@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Budget, CPU_PRIORITY_AFTER, Decision, Hold, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
-    RunnerSlot, Slot, SlotRef, StopReason, plan,
+    Budget, CPU_PRIORITY_AFTER, Decision, Demand, Hold, IDLE_TIMEOUT, Plan, Pool, Preparing,
+    Profile, Repository, RunnerSlot, Scarce, Slot, SlotRef, StopReason, Wait, Waits, plan,
 };
 use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
@@ -41,7 +41,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
         queued,
         runner_memory: None,
         runner_cpu: None,
-        cpu_waiting_since: None,
+        waits: Waits::default(),
         warm: 0,
     }
 }
@@ -52,6 +52,19 @@ fn budget(memory: Option<u64>, cpu: Option<u64>) -> Budget {
         cpu: cpu.map(|cpu| super::left(cpu, 0)),
         host: None,
         held: false,
+        ..Budget::default()
+    }
+}
+
+/// `repository`'s pool in `app` holding `job` for `scarce`.
+fn held(repository: &str, job: u64, scarce: Scarce) -> Demand {
+    Demand {
+        pool: Pool {
+            repository: repository.to_owned(),
+            profile: "app".to_owned(),
+        },
+        job,
+        scarce,
     }
 }
 
@@ -87,7 +100,7 @@ fn starts(decisions: &[Decision]) -> Vec<(usize, &str)> {
             Decision::Start {
                 slot, repository, ..
             } => Some((slot.index, repository.as_str())),
-            Decision::Stop { .. } | Decision::HeldForCpu { .. } => None,
+            Decision::Stop { .. } => None,
         })
         .collect()
 }
@@ -310,21 +323,17 @@ fn a_job_with_a_slot_and_memory_but_no_cpu_waits_and_its_repository_is_held_for_
             ..repository("o/b", "app", vec![job(4, &["app"])])
         },
     ];
-    let decisions = plan(
+    let plan = plan(
         &repositories,
         &profiles(vec![Slot::Free; 4]),
         budget(None, Some(4000)),
         now(),
-    )
-    .decisions;
-    assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a"), (2, "o/b")]);
-    assert!(
-        decisions.contains(&Decision::HeldForCpu {
-            repository: "o/a".to_owned(),
-            profile: "app".to_owned(),
-        }),
-        "o/a is held for CPU"
     );
+    assert_eq!(
+        starts(&plan.decisions),
+        [(0, "o/a"), (1, "o/a"), (2, "o/b")]
+    );
+    assert_eq!(plan.held, [held("o/a", 3, Scarce::Cpu)]);
 }
 
 #[test]
@@ -334,21 +343,15 @@ fn a_runner_at_its_profiles_cpus_that_do_not_fit_holds_its_repository_once() {
         "app",
         vec![job(1, &["app"]), job(2, &["app"])],
     )];
-    let decisions = plan(
+    let plan = plan(
         &repositories,
         &profiles(vec![Slot::Free, Slot::Free]),
         budget(None, Some(1000)),
         now(),
-    )
-    .decisions;
-    // A runner reserves the slot's 2 CPUs by default, which do not fit 1: one hold, not one per job.
-    assert_eq!(
-        decisions,
-        [Decision::HeldForCpu {
-            repository: "o/a".to_owned(),
-            profile: "app".to_owned(),
-        }]
     );
+    // A runner reserves the slot's 2 CPUs by default, which do not fit 1: one hold, not one per job.
+    assert_eq!(plan.decisions, []);
+    assert_eq!(plan.held, [held("o/a", 1, Scarce::Cpu)]);
 }
 
 /// Ticks 15 s apart against a 4-CPU budget: o/heavy's job, queued first, takes all 4; o/light queues a 1-CPU job
@@ -383,7 +386,10 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
         let repositories = [
             Repository {
                 runner_cpu: Some(4000),
-                cpu_waiting_since: waiting_since,
+                waits: Waits {
+                    cpu: waiting_since.map(|since| Wait { job: 1, since }),
+                    ..Waits::default()
+                },
                 ..repository(
                     "o/heavy",
                     "app",
@@ -399,14 +405,13 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
                 ..repository("o/light", "app", vec![job(1 + tick, &["app"])])
             },
         ];
-        let decisions = plan(
+        let plan = plan(
             &repositories,
             &profiles(slots),
             budget(None, Some(4000 - in_use)),
             at,
-        )
-        .decisions;
-        for (_, repository) in starts(&decisions) {
+        );
+        for (_, repository) in starts(&plan.decisions) {
             if repository == "o/heavy" {
                 return (Some(tick), light_after_limit);
             }
@@ -417,10 +422,7 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
             }
             running.push(("o/light", 1000, tick + 4));
         }
-        let held = decisions.contains(&Decision::HeldForCpu {
-            repository: "o/heavy".to_owned(),
-            profile: "app".to_owned(),
-        });
+        let held = plan.held.contains(&held("o/heavy", 1, Scarce::Cpu));
         // As the engine marks it: since the first plan that held it.
         waiting_since = if held {
             waiting_since.or(Some(at))
@@ -580,10 +582,10 @@ fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
         BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
     );
     assert!(
-        behind.decisions.contains(&Decision::HeldForCpu {
-            repository: "o/2".to_owned(),
-            profile: "app".to_owned(),
-        }),
+        behind
+            .held
+            .iter()
+            .any(|demand| demand.pool.repository == "o/2" && demand.scarce == Scarce::Cpu),
         "o/2 is held for CPU as before"
     );
 }
@@ -655,7 +657,13 @@ fn younger_jobs_wait_behind_one_starved_of_cpu() {
     let repositories = [
         Repository {
             runner_cpu: Some(4000),
-            cpu_waiting_since: Some(long_ago),
+            waits: Waits {
+                cpu: Some(Wait {
+                    job: 1,
+                    since: long_ago,
+                }),
+                ..Waits::default()
+            },
             ..repository("o/heavy", "app", vec![job(1, &["app"])])
         },
         Repository {
@@ -950,6 +958,7 @@ fn while_the_slice_is_held_warm_runners_make_no_room_and_none_starts() {
         cpu: None,
         host: None,
         held: true,
+        ..Budget::default()
     };
     let plan = plan(
         &repositories,
@@ -1242,3 +1251,5 @@ fn a_job_with_no_warm_slot_leaves_a_younger_jobs_warm_slot_to_it() {
     let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
     assert_eq!(starts(&decisions), [(0, "o/x")]);
 }
+
+mod priority;

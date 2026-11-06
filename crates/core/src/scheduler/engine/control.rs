@@ -921,6 +921,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for name in &names {
             self.repositories.entry(name.clone()).or_default();
         }
+        // A pool gone, or moved to another profile, keeps no wait a pool made there later would inherit.
+        let config = &self.config;
+        for (name, state) in &mut self.repositories {
+            state
+                .waits
+                .retain(|profile, _| config.pool_in(name, profile).is_some());
+            state
+                .cpu_held
+                .retain(|profile| config.pool_in(name, profile).is_some());
+        }
         self.control.set_repositories(names);
         let profiles = &self.config.profiles;
         self.reseed_requested

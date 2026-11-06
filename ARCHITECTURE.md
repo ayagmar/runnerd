@@ -162,7 +162,12 @@ queued → slot → container → removed
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)). For each job it leaves queued it says
    why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)). A job that does
-   not fit takes the room of warm runners of other repositories, which stop; once every job it can start has its
+   not fit takes the room of warm runners of other repositories, which stop, or is passed by younger jobs that fit,
+   until it has waited 2 minutes for memory or CPU: then the first such job that draining what runs would make room
+   for puts up the plan's one barrier (`scheduler::priority`), and no younger job starts until a runner of its pool
+   does. `plan` names each pool's held job and the engine keeps its wait, from the plans of ticks and passes only;
+   the high-water mark and a host stall suspend the barrier
+   ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md)). Once every job it can start has its
    runner and none waits for room, it starts the warm runners each active repository wants
    (`scheduler::warm`: `[[repositories]] warm` in its active hours, plus the jobs its workflow runs seen so far are
    expected to queue still), so a job finds a runner already registered
@@ -311,6 +316,10 @@ always returns, so the daemon closes and flushes the history.
   job. Admission, CPU holds, holds after failed runners, warm runners and runner registration go by the pool
   (repository and slot's profile), pause by the repository; a job no pool matches waits with `Waiting::NoPool`
   ([ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)).
+- A plan has at most one barrier, for memory and CPU alike: the oldest pool demand past its limit that draining what
+  runs would make room for. Only plans that schedule commit a wait, never `publish`'s. It governs new admissions: a
+  running runner is never stopped or lowered for it, and it stands down under the high-water mark or a host stall
+  ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md)).
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
 - A warm runner never holds back upkeep: a due reseed, or the shared caches' check an hour after the last, stops

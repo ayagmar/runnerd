@@ -10,15 +10,16 @@ use crate::api::Waiting;
 use crate::github::QueuedJob;
 
 pub mod engine;
+pub mod priority;
 pub mod warm;
+
+pub use priority::{
+    Barrier, CPU_PRIORITY_AFTER, Drained, MEMORY_PRIORITY_AFTER, Scarce, Wait, Waits,
+};
 
 /// How long a started runner may wait for a job before it counts as surplus: covers the container's start and
 /// GitHub's assignment.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Once a job has waited this long for CPU, no younger job takes CPU until it fits: smaller jobs arriving all the
-/// time would otherwise take every CPU that frees up before it.
-pub const CPU_PRIORITY_AFTER: Duration = Duration::from_secs(120);
 
 /// A repository's runners held back after they failed.
 #[derive(Debug, Clone, Copy)]
@@ -70,8 +71,8 @@ pub struct Repository {
     /// What a new runner of it takes of the CPU budget, in millicores: `None`, its profile's `cpus`. Under measured
     /// admission, the largest predicted average CPU of its queued jobs.
     pub runner_cpu: Option<u64>,
-    /// Since when its next job waits for CPU that a slot and memory have room for.
-    pub cpu_waiting_since: Option<SystemTime>,
+    /// What its next job has waited for, and since when (ADR 0096).
+    pub waits: Waits,
     /// How many idle runners it keeps beyond its queued jobs, for jobs not queued yet (`warm::target`).
     pub warm: usize,
 }
@@ -83,13 +84,6 @@ impl Repository {
             repository: self.name.clone(),
             profile: self.profile.clone(),
         }
-    }
-
-    /// Whether its next job has waited `CPU_PRIORITY_AFTER` or more for CPU at `now`.
-    fn starved_of_cpu(&self, now: SystemTime) -> bool {
-        self.cpu_waiting_since
-            .and_then(|since| now.duration_since(since).ok())
-            .is_some_and(|waited| waited >= CPU_PRIORITY_AFTER)
     }
 }
 
@@ -179,14 +173,6 @@ pub enum Decision {
         /// meanwhile and the start waits for the next plan.
         replacing: Vec<SlotRef>,
     },
-    /// Hold the next job of the repository's pool in `profile`: a slot and memory had room for its runner, the CPU
-    /// budget did not.
-    HeldForCpu {
-        /// `owner/name`.
-        repository: String,
-        /// The pool's profile.
-        profile: String,
-    },
     /// Remove the slot's idle runner, for `reason`.
     Stop {
         /// The slot whose runner stops.
@@ -194,6 +180,18 @@ pub enum Decision {
         /// Why it stops.
         reason: StopReason,
     },
+}
+
+/// A pool's next job that lacks something scarce, as the plan found it: past the jobs its idle runners take, and
+/// those the plan starts a runner for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Demand {
+    /// The pool.
+    pub pool: Pool,
+    /// The job's ID.
+    pub job: u64,
+    /// What it lacks.
+    pub scarce: Scarce,
 }
 
 /// Why an idle runner is removed: what its removal log line and the history say (ADR 0092).
@@ -254,7 +252,7 @@ impl StopReason {
 /// What `plan` decides, and why each queued job it starts no runner for waits.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
-    /// What to start, hold and stop.
+    /// What to start and stop.
     pub decisions: Vec<Decision>,
     /// Why each queued job of a repository's matching jobs waits, by job ID. A job an idle runner will take is
     /// `Waiting::RunnerStarting`; a job this plan starts a runner for has no reason, as that runner does not exist
@@ -265,8 +263,13 @@ pub struct Plan {
     /// The queued jobs one more slot of their profile would start now: none of its slots is free or a warm runner's
     /// to give, while the memory and CPU budgets, less what the older of these jobs would take, have room for their
     /// runners. Whatever `waiting` calls it, `NoSlot` or `BehindStart`; a job that also lacks memory or CPU is not
-    /// one (ADR 0090).
+    /// one (ADR 0090), nor is one a barrier holds, which another slot would not start.
     pub slot_waiting: BTreeSet<u64>,
+    /// The pools' next jobs a slot had room for and memory or CPU not: one per pool and resource. What a wait starts
+    /// from, once a scheduling path commits the plan (ADR 0096).
+    pub held: Vec<Demand>,
+    /// The job no younger job starts before, if one waited long enough.
+    pub barrier: Option<Barrier>,
 }
 
 /// The budgets a plan starts runners within.
@@ -282,8 +285,11 @@ pub struct Budget {
     /// running ones reserve past the host's limit; `None` when not known.
     pub host: Option<i64>,
     /// Nothing starts, so no warm runner stops to make room: measured admission holds the slice at its high-water
-    /// mark, or the host's tasks stall for memory.
+    /// mark, or the host's tasks stall for memory. `memory` and `host` are then 0 whatever the room, so no job's wait
+    /// starts and none puts up a barrier. Not a reservation for a starved job (ADR 0096).
     pub held: bool,
+    /// What the budgets would leave with no runner: what a job may hold younger ones for.
+    pub drained: Drained,
 }
 
 /// The workflow labels of GitHub-hosted runners, from
@@ -346,11 +352,12 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// that ran the same job last, else one that ran its repository, else the lowest), while what the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `budget.memory` and
 /// `budget.host`, and its CPU
 /// (`Repository::runner_cpu`, by default the slot's `cpus`) fits `budget.cpu` (`None`: no budget). A job that does
-/// not fit takes the room of warm runners of other repositories, which stop. A repository whose job had a slot and
-/// memory but not CPU is held once (`Decision::HeldForCpu`). An idle runner stops once no queued job is left for it,
-/// it is not one of its repository's `warm` runners, and it waited `IDLE_TIMEOUT`. Once a held repository waited
-/// `CPU_PRIORITY_AFTER`, no younger job starts until its own fits. Last, while no job waits for room, each
-/// repository short of its `warm` runners starts them at its profile's caps, one per repository at a time.
+/// not fit takes the room of warm runners of other repositories, which stop. A pool whose job had a slot but not
+/// memory or CPU is held once for each (`Plan::held`). An idle runner stops once no queued job is left for it,
+/// it is not one of its repository's `warm` runners, and it waited `IDLE_TIMEOUT`. The first such job that waited
+/// long enough, and that draining the running jobs would make room for, puts up the plan's one barrier
+/// (`priority::Barrier`): no younger job starts until a runner of its pool does. Last, while no job waits for room,
+/// each repository short of its `warm` runners starts them at its profile's caps, one per repository at a time.
 pub fn plan(
     repositories: &[Repository],
     profiles: &BTreeMap<String, Profile>,
@@ -374,8 +381,8 @@ pub fn plan(
     };
     let mut started = Started::new(&taken, left);
     let mut slot_bound = SlotBound::default();
-    // The job that waited long enough for CPU that no younger one takes CPU before it.
-    let mut first_for_cpu = None;
+    // Under a safety interlock, what is left says nothing of the room there is.
+    let drained = (!budget.held).then_some(budget.drained);
     for (position, &(job, repository)) in jobs.iter().enumerate() {
         let Some(missing) = wanted.get_mut(&pool_key(repository)) else {
             continue;
@@ -389,16 +396,24 @@ pub fn plan(
         ) else {
             continue;
         };
-        if let Some(older) = first_for_cpu {
-            decided
-                .waiting
-                .insert(job, Waiting::BehindCpu { job: older });
-            continue;
-        }
         let memory = repository.runner_memory.unwrap_or(profile.memory);
         let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
         let free_index = free_slot(taken, profile, repository, job, &jobs[position + 1..]);
         let fits = free_index.is_some() && left.fits(memory, cpu);
+        let turn = Turn {
+            repository,
+            profile,
+            job,
+            memory,
+            cpu,
+            free_slot: free_index.is_some(),
+            left,
+            started: &started,
+        };
+        if let Some(barrier) = decided.barrier {
+            turn.behind(barrier, &mut decided);
+            continue;
+        }
         let room = if fits || profile.preparing.is_some() {
             None
         } else {
@@ -407,33 +422,8 @@ pub fn plan(
         let index = match (room.as_ref(), free_index) {
             (Some(room), free) => free.or(room.slot).unwrap_or_default(),
             (None, Some(index)) if fits => index,
-            (None, free) => {
-                let (reason, short) = why_waits(
-                    &repository.profile,
-                    profile,
-                    free.is_some(),
-                    memory,
-                    cpu,
-                    left,
-                    &started,
-                );
-                decided.waiting.insert(job, reason);
-                if free.is_none()
-                    && profile.preparing.is_none()
-                    && slot_bound.takes(left, memory, cpu)
-                {
-                    decided.slot_waiting.insert(job);
-                }
-                if short == Short::Cpu {
-                    let held = held_for_cpu(repository);
-                    if !decided.decisions.contains(&held) {
-                        decided.decisions.push(held);
-                    }
-                    // It waited long enough: no younger job takes CPU until it fits.
-                    if repository.starved_of_cpu(now) {
-                        first_for_cpu = Some(job);
-                    }
-                }
+            (None, _) => {
+                turn.waits(drained, &mut slot_bound, now, &mut decided);
                 continue;
             }
         };
@@ -562,11 +552,99 @@ fn free_slot(
         })
 }
 
-/// The hold of `repository`'s next job for CPU.
-fn held_for_cpu(repository: &Repository) -> Decision {
-    Decision::HeldForCpu {
-        repository: repository.name.clone(),
-        profile: repository.profile.clone(),
+/// Holds `job` of `repository`'s pool for `scarce`, unless the plan already held an older job of the pool for it.
+fn hold(repository: &Repository, job: u64, scarce: Scarce, decided: &mut Plan) {
+    let pool = repository.pool();
+    let held = decided
+        .held
+        .iter()
+        .any(|demand| demand.pool == pool && demand.scarce == scarce);
+    if !held {
+        decided.held.push(Demand { pool, job, scarce });
+    }
+}
+
+/// A queued job as `plan`'s loop reaches it, if no runner starts for it.
+struct Turn<'plan> {
+    repository: &'plan Repository,
+    profile: &'plan Profile,
+    job: u64,
+    memory: u64,
+    /// Millicores.
+    cpu: u64,
+    free_slot: bool,
+    left: Left,
+    started: &'plan Started<'plan>,
+}
+
+impl Turn<'_> {
+    /// Why the job waits, and what it lacks.
+    fn why(&self) -> (Waiting, Short) {
+        why_waits(
+            &self.repository.profile,
+            self.profile,
+            self.free_slot,
+            self.memory,
+            self.cpu,
+            self.left,
+            self.started,
+        )
+    }
+
+    /// Says why the job waits with no barrier up. Lacking memory or CPU it is held, unless a safety interlock left no
+    /// `drained` bounds, and it puts up the barrier if it may.
+    fn waits(
+        self,
+        drained: Option<Drained>,
+        slot_bound: &mut SlotBound,
+        now: SystemTime,
+        decided: &mut Plan,
+    ) {
+        let (reason, short) = self.why();
+        decided.waiting.insert(self.job, reason);
+        if !self.free_slot
+            && self.profile.preparing.is_none()
+            && slot_bound.takes(self.left, self.memory, self.cpu)
+        {
+            decided.slot_waiting.insert(self.job);
+        }
+        let Some(scarce) = short.scarce() else {
+            return;
+        };
+        if drained.is_some() {
+            hold(self.repository, self.job, scarce, decided);
+        }
+        decided.barrier = Barrier::of(
+            priority::Short {
+                job: self.job,
+                scarce,
+                memory: self.memory,
+                cpu: self.cpu,
+            },
+            &self.repository.waits,
+            drained,
+            now,
+        );
+    }
+
+    /// Says why the job waits behind `barrier`. A job with no slot keeps saying so, as the barrier is not what holds
+    /// it, but counts for no more slots: another one would not start it. One that lacks memory or CPU itself is held
+    /// all the same and ages behind the barrier, which it does not share: it may go next.
+    fn behind(self, barrier: Barrier, decided: &mut Plan) {
+        if self.free_slot && self.left.fits(self.memory, self.cpu) {
+            decided.waiting.insert(self.job, barrier.reason());
+            return;
+        }
+        let (reason, short) = self.why();
+        let reason = if self.free_slot {
+            barrier.reason()
+        } else {
+            reason
+        };
+        decided.waiting.insert(self.job, reason);
+        if let Some(scarce) = short.scarce() {
+            hold(self.repository, self.job, scarce, decided);
+        }
     }
 }
 
@@ -611,6 +689,17 @@ enum Short {
     Slot,
     Memory,
     Cpu,
+}
+
+impl Short {
+    /// What a running job gives back of it: not a slot, which a job waits for in turn.
+    fn scarce(self) -> Option<Scarce> {
+        match self {
+            Short::Slot => None,
+            Short::Memory => Some(Scarce::Memory),
+            Short::Cpu => Some(Scarce::Cpu),
+        }
+    }
 }
 
 /// Why a job whose runner of `memory` and `cpu` does not fit in `profile` (named `name`) waits, given whether it has
@@ -723,6 +812,7 @@ fn start_warm(
                 | Waiting::HostMemory { .. }
                 | Waiting::Cpu { .. }
                 | Waiting::BehindCpu { .. }
+                | Waiting::BehindMemory { .. }
                 | Waiting::BehindStart { .. }
         )
     });

@@ -312,6 +312,21 @@ pub struct History {
     /// From when, in ms, the history holds every job (`history_kept`): a wait before it, as of a job queued before
     /// runnerd first ran, counts from then.
     pub kept_since: u64,
+    /// The jobs of the window `jobs` leaves out, for a replay to say what it did not see.
+    pub left_out: LeftOut,
+}
+
+/// The jobs queued in a window that no replay can run, as it has no run time for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeftOut {
+    /// Still queued: however long they waited, it is not over.
+    pub queued: u64,
+    /// Still running.
+    pub running: u64,
+    /// Cancelled before or while they ran.
+    pub cancelled: u64,
+    /// Taken by another machine's runner.
+    pub elsewhere: u64,
 }
 
 /// What `advise` sizes against besides the history.

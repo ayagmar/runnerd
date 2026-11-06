@@ -1,6 +1,6 @@
 # 0038. Admission by CPU, from each job's average, off by default
 
-Status: **Accepted** (2026-10-23).
+Status: **Accepted** (2026-10-23), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md).
 
 ## Context
 
@@ -38,12 +38,11 @@ runner is admitted by CPU.
 - The mirror, seed containers and shells reserve no CPU: they are rare, or idle most of the time.
 - `plan` holds a job that had a slot and memory but not CPU (`Decision::HeldForCpu`). The engine logs it, the budget
   says a job waits (`api::CpuBudget`), and the runner that starts next for that repository records how long it waited
-  (`api::CpuAdmission::waited`). Once a held repository has waited `CPU_PRIORITY_AFTER` (2 minutes), `plan` starts
-  no younger job until its own fits: otherwise a stream of lighter jobs takes every CPU that frees up before it.
-  The wait belongs to the job first held, the next one its waiting runners leave, and lasts until a runner of the
-  repository starts or, after a successful listing, that job is no longer queued: a tick that holds it for memory
-  (the high-water mark) or a slot instead does not make it younger.
-  `runnerd simulate` does not model this priority. Both fields are optional and absent without a CPU budget, so released clients read
+  (`api::CpuAdmission::waited`). Once a held pool has waited `CPU_PRIORITY_AFTER` (2 minutes), it may own the plan's one
+  barrier, shared with memory ([0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md)): no younger job starts until
+  a runner of its pool does, as otherwise a stream of lighter jobs takes every CPU that frees up before it. 0096 says
+  who owns the barrier, how a wait ends, and how `runnerd simulate` models it. A plan that holds the job for memory
+  (the high-water mark) or a slot instead does not make it younger. Both fields are optional and absent without a CPU budget, so released clients read
   the status and records as before.
 
 ### Why the average

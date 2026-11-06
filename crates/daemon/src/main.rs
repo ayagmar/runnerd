@@ -87,7 +87,7 @@ enum Command {
         /// Replay against this MemoryMax (such as 33G) instead of reading it from systemd.
         #[arg(long)]
         memory_max: Option<ByteSize>,
-        /// Replay the jobs queued in the last 30m, 12h, 7d, 2w, …
+        /// Replay the jobs queued in the 30m, 12h, 7d, 2w, … up to the history's last job
         #[arg(long, default_value = "30d", value_parser = parse_age)]
         since: Duration,
         /// The slots a profile may use beyond its configured ones, as PROFILE=SLOTS [default: as many as the slice
@@ -101,6 +101,10 @@ enum Command {
         /// `cpu_overcommit`, else 1].
         #[arg(long, value_parser = simulate::overcommit)]
         cpu_overcommit: Vec<f64>,
+        /// Also replay the config's policy and slots, `--slots` over them, without and with the barrier for a starved
+        /// job, pool by pool.
+        #[arg(long)]
+        priority: bool,
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
@@ -152,6 +156,7 @@ fn main() -> ExitCode {
             slots,
             cpus,
             cpu_overcommit,
+            priority,
         }) => config_or_default(config).and_then(|path| {
             run_simulation(
                 &path,
@@ -159,6 +164,11 @@ fn main() -> ExitCode {
                     memory_max,
                     cpus,
                     cpu_overcommit,
+                    priority: if priority {
+                        Comparing::Priority
+                    } else {
+                        Comparing::Policies
+                    },
                 },
                 since,
                 &slots.into_iter().collect(),
@@ -240,6 +250,14 @@ struct Limits {
     /// Millicores.
     cpus: Option<u64>,
     cpu_overcommit: Vec<f64>,
+    priority: Comparing,
+}
+
+/// Whether `runnerd simulate` also compares the barrier for a starved job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comparing {
+    Priority,
+    Policies,
 }
 
 fn run_simulation(
@@ -278,13 +296,10 @@ fn run_simulation(
         .clone()
         .or_else(default_database)
         .ok_or_else(|| fail(&"neither XDG_STATE_HOME nor HOME is set"))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let since = u64::try_from(now)
-        .unwrap_or(u64::MAX)
-        .saturating_sub(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+    let last = runnerd_core::store::last_queued_at(&database)
+        .map_err(|error| fail(&error))?
+        .unwrap_or_default();
+    let since = last.saturating_sub(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
     let history = runnerd_core::store::sizing_at(&database, since)
         .map_err(|error| fail(&error))?
         .ok_or_else(|| {
@@ -303,6 +318,21 @@ fn run_simulation(
         &history.jobs,
         slots,
     ));
+    if limits.priority == Comparing::Priority {
+        output::line(simulate::priority(
+            &config,
+            &simulate::Comparison {
+                memory_max: memory_max.map(|max| max.0),
+                cpu_budget: config
+                    .host
+                    .cpu_overcommit
+                    .map(|factor| runnerd_core::config::cpu_budget(cpus, factor)),
+                jobs: &history.jobs,
+                slots,
+                left_out: history.left_out,
+            },
+        ));
+    }
     Ok(ExitCode::SUCCESS)
 }
 

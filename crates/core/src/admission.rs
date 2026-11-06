@@ -1,17 +1,22 @@
 //! Admission by measured peaks: a job's memory peak and average CPU predicted from the job history (`Predictor`),
 //! and the history replayed through admission by caps and by predictions, with or without a CPU budget
-//! (`simulate`), to show what each would have done with the same jobs; and what the host's memory leaves runners
-//! (`host`). A job's memory goes by its last runs (`recent`, ADR 0070). Pure: no I/O, no clock.
+//! (`simulate`), to show what each would have done with the same jobs, with the barrier `scheduler::plan` puts up for
+//! a starved job or without; and what the host's memory leaves runners (`host`). A job's memory goes by its last runs
+//! (`recent`, ADR 0070). Pure: no I/O, no clock.
 
 pub mod host;
 pub mod recent;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, SystemTime};
 
 use crate::api::Spread;
 use crate::api::{Basis, JobPeak};
 use crate::config::{self, Config};
+use crate::scheduler::priority::Short;
+use crate::scheduler::{Barrier, Drained, Pool, Scarce, Waits};
 use crate::sizing::{GRANULE, History, Ran, spread};
+use crate::time;
 use recent::{Ending, RECENT_RUNS, Recent};
 
 /// For at most this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its
@@ -330,6 +335,31 @@ pub enum Policy {
     Measured,
 }
 
+/// Whether a replay puts up the barrier `scheduler::plan` does for a starved job (ADR 0096).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Barriers {
+    /// As the daemon runs.
+    On,
+    /// A job that does not fit lets every later one past, however long it waited: what to compare with.
+    Off,
+}
+
+/// What a replay did with one pool's jobs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PoolReplay {
+    /// Seconds from queued to started, of each job that started.
+    pub waits: Vec<u64>,
+    /// The jobs the replay never started.
+    pub never_started: u64,
+}
+
+impl PoolReplay {
+    /// The spread of `waits`.
+    pub fn wait(&self) -> Spread {
+        spread(self.waits.clone())
+    }
+}
+
 /// What a replay did with the history's jobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Replay {
@@ -358,6 +388,17 @@ pub struct Replay {
     pub cpu_held: u64,
     /// The most CPU, in millicores, the running jobs' averages add up to at one moment.
     pub worst_cpu: u64,
+    /// By pool, the jobs that ran in it.
+    pub pools: BTreeMap<Pool, PoolReplay>,
+    /// What the running jobs took of the budget over the replay, in byte-milliseconds.
+    pub charged: u128,
+    /// The budget over the replay, in byte-milliseconds; 0 without one. `charged` over it is the busy share.
+    pub capacity: u128,
+    /// How long a barrier stood, in milliseconds.
+    pub barrier_for: u64,
+    /// What the budget had free while a barrier stood, in byte-milliseconds: at most what the barrier cost, as some of
+    /// it no younger job could have used.
+    pub withheld: u128,
 }
 
 /// A job the replay started.
@@ -373,7 +414,9 @@ struct Running<'run> {
 
 /// Replays `jobs` through `policy`: each arrives when it was queued and runs as long as it ran, in a profile with
 /// `slots` (by name; the config's where absent) under the slice's `memory_max`. Jobs start as soon as the policy
-/// admits them, oldest first, a job that does not fit letting a later one past, as `scheduler::plan` does.
+/// admits them, in `jobs`' order, which is the job IDs' as the history reads them and `scheduler::plan` serves them: a
+/// job that does not fit lets a later one past, until it waited long enough under `barriers` and no later one starts
+/// before its pool does. The replay looks again at each such limit, so a quiet queue reaches it too.
 /// Measured admission predicts from the runs finished before it decides, as the daemon would, and holds each
 /// running job at its peak for its whole run, which the daemon does not see. A job with copies waiting or running
 /// beside it is predicted as one with `Copies::Several`. Each moment, the running jobs are predicted again, the
@@ -392,15 +435,17 @@ pub fn simulate(
     jobs: &[Ran],
     policy: Policy,
     slots: &BTreeMap<String, u32>,
+    barriers: Barriers,
 ) -> Replay {
     let mirror = config.mirror_memory();
     let budget = memory_max.map(|max| max.saturating_sub(mirror));
-    let mut queue: Vec<&Ran> = jobs
-        .iter()
-        .filter(|run| config.profiles.contains_key(&run.profile))
-        .filter(|run| matches!((run.started_at, run.finished_at), (Some(start), Some(end)) if end >= start))
+    let mut queue: Vec<Queued<'_>> = (0_u64..)
+        .zip(jobs)
+        .filter(|(_, run)| config.profiles.contains_key(&run.profile))
+        .filter(|(_, run)| matches!((run.started_at, run.finished_at), (Some(start), Some(end)) if end >= start))
+        .map(|(job, run)| Queued { job, run })
         .collect();
-    queue.sort_by_key(|run| run.queued_at);
+    queue.sort_by_key(|queued| queued.run.queued_at);
     let mut replayer = Replayer {
         config,
         budget,
@@ -417,29 +462,37 @@ pub fn simulate(
         held_back: 0,
         cpu_held: 0,
         worst_cpu: 0,
+        barriers,
+        pool_waits: BTreeMap::new(),
+        pools: BTreeMap::new(),
+        barrier: None,
+        moment: queue.first().map_or(0, |queued| queued.run.queued_at),
+        charged: 0,
+        capacity: 0,
+        barrier_for: 0,
+        withheld: 0,
     };
-    let mut waiting: Vec<&Ran> = Vec::new();
+    let mut waiting: Vec<Queued<'_>> = Vec::new();
     let mut next = 0;
     loop {
-        let arrival = queue.get(next).map(|run| run.queued_at);
+        let arrival = queue.get(next).map(|queued| queued.run.queued_at);
         let end = replayer.running.iter().map(|running| running.ends).min();
-        let Some(now) = [arrival, end].into_iter().flatten().min() else {
+        let Some(now) = [arrival, end, replayer.next_limit()]
+            .into_iter()
+            .flatten()
+            .min()
+        else {
             break;
         };
+        replayer.account(now);
         replayer.finish(now);
         replayer.rereserve(now);
-        while let Some(run) = queue.get(next).filter(|run| run.queued_at <= now) {
-            waiting.push(run);
+        while let Some(queued) = queue.get(next).filter(|queued| queued.run.queued_at <= now) {
+            waiting.push(*queued);
             next += 1;
         }
-        let mut index = 0;
-        while let Some(run) = waiting.get(index).copied() {
-            if replayer.admit(run, &waiting, now) {
-                waiting.remove(index);
-            } else {
-                index += 1;
-            }
-        }
+        waiting.sort_by_key(|queued| queued.job);
+        replayer.pass(&mut waiting, now);
         replayer.most_running = replayer.most_running.max(replayer.running.len() as u64);
         let peaks: u64 = replayer.running.iter().map(|running| running.peak).sum();
         replayer.worst_overlap = replayer.worst_overlap.max(peaks + mirror);
@@ -450,8 +503,15 @@ pub fn simulate(
             .sum();
         replayer.worst_cpu = replayer.worst_cpu.max(cpu);
     }
+    for queued in &waiting {
+        replayer
+            .pools
+            .entry(pool_of(queued.run))
+            .or_default()
+            .never_started += 1;
+    }
     let waits = replayer.waits;
-    let first = queue.first().map_or(0, |run| run.queued_at);
+    let first = queue.first().map_or(0, |queued| queued.run.queued_at);
     Replay {
         jobs: queue.len() as u64,
         never_started: waiting.len() as u64,
@@ -464,7 +524,46 @@ pub fn simulate(
         held_back: replayer.held_back,
         cpu_held: replayer.cpu_held,
         worst_cpu: replayer.worst_cpu,
+        pools: replayer.pools,
+        charged: replayer.charged,
+        capacity: replayer.capacity,
+        barrier_for: replayer.barrier_for,
+        withheld: replayer.withheld,
     }
+}
+
+/// A job waiting in a replay.
+#[derive(Clone, Copy)]
+struct Queued<'run> {
+    /// Its place in the jobs replayed, which stands for its ID: the order `scheduler::plan` serves jobs in.
+    job: u64,
+    run: &'run Ran,
+}
+
+/// The pool a job ran in.
+fn pool_of(run: &Ran) -> Pool {
+    Pool {
+        repository: run.repository.clone(),
+        profile: run.profile.clone(),
+    }
+}
+
+/// What a job started at a moment of a replay reserves.
+struct Admitted {
+    reserved: u64,
+    peak: u64,
+    /// Millicores.
+    cpu: u64,
+}
+
+/// Why a job did not start at a moment of a replay.
+enum Refused {
+    /// Every slot of its profile is taken.
+    Slot,
+    /// It does not fit the budget named.
+    Budget(Short),
+    /// The slice is at the high-water mark, though the job fits the budget.
+    HighWater(Short),
 }
 
 /// A replay's state between two moments.
@@ -484,9 +583,109 @@ struct Replayer<'run> {
     held_back: u64,
     cpu_held: u64,
     worst_cpu: u64,
+    barriers: Barriers,
+    /// What each pool's next job waited for, as the engine keeps it.
+    pool_waits: BTreeMap<Pool, Waits>,
+    pools: BTreeMap<Pool, PoolReplay>,
+    /// The barrier the last pass ended with.
+    barrier: Option<Barrier>,
+    /// The moment replayed last, in ms.
+    moment: u64,
+    charged: u128,
+    capacity: u128,
+    barrier_for: u64,
+    withheld: u128,
 }
 
 impl<'run> Replayer<'run> {
+    /// The next moment a pool's wait reaches its limit, in ms.
+    fn next_limit(&self) -> Option<u64> {
+        self.pool_waits
+            .values()
+            .flat_map(Waits::deadlines)
+            .map(time::ms)
+            .filter(|limit| *limit > self.moment)
+            .min()
+    }
+
+    /// Adds what ran from the last moment to `now`, which is what the last pass left.
+    fn account(&mut self, now: u64) {
+        let span = now.saturating_sub(self.moment);
+        let taken = self.taken();
+        self.charged += u128::from(taken) * u128::from(span);
+        if let Some(budget) = self.budget {
+            self.capacity += u128::from(budget) * u128::from(span);
+            if self.barrier.is_some() {
+                self.withheld += u128::from(budget.saturating_sub(taken)) * u128::from(span);
+            }
+        }
+        if self.barrier.is_some() {
+            self.barrier_for += span;
+        }
+        self.moment = now;
+    }
+
+    /// Serves `waiting` at `now`, as one `scheduler::plan` does: each job in turn starts if it fits, until a job that
+    /// waited long enough puts up the barrier; the jobs behind it still age by what they lack themselves.
+    fn pass(&mut self, waiting: &mut Vec<Queued<'run>>, now: u64) {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_millis(now);
+        self.barrier = None;
+        let mut index = 0;
+        while let Some(queued) = waiting.get(index).copied() {
+            match self.admits(queued, waiting, now) {
+                Ok(admitted) if self.barrier.is_none() => {
+                    waiting.remove(index);
+                    self.start(queued.run, &admitted, now);
+                }
+                Ok(_) | Err(Refused::Slot) => index += 1,
+                Err(Refused::Budget(short)) => {
+                    if self.barrier.is_none() && short.scarce == Scarce::Cpu {
+                        self.cpu_held += 1;
+                    }
+                    self.hold(queued.run, short, at);
+                    index += 1;
+                }
+                Err(Refused::HighWater(short)) => {
+                    if self.barrier.is_none() {
+                        self.held_back += 1;
+                    }
+                    self.hold(queued.run, short, at);
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    /// Under `Barriers::On`, ages the pool of `run`, which lacks what `short` says, and lets it put up the barrier, as
+    /// `scheduler::plan` and the engine do. None ages at the high-water mark, read job by job as `admits` reads it:
+    /// its zeros say nothing.
+    fn hold(&mut self, run: &Ran, short: Short, at: SystemTime) {
+        if self.barriers == Barriers::Off {
+            return;
+        }
+        let drained = (!self.at_high_water()).then_some(Drained {
+            memory: self.budget.map(signed),
+            cpu: self.cpu_budget.map(signed),
+            host: None,
+        });
+        let waits = self.pool_waits.entry(pool_of(run)).or_default();
+        if drained.is_some() {
+            waits.note(short.scarce, short.job, at);
+        }
+        if self.barrier.is_none() {
+            self.barrier = Barrier::of(short, waits, drained, at);
+        }
+    }
+
+    /// Whether measured admission starts nothing now: the running jobs' peaks are at the high-water mark.
+    fn at_high_water(&self) -> bool {
+        let peaks: u64 = self.running.iter().map(|running| running.peak).sum();
+        self.policy == Policy::Measured
+            && self.budget.is_some_and(|budget| {
+                peaks.saturating_mul(100) >= budget.saturating_mul(HIGH_WATER)
+            })
+    }
+
     /// Ends the jobs that end by `now`, in the order they end; measured admission learns them as the daemon reads
     /// their rows.
     fn finish(&mut self, now: u64) {
@@ -565,12 +764,18 @@ impl<'run> Replayer<'run> {
             .sum()
     }
 
-    /// Starts `run` at `now` if the policy admits it, `waiting` being every job not started yet; whether it did.
-    /// As in the daemon, the runner starts reserving the largest prediction among the waiting jobs of its
-    /// repository's pool (those that ran in its profile), then its job's own.
-    fn admit(&mut self, run: &'run Ran, waiting: &[&Ran], now: u64) -> bool {
+    /// What `queued` reserves if it starts at `now`, or why the policy does not admit it, `waiting` being every job
+    /// not started yet. As in the daemon, the runner starts reserving the largest prediction among the waiting jobs of
+    /// its repository's pool (those that ran in its profile), then its job's own.
+    fn admits(
+        &self,
+        queued: Queued<'run>,
+        waiting: &[Queued<'run>],
+        now: u64,
+    ) -> Result<Admitted, Refused> {
+        let run = queued.run;
         let Some((profile, limits)) = self.config.profiles.get_key_value(&run.profile) else {
-            return false;
+            return Err(Refused::Slot);
         };
         let slots = self.slots.get(profile).copied().unwrap_or(limits.slots);
         let in_profile = self
@@ -579,7 +784,7 @@ impl<'run> Replayer<'run> {
             .filter(|running| running.profile == profile.as_str())
             .count();
         if in_profile >= slots as usize {
-            return false;
+            return Err(Refused::Slot);
         }
         let cap = limits.memory.0;
         let running = |key: &Key| {
@@ -588,9 +793,12 @@ impl<'run> Replayer<'run> {
                 .any(|running| Key::of(running.run) == *key)
         };
         // A waiting job with a copy waiting or running beside it, as the daemon sees its queue.
-        let queued = |job: &Ran| {
+        let predicted = |job: &Ran| {
             let key = Key::of(job);
-            let waiting = waiting.iter().filter(|other| Key::of(other) == key).count();
+            let waiting = waiting
+                .iter()
+                .filter(|other| Key::of(other.run) == key)
+                .count();
             let copies = if waiting > 1 || running(&key) {
                 Copies::Several
             } else {
@@ -612,64 +820,82 @@ impl<'run> Replayer<'run> {
                 .predict(&key, profile, cap, now, copies)
                 .memory
         };
+        let pool = || {
+            waiting
+                .iter()
+                .map(|other| other.run)
+                .filter(|job| job.repository == run.repository && job.profile == run.profile)
+        };
         let (starting, reserved) = match self.policy {
             Policy::Caps => (cap, cap),
             Policy::Measured => (
-                waiting
-                    .iter()
-                    .filter(|job| job.repository == run.repository && job.profile == run.profile)
-                    .map(|job| queued(job))
-                    .max()
-                    .unwrap_or(0)
-                    .max(started()),
+                pool().map(predicted).max().unwrap_or(0).max(started()),
                 started(),
             ),
         };
+        let cpu = self.cpu(&Key::of(run), profile);
+        // As the daemon starts a runner: at the most CPU any waiting job of its repository's pool reserves.
+        let starting_cpu = pool()
+            .map(|job| self.cpu(&Key::of(job), profile))
+            .max()
+            .unwrap_or(0)
+            .max(cpu);
+        let short = |scarce| Short {
+            job: queued.job,
+            scarce,
+            memory: starting,
+            cpu: starting_cpu,
+        };
         if let Some(budget) = self.budget {
             if self.taken() + starting > budget {
-                return false;
+                return Err(Refused::Budget(short(Scarce::Memory)));
             }
-            let peaks: u64 = self.running.iter().map(|running| running.peak).sum();
-            if self.policy == Policy::Measured
-                && peaks.saturating_mul(100) >= budget.saturating_mul(HIGH_WATER)
-            {
-                self.held_back += 1;
-                return false;
+            if self.at_high_water() {
+                return Err(Refused::HighWater(short(Scarce::Memory)));
             }
         }
-        let cpu = self.cpu(&Key::of(run), profile);
         if let Some(cpu_budget) = self.cpu_budget {
-            // As the daemon starts a runner: at the most CPU any waiting job of its repository's pool reserves.
-            let starting = waiting
-                .iter()
-                .filter(|job| job.repository == run.repository && job.profile == run.profile)
-                .map(|job| self.cpu(&Key::of(job), profile))
-                .max()
-                .unwrap_or(0)
-                .max(cpu);
             let taken: u64 = self.running.iter().map(|running| running.cpu).sum();
-            if taken + starting > cpu_budget {
-                self.cpu_held += 1;
-                return false;
+            if taken + starting_cpu > cpu_budget {
+                return Err(Refused::Budget(short(Scarce::Cpu)));
             }
         }
-        // A job over its cap is killed at it.
-        let peak = run.memory_peak.min(cap);
+        Ok(Admitted {
+            reserved,
+            // A job over its cap is killed at it.
+            peak: run.memory_peak.min(cap),
+            cpu,
+        })
+    }
+
+    /// Starts `run` at `now`, which ends its pool's wait.
+    fn start(&mut self, run: &'run Ran, admitted: &Admitted, now: u64) {
+        let Some((profile, _)) = self.config.profiles.get_key_value(&run.profile) else {
+            return;
+        };
         let ran_for = run
             .finished_at
             .unwrap_or_default()
             .saturating_sub(run.started_at.unwrap_or_default());
-        self.waits.push(now.saturating_sub(run.queued_at) / 1000);
+        let waited = now.saturating_sub(run.queued_at) / 1000;
+        let pool = pool_of(run);
+        self.pool_waits.remove(&pool);
+        self.pools.entry(pool).or_default().waits.push(waited);
+        self.waits.push(waited);
         self.running.push(Running {
             run,
             profile,
             ends: now + ran_for,
-            reserved,
-            peak,
-            cpu,
+            reserved: admitted.reserved,
+            peak: admitted.peak,
+            cpu: admitted.cpu,
         });
-        true
     }
+}
+
+/// A budget's bytes or millicores as `Drained` counts them.
+fn signed(amount: u64) -> i64 {
+    i64::try_from(amount).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

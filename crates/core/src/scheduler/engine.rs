@@ -41,7 +41,7 @@ pub use self::control::{
 use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
 pub use self::records::RecordSelection;
-use super::{Hold, SlotRef};
+use super::{Hold, SlotRef, Waits};
 use crate::admission::Key;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -344,10 +344,12 @@ struct RepositoryState {
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
     holds: BTreeMap<String, PoolHold>,
-    /// By the profile of each of its pools, that pool's oldest job held for CPU that memory and a slot had room
-    /// for, and since when, kept while that job stays queued: a tick held by memory or slots in between does not
-    /// make it younger.
-    cpu_wait: BTreeMap<String, CpuWait>,
+    /// By the profile of each of its pools, what that pool's next job has waited for and since when (ADR 0096): from
+    /// the first plan of a tick or a pass that held it, not one a status runs, until a runner of the pool is in its
+    /// slot, the pool may no longer start one, or a listing that succeeded no longer shows the job. A plan that holds
+    /// it for a slot or for the other resource does not make it younger, nor does a listing that failed. Not kept over
+    /// a restart.
+    waits: BTreeMap<String, Waits>,
     /// The profiles of its pools whose next job the last plan held for CPU.
     cpu_held: BTreeSet<String>,
 }
@@ -360,15 +362,6 @@ struct PoolHold {
     failures: u32,
     /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.
     idle_exits: u32,
-}
-
-/// A job waiting for CPU, as `RepositoryState::cpu_wait` keeps it.
-#[derive(Debug, Clone, Copy)]
-struct CpuWait {
-    /// The job's ID.
-    job: u64,
-    /// When a plan first held it for CPU.
-    since: SystemTime,
 }
 
 /// How long a stop that detaches or is forced takes at most, from its request: what Docker and GitHub have not

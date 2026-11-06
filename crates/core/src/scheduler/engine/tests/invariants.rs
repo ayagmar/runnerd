@@ -17,7 +17,7 @@ use futures_util::FutureExt as _;
 use super::*;
 use crate::config::Admission;
 use crate::observe::metrics::Events;
-use crate::scheduler::IDLE_TIMEOUT;
+use crate::scheduler::{CPU_PRIORITY_AFTER, IDLE_TIMEOUT, MEMORY_PRIORITY_AFTER};
 use crate::store::SampleRecord;
 use crate::time;
 
@@ -458,6 +458,8 @@ struct Violation {
 
 /// A case: the engine on the fakes, and what GitHub and Docker hold as the world sees it.
 struct Case {
+    /// How many checks saw a barrier.
+    barriers: usize,
     github: FakeGithub,
     docker: FakeDocker,
     dir: TestDir,
@@ -505,6 +507,7 @@ impl Case {
         let shape = Shape::START;
         let (engine, handle) = Case::engine(&github, &docker, &dir, shape);
         Case {
+            barriers: 0,
             github,
             docker,
             dir,
@@ -1071,6 +1074,14 @@ impl Case {
                     held.until = past;
                 }
             }
+            for waits in state.waits.values_mut() {
+                if let Some(wait) = waits.memory.as_mut() {
+                    wait.since -= MEMORY_PRIORITY_AFTER;
+                }
+                if let Some(wait) = waits.cpu.as_mut() {
+                    wait.since -= CPU_PRIORITY_AFTER;
+                }
+            }
         }
     }
 
@@ -1184,6 +1195,7 @@ impl Case {
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
+        self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_removal_of_a_running_job()
     }
 
@@ -1210,6 +1222,7 @@ impl Case {
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
         self.starts_fit_the_budget(&after, &starts)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
+        self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_removal_of_a_running_job()
     }
 
@@ -1397,6 +1410,79 @@ impl Case {
                         "started {started:?} while the host stalls with {} available",
                         reading.available
                     ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Invariant 2a (ADR 0096): at most one job holds younger ones back, memory and CPU together. It is queued, older
+    /// than each of them and says what it lacks itself; and no wait is kept for a job a listing that succeeded no
+    /// longer shows, so no hold outlives its job.
+    fn one_barrier_and_only_for_a_queued_job(
+        &mut self,
+        status: &api::Status,
+    ) -> Result<(), Violation> {
+        let behind = |reason: &Option<api::Waiting>| match reason {
+            Some(api::Waiting::BehindMemory { job } | api::Waiting::BehindCpu { job }) => {
+                Some(*job)
+            }
+            _ => None,
+        };
+        let owners: BTreeSet<u64> = status
+            .queued
+            .iter()
+            .filter_map(|job| behind(&job.waiting))
+            .collect();
+        self.barriers += owners.len();
+        if owners.len() > 1 {
+            return violation(
+                self,
+                "one_barrier_and_only_for_a_queued_job",
+                format!("jobs wait behind each of {owners:?}"),
+            );
+        }
+        for owner in &owners {
+            let Some(queued) = status.queued.iter().find(|job| job.id == *owner) else {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("jobs wait behind {owner}, which no longer waits"),
+                );
+            };
+            if behind(&queued.waiting).is_some() {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("{owner} holds others back and says {:?}", queued.waiting),
+                );
+            }
+            if let Some(younger) = status
+                .queued
+                .iter()
+                .find(|job| behind(&job.waiting).is_some() && job.id <= *owner)
+            {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!(
+                        "{} is older than {owner}, which it waits behind",
+                        younger.id
+                    ),
+                );
+            }
+        }
+        for (name, state) in self.engine.repositories.iter().filter(|(_, s)| s.listed) {
+            let waits = state.waits.values();
+            let kept = waits.flat_map(|waits| waits.memory.iter().chain(&waits.cpu));
+            if let Some(wait) = kept
+                .into_iter()
+                .find(|wait| !state.queued.iter().any(|job| job.id == wait.job))
+            {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("{name} keeps a wait for job {}, listed no more", wait.job),
                 );
             }
         }
@@ -1664,7 +1750,7 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
 }
 
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
-async fn run(steps: &[Step]) -> Result<(), Violation> {
+async fn run(steps: &[Step]) -> Result<usize, Violation> {
     let mut case = Case::new();
     case.recover().await?;
     case.tick().await?;
@@ -1673,12 +1759,13 @@ async fn run(steps: &[Step]) -> Result<(), Violation> {
         case.apply(*step).await?;
     }
     case.step = steps.len();
-    case.drain().await
+    case.drain().await?;
+    Ok(case.barriers)
 }
 
 /// `run`, with a panic reported as the broken invariant `no_panic`, so it keeps its seed and shrinks like any other;
-/// its step is not known, and says 0.
-async fn attempt(steps: &[Step]) -> Result<(), Violation> {
+/// its step is not known, and says 0. Returns how many checks saw a barrier.
+async fn attempt(steps: &[Step]) -> Result<usize, Violation> {
     match AssertUnwindSafe(run(steps)).catch_unwind().await {
         Ok(outcome) => outcome,
         Err(panic) => Err(Violation {
@@ -1732,17 +1819,16 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         Some(seed) => vec![seed],
         None => (0..env_u64("RUNNERD_INVARIANT_CASES").unwrap_or(CASES)).collect(),
     };
+    let mut barriers = 0;
     // Cases at once: each waits now and then for its captures, which the others use.
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
             let steps = generate(&mut Rng(seed));
-            (
-                seed,
-                attempt(&steps).await.err().map(|found| (steps, found)),
-            )
+            (seed, attempt(&steps).await, steps)
         });
-        for (seed, failed) in futures_util::future::join_all(runs).await {
-            if let Some((steps, found)) = failed {
+        for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
+            barriers += outcome.as_ref().map_or(0, |barriers| *barriers);
+            if let Err(found) = outcome {
                 // Before shrinking, which may itself fail: the seed alone replays it.
                 eprintln!(
                     "seed {seed} breaks {} at step {}: {}; shrinking",
@@ -1757,6 +1843,10 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
             }
         }
     }
+    assert!(
+        barriers > 0 || seeds.len() == 1,
+        "the generated runs reach a barrier, or its invariant checks nothing"
+    );
 }
 
 /// Runs `steps` as the generated test does, and returns what broke.

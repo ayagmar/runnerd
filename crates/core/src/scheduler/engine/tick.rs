@@ -21,8 +21,8 @@ use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Budget, Decision, Left, Plan, Pool, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef,
-    StopReason, plan,
+    Barrier, Budget, Decision, Demand, Drained, Left, Plan, Pool, Preparing, Profile, Repository,
+    RunnerSlot, Slot, SlotRef, StopReason, plan,
 };
 use crate::store::Store;
 use crate::time;
@@ -74,8 +74,10 @@ struct Applied {
     acted: bool,
     /// Starts left for the next plan: the one that no longer fit, and those after it.
     deferred: usize,
-    /// The pools whose next job a slot and memory had room for, the CPU budget not.
-    held_for_cpu: BTreeSet<Pool>,
+    /// The next jobs of the pools a slot had room for, memory or CPU not.
+    held: Vec<Demand>,
+    /// The job no younger job started before.
+    barrier: Option<Barrier>,
 }
 
 /// A part of a tick, as its pacing log line names it.
@@ -328,7 +330,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             );
         }
         // The last plan's: a pool an earlier plan held may have started since.
-        self.note_held_for_cpu(&applied.held_for_cpu);
+        self.note_waits(&applied.held, applied.barrier);
         pace.done(self.config.host.poll_interval, plans);
         // Whether a job waits for the host's memory once this plan's starts took theirs, as the status says it.
         match mode {
@@ -483,6 +485,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             started += 1;
         }
+        // A plan's waits count whichever path ran it, and only once its starts are done.
+        self.note_waits(&plan.held, plan.barrier);
         started
     }
 
@@ -515,7 +519,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         mode: Shutdown,
         pace: &mut Pace,
     ) -> Applied {
-        let mut applied = Applied::default();
+        let mut applied = Applied {
+            held: plan.held,
+            barrier: plan.barrier,
+            ..Applied::default()
+        };
         let (stops, decisions): (Vec<Decision>, Vec<Decision>) = plan
             .decisions
             .into_iter()
@@ -524,7 +532,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .into_iter()
             .filter_map(|decision| match decision {
                 Decision::Stop { slot, reason } => Some((slot, reason)),
-                Decision::Start { .. } | Decision::HeldForCpu { .. } => None,
+                Decision::Start { .. } => None,
             })
             .collect();
         let before = self.occupied().count();
@@ -551,15 +559,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     } else {
                         applied.deferred += 1;
                     }
-                }
-                Decision::HeldForCpu {
-                    repository,
-                    profile,
-                } => {
-                    applied.held_for_cpu.insert(Pool {
-                        repository,
-                        profile,
-                    });
                 }
             }
         }
@@ -634,14 +633,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let held_since = self
             .repositories
-            .get_mut(&repository)
-            .and_then(|state| state.cpu_wait.remove(&slot.profile))
+            .get(&repository)
+            .and_then(|state| state.waits.get(&slot.profile)?.cpu)
             .map(|wait| wait.since);
         if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
             cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
         }
         self.start(&slot, &repository, admission, Purpose::Job)
             .await;
+        // Only a runner in its slot ends the wait: a start that failed served nothing.
+        if self.holds_runner(&slot)
+            && let Some(state) = self.repositories.get_mut(&repository)
+        {
+            state.waits.remove(&slot.profile);
+        }
         true
     }
 
@@ -670,10 +675,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     queued: self.listed_demand(repository, &taken),
                     runner_memory: None,
                     runner_cpu: None,
-                    cpu_waiting_since: state
-                        .cpu_wait
+                    waits: state
+                        .waits
                         .get(&repository.profile)
-                        .map(|wait| wait.since),
+                        .copied()
+                        .unwrap_or_default(),
                     warm: warm.get(&Pool::from(repository)).copied().unwrap_or(0),
                 }
             })
@@ -756,12 +762,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// the pool matches, for each runner of the pool that may have taken one no capture named: one a listing first
     /// showed busy, and one gone since the listing began (`unnamed`). Until the job is named, a pool may get one
     /// runner too few rather than two for one job.
-    fn listed_demand(
+    pub(super) fn listed_demand(
         &self,
         pool: &crate::config::Repository,
         taken: &BTreeSet<u64>,
     ) -> Vec<QueuedJob> {
-        let state = &self.repositories[&pool.name];
         let claims = self.claims.get(&pool.name);
         let busy = self
             .slots
@@ -779,15 +784,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|claim| claim.profile == pool.profile)
             .count();
         let unnamed = busy + gone;
-        let mut queued: Vec<QueuedJob> = state
-            .queued
-            .iter()
-            .filter(|job| {
-                !taken.contains(&job.id)
-                    && !claims.is_some_and(|claims| claims.consumed.contains_key(&job.id))
-            })
-            .cloned()
-            .collect();
+        let mut queued = self.listed_unnamed(&pool.name, taken);
         let claimed: BTreeSet<u64> = {
             let mut matching: Vec<u64> = queued
                 .iter()
@@ -801,8 +798,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         queued
     }
 
-    /// The budgets a plan has beside what runs now, as `admitting` admits.
+    /// The jobs listed on `repository` that no runner of this machine is known to have taken: not in `taken`, nor
+    /// consumed by a claim.
+    pub(super) fn listed_unnamed(&self, repository: &str, taken: &BTreeSet<u64>) -> Vec<QueuedJob> {
+        let claims = self.claims.get(repository);
+        self.repositories[repository]
+            .queued
+            .iter()
+            .filter(|job| {
+                !taken.contains(&job.id)
+                    && !claims.is_some_and(|claims| claims.consumed.contains_key(&job.id))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The budgets a plan has beside what runs now, as `admitting` admits. `drained` keeps what no runner's end gives
+    /// back and reads none of the interlocks' zeros. The host's limit in it is the one in force: the plain margin
+    /// comes back only with no runner in the slice, and a warm runner may keep it from ever being empty.
     fn plan_budget(&self, admitting: &Admitting) -> Budget {
+        let committed = self.committed_memory();
         Budget {
             // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
             memory: if admitting.held {
@@ -821,6 +836,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .as_ref()
                 .map(|host| host::left(host.limit, self.memory_in_use(), host.stalled)),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
+            drained: Drained {
+                memory: self
+                    .memory_max
+                    .map(|max| crate::scheduler::left(max, committed)),
+                cpu: admitting
+                    .cpu
+                    .as_ref()
+                    .and(self.cpu_budget())
+                    .map(|budget| crate::scheduler::left(budget, 0)),
+                host: admitting
+                    .host
+                    .as_ref()
+                    .map(|host| crate::scheduler::left(host.limit, committed)),
+            },
         }
     }
 
@@ -877,13 +906,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             memory: profile.memory.0,
             cpus: (u64::from(profile.cpus) * 1000).min(self.cpu_budget().unwrap_or(u64::MAX)),
             upkeep_due: self.upkeep_waits_for_warm(name),
-            preparing: if self.is_reseeding(name) {
-                Some(Preparing::Reseeding)
-            } else if self.awaits_image(&profile.image) {
-                Some(Preparing::PullingImage)
-            } else {
-                None
-            },
+            preparing: self.preparing(name, profile),
             slots,
             ran: (0..slots_len)
                 .map(|index| {
@@ -895,6 +918,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .cloned()
                 })
                 .collect(),
+        }
+    }
+
+    /// What keeps every slot of the profile from starting for now.
+    pub(super) fn preparing(
+        &self,
+        name: &str,
+        profile: &crate::config::Profile,
+    ) -> Option<Preparing> {
+        if self.is_reseeding(name) {
+            Some(Preparing::Reseeding)
+        } else if self.awaits_image(&profile.image) {
+            Some(Preparing::PullingImage)
+        } else {
+            None
         }
     }
 
@@ -913,8 +951,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .map(|(_, occupant)| self.takes(occupant))
             .sum();
+        runners + self.committed_memory()
+    }
+
+    /// The part of `memory_in_use` no runner's end gives back: the seed containers and the room waiting ones hold, the
+    /// shells and the mirror.
+    fn committed_memory(&self) -> u64 {
         let reseeds: u64 = self.seed_memory().values().sum();
-        runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
+        reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
 
     /// What a runner takes of the budget.

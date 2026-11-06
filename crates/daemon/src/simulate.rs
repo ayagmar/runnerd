@@ -1,14 +1,14 @@
 //! `runnerd simulate`: the job history replayed through admission by caps and by measured peaks, with and without
-//! a CPU budget (`admission::simulate`), as a table. Reads the history database read-only, as `runnerd doctor` does; changes
-//! nothing.
+//! a CPU budget (`admission::simulate`), as a table; and with `--priority`, with and without the barrier for a starved
+//! job (ADR 0096), pool by pool. Reads the history database read-only, as `runnerd doctor` does; changes nothing.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use runnerd_core::admission::{Policy, Replay, simulate};
+use runnerd_core::admission::{Barriers, Policy, PoolReplay, Replay, simulate};
 use runnerd_core::api;
-use runnerd_core::config::{self, ByteSize, Config};
-use runnerd_core::sizing::Ran;
+use runnerd_core::config::{self, Admission, ByteSize, Config};
+use runnerd_core::sizing::{LeftOut, Ran};
 
 /// One replay to run: a policy, the slots it may use and the CPU budget in millicores, if any.
 struct Row {
@@ -76,6 +76,7 @@ pub(crate) fn report(
             jobs,
             row.policy,
             &row.slots,
+            Barriers::On,
         );
         let _ = writeln!(out, "{}", line(&row, &replay, memory_max));
     }
@@ -91,6 +92,161 @@ pub(crate) fn report(
         api::cores(cpus.millicores)
     );
     out
+}
+
+/// What `priority` replays: the config's policy and CPU budget, with its slots but where `slots` says otherwise.
+pub(crate) struct Comparison<'run> {
+    pub(crate) memory_max: Option<u64>,
+    /// The CPU budget, in millicores.
+    pub(crate) cpu_budget: Option<u64>,
+    pub(crate) jobs: &'run [Ran],
+    pub(crate) slots: &'run BTreeMap<String, u32>,
+    pub(crate) left_out: LeftOut,
+}
+
+/// The same replay without and with the barrier for a starved job, side by side: each pool and each profile, then the
+/// budget's busy share and what the barrier withheld.
+pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
+    let slots: BTreeMap<String, u32> = config
+        .profiles
+        .iter()
+        .map(|(name, profile)| {
+            let slots = comparison.slots.get(name).copied();
+            (name.clone(), slots.unwrap_or(profile.slots))
+        })
+        .collect();
+    let policy = match config.host.admission {
+        Admission::Caps => Policy::Caps,
+        Admission::Measured => Policy::Measured,
+    };
+    let replay = |barriers| {
+        simulate(
+            config,
+            comparison.memory_max,
+            comparison.cpu_budget,
+            comparison.jobs,
+            policy,
+            &slots,
+            barriers,
+        )
+    };
+    let (without, with) = (replay(Barriers::Off), replay(Barriers::On));
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "\n\nWithout and with the barrier for a starved job, each job's wait from queued to started:\n"
+    );
+    let _ = writeln!(
+        out,
+        "{:<36} {:>6} {:>5} {:>9} {:>9} {:>9}   {:>6} {:>5} {:>9} {:>9} {:>9}",
+        "POOL",
+        "JOBS",
+        "NEVER",
+        "P50",
+        "P95",
+        "MAX",
+        "JOBS",
+        "NEVER",
+        "P50 WITH",
+        "P95 WITH",
+        "MAX WITH"
+    );
+    let pool_names = without.pools.keys().chain(with.pools.keys());
+    let names: std::collections::BTreeSet<_> = pool_names.collect();
+    for pool in names {
+        let _ = writeln!(
+            out,
+            "{}",
+            pool_line(
+                &format!("{}/{}", pool.repository, pool.profile),
+                &without.pools.get(pool).cloned().unwrap_or_default(),
+                &with.pools.get(pool).cloned().unwrap_or_default(),
+            )
+        );
+    }
+    for profile in slots.keys() {
+        let _ = writeln!(
+            out,
+            "{}",
+            pool_line(
+                &format!("all of {profile}"),
+                &of_profile(&without, profile),
+                &of_profile(&with, profile),
+            )
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nBusy share of the budget, what the running jobs took over the budget's time: {} without, {} with.",
+        share(&without),
+        share(&with)
+    );
+    let _ = writeln!(
+        out,
+        "A barrier stood for {}, with {} GiB-minutes of the budget free meanwhile: at most what it withheld, as a job \
+         behind it may not have fit that room.",
+        duration(with.barrier_for / 1000),
+        gib_minutes(with.withheld)
+    );
+    let LeftOut {
+        queued,
+        running,
+        cancelled,
+        elsewhere,
+    } = comparison.left_out;
+    let _ = write!(
+        out,
+        "Not replayed, having no run time to replay: {queued} jobs still queued, {running} running, {cancelled} \
+         cancelled and {elsewhere} taken elsewhere. Those still queued may be the ones that waited longest; no figure \
+         here says what the barrier does for them. The replay has no host readings, warm runners, restarts or \
+         recoveries, and a job gets the runner that starts for it, where GitHub may give that runner any job of its pool."
+    );
+    out
+}
+
+/// One pool's or profile's figures, without and with the barrier.
+fn pool_line(name: &str, without: &PoolReplay, with: &PoolReplay) -> String {
+    let figures = |replay: &PoolReplay| {
+        let wait = replay.wait();
+        format!(
+            "{:>6} {:>5} {:>9} {:>9} {:>9}",
+            replay.waits.len(),
+            replay.never_started,
+            duration(wait.p50),
+            duration(wait.p95),
+            duration(wait.max)
+        )
+    };
+    format!("{name:<36} {}   {}", figures(without), figures(with))
+}
+
+/// What the pools of `profile` did, together.
+fn of_profile(replay: &Replay, profile: &str) -> PoolReplay {
+    let mut all = PoolReplay::default();
+    for (_, pool) in replay
+        .pools
+        .iter()
+        .filter(|(pool, _)| pool.profile == profile)
+    {
+        all.waits.extend(&pool.waits);
+        all.never_started += pool.never_started;
+    }
+    all
+}
+
+/// The busy share of `replay`, to a tenth of a percent.
+fn share(replay: &Replay) -> String {
+    if replay.capacity == 0 {
+        return "not known without a budget".to_owned();
+    }
+    let tenths = replay.charged.saturating_mul(1000) / replay.capacity;
+    format!("{}.{}%", tenths / 10, tenths % 10)
+}
+
+/// Byte-milliseconds as GiB-minutes, to a tenth.
+fn gib_minutes(amount: u128) -> String {
+    let tenths = amount.saturating_mul(10) / (u128::from(1_u64 << 30) * 60_000);
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 /// The replays `report` runs, as its doc lists them.

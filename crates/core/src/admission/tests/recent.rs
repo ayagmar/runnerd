@@ -439,6 +439,7 @@ mod invariants {
             &rows,
             Policy::Measured,
             &std::collections::BTreeMap::from([("node".to_owned(), 2)]),
+            crate::admission::Barriers::Off,
         );
         if replay.under_predicted == under {
             Ok(())

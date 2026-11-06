@@ -844,11 +844,26 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
         })?
         .collect::<rusqlite::Result<_>>()?;
     let kept_since = kept_since(db)?;
+    let left_out = db
+        .prepare_cached(
+            "SELECT coalesce(sum(state = 'queued'), 0), coalesce(sum(state = 'running'), 0), \
+             coalesce(sum(conclusion IS 'cancelled'), 0), coalesce(sum(state = 'elsewhere'), 0) \
+             FROM jobs WHERE queued_at >= ?1",
+        )?
+        .query_row([since], |row| {
+            Ok(sizing::LeftOut {
+                queued: row.get(0)?,
+                running: row.get(1)?,
+                cancelled: row.get(2)?,
+                elsewhere: row.get(3)?,
+            })
+        })?;
     Ok(sizing::History {
         jobs,
         cancelled,
         runners,
         kept_since,
+        left_out,
         ..sizing::History::default()
     })
 }

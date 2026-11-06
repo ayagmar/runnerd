@@ -22,8 +22,8 @@ use std::path::PathBuf;
 
 use runnerd_core::api;
 use runnerd_core_previous::api as previous;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod samples;
@@ -49,7 +49,11 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[];
+const ACCEPTED: &[Accepted] = &[Accepted {
+    reader: Reader::Previous,
+    item: "waiting/behind-memory",
+    adr: "0096",
+}];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -340,6 +344,17 @@ fn the_previous_release_reads_what_this_one_writes() {
         }
     }
     assert_reads(Reader::Previous, &failures);
+}
+
+/// What ADR 0096 accepts: a client of the previous release shows a job behind a starved one as waiting for a reason it
+/// does not know, and goes on reading the status.
+#[test]
+fn the_previous_release_reads_a_job_behind_memory_as_a_reason_it_does_not_know() {
+    let sent = json(api::Waiting::BehindMemory { job: 41 });
+    assert_eq!(
+        previous::Waiting::deserialize(&sent).unwrap(),
+        previous::Waiting::Unknown
+    );
 }
 
 #[test]
