@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
 use super::history::CAPTURE_DRAIN;
+use super::runners::Collected;
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::host;
 use crate::api::{AdmissionPolicy, Basis};
@@ -38,7 +39,7 @@ const MAX_PLANS: usize = 3;
 struct Ending {
     slot: SlotRef,
     occupant: Occupant,
-    logs: Option<String>,
+    drained: Collected,
 }
 
 /// The releases a pass began, by index: each `None` once done.
@@ -61,8 +62,8 @@ impl Releases {
 
 /// A step of a release a pass waited for.
 enum Step {
-    /// Its log read, and its capture ended: what the log says.
-    Drained(Option<String>),
+    /// Its log read, and its capture ended.
+    Drained(Collected),
     /// Its container removed and its registration deleted, or why Docker did not remove it.
     Removed(Result<(), docker::Error>),
 }
@@ -377,21 +378,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 () = &mut joining, if join => join = false,
                 joined = releases.waits.join_next() => match joined {
                     Some(Ok((index, Step::Drained(read)))) => {
-                        let Some(Ending { slot, occupant, logs }) = &mut releases.ended[index] else {
+                        let Some(Ending { slot, occupant, drained }) = &mut releases.ended[index] else {
                             continue;
                         };
-                        *logs = read;
-                        let recorded = self.record(slot, occupant, logs.as_deref()).await;
+                        *drained = read;
+                        let recorded = self.record(slot, occupant, drained).await;
                         let removed = self.remove(occupant, recorded);
                         releases
                             .waits
                             .spawn(async move { (index, Step::Removed(removed.await)) });
                     }
                     Some(Ok((index, Step::Removed(removed)))) => {
-                        let Some(Ending { slot, occupant, logs }) = releases.ended[index].take() else {
+                        let Some(Ending { slot, occupant, drained }) = releases.ended[index].take() else {
                             continue;
                         };
-                        self.released(&slot, &occupant, logs.as_deref(), removed);
+                        self.released(&slot, &occupant, drained.logs.as_deref(), removed);
                         if !self.holds_runner(&slot) {
                             freed += 1;
                             started += self.refill().await;
@@ -448,7 +449,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 releases.ended.push(Some(Ending {
                     slot,
                     occupant,
-                    logs: None,
+                    drained: Collected::default(),
                 }));
                 releases
                     .waits

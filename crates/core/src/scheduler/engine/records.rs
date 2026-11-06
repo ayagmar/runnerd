@@ -170,13 +170,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// room within the limits, then commits and removes it, in the background. Returns whether it took the container
     /// over; if not, the caller removes it.
     pub(super) async fn begin_record(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
-        // The capture's last report may have named the job after `occupant` was taken.
-        let job = self
-            .occupied()
-            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
-            .and_then(|(_, candidate)| candidate.job)
-            .or(occupant.job);
-        let Some(job) = job else {
+        let Some(job) = self.named_job(occupant) else {
             return false;
         };
         if !self.records_failures(&slot.profile) {

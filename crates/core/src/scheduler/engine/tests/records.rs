@@ -879,6 +879,41 @@ async fn a_left_runners_claimed_job_ends_whether_docker_read_its_log_at_once_or_
     }
 }
 
+/// A capture that broke since the last tick reaches no `recapture` when a pass reaps its runner first, as for a job
+/// shorter than one poll: the stopped container's worker log still names the job.
+#[tokio::test]
+async fn a_pass_that_reaps_a_runner_whose_capture_just_broke_keeps_its_job_in_the_history() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("drain-claim");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    docker.0.lock().unwrap().break_captures = 1;
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    until_captures_end(&engine).await;
+    {
+        let mut github = github.0.lock().unwrap();
+        github.queued = Vec::new();
+        github
+            .jobs
+            .insert(5, details(5, "completed", Some("success")));
+    }
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers[0].running = false;
+        let container = state.containers[0].id.clone();
+        state
+            .container_logs
+            .insert(container.clone(), "Running job: build\n".to_owned());
+        state.diag.insert(container, docker::tests::diag_archive(5));
+    }
+    engine.exits.any();
+    engine.turnover().await;
+    handle.store.flush().await;
+    let job = handle.store.job(5).await.unwrap().unwrap().summary;
+    assert!(job.runner.is_some(), "its runner is named: {job:?}");
+}
+
 /// A failed job whose runner ends between polls is recorded without GitHub being listed sooner than
 /// `poll_interval`. The bug it catches: the end of each recording's check and commit waking a full tick, so failed
 /// jobs released by a pass (ADR 0095) multiplied the polls.

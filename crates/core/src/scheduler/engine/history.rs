@@ -260,10 +260,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// The job a runner took: its capture's last report may have named it after `occupant` was taken.
+    pub(super) fn named_job(&self, occupant: &Occupant) -> Option<u64> {
+        self.occupied()
+            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
+            .and_then(|(_, candidate)| candidate.job)
+            .or(occupant.job)
+    }
+
     /// Claims the job a stopped runner's worker log names, if no capture read one: nothing else may link the two, and a
     /// job whose capture broke can end before a listing shows its runner.
     pub(super) async fn claim_from_worker_log(&mut self, occupant: &Occupant) {
-        if occupant.job.is_some() {
+        if self.named_job(occupant).is_some() {
             return;
         }
         let read = self
@@ -616,11 +624,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Records a runner's removal and what the build cache served it, and stops watching it; its job, if it took
     /// one, closes once GitHub reports it completed.
     pub(super) fn forget(&mut self, occupant: &Occupant) {
-        let job = self
-            .occupied()
-            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
-            .and_then(|(_, candidate)| candidate.job)
-            .or(occupant.job);
+        let job = self.named_job(occupant);
         // Before the record of its removal, which the job's record then shows.
         self.detach_build_cache(occupant, job);
         let now = SystemTime::now();
