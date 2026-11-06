@@ -12,6 +12,7 @@
 //! slot.
 //! Under either policy the same predictor gives each pool and each running runner its usual run time, which says what
 //! may start behind a barrier (ADR 0097).
+//! Measured, what runs counts as `admission::pooled` adds it up (ADR 0099).
 //! It reads the store and the latest host sample and reading; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -287,7 +288,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !admitting.held {
             admitting.free = self
                 .memory_max
-                .map(|max| max.saturating_sub(self.memory_in_use()));
+                .map(|max| max.saturating_sub(self.count(admitting.remembered).pooled()));
         }
         if let (Some(cpu), Some(budget)) = (admitting.cpu.as_mut(), self.cpu_budget()) {
             cpu.free = budget.saturating_sub(self.cpu_in_use());
@@ -316,13 +317,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// with the margin `remembered` asks for.
     pub(super) fn host_budget_by(&self, remembered: host::Remembered) -> Option<api::HostBudget> {
         let memory = self.host_memory()?;
-        Some(host::budget(memory, self.memory_in_use(), remembered))
+        Some(host::budget(
+            memory,
+            self.count(remembered).pooled(),
+            remembered,
+        ))
     }
 
     /// What the last plan saw of the host, as the next one goes by it. The larger margin keeps a start from pushing a
     /// busy host back to the edge; with no runner in the slice there is no such start to follow, so the first
     /// runners need only the margin.
-    fn host_remembered(&self) -> host::Remembered {
+    pub(super) fn host_remembered(&self) -> host::Remembered {
         host::Remembered {
             short: self.measured.host.short && self.occupied().next().is_some(),
             ..self.measured.host
@@ -640,7 +645,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some(max) = self.memory_max else {
             return Vec::new();
         };
-        let mut in_use = self.memory_in_use();
+        let mut in_use = self.count(self.host_remembered()).pooled();
         let mut stops = Vec::new();
         for (slot, occupant) in self.occupied() {
             if in_use <= max {

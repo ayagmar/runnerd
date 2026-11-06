@@ -119,10 +119,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// The memory caps in use, with the mirror's and each seed container's part.
     fn budget(&self) -> api::Budget {
+        let count = self.count(self.host_remembered());
         api::Budget {
             slice: self.config.host.slice.clone(),
             memory_max: self.memory_max,
-            memory_in_use: self.memory_in_use(),
+            memory_in_use: count.plain,
+            pooled: (count.credit > 0).then_some(api::Pooled {
+                credit: count.credit,
+                counted: count.pooled(),
+                runners: count.runners as u64,
+            }),
             admission: match self.config.host.admission {
                 crate::config::Admission::Caps => api::AdmissionPolicy::Caps,
                 crate::config::Admission::Measured => api::AdmissionPolicy::Measured,

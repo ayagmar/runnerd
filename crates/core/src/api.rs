@@ -158,6 +158,9 @@ pub struct Budget {
     /// runner's predicted peak and its last sampled memory, nothing for one whose container is gone, and the caps of
     /// the seed containers, shells and the mirror.
     pub memory_in_use: u64,
+    /// What pooling takes off `memory_in_use` (ADR 0099); absent while it takes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooled: Option<Pooled>,
     /// What a new runner must fit in beside them.
     pub admission: AdmissionPolicy,
     /// Under measured admission, whether the slice is at the high-water mark, so no runner starts.
@@ -180,6 +183,17 @@ pub struct Budget {
     /// Absent when it could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice_cpus: Option<u64>,
+}
+
+/// The count the budgets go by while pooling takes something off `Budget::memory_in_use` (ADR 0099).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pooled {
+    /// What it takes off, in bytes.
+    pub credit: u64,
+    /// `Budget::memory_in_use` less `credit`: what new runners fit beside.
+    pub counted: u64,
+    /// How many runners the credit counts on.
+    pub runners: u64,
 }
 
 /// What the host's memory leaves the runners (ADR 0055). New runners fit in the lower of `MemoryMax` and

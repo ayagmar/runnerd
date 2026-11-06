@@ -61,6 +61,7 @@ fn status() -> Status {
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(16 << 30),
             memory_in_use: 6 << 30,
+            pooled: None,
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),

@@ -708,6 +708,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cpus: u64::from(spec.cpus) * 1000,
             admission: Some(admission),
             job: None,
+            job_started: None,
             key: None,
             labels: Some(labels),
             image: Some(image),

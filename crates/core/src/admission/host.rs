@@ -6,6 +6,7 @@
 //! its ceiling; the stall rule reads the memory the host has now. Pure: the engine passes in the reading, with the ceiling,
 //! and what it remembers of the last plan.
 
+use super::pooled;
 use crate::api::{HostBudget, HostMemory};
 
 /// Starts stop once every runnable task of the host waits for memory this share of the last 10 s, in hundredths of
@@ -39,6 +40,22 @@ pub fn margin(total: u64, short: bool) -> u64 {
         margin.saturating_add(margin / 2)
     } else {
         margin
+    }
+}
+
+/// What the host keeps past the margin before a credit counts on it, as a divisor of its memory: a quarter. A pooled
+/// count spends what the overcount left the host, and sockets start to throttle under about 20G of 62G available, which
+/// the margin and this come to; with them a 46G slice's replay spends about as long under that line (ADR 0099).
+const CREDIT_ALLOWANCE_SHARE: u64 = 4;
+
+/// The host as the pooled count reads it, by the margin in force.
+pub fn pooling(memory: &HostMemory, remembered: Remembered) -> pooled::Host {
+    let stalled = stalls(memory, remembered.stalled);
+    let margin = margin(memory.grown(), remembered.short || stalled);
+    pooled::Host {
+        available: memory.available.saturating_add(memory.growable()),
+        keeps: margin.saturating_add(memory.grown() / CREDIT_ALLOWANCE_SHARE),
+        stalled,
     }
 }
 

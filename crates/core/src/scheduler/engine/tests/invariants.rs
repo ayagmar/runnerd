@@ -15,6 +15,8 @@ use std::time::SystemTime;
 use futures_util::FutureExt as _;
 
 use super::*;
+use crate::admission::pooled::{self, POOL_AFTER};
+use crate::api::{Basis, JobPeak};
 use crate::config::Admission;
 use crate::observe::metrics::Events;
 use crate::scheduler::{IDLE_TIMEOUT, PRIORITY_AFTER};
@@ -67,6 +69,10 @@ impl Rng {
 
 /// The config a case runs with: two profiles, `o/r` in both, `o/s` beside it in `heavy`.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a config choice a reload flips on its own"
+)]
 struct Shape {
     admission: Admission,
     cpu_overcommit: bool,
@@ -77,6 +83,10 @@ struct Shape {
     light_pool: bool,
     /// Whether `o/s` is configured.
     second_repository: bool,
+    /// `[host] pooled_count`.
+    pooled_count: bool,
+    /// The `heavy` profile's memory, in gigabytes.
+    heavy_memory: u64,
 }
 
 /// A pool as the config has it.
@@ -94,6 +104,8 @@ impl Shape {
         light_slots: Some(2),
         light_pool: true,
         second_repository: true,
+        pooled_count: true,
+        heavy_memory: 4,
     };
 
     fn pools(&self) -> Vec<PoolShape> {
@@ -127,6 +139,9 @@ impl Shape {
         if self.cpu_overcommit {
             host.push_str("cpu_overcommit = 1.0\n");
         }
+        if !self.pooled_count {
+            host.push_str("pooled_count = false\n");
+        }
         let mut config = format!(
             r#"
 [host]
@@ -141,10 +156,10 @@ maven = {{ max_size = "5G" }}
 [profiles.heavy]
 image_stage = "app"
 cpus = 2
-memory = "4G"
+memory = "{}G"
 slots = {}
 "#,
-            self.heavy_slots
+            self.heavy_memory, self.heavy_slots
         );
         if let Some(slots) = self.light_slots {
             let _ = write!(
@@ -242,6 +257,8 @@ enum Change {
     LightProfile,
     Policy,
     CpuOvercommit,
+    PooledCount,
+    HeavyMemory,
 }
 
 /// One thing that happens. Indexes pick among the candidates there are then, modulo their number.
@@ -313,6 +330,8 @@ enum Step {
     },
     /// Time passes: idle runners waited `IDLE_TIMEOUT`, holds after failures ran out.
     Elapse,
+    /// Running jobs pass their first minute, and the predictor says what each reservation goes by from here on.
+    Settle,
     Tick,
     /// Docker says runners stopped, and a pass between ticks frees their slots and starts runners from the last
     /// tick's listings (ADR 0095).
@@ -348,13 +367,15 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 available: [3, 8, 20, 50][rng.index() % 4],
                 stalled: rng.below(5) == 0,
             },
-            55..=62 => Step::Reload(match rng.below(7) {
+            55..=62 => Step::Reload(match rng.below(9) {
                 0 => Change::HeavySlots(1 + u32::try_from(rng.below(3)).unwrap()),
                 1 => Change::LightSlots(1 + u32::try_from(rng.below(3)).unwrap()),
                 2 => Change::LightPool,
                 3 => Change::SecondRepository,
                 4 => Change::LightProfile,
                 5 => Change::Policy,
+                6 => Change::PooledCount,
+                7 => Change::HeavyMemory,
                 _ => Change::CpuOvercommit,
             }),
             63..=65 => Step::Restart,
@@ -380,6 +401,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 docker_gone: rng.below(2) == 0,
             },
             83..=89 => Step::Pass,
+            90..=93 => Step::Settle,
             _ => Step::Tick,
         })
         .collect()
@@ -455,9 +477,16 @@ struct Violation {
 }
 
 /// A case: the engine on the fakes, and what GitHub and Docker hold as the world sees it.
-struct Case {
-    /// How many checks saw a barrier.
+/// How many checks saw what they exist for: none of either in all cases, and they check nothing.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
     barriers: usize,
+    credits: usize,
+}
+
+struct Case {
+    /// What the checks saw.
+    seen: Seen,
     github: FakeGithub,
     docker: FakeDocker,
     dir: TestDir,
@@ -505,7 +534,7 @@ impl Case {
         let shape = Shape::START;
         let (engine, handle) = Case::engine(&github, &docker, &dir, shape);
         Case {
-            barriers: 0,
+            seen: Seen::default(),
             github,
             docker,
             dir,
@@ -739,6 +768,7 @@ impl Case {
                 self.tick().await?;
             }
             Step::Elapse => self.elapse(),
+            Step::Settle => self.settle(),
             Step::Tick => self.tick().await?,
             Step::Pass => self.pass().await?,
         }
@@ -990,6 +1020,10 @@ impl Case {
                 };
             }
             Change::CpuOvercommit => shape.cpu_overcommit = !shape.cpu_overcommit,
+            Change::PooledCount => shape.pooled_count = !shape.pooled_count,
+            // Only up: a restart whose inspect fails counts a runner at its profile's memory, which lowered would
+            // read less than Docker runs it with.
+            Change::HeavyMemory => shape.heavy_memory = (shape.heavy_memory + 1).min(6),
         }
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.engine
@@ -1079,6 +1113,18 @@ impl Case {
                 if let Some(wait) = waits.cpu.as_mut() {
                     wait.since -= PRIORITY_AFTER;
                 }
+            }
+        }
+    }
+
+    fn settle(&mut self) {
+        for occupant in self.engine.slots.values_mut().flatten().flatten() {
+            occupant.job_started = occupant.job_started.map(|at| at - POOL_AFTER);
+            if let Some(admission) = occupant.admission.as_mut() {
+                admission.basis = Basis::Job {
+                    runs: 10,
+                    peak: JobPeak::P95,
+                };
             }
         }
     }
@@ -1175,26 +1221,29 @@ impl Case {
             .reseed_memory
             .keys()
             .filter(|profile| !seeds_before.contains(*profile))
-            .map(|profile| format!("{profile}'s seed container"));
-        // A reading taken while a runner started binds only the starts after it, seeds among them, which go last;
-        // the starts before it went by the reading the plan had.
-        let hooked = self.docker.0.lock().unwrap().hooked_start.take();
-        let during = self.host_during_start.lock().unwrap().take();
-        if let (Some(hooked), Some(reading)) = (hooked, during) {
-            started = starts
-                .iter()
-                .skip_while(|name| **name != hooked)
-                .skip(1)
-                .cloned()
-                .collect();
-            self.host = Some(reading);
+            .map(|profile| format!("{profile}'s seed container"))
+            .collect::<Vec<_>>();
+        if let Some(after) = self.starts_after_a_reading(&starts) {
+            started = after;
         }
         started.extend(seeds);
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
+        self.the_count_keeps_its_bounds(&after)?;
         self.no_removal_of_a_running_job()
+    }
+
+    /// The starts a reading taken while a runner started binds, if one was: those after it, seeds among them, which go
+    /// last. The starts before it went by the reading the plan had.
+    fn starts_after_a_reading(&mut self, starts: &[String]) -> Option<BTreeSet<String>> {
+        let hooked = self.docker.0.lock().unwrap().hooked_start.take();
+        let during = self.host_during_start.lock().unwrap().take();
+        let (hooked, reading) = hooked.zip(during)?;
+        self.host = Some(reading);
+        let after = starts.iter().skip_while(|name| **name != hooked).skip(1);
+        Some(after.cloned().collect())
     }
 
     /// A pass between ticks, after Docker said every runner may have stopped: the checks of a tick that bind a pass,
@@ -1211,16 +1260,19 @@ impl Case {
             .into_iter()
             .map(|container| container.name)
             .collect();
-        let starts: BTreeSet<String> = self.docker.0.lock().unwrap().calls[calls_before..]
+        let order: Vec<String> = self.docker.0.lock().unwrap().calls[calls_before..]
             .iter()
             .filter_map(|call| call.strip_prefix("start "))
             .filter(|name| running.contains(*name))
             .map(str::to_owned)
             .collect();
+        let starts: BTreeSet<String> = order.iter().cloned().collect();
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
-        self.starts_fit_the_budget(&after, &starts)?;
+        let bound = self.starts_after_a_reading(&order);
+        self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
+        self.the_count_keeps_its_bounds(&after)?;
         self.no_removal_of_a_running_job()
     }
 
@@ -1326,6 +1378,9 @@ impl Case {
             return Ok(());
         }
         let budget = &status.budget;
+        // Seeds and the mirror reserve no CPU, so a seed alone may start beside runners a reload to `cpu_overcommit`
+        // left past the budget.
+        let runner_started = started.iter().any(|name| !name.ends_with("seed container"));
         // Under caps, what Docker runs them with, whatever the engine counts.
         if self.shape.admission == Admission::Caps {
             let running = self.running_containers();
@@ -1339,8 +1394,8 @@ impl Case {
                 .map(|container| docker.cpus.get(&container.id).copied().unwrap_or(0))
                 .sum();
             drop(docker);
-            // The CPU budget is the slice's CPUs times 1.0; seeds and the mirror reserve none.
-            if self.shape.cpu_overcommit && cpus > SLICE_CPUS {
+            // The CPU budget is the slice's CPUs times 1.0.
+            if self.shape.cpu_overcommit && runner_started && cpus > SLICE_CPUS {
                 return violation(
                     self,
                     "starts_fit_the_budget",
@@ -1359,18 +1414,20 @@ impl Case {
             }
         }
         if let Some(max) = budget.memory_max
-            && budget.memory_in_use > max
+            && budget.counted() > max
         {
             return violation(
                 self,
                 "starts_fit_the_budget",
                 format!(
-                    "started {started:?} with {} of {max} reserved, seed containers {:?}",
-                    budget.memory_in_use, budget.seed_memory
+                    "started {started:?} with {} of {max} counted, seed containers {:?}",
+                    budget.counted(),
+                    budget.seed_memory
                 ),
             );
         }
         if let Some(cpu) = &budget.cpu
+            && runner_started
             && cpu.in_use > cpu.budget
         {
             return violation(
@@ -1390,9 +1447,11 @@ impl Case {
                 .saturating_sub(HOST_MARGIN);
             // The seed containers that run, at their caps; not the room a waiting one holds.
             let seeds: u64 = self.engine.reseed_memory.values().sum();
+            let credit = budget.pooled.map_or(0, |pooled| pooled.credit);
             let reserved = runners_of(status)
                 .map(|(_, runner)| runner.reserved)
-                .fold(seeds, u64::saturating_add);
+                .fold(seeds, u64::saturating_add)
+                .saturating_sub(credit);
             if reserved > limit {
                 return violation(
                     self,
@@ -1410,6 +1469,82 @@ impl Case {
                     ),
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Invariant 11 (ADR 0099): the credit stays in its bounds through restarts, reloads, stale readings and lost
+    /// runners. What the status shows is what a plan goes by, and the count never reads under what eligible runners use
+    /// with all the rest in full.
+    fn the_count_keeps_its_bounds(&mut self, status: &api::Status) -> Result<(), Violation> {
+        let budget = &status.budget;
+        let credit = budget.pooled.map_or(0, |pooled| pooled.credit);
+        let measured = self.shape.admission == Admission::Measured;
+        if credit > pooled::MOST_CREDIT || (credit > 0 && !(measured && self.shape.pooled_count)) {
+            let detail = format!("{budget:?} under {:?}", self.shape);
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        let admitting = self.engine.admitting(&mut [], None);
+        let plan = self.engine.plan_budget(&admitting);
+        let left = budget
+            .memory_max
+            .map(|max| crate::scheduler::left(max, budget.counted()));
+        if !admitting.held && plan.memory != left {
+            let detail = format!("a plan reads {:?}, the status {left:?}", plan.memory);
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        if credit == 0 {
+            return Ok(());
+        }
+        self.seen.credits += 1;
+        let now = SystemTime::now();
+        let fresh_after = time::now_ms().saturating_sub(3000 * api::SAMPLE_INTERVAL);
+        let floor: u64 = self
+            .engine
+            .occupied()
+            .map(|(_, occupant)| {
+                let sample = self.handle.store.latest_sample(&occupant.runner_name);
+                let settled = occupant
+                    .job_started
+                    .and_then(|started| now.duration_since(started).ok())
+                    .is_some_and(|ran| ran >= POOL_AFTER);
+                let predicted = occupant.admission.is_some_and(|admission| {
+                    matches!(
+                        admission.basis,
+                        Basis::Job { .. } | Basis::Profile { .. } | Basis::ProfileMax { .. }
+                    )
+                });
+                let known = occupant.key.is_some() && occupant.purpose.is_some();
+                match sample.filter(|sample| sample.at >= fresh_after) {
+                    Some(sample) if settled && predicted && known => sample.memory,
+                    _ => self.engine.takes(occupant),
+                }
+            })
+            .sum();
+        let floor = floor + self.engine.committed_memory();
+        if budget.counted() < floor {
+            let detail = format!("{budget:?} counts under {floor}");
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        let host = budget.host.as_ref();
+        let keeps = HOST_MARGIN + HOST_TOTAL / 4;
+        if host.is_none_or(|host| host.stalled || host.memory.available < keeps + credit) {
+            let detail = format!("{credit} of credit beside the host's {host:?}");
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        let slice = self
+            .handle
+            .store
+            .latest_host_sample()
+            .map(|sample| sample.memory);
+        let room = slice.map(|slice| {
+            (MEMORY_MAX * 90 / 100)
+                .saturating_sub(slice)
+                .saturating_sub(pooled::HIGH_WATER_RESERVE)
+        });
+        if room.is_none_or(|room| credit > room) {
+            let detail = format!("{credit} of credit beside the slice's {slice:?}");
+            return violation(self, "the_count_keeps_its_bounds", detail);
         }
         Ok(())
     }
@@ -1432,7 +1567,7 @@ impl Case {
             .iter()
             .filter_map(|job| behind(&job.waiting))
             .collect();
-        self.barriers += owners.len();
+        self.seen.barriers += owners.len();
         if owners.len() > 1 {
             return violation(
                 self,
@@ -1582,7 +1717,7 @@ impl Case {
         while !self.running().is_empty() {
             self.apply(Step::Finish(0)).await?;
         }
-        for _ in 0..4 {
+        for _ in 0..6 {
             self.elapse();
             self.tick().await?;
         }
@@ -1765,7 +1900,7 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
 }
 
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
-async fn run(steps: &[Step]) -> Result<usize, Violation> {
+async fn run(steps: &[Step]) -> Result<Seen, Violation> {
     let mut case = Case::new();
     case.recover().await?;
     case.tick().await?;
@@ -1775,12 +1910,12 @@ async fn run(steps: &[Step]) -> Result<usize, Violation> {
     }
     case.step = steps.len();
     case.drain().await?;
-    Ok(case.barriers)
+    Ok(case.seen)
 }
 
 /// `run`, with a panic reported as the broken invariant `no_panic`, so it keeps its seed and shrinks like any other;
-/// its step is not known, and says 0. Returns how many checks saw a barrier.
-async fn attempt(steps: &[Step]) -> Result<usize, Violation> {
+/// its step is not known, and says 0.
+async fn attempt(steps: &[Step]) -> Result<Seen, Violation> {
     match AssertUnwindSafe(run(steps)).catch_unwind().await {
         Ok(outcome) => outcome,
         Err(panic) => Err(Violation {
@@ -1818,6 +1953,30 @@ async fn shrink(mut steps: Vec<Step>, found: Violation) -> (Vec<Step>, Violation
     (steps, last)
 }
 
+/// What every other case starts from: under measured admission, a job of `o/r` and one of `o/s` past their first minute
+/// and using a tenth of what they reserve, so the steps after it find a credit to take back.
+const TWO_JOBS_SETTLED: [Step; 9] = [
+    Step::Reload(Change::Policy),
+    Step::Queue {
+        second: false,
+        labels: Labels::Heavy,
+    },
+    Step::Queue {
+        second: true,
+        labels: Labels::Heavy,
+    },
+    Step::Tick,
+    Step::Assign(0),
+    Step::Assign(0),
+    Step::Settle,
+    Step::Sample {
+        percent: 10,
+        available: 50,
+        stalled: false,
+    },
+    Step::Tick,
+];
+
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()
@@ -1834,15 +1993,21 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         Some(seed) => vec![seed],
         None => (0..env_u64("RUNNERD_INVARIANT_CASES").unwrap_or(CASES)).collect(),
     };
-    let mut barriers = 0;
+    let mut seen = Seen::default();
     // Cases at once: each waits now and then for its captures, which the others use.
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
-            let steps = generate(&mut Rng(seed));
+            let mut steps = generate(&mut Rng(seed));
+            if seed % 2 == 1 {
+                steps.splice(0..0, TWO_JOBS_SETTLED);
+            }
             (seed, attempt(&steps).await, steps)
         });
         for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
-            barriers += outcome.as_ref().map_or(0, |barriers| *barriers);
+            if let Ok(case) = &outcome {
+                seen.barriers += case.barriers;
+                seen.credits += case.credits;
+            }
             if let Err(found) = outcome {
                 // Before shrinking, which may itself fail: the seed alone replays it.
                 eprintln!(
@@ -1859,8 +2024,12 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         }
     }
     assert!(
-        barriers > 0 || seeds.len() == 1,
+        seen.barriers > 0 || seeds.len() == 1,
         "the generated runs reach a barrier, or its invariant checks nothing"
+    );
+    assert!(
+        seen.credits > 0 || seeds.len() == 1,
+        "the generated runs reach a credit, or its invariant checks nothing"
     );
 }
 

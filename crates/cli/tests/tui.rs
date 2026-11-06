@@ -64,6 +64,7 @@ fn serve(socket: &Path) {
             slice: "runnerd.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,
+            pooled: None,
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),

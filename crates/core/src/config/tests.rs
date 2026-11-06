@@ -686,6 +686,18 @@ fn an_age_reads_in_seconds_to_weeks_and_names_its_units_when_it_does_not() {
 }
 
 #[test]
+fn the_pooled_count_is_on_unless_turned_off() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert!(config.host.pooled_count, "on by default");
+    let off = MINIMAL.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\npooled_count = false",
+    );
+    let config = Config::parse(&off).unwrap();
+    assert!(!config.host.pooled_count, "turned off under [host]");
+}
+
+#[test]
 fn cpu_admission_is_off_unless_an_overcommit_above_0_is_set() {
     assert_eq!(Config::parse(MINIMAL).unwrap().host.cpu_overcommit, None);
     let with = |factor: &str| {

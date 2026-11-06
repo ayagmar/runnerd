@@ -74,6 +74,10 @@ pub struct Host {
     /// (ADR 0084). Absent, or not above `MemTotal`, the host is the memory it has now.
     #[serde(default)]
     pub memory_ceiling: Option<ByteSize>,
+    /// Under measured admission, whether the budget counts what runners reserve as jobs that do not all peak at once,
+    /// up to a bounded credit (ADR 0099). Default on; off, it adds every runner's worst case.
+    #[serde(default = "default_pooled_count")]
+    pub pooled_count: bool,
 }
 
 impl Host {
@@ -111,6 +115,10 @@ impl Admission {
             Admission::Measured => api::AdmissionPolicy::Measured,
         }
     }
+}
+
+fn default_pooled_count() -> bool {
+    true
 }
 
 fn default_poll_interval() -> Duration {

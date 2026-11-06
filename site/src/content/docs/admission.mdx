@@ -98,6 +98,24 @@ slots = 8       # 8 × 7G may exceed MemoryMax
 
 The caps still stop a container that goes over them, but several jobs going over their predictions at once can fill the slice, and the kernel then kills a process in it. `runnerctl job <id>` says what a runner reserved and why.
 
+### The pooled count
+
+Each reservation is a job's worst case, and jobs rarely peak at once. So under `measured` the budget takes a credit off the sum of what runners count, up to 6G. Nothing changes for a runner: it reserves, learns and is recorded as before. `pooled_count = false` under `[host]` turns it off.
+
+A runner adds to the credit only if all of this holds:
+
+- Its job is known, it has run for a minute, and this daemon saw it start: a waiting or warm runner, a recent start and a runner adopted after a restart count in full.
+- Its reservation goes by a prediction, not its cap or a run that overran.
+- It has a recent sample.
+
+The room between what such a runner counts and what it uses adds up within one job, across profiles, as copies of a job grow together. Across jobs it adds as a root sum of squares. The credit is that sum of room less its root, and never more than:
+
+- 6G.
+- What the slice has under 90% of `MemoryMax`, less 2G.
+- What the host has available past its margin and a quarter of its memory. A host that stalls allows none, and so does a slice or host reading that is not recent.
+
+The slice's and the host's budgets, the high-water mark's room and a waiting job's room all read the count after the credit. When a guard takes the credit back, the count rises and nothing starts until it fits; no running job stops for it. The status line shows both figures (`36.8G of 46G counted in ci.slice by predicted peaks: 42.8G reserved, 6G pooled`).
+
 ### A starved job goes first
 
 Smaller runners can take all the memory that frees up, so a large runner would never fit. Once a pool's next job has waited 10 minutes for memory with a free slot, no younger job starts until a runner of that pool does. Its next jobs then wait 2 minutes, until a listing shows its queue empty, so a pool of many large jobs is not held to one runner per 10 minutes. It works under `caps` and `measured`, and there is nothing to set.
@@ -112,7 +130,7 @@ Smaller runners can take all the memory that frees up, so a large runner would n
 A younger job still starts behind that job if all of this holds:
 
 - It has a free slot and fits the budgets left. In the waiting job's profile, it leaves that job a free slot too.
-- The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
+- The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. That time counts [the credit](#the-pooled-count) at its largest, since it can grow with no job ending. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
 - Every job its runner could take usually ends by then. The usual run time is the p95 of a job's last 20 successful runs, from 3 of them. A pool with one queued job that has no estimate stays behind.
 - Everything started since the wait reached its limit, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger.
 

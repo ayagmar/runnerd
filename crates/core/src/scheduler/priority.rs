@@ -275,6 +275,8 @@ pub(crate) struct Older<'plan> {
 pub(crate) struct Around<'plan> {
     /// The budgets left.
     pub(crate) left: Left,
+    /// How much more memory the pooled count could leave with no runner ending (`Budget::credit_room`).
+    pub(crate) credit_room: u64,
     /// What a drain leaves.
     pub(crate) drained: Drained,
     /// The runners in slots, and those the plan started so far.
@@ -355,10 +357,15 @@ impl<'plan> Backfill<'plan> {
     ) -> Option<Backfill<'plan>> {
         let Around {
             left,
+            credit_room,
             drained,
             runners,
             older,
         } = around;
+        // The room may come sooner than ends bring it: a credit can grow at any moment, and an end gives back at most
+        // what its runner counts. So the time found is the earliest the owner could start.
+        let mut left = left;
+        left.give(credit_room, 0);
         let mut ending: Vec<(Duration, Runner<'_>)> = runners
             .iter()
             .map(|runner| (runner.left_to_run(now), *runner))

@@ -242,6 +242,9 @@ struct Occupant {
     admission: Option<api::Admission>,
     /// The job it took, once its log capture found it.
     job: Option<u64>,
+    /// When this daemon's capture found that job; `None` before, and for a job found again after a restart only by
+    /// an adopted runner, whose `purpose` says so.
+    job_started: Option<SystemTime>,
     /// That job as admission tells jobs apart, once the history had its record.
     key: Option<Key>,
     /// The labels it registered with; `None` for one adopted from a container that does not say.

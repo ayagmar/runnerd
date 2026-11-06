@@ -672,6 +672,7 @@ mod tests {
                     slice: "runnerd.slice".to_owned(),
                     memory_max: None,
                     memory_in_use: id,
+                    pooled: None,
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),

@@ -2,10 +2,11 @@
 //! and the history replayed through admission by caps and by predictions, with or without a CPU budget
 //! (`simulate`), to show what each would have done with the same jobs, with the barrier `scheduler::plan` puts up for
 //! a starved job or without, and with jobs arriving when they did or after what they followed; and what the host's
-//! memory leaves runners (`host`). A job's memory and usual run time go by its last runs (`recent`, ADR 0070, 0097).
-//! Pure: no I/O, no clock.
+//! memory leaves runners (`host`); and what all that runs counts for in the budget (`pooled`, ADR 0099). A job's memory
+//! and usual run time go by its last runs (`recent`, ADR 0070, 0097). Pure: no I/O, no clock.
 
 pub mod host;
+pub mod pooled;
 pub mod recent;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -936,6 +937,7 @@ impl<'run> Replayer<'run> {
         let runners = self.runners();
         let around = Around {
             left: self.left(),
+            credit_room: 0,
             drained: self.drained(),
             runners: &runners,
             older: &older,

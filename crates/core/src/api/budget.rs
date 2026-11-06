@@ -23,23 +23,42 @@ impl Reading {
 
 impl Budget {
     /// What is reserved of what, as every client shows it: `8G` `of 24G reserved in runnerd.slice`, or without
-    /// `MemoryMax` `8G` `reserved in runnerd.slice, which has no MemoryMax`; how runners are admitted
+    /// `MemoryMax` `8G` `reserved in runnerd.slice, which has no MemoryMax`; while pooling takes something off, `36.8G`
+    /// `of 46G counted in ci.slice by predicted peaks: 42.8G reserved, 6G pooled`; how runners are admitted
     /// (`Budget::admission_note`) follows the slice.
     pub fn memory_reading(&self) -> Reading {
         let of = self
             .memory_max
             .map_or_else(String::new, |max| format!("of {} ", ByteSize(max)));
-        let mut text = format!("{of}reserved in {}", self.slice);
+        let verb = if self.pooled.is_some() {
+            "counted"
+        } else {
+            "reserved"
+        };
+        let mut text = format!("{of}{verb} in {}", self.slice);
         if let Some(note) = self.admission_note() {
             text = format!("{text} {note}");
+        }
+        if let Some(pooled) = &self.pooled {
+            let reserved = ByteSize(self.memory_in_use);
+            text = format!(
+                "{text}: {reserved} reserved, {} pooled",
+                ByteSize(pooled.credit)
+            );
         }
         if self.memory_max.is_none() {
             text.push_str(", which has no MemoryMax");
         }
         Reading {
-            figure: ByteSize(self.memory_in_use).to_string(),
+            figure: ByteSize(self.counted()).to_string(),
             text,
         }
+    }
+
+    /// What the budgets go by, in bytes: `memory_in_use`, less what pooling takes off it (ADR 0099).
+    pub fn counted(&self) -> u64 {
+        self.pooled
+            .map_or(self.memory_in_use, |pooled| pooled.counted)
     }
 
     /// The budget's clauses in the order clients show them: memory (`Budget::memory_reading`), then CPU
@@ -117,11 +136,11 @@ impl Budget {
         self.clauses().join("; ")
     }
 
-    /// What `MemoryMax` leaves beside every running container's reservation, in bytes: what a new runner must fit
-    /// in. `None` without `MemoryMax`.
+    /// What `MemoryMax` leaves beside what the running containers count (`Budget::counted`), in bytes: what a new
+    /// runner must fit in. `None` without `MemoryMax`.
     pub fn remaining(&self) -> Option<u64> {
         self.memory_max
-            .map(|max| max.saturating_sub(self.memory_in_use))
+            .map(|max| max.saturating_sub(self.counted()))
     }
 }
 
@@ -251,7 +270,7 @@ impl Budget {
             .as_ref()
             .map_or((0, 0), |host| (host.limit, host.spare));
         let memory = room - host.unwrap_or(0);
-        let text = match (unclaimed, withheld) {
+        let mut text = match (unclaimed, withheld) {
             (0, None) => format!("of {} free", ByteSize(max)),
             (_, None) => format!(
                 "of {} free past every slot's cap; {} is free beside what runs",
@@ -270,6 +289,10 @@ impl Budget {
                 ByteSize(max)
             ),
         };
+        // The blocks stay what runners reserve, so what pooling adds is said and not drawn.
+        if let Some(pooled) = &self.pooled {
+            text = format!("{text}, and pooling adds {}", ByteSize(pooled.credit));
+        }
         let free = (memory > 0).then(|| FreePart {
             memory,
             reading: Reading {
