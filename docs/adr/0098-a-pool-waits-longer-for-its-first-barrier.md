@@ -103,13 +103,15 @@ under one limit. `TWO_LIMITS` ticks at 300 s, so a first wait takes two ticks an
 together or two ticks apart, to land behind a barrier that went up in between. `TIGHT` and `SHARED` give 0097's counts
 unchanged. `TWO_LIMITS`, up to 6 jobs, is 26,051,628 worlds and 2,291,604 passes:
 
-- A run takes what the plan read: no owner that kept its barrier started late. 80 that lost theirs did, by a tick.
+- A run takes what the plan read: no owner started late, whether it kept its barrier or not.
 - Estimates read double: 4,220 owners that kept their barrier started late, by a tick, none past the later of its strict
-  start and the last end of what passed it.
+  start and the last end of what passed it. 80 that lost theirs started late, by a tick.
 - Jobs behind a barrier hang: no owner was kept out, unless an older job took its barrier.
 
-Seed 767, the one generated world 0097 quotes for a lost barrier, shows nothing under these limits, nor does any of the first
-1,500 seeds. The generated test no longer asserts it, and the small worlds above are what show that case now.
+An owner that lost its barrier now starts late only on estimates that read double. Seed 767, the one generated world 0097
+quotes for that case with exact estimates, shows nothing under these limits, nor does any of the first 1,500 seeds, and no
+small world does. `an_owner_that_loses_its_barrier_can_start_later_than_under_a_strict_one` pins a 6-job world of the double
+case, so the branch that excuses such an owner stays reached on every `cargo test`, and `every_world_of_six` asserts it too.
 
 The start that serves a pool logs one `info!` line, which is how a sandbox run sees the mark. A failed start logs none, even
 one that left a container in the slot.

@@ -102,9 +102,9 @@ pool, a job starved after one tick, and every pattern of arrivals 0 or 1 tick ap
 26,051,628 worlds of up to 6 jobs with memory and CPU both short, and 2,163,756 of up to 5 jobs with two pools sharing a
 profile.
 
-- A run takes what the plan read: no owner that kept its barrier started late. 140 that lost theirs did, by a tick.
+- A run takes what the plan read: no owner started late, whether it kept its barrier or not.
 - Estimates read double: no owner that kept its barrier started past the later of its strict start and the last end of
-  what passed it.
+  what passed it. 140 that lost theirs started late, by a tick.
 - Jobs behind a barrier hang: no owner was kept out, unless an older job took its barrier.
 
 These worlds have no warm runners, preparation, reloads or host limit. Up to 3 jobs run in every `cargo test`; the rest

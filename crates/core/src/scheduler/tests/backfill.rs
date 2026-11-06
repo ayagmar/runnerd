@@ -1175,6 +1175,7 @@ mod generated {
         /// An owner that kept its barrier and started later than under a strict one: what bound 1 rules out.
         late: Vec<String>,
         /// How many that lost their barrier started later, and by how many ticks at most: what ADR 0097 says can happen.
+        /// On every small world so far, only with estimates that read long.
         lost_and_late: u64,
         most_late_after_losing: u64,
         /// An owner that kept its barrier and started later than strict and than the end of all that passed it.
@@ -1471,6 +1472,23 @@ mod generated {
         assert!(tally.passed > 100, "and with two limits: {tally:?}");
     }
 
+    /// The case the first bound excuses, as no run of fewer jobs reaches it: job 5 owns a barrier, older jobs take it, and
+    /// on estimates that read double what passed starts it a tick late. Found by `every_world_of_six`.
+    #[test]
+    fn an_owner_that_loses_its_barrier_can_start_later_than_under_a_strict_one() {
+        let job = |id, pool, ticks| Job { id, pool, ticks };
+        let arrivals = [
+            vec![job(1, 2, 4), job(2, 1, 2), job(3, 1, 3)],
+            vec![job(4, 1, 1), job(5, 0, 1), job(6, 2, 2)],
+        ];
+        let mut tally = Tally::default();
+        tally.compare(&TIGHT, Estimates::Double, &arrivals, &|| {
+            "pinned".to_owned()
+        });
+        assert!(tally.lost_and_late > 0, "{tally:?}");
+        assert_eq!(tally.past_the_ceiling, [] as [String; 0]);
+    }
+
     /// The same up to 6 jobs: minutes in a release build, so not on every run. `cargo test --release -- --ignored
     /// every_world_of_six`. Rule 2's older jobs change no count in these worlds: their unit tests and the replay and
     /// planner's shared fixture stand for them.
@@ -1481,11 +1499,16 @@ mod generated {
         reason = "its counts are what ADRs 0097 and 0098 record"
     )]
     fn every_world_of_six() {
-        for (shape, most) in [(&SHARED, 5), (&TIGHT, 6), (&TWO_LIMITS, 6)] {
+        for (shape, most, lost) in [
+            (&SHARED, 5, false),
+            (&TIGHT, 6, true),
+            (&TWO_LIMITS, 6, true),
+        ] {
             let tally = every_world(shape, most, |count| 1 << (count - 1).min(3), 8);
             eprintln!("{tally:?}");
             assert_bounds_hold(&tally);
             assert!(tally.hung > 100, "jobs hang in these worlds: {tally:?}");
+            assert_eq!(tally.lost_and_late > 0, lost, "{tally:?}");
         }
     }
 }
