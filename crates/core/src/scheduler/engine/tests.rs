@@ -829,7 +829,8 @@ impl DockerApi for FakeDocker {
         }
         let late = runner.then(|| state.late_failures.pop_front()).flatten();
         let id = match late {
-            Some(_) => format!("late-{}", spec.name),
+            // Docker gives every container an ID of its own, though a restart in the same second reuses the name.
+            Some(_) => format!("late-{}-{}", spec.name, state.started_images.len()),
             None => spec.name.clone(),
         };
         if runner && state.fail_started_inspects > 0 {

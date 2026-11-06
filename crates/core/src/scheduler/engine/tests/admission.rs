@@ -2177,7 +2177,6 @@ async fn any_stale_reading_takes_the_credit_back() {
         .next()
         .unwrap();
     runners_use(&github, &handle.store, 512 * M);
-    handle.store.containers_gone(Vec::new());
     handle.store.samples(vec![SampleRecord {
         runner: stale.clone(),
         at: old,

@@ -1378,9 +1378,6 @@ impl Case {
             return Ok(());
         }
         let budget = &status.budget;
-        // Seeds and the mirror reserve no CPU, so a seed alone may start beside runners a reload to `cpu_overcommit`
-        // left past the budget.
-        let runner_started = started.iter().any(|name| !name.ends_with("seed container"));
         // Under caps, what Docker runs them with, whatever the engine counts.
         if self.shape.admission == Admission::Caps {
             let running = self.running_containers();
@@ -1394,8 +1391,8 @@ impl Case {
                 .map(|container| docker.cpus.get(&container.id).copied().unwrap_or(0))
                 .sum();
             drop(docker);
-            // The CPU budget is the slice's CPUs times 1.0.
-            if self.shape.cpu_overcommit && runner_started && cpus > SLICE_CPUS {
+            // The CPU budget is the slice's CPUs times 1.0; seeds and the mirror reserve none.
+            if self.shape.cpu_overcommit && cpus > SLICE_CPUS {
                 return violation(
                     self,
                     "starts_fit_the_budget",
@@ -1427,7 +1424,6 @@ impl Case {
             );
         }
         if let Some(cpu) = &budget.cpu
-            && runner_started
             && cpu.in_use > cpu.budget
         {
             return violation(
@@ -2123,23 +2119,6 @@ async fn a_job_that_ends_before_its_broken_capture_comes_back_keeps_its_runner_i
 }
 
 #[tokio::test]
-async fn a_stopped_runner_that_recovery_cannot_remove_is_removed_later() {
-    let steps = [
-        Step::Queue {
-            second: false,
-            labels: Labels::Light,
-        },
-        Step::Tick,
-        Step::Assign(0),
-        // The job ends while the daemon is down, and Docker fails the first remove after the restart.
-        Step::RemoveFails,
-        Step::Finish(0),
-        Step::Restart,
-    ];
-    assert_eq!(broken(&steps).await, None);
-}
-
-#[tokio::test]
 async fn a_runner_whose_inspect_fails_after_a_reload_lowered_its_memory_counts_at_its_own_cap() {
     // Shrunk from seed 487: two heavy runners started at 4G; a reload lowers the profile to 2G; a restart cannot read
     // them. Counted at 2G each, the next start would fit caps that add past the budget.
@@ -2157,6 +2136,23 @@ async fn a_runner_whose_inspect_fails_after_a_reload_lowered_its_memory_counts_a
         Step::RestartInspectFails(7),
         heavy(false),
         Step::Reload(Change::HeavySlots(3)),
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+#[tokio::test]
+async fn a_stopped_runner_that_recovery_cannot_remove_is_removed_later() {
+    let steps = [
+        Step::Queue {
+            second: false,
+            labels: Labels::Light,
+        },
+        Step::Tick,
+        Step::Assign(0),
+        // The job ends while the daemon is down, and Docker fails the first remove after the restart.
+        Step::RemoveFails,
+        Step::Finish(0),
+        Step::Restart,
     ];
     assert_eq!(broken(&steps).await, None);
 }
