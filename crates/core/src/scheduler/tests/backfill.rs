@@ -1,5 +1,5 @@
-//! What starts behind a barrier (ADR 0097), as `plan` decides it: the rule's four parts, each failing on its own, and
-//! over generated sequences its two bounds, with run times that hold and with run times that do not.
+//! What starts behind a barrier (ADR 0097), as `plan` decides it: the rule's four parts, each failing on its own; over
+//! generated runs and over every small world, its two bounds and what run times that read long cost.
 
 use super::*;
 use crate::scheduler::{Drained, MEMORY_PRIORITY_AFTER};
@@ -164,6 +164,27 @@ fn a_younger_job_may_end_as_the_room_gathers_and_not_a_moment_later() {
     assert_passes(&plan_behind(at_the_end, room_in_twenty_minutes()));
     let past_it = younger(Some(minutes(20) + Duration::from_secs(1)));
     assert_held(&plan_behind(past_it, room_in_twenty_minutes()));
+}
+
+/// The log line a sandbox run counts passes by reads this, so a start before the barrier must not carry it.
+#[test]
+fn a_start_says_which_barrier_it_passed() {
+    let older = pool("o/older", "small", GIB, Some(minutes(5)), &[0]);
+    let plan = plan(
+        &[older, owner(), younger(Some(minutes(1)))],
+        &slots(room_in_twenty_minutes()),
+        slice(13 * GIB),
+        now(),
+    );
+    let behind: Vec<Option<u64>> = plan
+        .decisions
+        .iter()
+        .filter_map(|decision| match decision {
+            Decision::Start { behind, .. } => Some(*behind),
+            Decision::Stop { .. } => None,
+        })
+        .collect();
+    assert_eq!(behind, [None, Some(1)]);
 }
 
 #[test]
@@ -488,6 +509,66 @@ fn an_older_job_no_end_makes_room_for_holds_nothing_back() {
     assert_eq!(started(&plan), ["o/small"]);
 }
 
+/// A preparing profile has no free slot and no runner ending, but its preparation ends on its own, and the older job
+/// then takes the room it has now.
+#[test]
+fn a_younger_job_leaves_the_room_of_an_older_job_whose_profile_is_preparing() {
+    let mut profiles = slots(vec![
+        running(3 * GIB, minutes(20)),
+        running(6 * GIB, minutes(40)),
+    ]);
+    let reseeding = Profile {
+        preparing: Some(Preparing::Reseeding),
+        ..profile(6 * GIB, 1000, vec![Slot::Free])
+    };
+    profiles.insert("older".to_owned(), reseeding);
+    let plan = plan(
+        &[
+            pool("o/older", "older", 6 * GIB, None, &[0]),
+            owner(),
+            pool("o/small", "small", 2 * GIB, Some(minutes(15)), &[2]),
+        ],
+        &profiles,
+        slice(9 * GIB),
+        now(),
+    );
+    assert_eq!(started(&plan), [] as [&str; 0]);
+    assert_eq!(plan.waiting[&2], Waiting::BehindMemory { job: 1 });
+}
+
+/// An older job that matures takes the barrier, and what started behind the first must leave it its room as well, or a
+/// hung job keeps it, and the owner behind it, out.
+#[test]
+fn the_caps_leave_an_older_jobs_room_as_they_leave_the_owners() {
+    let plan_with = |cap| {
+        let needs_little = Repository {
+            waits: starved(1),
+            ..pool("o/big", "big", 4 * GIB, None, &[1])
+        };
+        let mut profiles = slots(vec![
+            running(3 * GIB, minutes(20)),
+            running(10 * GIB, minutes(40)),
+        ]);
+        profiles.insert(
+            "older".to_owned(),
+            profile(14 * GIB, 1000, vec![Slot::Free]),
+        );
+        profiles.insert("wide".to_owned(), profile(cap, 1000, vec![Slot::Free; 2]));
+        plan(
+            &[
+                pool("o/older", "older", 14 * GIB, None, &[0]),
+                needs_little,
+                pool("o/wide", "wide", GIB, Some(minutes(10)), &[2]),
+            ],
+            &profiles,
+            slice(13 * GIB),
+            now(),
+        )
+    };
+    assert_eq!(started(&plan_with(2 * GIB)), ["o/wide"]);
+    assert_eq!(started(&plan_with(3 * GIB)), [] as [&str; 0]);
+}
+
 /// All of a pool's runners take the same, so what does not fit the owner does not fit its younger jobs.
 #[test]
 fn the_owners_own_younger_jobs_never_pass_it() {
@@ -577,6 +658,37 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
     let runners = || vec![from_the_future(minutes(5)), running(8 * GIB, minutes(40))];
     let held = plan_behind(younger(Some(minutes(6))), runners());
     assert_held(&held);
+    // Its whole usual run time is not what it has left: the room it gives comes now, so nothing passes.
+    let matured_later = Repository {
+        waits: Waits {
+            memory: Some(Wait {
+                job: 1,
+                since: now() - WAITED,
+            }),
+            ..Waits::default()
+        },
+        ..owner()
+    };
+    let in_the_past_for_the_barrier = Slot::Runner(RunnerSlot {
+        repository: "o/other".to_owned(),
+        busy: true,
+        started_at: now() + minutes(1),
+        memory: 7 * GIB,
+        cpu: 0,
+        usual: Some(minutes(30)),
+    });
+    let mut wide = slots(vec![
+        in_the_past_for_the_barrier,
+        running(8 * GIB, minutes(40)),
+    ]);
+    wide.get_mut("other").unwrap().memory = GIB;
+    let plan_of = plan(
+        &[matured_later, younger(Some(minutes(20)))],
+        &wide,
+        slice(15 * GIB),
+        now(),
+    );
+    assert_eq!(started(&plan_of), [] as [&str; 0]);
     // Started "later" than the barrier matured, so its cap counts as well: 8G, all a drain leaves past the owner.
     let wait_from_the_future = Repository {
         waits: Waits {
@@ -600,18 +712,129 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
 /// The planner, a model of the engine and of GitHub: jobs queue, runners take the oldest job of their pool and run as
 /// long as a run time says, and nothing but the plan decides. Run times here are the model's own.
 mod generated {
+    use std::sync::Mutex;
+
     use super::*;
 
-    const TICK: Duration = Duration::from_secs(30);
-    const BUDGET: u64 = 16 * GIB;
-    const HUNG_JOBS_GROW_AT: u64 = 30;
+    /// A pool of the model: what a runner takes of the budgets, and what its cap lets it grow to.
+    #[derive(Debug, Clone, Copy)]
+    struct Kind {
+        repository: &'static str,
+        profile: &'static str,
+        memory: u64,
+        cap: u64,
+        cpu: u64,
+    }
 
-    /// Each pool's repository, profile, what a runner takes and what its cap lets it grow to.
-    const POOLS: [(&str, &str, u64, u64); 3] = [
-        ("o/big", "big", 8 * GIB, 8 * GIB),
-        ("o/mid", "mid", 3 * GIB, 3 * GIB),
-        ("o/small", "small", GIB, 2 * GIB),
-    ];
+    /// The limits of a model.
+    #[derive(Debug)]
+    struct Shape {
+        /// How long a tick is: a job that waited `MEMORY_PRIORITY_AFTER` holds.
+        tick: Duration,
+        memory: u64,
+        cpu: Option<u64>,
+        slots: usize,
+        pools: [Kind; 3],
+        /// When a job that hangs has grown to its cap: late enough that the budgets gave no warning while jobs passed,
+        /// which only rule 4 of ADR 0097 stands against.
+        hung_jobs_grow_at: u64,
+    }
+
+    /// Long runs of many jobs: slots to spare, memory short.
+    static STREAMS: Shape = Shape {
+        tick: Duration::from_secs(30),
+        memory: 16 * GIB,
+        cpu: None,
+        slots: 16,
+        pools: [
+            Kind {
+                repository: "o/big",
+                profile: "big",
+                memory: 8 * GIB,
+                cap: 8 * GIB,
+                cpu: 0,
+            },
+            Kind {
+                repository: "o/mid",
+                profile: "mid",
+                memory: 3 * GIB,
+                cap: 3 * GIB,
+                cpu: 0,
+            },
+            Kind {
+                repository: "o/small",
+                profile: "small",
+                memory: GIB,
+                cap: 2 * GIB,
+                cpu: 0,
+            },
+        ],
+        hung_jobs_grow_at: 30,
+    };
+
+    /// A few jobs in two slots a pool, a job that waits a tick being starved: memory, CPU and slots each run out.
+    static TIGHT: Shape = Shape {
+        tick: Duration::from_secs(120),
+        memory: 8 * GIB,
+        cpu: Some(4000),
+        slots: 2,
+        pools: [
+            Kind {
+                repository: "o/big",
+                profile: "big",
+                memory: 6 * GIB,
+                cap: 6 * GIB,
+                cpu: 2000,
+            },
+            Kind {
+                repository: "o/mid",
+                profile: "mid",
+                memory: 3 * GIB,
+                cap: 3 * GIB,
+                cpu: 2000,
+            },
+            Kind {
+                repository: "o/small",
+                profile: "small",
+                memory: GIB,
+                cap: 2 * GIB,
+                cpu: 1000,
+            },
+        ],
+        hung_jobs_grow_at: 6,
+    };
+
+    /// Two pools of one profile, its caps leaving room to pass, and two slots: a younger pool could take them both.
+    static SHARED: Shape = Shape {
+        tick: Duration::from_secs(120),
+        memory: 11 * GIB,
+        cpu: None,
+        slots: 2,
+        pools: [
+            Kind {
+                repository: "o/wide",
+                profile: "shared",
+                memory: 3 * GIB,
+                cap: 3 * GIB,
+                cpu: 0,
+            },
+            Kind {
+                repository: "o/thin",
+                profile: "shared",
+                memory: GIB,
+                cap: 3 * GIB,
+                cpu: 0,
+            },
+            Kind {
+                repository: "o/other",
+                profile: "other",
+                memory: 9 * GIB,
+                cap: 9 * GIB,
+                cpu: 0,
+            },
+        ],
+        hung_jobs_grow_at: 6,
+    };
 
     /// `SplitMix64`: the same seed gives the same sequence on every machine.
     struct Rng(u64);
@@ -634,24 +857,26 @@ mod generated {
     struct Job {
         id: u64,
         pool: usize,
-        /// How many ticks it usually runs.
-        usual: u64,
+        /// How many ticks it really runs.
+        ticks: u64,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Estimates {
         /// The planner knows none: a strict barrier.
         None,
-        /// The planner knows each job's.
-        Known,
+        /// The planner reads each job's real run time.
+        Exact,
+        /// The planner reads twice each job's real run time, as a p95 reads a run that ends at its median.
+        Double,
     }
 
-    /// What a run does with its usual run time.
+    /// What a run does.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Runs {
-        /// It holds.
-        AsUsual,
-        /// A job that started behind a barrier never ends; the rest hold.
+        /// It ends on time.
+        OnTime,
+        /// A job that started behind a barrier never ends; the rest do.
         BackfilledHang,
     }
 
@@ -661,27 +886,11 @@ mod generated {
         started: u64,
         /// `None`: it hangs.
         ends: Option<u64>,
-        behind: bool,
     }
 
-    fn at(tick: u64) -> SystemTime {
-        now() + TICK * u32::try_from(tick).unwrap()
-    }
-
-    impl Run {
-        /// What it takes of the budget at `tick`: a job that hangs grows to its cap, late enough that the budgets gave
-        /// no warning while jobs passed, which only rule 4 of ADR 0097 stands against.
-        fn takes(&self, tick: u64) -> u64 {
-            let (.., memory, cap) = POOLS[self.job.pool];
-            if self.ends.is_none() && tick >= HUNG_JOBS_GROW_AT {
-                cap
-            } else {
-                memory
-            }
-        }
-    }
-
+    #[derive(Clone)]
     struct World {
+        shape: &'static Shape,
         tick: u64,
         estimates: Estimates,
         runs: Runs,
@@ -695,11 +904,22 @@ mod generated {
         passed: u64,
         /// Up to which tick a runner that did not start behind a barrier ran.
         last_end: u64,
+        /// Up to which tick a runner that started behind a barrier ran.
+        last_pass_end: u64,
+    }
+
+    /// What became of an owner, from the plan that first put up its barrier.
+    struct Outcome {
+        start: u64,
+        /// Whether it owned every barrier until it started: an older job that matures takes the barrier from it.
+        kept: bool,
+        last_pass_end: u64,
     }
 
     impl World {
-        fn new(estimates: Estimates, runs: Runs) -> World {
+        fn new(shape: &'static Shape, estimates: Estimates, runs: Runs) -> World {
             World {
+                shape,
                 tick: 0,
                 estimates,
                 runs,
@@ -710,18 +930,32 @@ mod generated {
                 owners: Vec::new(),
                 passed: 0,
                 last_end: 0,
+                last_pass_end: 0,
             }
         }
 
-        /// The same world from here on, knowing `estimates`.
+        /// The same world from here on, reading `estimates`.
         fn fork(&self, estimates: Estimates) -> World {
             World {
                 estimates,
-                queued: self.queued.clone(),
-                running: self.running.clone(),
-                starts: self.starts.clone(),
-                owners: self.owners.clone(),
-                ..*self
+                last_pass_end: 0,
+                ..self.clone()
+            }
+        }
+
+        /// Runs this world until `owner` starts.
+        fn owner_outcome(mut self, owner: u64, arrivals: &[Vec<Job>]) -> Outcome {
+            let mut kept = true;
+            loop {
+                let plan = self.step(arrival_at(arrivals, self.tick));
+                if let Some(start) = self.starts.get(&owner) {
+                    return Outcome {
+                        start: *start,
+                        kept,
+                        last_pass_end: self.last_pass_end,
+                    };
+                }
+                kept &= plan.barrier.is_some_and(|barrier| barrier.job == owner);
             }
         }
 
@@ -732,25 +966,42 @@ mod generated {
                 && self.running.is_empty()
         }
 
+        fn at(&self, tick: u64) -> SystemTime {
+            now() + self.shape.tick * u32::try_from(tick).unwrap()
+        }
+
+        fn estimate(&self, ticks: u64) -> Option<Duration> {
+            let read = self.shape.tick * u32::try_from(ticks).unwrap();
+            match self.estimates {
+                Estimates::None => None,
+                Estimates::Exact => Some(read),
+                Estimates::Double => Some(read * 2),
+            }
+        }
+
+        /// What `run` takes of the memory budget now.
+        fn takes(&self, run: &Run) -> u64 {
+            let kind = self.shape.pools[run.job.pool];
+            if run.ends.is_none() && self.tick >= self.shape.hung_jobs_grow_at {
+                kind.cap
+            } else {
+                kind.memory
+            }
+        }
+
         fn repositories(&self) -> Vec<Repository> {
-            (0..POOLS.len())
+            (0..self.shape.pools.len())
                 .map(|index| {
-                    let (name, profile, memory, _) = POOLS[index];
+                    let kind = self.shape.pools[index];
                     let jobs: Vec<&Job> =
                         self.queued.iter().filter(|job| job.pool == index).collect();
-                    let longest = jobs.iter().map(|job| job.usual).max();
+                    let longest = jobs.iter().map(|job| job.ticks).max();
                     let ids: Vec<u64> = jobs.iter().map(|job| job.id).collect();
+                    let usual = longest.and_then(|ticks| self.estimate(ticks));
                     Repository {
                         waits: self.waits[index],
-                        ..pool(
-                            name,
-                            profile,
-                            memory,
-                            longest
-                                .filter(|_| self.estimates == Estimates::Known)
-                                .map(|ticks| TICK * u32::try_from(ticks).unwrap()),
-                            &ids,
-                        )
+                        runner_cpu: Some(kind.cpu),
+                        ..pool(kind.repository, kind.profile, kind.memory, usual, &ids)
                     }
                 })
                 .collect()
@@ -758,27 +1009,52 @@ mod generated {
 
         fn profiles(&self) -> BTreeMap<String, Profile> {
             let mut profiles = BTreeMap::new();
-            for (index, (_, name, _, cap)) in POOLS.iter().enumerate() {
+            for kind in &self.shape.pools {
                 let mut slots: Vec<Slot> = self
                     .running
                     .iter()
-                    .filter(|run| run.job.pool == index)
+                    .filter(|run| self.shape.pools[run.job.pool].profile == kind.profile)
                     .map(|run| {
+                        let of_run = self.shape.pools[run.job.pool];
                         Slot::Runner(RunnerSlot {
-                            repository: POOLS[index].0.to_owned(),
+                            repository: of_run.repository.to_owned(),
                             busy: true,
-                            started_at: at(run.started),
-                            memory: run.takes(self.tick),
-                            cpu: 0,
-                            usual: (self.estimates == Estimates::Known)
-                                .then(|| TICK * u32::try_from(run.job.usual).unwrap()),
+                            started_at: self.at(run.started),
+                            memory: self.takes(run),
+                            cpu: of_run.cpu,
+                            usual: self.estimate(run.job.ticks),
                         })
                     })
                     .collect();
-                slots.resize(slots.len().max(16), Slot::Free);
-                profiles.insert((*name).to_owned(), profile(*cap, 0, slots));
+                slots.resize(self.shape.slots.max(slots.len()), Slot::Free);
+                profiles.insert(kind.profile.to_owned(), profile(kind.cap, kind.cpu, slots));
             }
             profiles
+        }
+
+        fn budget(&self) -> Budget {
+            let left = crate::scheduler::left;
+            let memory: u64 = self.running.iter().map(|run| self.takes(run)).sum();
+            let kinds = &self.shape.pools;
+            let cpu: u64 = self.running.iter().map(|run| kinds[run.job.pool].cpu).sum();
+            Budget {
+                memory: Some(left(self.shape.memory, memory)),
+                cpu: self.shape.cpu.map(|budget| left(budget, cpu)),
+                drained: Drained {
+                    memory: Some(left(self.shape.memory, 0)),
+                    cpu: self.shape.cpu.map(|budget| left(budget, 0)),
+                    ..Drained::default()
+                },
+                ..Budget::default()
+            }
+        }
+
+        fn index_of(&self, repository: &str) -> usize {
+            let pools = &self.shape.pools;
+            pools
+                .iter()
+                .position(|kind| kind.repository == repository)
+                .unwrap()
         }
 
         /// One tick: what is due ends, `arrivals` queue, and one plan is carried out as the engine would.
@@ -787,51 +1063,40 @@ mod generated {
             self.running
                 .retain(|run| run.ends.is_none_or(|ends| ends > tick));
             self.queued.extend_from_slice(arrivals);
-            let used: u64 = self.running.iter().map(|run| run.takes(tick)).sum();
-            let budget = Budget {
-                memory: Some(crate::scheduler::left(BUDGET, used)),
-                drained: Drained {
-                    memory: Some(crate::scheduler::left(BUDGET, 0)),
-                    ..Drained::default()
-                },
-                ..Budget::default()
-            };
-            let at = at(tick);
-            let plan = plan(&self.repositories(), &self.profiles(), budget, at);
+            let at = self.at(tick);
+            let plan = plan(&self.repositories(), &self.profiles(), self.budget(), at);
             for decision in &plan.decisions {
-                let Decision::Start { repository, .. } = decision else {
+                let Decision::Start {
+                    repository, behind, ..
+                } = decision
+                else {
                     continue;
                 };
-                let index = POOLS
-                    .iter()
-                    .position(|(name, ..)| name == repository)
-                    .unwrap();
+                let index = self.index_of(repository);
                 let oldest = self
                     .queued
                     .iter()
                     .position(|job| job.pool == index)
                     .unwrap();
                 let job = self.queued.remove(oldest);
-                let behind = plan.barrier.is_some_and(|barrier| barrier.job < job.id);
-                self.passed += u64::from(behind);
                 self.waits[index] = Waits::default();
                 self.starts.insert(job.id, tick);
-                let ends = (!behind || self.runs == Runs::AsUsual).then_some(tick + job.usual);
-                if !behind {
-                    self.last_end = self.last_end.max(tick + job.usual);
+                let end = tick + job.ticks;
+                if behind.is_some() {
+                    self.passed += 1;
+                    self.last_pass_end = self.last_pass_end.max(end);
+                } else {
+                    self.last_end = self.last_end.max(end);
                 }
+                let hangs = behind.is_some() && self.runs == Runs::BackfilledHang;
                 self.running.push(Run {
                     job,
                     started: tick,
-                    ends,
-                    behind,
+                    ends: (!hangs).then_some(end),
                 });
             }
             for demand in &plan.held {
-                let index = POOLS
-                    .iter()
-                    .position(|(name, ..)| *name == demand.pool.repository)
-                    .unwrap();
+                let index = self.index_of(&demand.pool.repository);
                 self.waits[index].note(demand.scarce, demand.job, at);
             }
             if let Some(barrier) = plan.barrier
@@ -847,10 +1112,10 @@ mod generated {
     /// Small and mid jobs filling the slice, a big job among them, and more behind it, tick by tick.
     fn arrivals(rng: &mut Rng) -> Vec<Vec<Job>> {
         let mut next = 1;
-        let mut job = |pool, usual| {
+        let mut job = |pool, ticks| {
             let id = next;
             next += 1;
-            Job { id, pool, usual }
+            Job { id, pool, ticks }
         };
         let mut ticks: Vec<Vec<Job>> = Vec::new();
         for tick in 0..120 {
@@ -873,38 +1138,174 @@ mod generated {
         arrivals.get(at).map_or(&[], Vec::as_slice)
     }
 
-    /// The first bound of ADR 0097, at every barrier of a run: from the plan that first put it up, the same world goes on
-    /// with younger jobs passing and with none, and its owner starts no later for them.
-    #[test]
-    fn with_run_times_that_hold_every_owner_starts_as_early_as_under_a_strict_barrier() {
-        let (mut owners, mut passed, mut later) = (0, 0, Vec::new());
-        for seed in 0..128 {
-            let arrivals = arrivals(&mut Rng(seed));
-            let mut world = World::new(Estimates::Known, Runs::AsUsual);
+    /// What the comparisons at every barrier of some worlds came to.
+    #[derive(Debug, Default)]
+    struct Tally {
+        worlds: u64,
+        owners: u64,
+        /// Of those, how many owned every barrier until they started, in both worlds compared.
+        kept: u64,
+        passed: u64,
+        /// An owner that kept its barrier and started later than under a strict one: what bound 1 rules out.
+        late: Vec<String>,
+        /// How many that lost their barrier started later, and by how many ticks at most: what ADR 0097 says can happen.
+        lost_and_late: u64,
+        most_late_after_losing: u64,
+        /// An owner that kept its barrier and started later than strict and than the end of all that passed it.
+        past_the_ceiling: Vec<String>,
+        /// How many owners that kept their barrier started later for estimates that read long, and by how much at most.
+        read_long_and_late: u64,
+        most_late_read_long: u64,
+        /// An owner a hung job kept out once all else had ended: what bound 2 rules out.
+        kept_out: Vec<String>,
+        hung: u64,
+    }
+
+    impl Tally {
+        fn add(&mut self, other: Tally) {
+            self.worlds += other.worlds;
+            self.owners += other.owners;
+            self.kept += other.kept;
+            self.passed += other.passed;
+            self.late.extend(other.late);
+            self.lost_and_late += other.lost_and_late;
+            self.most_late_after_losing = self
+                .most_late_after_losing
+                .max(other.most_late_after_losing);
+            self.past_the_ceiling.extend(other.past_the_ceiling);
+            self.read_long_and_late += other.read_long_and_late;
+            self.most_late_read_long = self.most_late_read_long.max(other.most_late_read_long);
+            self.kept_out.extend(other.kept_out);
+            self.hung += other.hung;
+        }
+
+        /// Compares, at every barrier of the world of `arrivals`, what comes of its owner with the jobs behind it
+        /// starting and with none: from the same state, before the plan that put the barrier up, as that plan offers
+        /// the most room. A world in which nothing passes is its own strict world.
+        fn compare(
+            &mut self,
+            shape: &'static Shape,
+            read: Estimates,
+            arrivals: &[Vec<Job>],
+            name: &dyn Fn() -> String,
+        ) {
+            let mut passing = World::new(shape, read, Runs::OnTime);
+            while !passing.done(arrivals) {
+                passing.step(arrival_at(arrivals, passing.tick));
+            }
+            self.passed += passing.passed;
+            if passing.passed == 0 {
+                self.owners += passing.owners.len() as u64;
+                self.kept += passing.owners.len() as u64;
+                return;
+            }
+            let mut world = World::new(shape, read, Runs::OnTime);
             let mut seen = 0;
-            while !world.done(&arrivals) {
-                world.step(arrival_at(&arrivals, world.tick));
+            while !world.done(arrivals) {
+                let before = world.clone();
+                world.step(arrival_at(arrivals, world.tick));
                 for owner in world.owners[seen..].iter().copied() {
-                    owners += 1;
-                    let start = |estimates| {
-                        let mut fork = world.fork(estimates);
-                        while !fork.starts.contains_key(&owner) {
-                            fork.step(arrival_at(&arrivals, fork.tick));
-                        }
-                        fork.starts[&owner]
+                    self.owners += 1;
+                    let strict = before.fork(Estimates::None).owner_outcome(owner, arrivals);
+                    let passing = before.fork(read).owner_outcome(owner, arrivals);
+                    let late = passing.start.saturating_sub(strict.start);
+                    let kept = strict.kept && passing.kept;
+                    self.kept += u64::from(kept);
+                    let what = || {
+                        format!(
+                            "{}: owner {owner} at tick {}: strict {}, with passes {}, the last ending at {}",
+                            name(),
+                            before.tick,
+                            strict.start,
+                            passing.start,
+                            passing.last_pass_end
+                        )
                     };
-                    let (strict, backfill) = (start(Estimates::None), start(Estimates::Known));
-                    if backfill > strict {
-                        later.push((seed, owner, world.tick, strict, backfill));
+                    if late > 0 && !kept {
+                        self.lost_and_late += 1;
+                        self.most_late_after_losing = self.most_late_after_losing.max(late);
+                    } else if late > 0 && read == Estimates::Exact {
+                        self.late.push(what());
+                    } else if late > 0 {
+                        self.read_long_and_late += 1;
+                        self.most_late_read_long = self.most_late_read_long.max(late);
+                        if passing.start > strict.start.max(passing.last_pass_end) {
+                            self.past_the_ceiling.push(what());
+                        }
                     }
                 }
                 seen = world.owners.len();
             }
-            passed += world.passed;
         }
-        assert_eq!(later, [], "seed, owner, tick, strict start, backfill start");
-        assert!(owners > 100, "generated runs reach barriers: {owners}");
-        assert!(passed > 20, "and younger jobs pass them: {passed}");
+
+        /// Hangs every job that starts behind a barrier and checks the first barrier's owner, if it keeps that barrier.
+        fn hang(&mut self, shape: &'static Shape, arrivals: &[Vec<Job>]) {
+            let mut world = World::new(shape, Estimates::Exact, Runs::BackfilledHang);
+            let mut owner = None;
+            for tick in 0..200 {
+                let plan = world.step(arrival_at(arrivals, tick));
+                if let Some(owner) = owner
+                    && world.starts.contains_key(&owner)
+                {
+                    self.hung += u64::from(world.passed > 0);
+                    return;
+                }
+                let barrier = plan.barrier.map(|barrier| barrier.job);
+                match (owner, barrier) {
+                    (None, Some(job)) => owner = Some(job),
+                    // An older job took the barrier: the bound was the first owner's while it stood.
+                    (Some(owner), Some(job)) if job < owner => return,
+                    _ => {}
+                }
+            }
+            if let Some(owner) = owner {
+                self.kept_out.push(format!(
+                    "{arrivals:?}: owner {owner}, the last job not behind a barrier ending at {}",
+                    world.last_end
+                ));
+            }
+        }
+    }
+
+    /// The first bound of ADR 0097, over long generated runs. Seed 767 is a world in which an owner that lost its barrier
+    /// to older jobs starts late all the same, which is what the ADR says of the bound.
+    #[test]
+    fn with_run_times_that_hold_an_owner_that_keeps_its_barrier_starts_as_under_a_strict_one() {
+        let mut tally = Tally::default();
+        for seed in (0..128).chain([767]) {
+            let arrivals = arrivals(&mut Rng(seed));
+            tally.compare(&STREAMS, Estimates::Exact, &arrivals, &|| {
+                format!("seed {seed}")
+            });
+        }
+        assert_eq!(tally.late, [] as [String; 0]);
+        assert!(
+            tally.owners > 100,
+            "generated runs reach barriers: {tally:?}"
+        );
+        assert!(tally.passed > 20, "and younger jobs pass them: {tally:?}");
+        assert!(
+            tally.lost_and_late > 0,
+            "seed 767 still shows it: {tally:?}"
+        );
+    }
+
+    /// Run times that read long put the owner's room too late, so it can come while jobs still run behind the barrier.
+    /// What they cost it stops at their ends.
+    #[test]
+    fn with_run_times_that_read_long_an_owner_waits_no_longer_than_what_passed_it() {
+        let mut tally = Tally::default();
+        for seed in 0..128 {
+            let arrivals = arrivals(&mut Rng(seed));
+            tally.compare(&STREAMS, Estimates::Double, &arrivals, &|| {
+                format!("seed {seed}")
+            });
+        }
+        assert_eq!(tally.past_the_ceiling, [] as [String; 0]);
+        assert!(
+            tally.read_long_and_late > 0,
+            "the ceiling is reached for: {tally:?}"
+        );
     }
 
     /// Five mid runners filling the slice and ending one by one, a big job behind them, and a stream of short small jobs.
@@ -912,16 +1313,24 @@ mod generated {
         let mut ticks = vec![Vec::new(); 80];
         for id in 1..=5 {
             let usual = 10 * id + rng.below(10);
-            ticks[0].push(Job { id, pool: 1, usual });
+            ticks[0].push(Job {
+                id,
+                pool: 1,
+                ticks: usual,
+            });
         }
         ticks[1].push(Job {
             id: 6,
             pool: 0,
-            usual: 5,
+            ticks: 5,
         });
         for (tick, id) in (2..80).zip(7..) {
             let usual = 1 + rng.below(3);
-            ticks[tick].push(Job { id, pool: 2, usual });
+            ticks[tick].push(Job {
+                id,
+                pool: 2,
+                ticks: usual,
+            });
         }
         ticks
     }
@@ -932,14 +1341,15 @@ mod generated {
         let mut most = 0;
         for seed in 0..64 {
             let arrivals = a_stream_behind_a_big_job(&mut Rng(seed));
-            let mut world = World::new(Estimates::Known, Runs::BackfilledHang);
+            let mut world = World::new(&STREAMS, Estimates::Exact, Runs::BackfilledHang);
             for tick in 0..300 {
                 world.step(arrival_at(&arrivals, tick));
                 if world.starts.contains_key(&6) {
                     break;
                 }
             }
-            most = most.max(world.running.iter().filter(|run| run.behind).count());
+            let hung = world.running.iter().filter(|run| run.ends.is_none());
+            most = most.max(hung.count());
             let started = world.starts.get(&6).copied();
             assert!(
                 started.is_some_and(|started| started <= world.last_end + 1),
@@ -948,5 +1358,106 @@ mod generated {
             );
         }
         assert!(most >= 3, "the caps fill with hung runners: {most}");
+    }
+
+    /// Every world of `count` jobs of a shape's three pools, running 1 to 4 ticks, each arriving at or a tick after the one
+    /// before as the bits of `gaps` say: world `index` of `worlds_of(count)`.
+    fn world(count: u32, gaps: u32, index: u64) -> Vec<Vec<Job>> {
+        let mut ticks: Vec<Vec<Job>> = vec![Vec::new()];
+        let mut left = index;
+        for id in 0..count {
+            let pool = usize::try_from(left % 3).unwrap();
+            left /= 3;
+            let run = 1 + left % 4;
+            left /= 4;
+            if id > 0 && gaps >> (id - 1) & 1 == 1 {
+                ticks.push(Vec::new());
+            }
+            ticks.last_mut().unwrap().push(Job {
+                id: u64::from(id) + 1,
+                pool,
+                ticks: run,
+            });
+        }
+        ticks
+    }
+
+    fn worlds_of(count: u32) -> u64 {
+        12_u64.pow(count)
+    }
+
+    /// Checks both bounds and the ceiling on every world of up to `most` jobs, with every pattern of gaps below
+    /// `gap_patterns(count)`, on `threads` threads.
+    fn every_world(
+        shape: &'static Shape,
+        most: u32,
+        gap_patterns: impl Fn(u32) -> u32 + Sync,
+        threads: u64,
+    ) -> Tally {
+        let total = Mutex::new(Tally::default());
+        std::thread::scope(|scope| {
+            for thread in 0..threads {
+                let (total, gap_patterns) = (&total, &gap_patterns);
+                scope.spawn(move || {
+                    let mut tally = Tally::default();
+                    for count in 1..=most {
+                        for gaps in 0..gap_patterns(count) {
+                            let mut index = thread;
+                            while index < worlds_of(count) {
+                                let arrivals = world(count, gaps, index);
+                                let name = || format!("{arrivals:?}");
+                                tally.worlds += 1;
+                                tally.compare(shape, Estimates::Exact, &arrivals, &name);
+                                tally.compare(shape, Estimates::Double, &arrivals, &name);
+                                tally.hang(shape, &arrivals);
+                                index += threads;
+                            }
+                        }
+                    }
+                    total.lock().unwrap().add(tally);
+                });
+            }
+        });
+        total.into_inner().unwrap()
+    }
+
+    fn assert_bounds_hold(tally: &Tally) {
+        let first = |found: &[String]| found.first().cloned();
+        assert_eq!(first(&tally.late), None, "{} late", tally.late.len());
+        assert_eq!(
+            first(&tally.past_the_ceiling),
+            None,
+            "{} past the ceiling",
+            tally.past_the_ceiling.len()
+        );
+        assert_eq!(
+            first(&tally.kept_out),
+            None,
+            "{} kept out",
+            tally.kept_out.len()
+        );
+    }
+
+    /// The bounds, on every small world rather than on a sample of large ones.
+    #[test]
+    fn in_every_small_world_an_owner_keeps_what_adr_0097_promises() {
+        let tally = every_world(&TIGHT, 3, |count| 1 << (count - 1), 1);
+        assert_bounds_hold(&tally);
+        assert!(tally.passed > 100, "jobs pass in these worlds: {tally:?}");
+        assert!(tally.hung > 100, "and hang: {tally:?}");
+    }
+
+    /// The same up to 6 jobs: minutes in a release build, so not on every run. `cargo test --release -- --ignored
+    /// every_world_of_six`.
+    #[test]
+    #[ignore = "takes minutes; ADR 0097 records its last result"]
+    #[allow(clippy::print_stderr, reason = "its counts are what ADR 0097 records")]
+    fn every_world_of_six() {
+        for (shape, most) in [(&SHARED, 5), (&TIGHT, 6)] {
+            let tally = every_world(shape, most, |count| 1 << (count - 1).min(3), 8);
+            eprintln!("{tally:?}");
+            assert_bounds_hold(&tally);
+            assert!(tally.hung > 100, "jobs hang in these worlds: {tally:?}");
+        }
     }
 }

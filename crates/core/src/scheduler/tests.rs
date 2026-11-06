@@ -771,6 +771,7 @@ fn a_repository_wanting_a_warm_runner_starts_one_with_no_job_queued() {
             cpu: 2000,
             warm: true,
             replacing: Vec::new(),
+            behind: None,
         }]
     );
 }
@@ -855,6 +856,7 @@ fn a_queued_job_takes_the_slot_of_a_warm_runner_of_another_repository_in_the_sam
                 cpu: 2000,
                 warm: false,
                 replacing: vec![slot(0)],
+                behind: None,
             }
         ]
     );
@@ -908,6 +910,7 @@ fn a_queued_job_takes_the_memory_and_cpu_of_warm_runners_of_another_profile() {
                 cpu: 2000,
                 warm: false,
                 replacing: vec![web(0)],
+                behind: None,
             }
         ]
     );

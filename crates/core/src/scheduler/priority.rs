@@ -202,10 +202,12 @@ pub(crate) struct Runner<'plan> {
 }
 
 impl Runner<'_> {
-    /// How long from `now` it usually ends: at once if that time has passed. A clock that went back shortens what it
-    /// ran, never lengthens what it has left past its usual run time.
+    /// How long from `now` it usually ends: at once if that time has passed, or if it started in the future, as after
+    /// a clock went back: the room coming sooner is the side that starts less behind a barrier.
     fn left_to_run(&self, now: SystemTime) -> Duration {
-        let ran = now.duration_since(self.started_at).unwrap_or_default();
+        let Ok(ran) = now.duration_since(self.started_at) else {
+            return Duration::ZERO;
+        };
         self.usual
             .map_or(Duration::ZERO, |usual| usual.saturating_sub(ran))
     }
@@ -217,7 +219,7 @@ impl Runner<'_> {
 pub(crate) struct Older<'plan> {
     /// Its pool's profile.
     pub(crate) profile: &'plan str,
-    /// Whether that profile has a free slot.
+    /// Whether that profile has a free slot, or will have one with no runner ending, as when it is preparing.
     pub(crate) free_slot: bool,
     /// What its runner takes of the memory budget.
     pub(crate) memory: u64,
@@ -252,12 +254,12 @@ pub(crate) struct Candidate<'plan> {
     pub(crate) caps: Caps,
 }
 
-/// The room behind a barrier that cannot cost its owner what the bounds of ADR 0097 promise. With run times that hold,
-/// everything started here has ended before the owner or any job older than it could start, so nothing they see changes
-/// and the owner starts no later than with no backfill. Whatever the run times do, what started since the barrier
-/// matured cannot take, even at its caps, what an empty slice has for the owner, nor the last free slot of its profile,
-/// so the owner fits once the older jobs and what ran before have ended. Those are the only promises: a backfill may
-/// well delay the owner when a job overruns.
+/// The room behind a barrier, as ADR 0097 bounds it. If each run takes what the plan read, everything started here has
+/// ended before the owner or any job older than it could start, so nothing they see changes and an owner that keeps the
+/// barrier starts no later than with no backfill. The plan reads p95s, so a run that ends early can bring the room while
+/// a job started here still runs, and that job can cost the owner what it has left. Whatever the run times do, what
+/// started since the barrier matured cannot take, even at its caps, what an empty slice has for the owner and the older
+/// jobs, nor the last free slot of its profile, so the owner fits once the older jobs and what ran before have ended.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backfill<'plan> {
     /// The owner's profile.
@@ -321,8 +323,8 @@ impl<'plan> Backfill<'plan> {
         ending.sort_by_key(|(left_to_run, _)| *left_to_run);
         let ending = Ending(ending);
         let owner = ending.room_in(left, barrier.memory, barrier.cpu)?;
-        let older = older.iter().filter_map(|job| ending.start_of(job, left));
-        let until = older.fold(owner, Duration::min);
+        let starts = older.iter().filter_map(|job| ending.start_of(job, left));
+        let until = starts.fold(owner, Duration::min);
         if until.is_zero() {
             return None;
         }
@@ -331,7 +333,12 @@ impl<'plan> Backfill<'plan> {
             cpu: drained.cpu,
             host: drained.host,
         };
-        spare.take(barrier.memory, barrier.cpu);
+        // An older job that matures takes the barrier, so its room is kept as the owner's is. One no drain serves never
+        // will, and must not stop everything behind the barrier.
+        let served = older.iter().filter(|job| spare.fits(job.memory, job.cpu));
+        let memory = served.clone().map(|job| job.memory).max().unwrap_or(0);
+        let cpu = served.map(|job| job.cpu).max().unwrap_or(0);
+        spare.take(barrier.memory.max(memory), barrier.cpu.max(cpu));
         for runner in runners
             .iter()
             .filter(|runner| runner.started_at >= barrier.since)

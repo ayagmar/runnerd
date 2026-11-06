@@ -178,6 +178,8 @@ pub enum Decision {
         /// The warm runners this plan stops to make room for it, just before: if one is still there, it took a job
         /// meanwhile and the start waits for the next plan.
         replacing: Vec<SlotRef>,
+        /// The barrier's owner, for a start behind a barrier (ADR 0097).
+        behind: Option<u64>,
     },
     /// Remove the slot's idle runner, for `reason`.
     Stop {
@@ -442,7 +444,7 @@ pub fn plan(
                 turn.waits(drained, &mut slot_bound, now, &mut decided);
                 let job = Older {
                     profile: &repository.profile,
-                    free_slot: free_index.is_some(),
+                    free_slot: free_index.is_some() || profile.preparing.is_some(),
                     memory,
                     cpu,
                 };
@@ -456,9 +458,14 @@ pub fn plan(
         started.note(&repository.profile, job);
         left.take(memory, cpu);
         behind.started(&repository.profile, profile.caps(), memory, cpu, now);
-        decided
-            .decisions
-            .push(start(repository, index, memory, cpu, replacing));
+        decided.decisions.push(start(
+            repository,
+            index,
+            memory,
+            cpu,
+            replacing,
+            decided.barrier,
+        ));
     }
     if !budget.held {
         start_warm(&warm_wanted, profiles, &mut taken, left, &mut decided);
@@ -883,6 +890,7 @@ fn start(
     memory: u64,
     cpu: u64,
     replacing: Vec<SlotRef>,
+    barrier: Option<Barrier>,
 ) -> Decision {
     Decision::Start {
         slot: SlotRef {
@@ -894,6 +902,7 @@ fn start(
         cpu,
         warm: false,
         replacing,
+        behind: barrier.map(|barrier| barrier.job),
     }
 }
 
@@ -954,6 +963,7 @@ fn start_warm(
                 cpu,
                 warm: true,
                 replacing: Vec::new(),
+                behind: None,
             });
         }
         if !any {

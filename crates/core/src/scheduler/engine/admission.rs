@@ -461,16 +461,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Sets how long a new runner of each of `repositories` may run: the longest usual run time of the queued jobs its
-    /// labels match (ADR 0097).
-    pub(super) fn usual_runs(&self, repositories: &mut [Repository]) {
+    /// labels match, `taken` left out (ADR 0097). Not `listed_demand`: a job it hides for a runner no capture named yet
+    /// may still be queued, and GitHub may give it to the new runner.
+    pub(super) fn usual_runs(&self, repositories: &mut [Repository], taken: &BTreeSet<u64>) {
         let Some((predictor, _)) = &self.measured.predictor else {
             return;
         };
         for repository in repositories {
-            let queued = repository
-                .queued
-                .iter()
-                .filter(|job| matches(job, &repository.labels));
+            let listed = self.listed_unnamed(&repository.name, taken);
+            let queued = listed.iter().filter(|job| matches(job, &repository.labels));
             let keys = queued.map(|job| Key {
                 repository: repository.name.clone(),
                 workflow: job.workflow.clone(),

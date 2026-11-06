@@ -736,6 +736,46 @@ async fn a_pool_with_short_and_long_jobs_queued_is_judged_by_the_long_one() {
     );
 }
 
+/// A runner no capture named hides the pool's oldest job from the plan, but it may have taken another: the new runner
+/// may still get the hidden job, which goes by its run time all the same. Three 1G runners take 3G of 9G, so the 8G owner
+/// needs two ends: the unnamed one's, now, and a named one's in 30 minutes.
+async fn a_runner_not_named_hides(name: &str) -> Fixture {
+    let mut fixture = Fixture::new(9 * G).await;
+    fixture.queue((1..=3).map(small).collect());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.all_busy();
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.wait().map(|wait| wait.job), Some(10));
+    fixture.age();
+    fixture.ran("small", 100, 3, 30).await;
+    fixture.ran("quick", 200, 3, 2).await;
+    fixture.ran("slow", 400, 3, 45).await;
+    fixture.running("small");
+    fixture.queue(vec![big(10), named(11, name), named(12, "quick")]);
+    let unnamed = fixture
+        .engine
+        .slots
+        .values_mut()
+        .flatten()
+        .flatten()
+        .find(|occupant| occupant.repository == "o/small")
+        .unwrap();
+    unnamed.job = None;
+    unnamed.key = None;
+    unnamed.busy = false;
+    fixture.engine.tick(Shutdown::No).await;
+    fixture
+}
+
+#[tokio::test]
+async fn a_job_hidden_for_a_runner_not_yet_named_counts_towards_its_pools_longest() {
+    let mut short = a_runner_not_named_hides("quick").await;
+    assert_eq!(short.runners_of("o/small"), 4, "a short job passes");
+    let mut long = a_runner_not_named_hides("slow").await;
+    assert_eq!(long.runners_of("o/small"), 3, "job 12 stays behind");
+}
+
 /// Three busy runners, and one ends: the pass plans with the listing it has, by the rule a tick goes by.
 async fn a_pass_behind_the_barrier(name: &str) -> Fixture {
     let mut fixture = Fixture::new(9 * G).await;
