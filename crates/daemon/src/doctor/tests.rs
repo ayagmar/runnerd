@@ -887,6 +887,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             succeeded: true,
             failed: false,
             run_id: i,
+            run_attempt: 1,
             branch: None,
         })
         .collect()

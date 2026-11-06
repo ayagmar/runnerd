@@ -1,14 +1,17 @@
 //! `runnerd simulate`: the job history replayed through admission by caps and by measured peaks, with and without
-//! a CPU budget (`admission::simulate`), as a table; and with `--priority`, with and without the barrier for a starved
-//! job (ADR 0096), pool by pool. Reads the history database read-only, as `runnerd doctor` does; changes nothing.
+//! a CPU budget (`admission::simulate`), as a table; and with `--priority`, with no barrier for a starved job, a strict
+//! one (ADR 0096) and the daemon's (ADR 0097), pool by pool and run by run. Reads the history database read-only, as
+//! `runnerd doctor` does; changes nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use runnerd_core::admission::{Barriers, Policy, PoolReplay, Replay, simulate};
+use runnerd_core::admission::{
+    Arrivals, Barriers, Policy, PoolReplay, Replay, Replaying, simulate,
+};
 use runnerd_core::api;
 use runnerd_core::config::{self, Admission, ByteSize, Config};
-use runnerd_core::sizing::{LeftOut, Ran};
+use runnerd_core::sizing::{History, LeftOut, Ran};
 
 /// One replay to run: a policy, the slots it may use and the CPU budget in millicores, if any.
 struct Row {
@@ -100,12 +103,16 @@ pub(crate) struct Comparison<'run> {
     /// The CPU budget, in millicores.
     pub(crate) cpu_budget: Option<u64>,
     pub(crate) jobs: &'run [Ran],
+    /// What the daemon had read by the time those jobs queued.
+    pub(crate) known: &'run History,
     pub(crate) slots: &'run BTreeMap<String, u32>,
     pub(crate) left_out: LeftOut,
 }
 
-/// The same replay without and with the barrier for a starved job, side by side: each pool and each profile, then the
-/// budget's busy share and what the barrier withheld.
+/// The same replay with no barrier, with a barrier nothing starts behind, and as the daemon runs (ADR 0097), side by
+/// side: each pool and profile by its jobs' waits, then whole runs, then the budget's busy share and what a barrier
+/// withheld. Jobs that followed another in their run arrive after its replayed end, so a job held back also holds back
+/// what comes after it.
 pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
     let slots: BTreeMap<String, u32> = config
         .profiles
@@ -127,66 +134,49 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
             comparison.jobs,
             policy,
             &slots,
-            barriers,
+            Replaying {
+                barriers,
+                arrivals: Arrivals::AfterNeeds,
+                known: Some(comparison.known),
+            },
         )
     };
-    let (without, with) = (replay(Barriers::Off), replay(Barriers::On));
+    let replays = [
+        replay(Barriers::Off),
+        replay(Barriers::Strict),
+        replay(Barriers::On),
+    ];
+    let [without, strict, with] = &replays;
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "\n\nWithout and with the barrier for a starved job, each job's wait from queued to started:\n"
+        "\n\nWith no barrier for a starved job, a strict one, and one younger jobs may start behind (the daemon's). A job \
+         that queued after another of its run ended arrives as long after that job's replayed end.\n"
+    );
+    out.push_str(&waits_and_runs(&replays, &slots));
+    let _ = writeln!(
+        out,
+        "\nBusy share of the budget, what the running jobs took over the budget's time: {} with no barrier, {} strict, \
+         {} with younger jobs behind it.",
+        share(without),
+        share(strict),
+        share(with)
     );
     let _ = writeln!(
         out,
-        "{:<36} {:>6} {:>5} {:>9} {:>9} {:>9}   {:>6} {:>5} {:>9} {:>9} {:>9}",
-        "POOL",
-        "JOBS",
-        "NEVER",
-        "P50",
-        "P95",
-        "MAX",
-        "JOBS",
-        "NEVER",
-        "P50 WITH",
-        "P95 WITH",
-        "MAX WITH"
-    );
-    let pool_names = without.pools.keys().chain(with.pools.keys());
-    let names: std::collections::BTreeSet<_> = pool_names.collect();
-    for pool in names {
-        let _ = writeln!(
-            out,
-            "{}",
-            pool_line(
-                &format!("{}/{}", pool.repository, pool.profile),
-                &without.pools.get(pool).cloned().unwrap_or_default(),
-                &with.pools.get(pool).cloned().unwrap_or_default(),
-            )
-        );
-    }
-    for profile in slots.keys() {
-        let _ = writeln!(
-            out,
-            "{}",
-            pool_line(
-                &format!("all of {profile}"),
-                &of_profile(&without, profile),
-                &of_profile(&with, profile),
-            )
-        );
-    }
-    let _ = writeln!(
-        out,
-        "\nBusy share of the budget, what the running jobs took over the budget's time: {} without, {} with.",
-        share(&without),
-        share(&with)
-    );
-    let _ = writeln!(
-        out,
-        "A barrier stood for {}, with {} GiB-minutes of the budget free meanwhile: at most what it withheld, as a job \
-         behind it may not have fit that room.",
+        "A strict barrier stood for {}, with {} GiB-minutes of the budget free meanwhile; with younger jobs behind it, \
+         {} and {}: at most what it withheld, as a job behind it may not have fit that room.",
+        duration(strict.barrier_for / 1000),
+        gib_minutes(strict.withheld),
         duration(with.barrier_for / 1000),
         gib_minutes(with.withheld)
+    );
+    let _ = writeln!(
+        out,
+        "{} jobs started behind a barrier; {} ran past the usual run time they passed by, by {} at most.",
+        with.backfilled.jobs,
+        with.backfilled.overran,
+        duration(with.backfilled.most_overrun)
     );
     let LeftOut {
         queued,
@@ -199,25 +189,139 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
         "Not replayed, having no run time to replay: {queued} jobs still queued, {running} running, {cancelled} \
          cancelled and {elsewhere} taken elsewhere. Those still queued may be the ones that waited longest; no figure \
          here says what the barrier does for them. The replay has no host readings, warm runners, restarts or \
-         recoveries, and a job gets the runner that starts for it, where GitHub may give that runner any job of its pool."
+         recoveries, a job gets the runner that starts for it, where GitHub may give that runner any job of its pool, \
+         and what follows what is read from the times."
     );
     out
 }
 
-/// One pool's or profile's figures, without and with the barrier.
-fn pool_line(name: &str, without: &PoolReplay, with: &PoolReplay) -> String {
-    let figures = |replay: &PoolReplay| {
-        let wait = replay.wait();
+/// The tables of `replays`: each pool and profile of `slots` by its jobs' waits, then whole runs.
+fn waits_and_runs(replays: &[Replay; 3], slots: &BTreeMap<String, u32>) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Each job's wait from arrival to start:\n");
+    let _ = writeln!(out, "{}", heading("POOL", "JOBS", ["P50", "P95", "MAX"]));
+    let names: BTreeSet<_> = replays
+        .iter()
+        .flat_map(|replay| replay.pools.keys())
+        .collect();
+    for pool in names {
+        let of_pool = |replay: &Replay| replay.pools.get(pool).cloned().unwrap_or_default();
+        let name = format!("{}/{}", pool.repository, pool.profile);
+        let _ = writeln!(
+            out,
+            "{}",
+            pool_line(&name, &replays.each_ref().map(of_pool))
+        );
+    }
+    for profile in slots.keys() {
+        let name = format!("all of {profile}");
+        let _ = writeln!(
+            out,
+            "{}",
+            pool_line(
+                &name,
+                &replays.each_ref().map(|replay| of_profile(replay, profile))
+            )
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nEach run attempt, from its first job's arrival to its last job's end:\n"
+    );
+    let _ = writeln!(out, "{}", heading("RUNS", "RUNS", ["MEAN", "P50", "MAX"]));
+    let _ = writeln!(
+        out,
+        "{}",
+        runs_line(
+            "all",
+            &replays.each_ref().map(|replay| runs_of(replay, None))
+        )
+    );
+    for profile in slots.keys() {
+        let name = format!("with a {profile} job");
+        let _ = writeln!(
+            out,
+            "{}",
+            runs_line(
+                &name,
+                &replays
+                    .each_ref()
+                    .map(|replay| runs_of(replay, Some(profile)))
+            )
+        );
+    }
+    out
+}
+
+/// Three columns for each of the replays, under `name` and `count`.
+fn heading(name: &str, count: &str, columns: [&str; 3]) -> String {
+    let group = |replay: &str| {
+        let [first, second, third] = columns.map(|column| format!("{column} {replay}"));
+        format!("{first:>14} {second:>14} {third:>14}")
+    };
+    format!(
+        "{name:<36} {count:>6}  {}  {}  {}",
+        group("NONE"),
+        group("STRICT"),
+        group("NOW")
+    )
+}
+
+/// `name`, how many jobs or runs, and three figures for each of the replays.
+fn figures_line(name: &str, count: usize, figures: [[u64; 3]; 3]) -> String {
+    let group = |[first, second, third]: [u64; 3]| {
         format!(
-            "{:>6} {:>5} {:>9} {:>9} {:>9}",
-            replay.waits.len(),
-            replay.never_started,
-            duration(wait.p50),
-            duration(wait.p95),
-            duration(wait.max)
+            "{:>14} {:>14} {:>14}",
+            duration(first),
+            duration(second),
+            duration(third)
         )
     };
-    format!("{name:<36} {}   {}", figures(without), figures(with))
+    let [none, strict, now] = figures.map(group);
+    format!("{name:<36} {count:>6}  {none}  {strict}  {now}")
+}
+
+/// One pool's or profile's figures in each of the replays, and how many jobs each never started, if any did.
+fn pool_line(name: &str, replays: &[PoolReplay; 3]) -> String {
+    let figures = replays.each_ref().map(|replay| {
+        let wait = replay.wait();
+        [wait.p50, wait.p95, wait.max]
+    });
+    let count = replays[0].waits.len() + usize::try_from(replays[0].never_started).unwrap_or(0);
+    let mut line = figures_line(name, count, figures);
+    let never = replays.each_ref().map(|replay| replay.never_started);
+    if never != [0; 3] {
+        let _ = write!(
+            line,
+            "  never started: {} / {} / {}",
+            never[0], never[1], never[2]
+        );
+    }
+    line
+}
+
+/// How long `runs` took, in each of the replays.
+fn runs_line(name: &str, runs: &[Vec<u64>; 3]) -> String {
+    let figures = runs.each_ref().map(|took| {
+        let total: u64 = took.iter().sum();
+        let spread = PoolReplay {
+            waits: took.clone(),
+            never_started: 0,
+        }
+        .wait();
+        [total / (took.len() as u64).max(1), spread.p50, spread.max]
+    });
+    figures_line(name, runs[0].len(), figures)
+}
+
+/// How long the run attempts of `replay` took, in seconds: those with a job of `profile`, or all.
+fn runs_of(replay: &Replay, profile: Option<&String>) -> Vec<u64> {
+    replay
+        .runs
+        .iter()
+        .filter(|run| profile.is_none_or(|profile| run.profiles.contains(profile)))
+        .map(|run| run.took)
+        .collect()
 }
 
 /// What the pools of `profile` did, together.

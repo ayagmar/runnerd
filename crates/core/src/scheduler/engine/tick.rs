@@ -680,10 +680,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .get(&repository.profile)
                         .copied()
                         .unwrap_or_default(),
+                    usual: None,
                     warm: warm.get(&Pool::from(repository)).copied().unwrap_or(0),
                 }
             })
             .collect();
+        self.usual_runs(&mut repositories);
         let profiles = self
             .config
             .profiles
@@ -898,6 +900,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     started_at: occupant.started_at,
                     memory: self.takes(occupant),
                     cpu: self.reserves_cpu(occupant),
+                    usual: self.usual_run(occupant, name),
                 }),
             })
             .collect();

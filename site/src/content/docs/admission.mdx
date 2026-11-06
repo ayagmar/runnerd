@@ -107,7 +107,16 @@ Smaller runners can take all the memory that frees up, so a large runner would n
 - While the slice is at 90% of `MemoryMax` or the host stalls, no job holds. Nothing starts then anyway, and waits keep their age.
 - The wait ends when a runner of the pool is in its slot, or when the job leaves the queue. It starts again after a pause, a backoff, a reseed or image pull, or a restart. A failed GitHub listing keeps it, and nothing is held back until a listing answers.
 
-Small jobs pay for this: memory stays free that one of them could have used. `runnerd simulate --priority` shows what it does on your history.
+A younger job still starts behind that job if all of this holds:
+
+- It has a free slot and fits the budgets left. In the waiting job's profile, it leaves that job a free slot too.
+- The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
+- Every job its runner could take usually ends by then. The usual run time is the p95 of a job's last 20 successful runs, from 3 of them. A pool with one queued job that has no estimate stays behind.
+- Everything started since the wait reached its 2 minutes, this runner included, leaves the waiting job its room even at its caps.
+
+So with run times that hold, the waiting job starts when it would with nothing behind it. If a job overruns it can start later, but it fits once the runners from before those 2 minutes and any older jobs' have ended, even if a job behind it hangs.
+
+Small jobs still pay when none of that holds: memory stays free that one of them could have used. `runnerd simulate --priority` shows what it does on your history.
 
 ### Simulating
 
@@ -127,7 +136,11 @@ cpu ×1.5  jvm 3, node 8                 0s     2m08s     4m21s       21s       
 
 Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d` (counted back from the history's last job, so a backup replays its own last days), `--cpus`, and `--cpu-overcommit`, repeated to compare factors.
 
-`--priority` adds the config's policy and slots replayed without and with [the barrier for a starved job](#a-starved-job-goes-first), pool by pool, with the budget's busy share. Every row above already goes by the barrier. Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. The replay also has no host readings, warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool. Each job keeps the time it was queued, though a job that follows another in its workflow would really queue later if that one waited. Each window starts from an empty slice, so moving its start by minutes can change the figures a lot.
+`--priority` adds the config's policy and slots replayed three ways: with no barrier for [a starved job](#a-starved-job-goes-first), with one nothing starts behind, and as the daemon runs. It shows each pool's waits, how long whole workflow runs took from first arrival to last end, the budget's busy share, and how many jobs started behind a barrier and overran. Every row above already goes as the daemon runs.
+
+These replays know the history from before the window, as the daemon would. A job that queued after another of its run ended arrives as long after that job's replayed end, so a job held back also holds back what follows it. The history has no `needs`, so this is read from the times.
+
+Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. The replay also has no host readings, warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool. With no host limit there is less contention than the daemon sees, so try a smaller `--memory-max` too. Each window starts from an empty slice, so moving its start by minutes can change the figures a lot.
 
 ## CPU admission
 

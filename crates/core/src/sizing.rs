@@ -67,6 +67,8 @@ pub struct Ran {
     pub failed: bool,
     /// Its workflow run on GitHub: a re-run of its failed jobs has the same.
     pub run_id: u64,
+    /// Which attempt of that run it belongs to, from 1.
+    pub run_attempt: u32,
     /// The branch it ran for, when known.
     pub branch: Option<String>,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
@@ -196,6 +198,13 @@ impl Capped {
 }
 
 impl Ran {
+    /// How long it kept its runner from anything else, in ms: from the runner's start, a warm runner's from when the
+    /// job queued, to its finish. The start of a runner counts, as a slot's runner is what a plan waits to see end.
+    pub fn occupied(&self) -> Option<u64> {
+        let from = self.runner_started_at.max(self.queued_at);
+        self.finished_at.map(|end| end.saturating_sub(from))
+    }
+
     /// Its wait, once it started.
     pub fn wait(&self) -> Option<Wait> {
         Some(Wait {

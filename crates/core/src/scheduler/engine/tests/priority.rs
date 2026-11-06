@@ -3,7 +3,11 @@
 //! to pass its limit, as the clock does in the field.
 
 use super::*;
-use crate::scheduler::{MEMORY_PRIORITY_AFTER, Wait};
+use crate::admission::{Key, Predictor};
+use crate::observe::metrics::{CpuHeld, Events};
+use crate::scheduler::{Decision, MEMORY_PRIORITY_AFTER, Wait};
+use crate::sizing::{Measure, Ran};
+use crate::store::{RunnerRecord, SampleRecord};
 
 const G: u64 = 1 << 30;
 
@@ -567,5 +571,260 @@ async fn a_restart_starts_the_wait_again() {
     assert!(
         wait.since.elapsed().unwrap_or_default() < MEMORY_PRIORITY_AFTER,
         "not carried over"
+    );
+}
+
+/// A 1G job of o/small named `name`.
+fn named(id: u64, name: &str) -> QueuedJob {
+    QueuedJob {
+        name: name.to_owned(),
+        ..small(id)
+    }
+}
+
+/// `ms` since the epoch as GitHub writes a time.
+fn rfc3339(ms: u64) -> String {
+    let (days, secs) = (ms / 86_400_000, ms / 1000 % 86_400);
+    // Days to a civil date, from Howard Hinnant's `civil_from_days`.
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let of_era = shifted % 146_097;
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    let (hour, minute, second) = (secs / 3600, secs / 60 % 60, secs % 60);
+    format!("{year}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+impl Fixture {
+    /// `count` successful runs of o/small's `name` in the history, from ID `first`, each keeping its runner `minutes`.
+    async fn ran(&self, name: &str, first: u64, count: u64, minutes: u64) {
+        let store = &self.handle.store;
+        let at = crate::time::now_ms() - 24 * 3600 * 1000;
+        for id in first..first + count {
+            let runner = format!("earlier-{id}");
+            let job = QueuedJob {
+                created_at: at,
+                ..named(id, name)
+            };
+            store.queued("o/small", &job, at);
+            store.runner_started(RunnerRecord {
+                purpose: None,
+                name: runner.clone(),
+                repository: "o/small".to_owned(),
+                profile: "small".to_owned(),
+                slot: 1,
+                container: format!("c-{id}"),
+                started_at: at,
+                memory_cap: Some(G),
+                cpu_cap: Some(1000),
+                admission: None,
+            });
+            store.claimed(id, id, &runner, at + 1000);
+            store.samples(vec![SampleRecord {
+                runner: runner.clone(),
+                at: at + 2000,
+                cpu: 0,
+                cpu_usage: 0,
+                memory: G / 2,
+                network_received: 0,
+                network_sent: 0,
+                cpu_held: CpuHeld::default(),
+                events: Events {
+                    oom: Some(0),
+                    oom_kill: Some(0),
+                    sock_throttled: None,
+                    local_oom: None,
+                },
+            }]);
+            store.details(JobDetails {
+                id,
+                run_id: id,
+                run_attempt: 1,
+                name: name.to_owned(),
+                workflow_name: None,
+                head_branch: None,
+                html_url: None,
+                labels: Vec::new(),
+                created_at: None,
+                status: "completed".to_owned(),
+                conclusion: Some("success".to_owned()),
+                started_at: None,
+                completed_at: Some(rfc3339(at + minutes * 60_000)),
+                runner_name: Some(runner.clone()),
+                steps: Vec::new(),
+            });
+            store.runner_removed(&runner, at + minutes * 60_000);
+        }
+        store.flush().await;
+    }
+
+    /// The running runners run `name` of o/small, and the engine reads the history again, as it does each minute.
+    fn running(&mut self, name: &str) {
+        for occupant in self.engine.slots.values_mut().flatten().flatten() {
+            occupant.key = Some(Key {
+                repository: "o/small".to_owned(),
+                workflow: None,
+                name: name.to_owned(),
+            });
+        }
+        self.engine.measured.predictor = None;
+    }
+
+    /// Two 1G runners that usually run 30 minutes hold back job 10's 8G; job 11 of o/small, `name`, comes after it.
+    async fn behind_the_barrier(name: &str) -> Fixture {
+        let mut fixture = Fixture::starved().await;
+        fixture.ran("small", 100, 3, 30).await;
+        fixture.ran("quick", 200, 3, 2).await;
+        fixture.ran("rare", 300, 2, 2).await;
+        fixture.ran("slow", 400, 3, 45).await;
+        fixture.running("small");
+        fixture.queue(vec![big(10), named(11, name)]);
+        fixture
+    }
+}
+
+/// Whole, under the default admission: the history's run times reach the plan, and the job needs no reason to start.
+#[tokio::test]
+async fn a_job_that_usually_ends_before_the_room_gathers_starts_behind_the_barrier() {
+    let mut fixture = Fixture::behind_the_barrier("quick").await;
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 11's runner started");
+    assert_eq!(fixture.runners_of("o/big"), 0);
+    assert!(
+        matches!(fixture.reason(10), Some(api::Waiting::Memory { .. })),
+        "the owner keeps its reason"
+    );
+    assert_eq!(
+        fixture.wait().map(|wait| wait.job),
+        Some(10),
+        "a start behind the barrier ends its own pool's wait, not the owner's"
+    );
+}
+
+#[tokio::test]
+async fn a_job_that_would_outlast_the_room_or_has_too_few_runs_stays_behind_the_barrier() {
+    for name in ["slow", "rare"] {
+        let mut fixture = Fixture::behind_the_barrier(name).await;
+        fixture.engine.tick(Shutdown::No).await;
+        assert_eq!(fixture.runners_of("o/small"), 2, "{name} stays queued");
+        assert_eq!(
+            fixture.reason(11),
+            Some(api::Waiting::BehindMemory { job: 10 }),
+            "{name} says what it says behind a strict barrier"
+        );
+    }
+}
+
+/// GitHub may give the runner either job: the long one speaks for the pool, though the short one is older.
+#[tokio::test]
+async fn a_pool_with_short_and_long_jobs_queued_is_judged_by_the_long_one() {
+    let mut fixture = Fixture::behind_the_barrier("quick").await;
+    fixture.queue(vec![big(10), named(11, "quick"), named(12, "slow")]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 2);
+    assert_eq!(
+        fixture.reason(11),
+        Some(api::Waiting::BehindMemory { job: 10 })
+    );
+}
+
+/// Three busy runners, and one ends: the pass plans with the listing it has, by the rule a tick goes by.
+async fn a_pass_behind_the_barrier(name: &str) -> Fixture {
+    let mut fixture = Fixture::new(9 * G).await;
+    fixture.queue((1..=3).map(small).collect());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.all_busy();
+    fixture.queue((1..=3).map(small).chain([big(10)]).collect());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.wait().map(|wait| wait.job), Some(10));
+    fixture.age();
+    fixture.ran("small", 100, 3, 30).await;
+    fixture.ran("quick", 200, 3, 2).await;
+    fixture.ran("slow", 400, 3, 45).await;
+    fixture.running("small");
+    fixture.engine.refresh_predictor().await;
+    let listed = fixture.engine.repositories.get_mut("o/small").unwrap();
+    // The runner that ended may have taken the older one, which the plan then leaves out.
+    listed.queued = vec![named(11, name), named(12, name)];
+    listed.listed = true;
+    fixture.engine.listing += 1;
+    fixture.docker.0.lock().unwrap().containers.remove(0);
+    fixture.engine.exits.any();
+    fixture.engine.turnover().await;
+    fixture
+}
+
+/// ADR 0095's passes run between ticks: a backfill that only ticks checked would let them take the owner's room.
+#[tokio::test]
+async fn a_pass_between_ticks_goes_by_the_same_rule_as_a_tick() {
+    let mut passed = a_pass_behind_the_barrier("quick").await;
+    assert_eq!(passed.runners_of("o/small"), 3, "two left, and job 12's");
+    let mut held = a_pass_behind_the_barrier("slow").await;
+    assert_eq!(held.runners_of("o/small"), 2, "two left");
+    assert_eq!(
+        held.reason(12),
+        Some(api::Waiting::BehindMemory { job: 10 })
+    );
+}
+
+/// Reading run times under caps must not start predicting CPU there: its runners reserve their profile's `cpus`.
+#[tokio::test]
+async fn under_caps_a_history_changes_no_reservation() {
+    let config = big_and_small().replace("[caches]", "cpu_overcommit = 1.0\n\n[caches]");
+    let mut fixture = Fixture::with(&config, 9 * G).await;
+    fixture.engine.cpus = Some(8000);
+    let run = Ran {
+        repository: "o/small".to_owned(),
+        workflow: None,
+        name: "small".to_owned(),
+        profile: "small".to_owned(),
+        memory_cap: Some(G),
+        cpu_cap: Some(1000),
+        memory_peak: G / 2,
+        cpu_peak: 200,
+        cpu_average: Some(100),
+        queued_at: 0,
+        started_at: Some(0),
+        runner_started_at: 0,
+        finished_at: Some(60_000),
+        oom_killed: false,
+        hit_cap: Some(false),
+        own_cap: Some(false),
+        measure: Measure::WithoutPageCache,
+        succeeded: true,
+        failed: false,
+        run_id: 1,
+        run_attempt: 1,
+        branch: None,
+        reserved: None,
+        host_waited: 0,
+        unseen: 0,
+        cpu_periods: None,
+        cpu_throttled: None,
+        slot_waited: 0,
+    };
+    let mut predictor = Predictor::new(&fixture.engine.config.sizing);
+    for _ in 0..20 {
+        predictor.learn(&run, "small", G, 60_000);
+    }
+    fixture.engine.measured.predictor = Some((predictor, std::time::SystemTime::now()));
+    fixture.queue(vec![small(1)]);
+    fixture.engine.tick(Shutdown::No).await;
+    let (plan, _) = fixture.engine.plan();
+    assert_eq!(plan.decisions, [] as [Decision; 0]);
+    assert_eq!(
+        fixture.engine.cpu_in_use(),
+        1000,
+        "the runner's whole 1 CPU"
     );
 }

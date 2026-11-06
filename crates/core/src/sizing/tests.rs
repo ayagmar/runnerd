@@ -76,6 +76,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         succeeded: true,
         failed: false,
         run_id: 0,
+        run_attempt: 1,
         branch: Some("main".to_owned()),
     }
 }

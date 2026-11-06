@@ -673,6 +673,7 @@ fn as_sized(runs: &[Run], average: u64) -> Vec<crate::sizing::Ran> {
             succeeded: true,
             failed: false,
             run_id: run.run_id,
+            run_attempt: 1,
             branch: run.branch.clone(),
             reserved: None,
             host_waited: 0,

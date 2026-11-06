@@ -42,6 +42,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
         runner_memory: None,
         runner_cpu: None,
         waits: Waits::default(),
+        usual: None,
         warm: 0,
     }
 }
@@ -90,6 +91,7 @@ fn idle_runner(repository: &str, started_at: SystemTime) -> Slot {
         started_at,
         memory: 4 * GIB,
         cpu: 2000,
+        usual: None,
     })
 }
 
@@ -376,6 +378,7 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
                     started_at: now(),
                     memory: 4 * GIB,
                     cpu: 2000,
+                    usual: None,
                 }),
                 None => Slot::Free,
             })
@@ -467,6 +470,7 @@ fn each_job_left_queued_says_why_it_waits() {
         started_at: now(),
         memory: GIB,
         cpu: 1000,
+        usual: None,
     });
     let mut profiles = profiles(vec![Slot::Free, Slot::Free]);
     profiles.insert(
@@ -534,6 +538,7 @@ fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
         started_at: now(),
         memory: GIB,
         cpu: 1000,
+        usual: None,
     });
     let plan = plan(
         &[two(1), two(2)],
@@ -601,6 +606,7 @@ fn only_the_jobs_memory_and_cpu_have_room_for_wait_for_a_slot_alone() {
         started_at: now(),
         memory: GIB,
         cpu: 1000,
+        usual: None,
     });
     let jobs: Vec<Repository> = (1..=5).map(one).collect();
     // 13G: job 1 takes the free slot and 4G; 9G holds the runners of jobs 2 and 3 beside it, not of 4 or 5.
@@ -1216,6 +1222,7 @@ fn a_job_never_waits_for_the_slot_it_prefers() {
         started_at: now(),
         memory: 4 * GIB,
         cpu: 2000,
+        usual: None,
     });
     let profiles = remembering(
         vec![Slot::Free, busy, Slot::Free],
@@ -1252,4 +1259,5 @@ fn a_job_with_no_warm_slot_leaves_a_younger_jobs_warm_slot_to_it() {
     assert_eq!(starts(&decisions), [(0, "o/x")]);
 }
 
+mod backfill;
 mod priority;

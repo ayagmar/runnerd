@@ -10,6 +10,8 @@
 //! (`admission::host`), and nothing starts while the host stalls for memory; running runners are never stopped for
 //! it. The spans in which that held a job back go into the history, so sizing does not read them as waits for a
 //! slot.
+//! Under either policy the same predictor gives each pool and each running runner its usual run time, which says what
+//! may start behind a barrier (ADR 0097).
 //! It reads the store and the latest host sample and reading; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,8 +46,8 @@ pub(super) struct Measured {
     host_waiting: (BTreeSet<u64>, u64),
     /// The jobs the last plan had waiting only for a slot (`Plan::slot_waiting`), and when (ms): each waited since.
     slot_waiting: (BTreeSet<u64>, u64),
-    /// What predicts the jobs' peaks, and when it read the history.
-    predictor: Option<(Predictor, SystemTime)>,
+    /// What predicts the jobs' peaks and usual run times, and when it read the history.
+    pub(super) predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
     pub high_water: bool,
     /// The waiting runners `rereserve` raised for a heavier queued job, until they take a job or go. A raise stays
@@ -177,13 +179,10 @@ fn job_cpu(
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
-    /// Under measured admission, reads the job history into a new predictor once the last is a minute old. A read
-    /// that fails keeps the last one; without any, jobs are admitted at their caps.
+    /// Reads the job history into a new predictor once the last is a minute old. A read that fails keeps the last one;
+    /// without any, jobs are admitted at their caps and nothing starts behind a barrier. Under caps only usual run times
+    /// are read from it (ADR 0097).
     pub(super) async fn refresh_predictor(&mut self) {
-        if self.config.host.admission != Admission::Measured {
-            self.measured.predictor = None;
-            return;
-        }
         if self
             .measured
             .predictor
@@ -432,7 +431,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             else {
                 continue;
             };
-            let prediction = self.measured.predictor.as_ref().and_then(|(predictor, _)| {
+            let predictor = self
+                .measured
+                .predictor
+                .as_ref()
+                .filter(|_| self.config.host.admission == Admission::Measured);
+            let prediction = predictor.and_then(|(predictor, _)| {
                 repository
                     .queued
                     .iter()
@@ -454,6 +458,32 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             admitting.basis.insert(repository.pool(), basis);
         }
         Some(admitting)
+    }
+
+    /// Sets how long a new runner of each of `repositories` may run: the longest usual run time of the queued jobs its
+    /// labels match (ADR 0097).
+    pub(super) fn usual_runs(&self, repositories: &mut [Repository]) {
+        let Some((predictor, _)) = &self.measured.predictor else {
+            return;
+        };
+        for repository in repositories {
+            let queued = repository
+                .queued
+                .iter()
+                .filter(|job| matches(job, &repository.labels));
+            let keys = queued.map(|job| Key {
+                repository: repository.name.clone(),
+                workflow: job.workflow.clone(),
+                name: job.name.clone(),
+            });
+            repository.usual = predictor.longest_usual(keys, &repository.profile);
+        }
+    }
+
+    /// How long `occupant`'s job in `profile` usually keeps it, once that job is known and its runs say.
+    pub(super) fn usual_run(&self, occupant: &super::Occupant, profile: &str) -> Option<Duration> {
+        let (predictor, _) = self.measured.predictor.as_ref()?;
+        predictor.usual(occupant.key.as_ref()?, profile)
     }
 
     /// Tells apart the jobs of the runners whose job the history now has a record of, unless that record is the
@@ -492,11 +522,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted without a record of its
     /// admission keeps its cap. Each change goes into the runner's row.
     pub(super) async fn rereserve(&mut self) {
+        self.find_keys().await;
         if self.config.host.admission != Admission::Measured {
             self.measured.raised.clear();
             return;
         }
-        self.find_keys().await;
         let Some((predictor, _)) = &self.measured.predictor else {
             return;
         };
