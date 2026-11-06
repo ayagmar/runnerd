@@ -8,6 +8,7 @@ use super::*;
 use crate::docker::TtySize;
 use crate::record;
 use crate::scheduler::engine::RecordSelection;
+use crate::store::RunnerRecord;
 
 pub(super) const FAILED: &str = "2026-10-23 01:08:55Z: Running job: build\n\
                       2026-10-23 01:09:27Z: Job build completed with result: Failed\n";
@@ -807,6 +808,75 @@ async fn a_left_runner_docker_cannot_read_is_asked_about_less_and_less_and_never
         !docker.calls().contains(&"remove container-2".to_owned()),
         "the runner is never removed"
     );
+}
+
+/// A job queued in the history whose runner stopped while no daemon ran, as an idle runner that took it during a
+/// detaching stop. The restart claims it from the worker log, so nothing else closes it: its runner is in no slot. A
+/// runner the history never recorded, as Docker failed to inspect it, leaves no removal to wait for.
+#[tokio::test(start_paused = true)]
+async fn a_left_runners_claimed_job_ends_whether_docker_read_its_log_at_once_or_later() {
+    for (failed_reads, recorded) in [(0, true), (1, true), (0, false)] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("left-claim");
+        {
+            let mut state = docker.0.lock().unwrap();
+            state.containers = vec![runner_container(2, 8, false)];
+            state
+                .container_logs
+                .insert("container-2".to_owned(), FAILED.to_owned());
+            state
+                .diag
+                .insert("container-2".to_owned(), docker::tests::diag_archive(5));
+            state.fail_files = failed_reads;
+        }
+        github
+            .0
+            .lock()
+            .unwrap()
+            .jobs
+            .insert(5, details(5, "completed", Some("failure")));
+        let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+        let name = runner_container(2, 8, false).name;
+        if recorded {
+            handle.store.runner_started(RunnerRecord {
+                name,
+                repository: "o/r".to_owned(),
+                profile: "app".to_owned(),
+                slot: 2,
+                container: "container-2".to_owned(),
+                started_at: crate::time::now_ms(),
+                memory_cap: None,
+                cpu_cap: None,
+                admission: None,
+                purpose: None,
+            });
+        }
+        handle.store.queued(
+            "o/r",
+            &QueuedJob {
+                id: 5,
+                run_id: 5,
+                name: "build".to_owned(),
+                ..QueuedJob::default()
+            },
+            crate::time::now_ms(),
+        );
+        handle.store.flush().await;
+        engine.recover().await.unwrap();
+        let poll = engine.config.host.poll_interval;
+        for _ in 0..240 {
+            tokio::time::advance(poll).await;
+            engine.tick(Shutdown::No).await;
+        }
+        handle.store.flush().await;
+        let job = handle.store.job(5).await.unwrap().unwrap().summary;
+        assert_eq!(
+            (job.state, job.conclusion.as_deref()),
+            (JobState::Completed, Some("failure")),
+            "it ends, {failed_reads} failed reads of its log, runner recorded: {recorded}"
+        );
+        assert_eq!(job.runner.is_some(), recorded, "{job:?}");
+    }
 }
 
 /// A failed job whose runner ends between polls is recorded without GitHub being listed sooner than

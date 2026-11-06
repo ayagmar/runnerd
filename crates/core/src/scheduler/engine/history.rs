@@ -289,6 +289,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 job,
                 run_id,
             });
+            // A left runner is in no slot, so no `forget` closes what the claim opened.
+            let held = self
+                .occupied()
+                .any(|(_, candidate)| candidate.runner_name == occupant.runner_name);
+            if !held {
+                self.closing.insert(job, Closing::now(&occupant.repository));
+                self.consume(&occupant.repository, job);
+            }
         }
     }
 

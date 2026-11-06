@@ -1587,7 +1587,8 @@ impl Case {
             self.tick().await?;
         }
         self.no_runner_is_left()?;
-        self.history_names_the_pool_that_ran_each_job().await
+        self.history_names_the_pool_that_ran_each_job().await?;
+        self.no_job_stays_running().await
     }
 
     /// Invariant 4, once drained: every runner runnerd started has gone, from Docker, its slots and GitHub.
@@ -1653,6 +1654,21 @@ impl Case {
                     self,
                     "history_names_the_pool_that_ran_each_job",
                     format!("job {id} ran in {repository} {profile}; the history says {seen:?}"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Invariant 7, once drained: no job the history holds stays running, as every runner has gone.
+    async fn no_job_stays_running(&mut self) -> Result<(), Violation> {
+        for id in self.jobs.keys().copied().collect::<Vec<_>>() {
+            let recorded = self.handle.store.job(id).await.unwrap();
+            if let Some(job) = recorded.filter(|job| job.summary.state == JobState::Running) {
+                return violation(
+                    self,
+                    "no_job_stays_running",
+                    format!("job {id} is still running on {:?}", job.summary.runner),
                 );
             }
         }
