@@ -22,6 +22,7 @@ fn host_memory(total: u64, available: u64) -> HostMemory {
         full: None,
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     }
 }
 
@@ -254,6 +255,7 @@ fn init_given_a_memory_ceiling_writes_it_and_sizes_the_first_runner_for_the_host
     assert_eq!((sizing.slots, sizing.memory), (2, ByteSize(8 * GIB)));
     let grown = HostMemory {
         ceiling: Some(24 * GIB),
+        swap: None,
         ..machine.memory.clone()
     };
     assert!(

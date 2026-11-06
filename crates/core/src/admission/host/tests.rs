@@ -2,7 +2,7 @@
 //! (ADR 0084): what the slice may hold, the margin it keeps and the stall rule, which a ceiling leaves alone.
 
 use super::{Remembered, budget, first_runner, limit, margin, stalls};
-use crate::api::{HostMemory, Pressure};
+use crate::api::{HostMemory, Pressure, Swap};
 
 const G: u64 = 1 << 30;
 const M: u64 = 1 << 20;
@@ -18,6 +18,7 @@ fn host(total: u64, available: u64) -> HostMemory {
         full: Some(Pressure::default()),
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn the_margin_follows_the_ceiling_not_mem_total() {
     // A 16G VM that can grow to 96G keeps the 6G margin of 96G, not the 2G of 16G.
     let memory = HostMemory {
         ceiling: Some(96 * G),
+        swap: None,
         ..host(16 * G, 10 * G)
     };
     assert_eq!(limit(&memory, false), 10 * G + 80 * G - 6 * G);
@@ -89,6 +91,7 @@ fn a_ceiling_at_or_under_mem_total_changes_nothing() {
     for ceiling in [G, 32 * G, 64 * G] {
         let memory = HostMemory {
             ceiling: Some(ceiling),
+            swap: None,
             ..fixed.clone()
         };
         assert_eq!(memory.growable(), 0, "{ceiling}");
@@ -102,6 +105,36 @@ fn a_ceiling_at_or_under_mem_total_changes_nothing() {
             (without.limit, without.spare),
             "{ceiling}"
         );
+    }
+}
+
+#[test]
+fn swap_changes_nothing_admission_counts() {
+    // Catches swap room leaking into the host bound (ADR 0101): a host with a free swap device must leave the slice
+    // what the same host without one does, stalled or not, short or not.
+    for (available, avg10, short) in [(31 * G, 0, false), (31 * G, 0, true), (3 * G, 600, false)] {
+        let bare = stalled(host(64 * G, available), avg10);
+        let with_swap = HostMemory {
+            swap: Some(Swap {
+                total: 16 * G,
+                free: 16 * G,
+            }),
+            ..bare.clone()
+        };
+        let remembered = Remembered {
+            short,
+            ..Remembered::default()
+        };
+        let (without, with) = (
+            budget(bare.clone(), 8 * G, remembered),
+            budget(with_swap.clone(), 8 * G, remembered),
+        );
+        assert_eq!(
+            (without.limit, without.spare, without.stalled),
+            (with.limit, with.spare, with.stalled),
+            "{available} available, {avg10} stalled, short {short}"
+        );
+        assert_eq!(first_runner(&bare, 0), first_runner(&with_swap, 0));
     }
 }
 
@@ -129,6 +162,7 @@ fn with_a_ceiling_a_stall_counts_below_twice_the_margin_of_mem_total() {
     let memory = stalled(
         HostMemory {
             ceiling: Some(96 * G),
+            swap: None,
             ..host(8 * G, 5 * G)
         },
         600,
@@ -142,6 +176,7 @@ fn a_running_runner_counts_against_the_grown_limit() {
     let memory = HostMemory {
         slice: 7 * G,
         ceiling: Some(24 * G),
+        swap: None,
         ..host(12 * G + 800 * M, 4 * G)
     };
     let host = budget(memory, 8 * G, Remembered::default());

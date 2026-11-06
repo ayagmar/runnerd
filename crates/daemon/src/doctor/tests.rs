@@ -97,6 +97,7 @@ fn ready_host(os_release: &str) -> Host {
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
             ceiling: None,
+            swap: None,
         }),
         config_file: Some(ConfigFile {
             path: "/home/dana/.config/runnerd/runnerd.toml".into(),

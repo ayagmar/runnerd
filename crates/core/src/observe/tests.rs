@@ -701,10 +701,37 @@ fn the_hosts_memory_and_how_long_its_tasks_stalled_for_it_are_read_from_proc() {
             }),
             holders: Vec::new(),
             ceiling: None,
+            swap: None,
         })
     );
     std::fs::write(paths.proc.join("meminfo"), "MemTotal: 1 kB\n").unwrap();
     assert_eq!(read_host_memory(&paths, 0, 7), None, "no MemAvailable");
+}
+
+#[test]
+fn swap_is_read_from_the_same_meminfo_and_absent_without_a_swap_device() {
+    // Catches a host without swap reported as one with 0B of it, and a half-read figure reported as a whole one.
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    std::fs::create_dir_all(&paths.proc).unwrap();
+    let swap = |meminfo: &str| {
+        std::fs::write(
+            paths.proc.join("meminfo"),
+            format!("MemTotal: 65184256 kB\nMemAvailable: 27108076 kB\n{meminfo}"),
+        )
+        .unwrap();
+        read_host_memory(&paths, 0, 7).unwrap().swap
+    };
+    assert_eq!(
+        swap("SwapTotal: 16252924 kB\nSwapFree: 3544612 kB\n"),
+        Some(api::Swap {
+            total: 16_252_924 * 1024,
+            free: 3_544_612 * 1024,
+        })
+    );
+    assert_eq!(swap("SwapTotal: 0 kB\nSwapFree: 0 kB\n"), None, "no device");
+    assert_eq!(swap(""), None, "no swap lines");
+    assert_eq!(swap("SwapTotal: 1024 kB\n"), None, "no SwapFree");
 }
 
 #[test]

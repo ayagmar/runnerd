@@ -165,6 +165,7 @@ impl Fixture {
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
             ceiling: None,
+            swap: None,
         });
     }
 

@@ -52,7 +52,8 @@ impl Budget {
     }
 
     /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
-    /// slice 40G`; when that is less room than `MemoryMax` leaves (`Budget::host_withheld`), `…; leaves the slice 25G
+    /// slice 40G`; on a host with swap, `host: 31G of 64G available, swap 12.1G of 15.5G used, …` (ADR 0101); when that
+    /// is less room than `MemoryMax` leaves (`Budget::host_withheld`), `…; leaves the slice 25G
     /// of its 46G, so 6.5G is free`, and without `MemoryMax`, where the host alone bounds it, `…; leaves the slice
     /// 25G, so 6.5G is free`; while it stalls, `…; stalling, so no runner starts`. While the slice is held
     /// (`Budget::held`), nothing is free, so it says no figure of it. With programs outside the slice large enough to
@@ -61,6 +62,13 @@ impl Budget {
     pub fn host_line(&self) -> Option<String> {
         let host = self.host.as_ref()?;
         let mut line = format!("host: {}", host.memory.available_line());
+        if let Some(swap) = host.memory.swap {
+            line = format!(
+                "{line}, swap {} of {} used",
+                ByteSize(swap.used()),
+                ByteSize(swap.total)
+            );
+        }
         if let Some(full) = host.memory.full.filter(|full| full.avg10 > 0) {
             line = format!("{line}, {} stalled for memory", percent(full.avg10));
         }

@@ -223,7 +223,7 @@ pub fn read_events(cgroup: &Path) -> Events {
 
 /// The host's memory from `/proc/meminfo` and `/proc/pressure/memory`, beside `slice` bytes the runners hold
 /// without page cache, at `at` (seconds). `None` without `MemTotal` and `MemAvailable`; the pressure lines are `None`
-/// on a kernel without pressure stall information.
+/// on a kernel without pressure stall information, and `swap` unless `SwapTotal` is above 0 and `SwapFree` is there.
 pub fn read_host_memory(paths: &Paths, slice: u64, at: u64) -> Option<api::HostMemory> {
     let meminfo = read(&paths.proc.join("meminfo")).ok()?;
     let kib = |key: &str| {
@@ -265,6 +265,13 @@ pub fn read_host_memory(paths: &Paths, slice: u64, at: u64) -> Option<api::HostM
         full: line("full"),
         holders: Vec::new(),
         ceiling: None,
+        swap: kib("SwapTotal")
+            .filter(|total| *total > 0)
+            .zip(kib("SwapFree"))
+            .map(|(total, free)| api::Swap {
+                total: total.saturating_mul(1024),
+                free: free.saturating_mul(1024),
+            }),
     })
 }
 

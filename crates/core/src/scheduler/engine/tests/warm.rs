@@ -964,6 +964,7 @@ warm = 0
         full: None,
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     });
     engine.request_reseed("heavy").unwrap();
     github.0.lock().unwrap().queued = vec![QueuedJob {

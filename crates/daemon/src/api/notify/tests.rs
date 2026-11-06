@@ -406,6 +406,7 @@ fn reading_at(at: u64) -> HostMemory {
         full: None,
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     }
 }
 
