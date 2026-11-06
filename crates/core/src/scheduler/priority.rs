@@ -97,7 +97,7 @@ pub struct Drained {
     pub memory: Option<i64>,
     /// The CPU budget, in millicores.
     pub cpu: Option<i64>,
-    /// What the host's memory leaves the slice, by the margin of a slice with no runner (ADR 0055).
+    /// What the host's memory leaves the slice, by the margin in force now (ADR 0055).
     pub host: Option<i64>,
 }
 

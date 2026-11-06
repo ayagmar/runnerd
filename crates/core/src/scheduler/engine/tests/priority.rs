@@ -137,6 +137,30 @@ impl Fixture {
             .since -= MEMORY_PRIORITY_AFTER;
     }
 
+    /// The host's memory read now: 32G, whose 2G margin grows to 3G while the host is short, with `room` of it for the
+    /// slice and what is available.
+    fn host(&self, room: u64) {
+        self.handle.store.host_memory(api::HostMemory {
+            at: crate::time::now_ms() / 1000,
+            total: 32 * G,
+            available: room,
+            slice: 0,
+            some: Some(api::Pressure::default()),
+            full: Some(api::Pressure::default()),
+            holders: Vec::new(),
+            ceiling: None,
+        });
+    }
+
+    /// Job 10 of o/big does not fit and waits past its limit; then job 11 of o/small, 1G, comes after it.
+    async fn younger_job_after_a_starved_one(&mut self) {
+        self.queue(vec![big(10)]);
+        self.engine.tick(Shutdown::No).await;
+        self.age();
+        self.queue(vec![big(10), small(11)]);
+        self.engine.tick(Shutdown::No).await;
+    }
+
     /// How many runners of `repository` run.
     fn runners_of(&mut self, repository: &str) -> usize {
         self.engine.publish();
@@ -394,6 +418,133 @@ async fn a_runner_that_fits_the_slice_but_not_beside_the_mirror_erects_no_barrie
     fixture.queue(vec![big(10), small(11)]);
     fixture.engine.tick(Shutdown::No).await;
     assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
+}
+
+/// Between the plain margin and a short host's the runner fits only an empty slice, which a warm runner keeps from
+/// happening: its room cannot pay for the job, so nothing ends, and a barrier there would stop every queue for good.
+#[tokio::test]
+async fn a_runner_that_fits_only_a_slice_with_no_runner_erects_no_barrier_while_a_warm_one_stays() {
+    let config = big_and_small()
+        + r#"
+[[repositories]]
+name = "o/warm"
+profile = "small"
+labels = ["self-hosted", "warmed"]
+warm = 1
+"#;
+    let mut fixture = Fixture::with(&config, 24 * G).await;
+    // o/warm ran a job lately, so it is active.
+    let lately = QueuedJob {
+        id: 1,
+        run_id: 1,
+        name: "warmed".to_owned(),
+        labels: vec!["self-hosted".to_owned(), "warmed".to_owned()],
+        created_at: crate::time::now_ms() - 600_000,
+        ..QueuedJob::default()
+    };
+    fixture
+        .handle
+        .store
+        .queued("o/warm", &lately, crate::time::now_ms());
+    fixture.handle.store.flush().await;
+    // 8.5G by the plain margin and 7.5G while short, with the 8G runner between.
+    fixture.host(21 * G / 2);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/warm"), 1, "a 1G warm runner runs");
+    fixture.engine.measured.host.short = true;
+    fixture.younger_job_after_a_starved_one().await;
+    assert!(
+        matches!(fixture.reason(10), Some(api::Waiting::HostMemory { .. })),
+        "{:?}",
+        fixture.reason(10)
+    );
+    assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
+    assert_eq!(fixture.runners_of("o/warm"), 1, "its room would not do");
+}
+
+/// Programs outside the slice hold the memory: no runner's end gives it back.
+#[tokio::test]
+async fn a_host_too_short_for_the_runner_after_a_full_drain_erects_no_barrier() {
+    let mut fixture = Fixture::new(24 * G).await;
+    fixture.host(7 * G);
+    fixture.younger_job_after_a_starved_one().await;
+    assert!(
+        matches!(fixture.reason(10), Some(api::Waiting::HostMemory { .. })),
+        "{:?}",
+        fixture.reason(10)
+    );
+    assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
+}
+
+/// A seed container stays when runners end, as the mirror does.
+#[tokio::test]
+async fn a_runner_that_fits_the_slice_but_not_beside_a_seed_container_erects_no_barrier() {
+    let mut fixture = Fixture::new(9 * G).await;
+    fixture
+        .engine
+        .reseed_memory
+        .insert("small".to_owned(), 2 * G);
+    fixture.younger_job_after_a_starved_one().await;
+    assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
+}
+
+/// A shell stays when runners end, as the mirror does.
+#[tokio::test]
+async fn a_runner_that_fits_the_slice_but_not_beside_a_shell_erects_no_barrier() {
+    let config = big_and_small().replace("slots = 4", "slots = 4\nrecord_failures = true");
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("priority"),
+    );
+    let mut image = records::record_image(99, 60);
+    image
+        .labels
+        .insert("runnerd.profile".to_owned(), "small".to_owned());
+    docker.0.lock().unwrap().images = vec![image];
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(17 * G / 2);
+    engine.recover().await.unwrap();
+    engine
+        .open_shell(99, docker::TtySize { cols: 80, rows: 24 })
+        .await
+        .unwrap();
+    let mut fixture = Fixture {
+        github,
+        docker,
+        engine,
+        handle,
+        _dir: dir,
+    };
+    fixture.younger_job_after_a_starved_one().await;
+    assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
+}
+
+/// A runner no capture named hides the pool's oldest job from the plan, which does not say it took that one: reading
+/// that as gone would make a job that may well still wait young again.
+#[tokio::test]
+async fn a_runner_not_yet_named_leaves_the_oldest_jobs_wait() {
+    let mut fixture = Fixture::new(17 * G).await;
+    fixture.queue(vec![big(9)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    let wait = Wait {
+        job: 10,
+        since: std::time::SystemTime::now() - MEMORY_PRIORITY_AFTER,
+    };
+    fixture
+        .engine
+        .repositories
+        .get_mut("o/big")
+        .unwrap()
+        .waits
+        .entry("big".to_owned())
+        .or_default()
+        .memory = Some(wait);
+    fixture.queue(vec![big(10)]);
+    fixture.all_busy();
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.wait(), Some(wait), "its age is kept");
 }
 
 /// A restart loses the wait, so a job restarts its clock: nothing stale can hold a queue after one, and its age

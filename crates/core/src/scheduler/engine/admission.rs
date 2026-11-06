@@ -644,7 +644,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Commits what the last plan of a tick or a pass found (ADR 0096): the pools it `held`, each wait starting with
     /// the job the plan names, and its `barrier`. A pool that may not start a runner, paused, backing off or preparing,
     /// loses its wait, as does one whose job a listing that succeeded no longer shows or a runner of this machine
-    /// took. A listing that failed says nothing of the job: its wait stays, and the plan, which has no such job, puts
+    /// is known to have taken. A listing that failed says nothing of the job: its wait stays, and the plan, which has no such job, puts
     /// up no barrier for it. A status's plan never comes here, so reading the status changes no wait.
     pub(super) fn note_waits(&mut self, held: &[Demand], barrier: Option<Barrier>) {
         let budget = self.cpu_budget();
@@ -659,8 +659,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .repositories
             .iter()
             .map(|repository| {
+                // Not `listed_demand`: a runner no capture named yet hides the oldest job from the plan, which says
+                // nothing of whether it took that one.
                 let queued = self
-                    .listed_demand(repository, &taken)
+                    .listed_unnamed(&repository.name, &taken)
                     .iter()
                     .filter(|job| matches(job, &repository.labels))
                     .map(|job| job.id)

@@ -66,7 +66,9 @@ it out again from queue length.
 - A runner in its slot ends the pool's waits. A proposed start, a deferred one, or a start that failed preparing the
   caches does not: that failure leaves no runner and no backoff, and ending the wait there would make the job young
   over and over.
-- A listing that succeeded and no longer shows the job, or a claim on it, ends the wait.
+- A listing that succeeded and no longer shows the job ends the wait, and so does a runner known to have taken it. A
+  runner no capture has named yet hides the pool's oldest job from the plan without saying it took that one, so the
+  job's wait stays, and the pool's next job starts none until the next listing or capture settles it.
 - A listing that failed keeps it. The plan has no such job, so no barrier stands for it and other repositories go on;
   the next listing that succeeds resumes the age if the same job is still there.
 - Pausing, a failure backoff, and a reseed or image pull end the wait. A broken pool then cannot hold everyone for a
@@ -86,8 +88,11 @@ job could ever fit. The engine passes `Budget::drained`:
 - Slice: `MemoryMax` less `committed_memory`, which is the mirror, seed containers, the room a waiting reseed holds and
   shells. Every runner counts as draining at what `takes` charges, adopted and retired ones too, so a stale sample that
   charges a runner at its cap changes nothing here.
-- Host: `host::limit` with the plain margin, the one the first runner into an empty slice goes by, less the same
-  commitments. A host short because of programs outside the slice fails this bound.
+- Host: the limit in force now, less the same commitments. A host short because of programs outside the slice fails
+  this bound. So does a runner between the plain margin and a short host's larger one (0055): the plain margin comes back
+  only with no runner in the slice, which a warm runner can keep from ever happening, as its room cannot pay for such a
+  job. That job keeps its `HostMemory` reason and younger jobs go on, as they would without this record; a barrier there
+  would never end.
 - CPU: the whole budget, as nothing else reserves CPU.
 
 A demand must fit every known bound; a bound not known restricts nothing. With neither a memory budget nor a host
@@ -154,9 +159,7 @@ Usual run times are not deadlines, a running job can overrun, and a younger runn
 could not promise "would not delay". It would need elapsed and remaining times and confidence rules that `Profile` and
 `RunnerSlot` do not carry: a prediction subsystem inside a fix.
 
-A later backfill that is safe needs no prediction: admit only what fits beside the owner's whole protected need, that
-is, while `left` less the owner's memory and CPU still has room. It stays strict about the owner and gives back surplus
-above it. Guessed completion times would be a separate, openly probabilistic design.
+A bounded backfill follows in ADR 0097, the next change of this wave.
 
 ### Replay
 
@@ -166,20 +169,32 @@ and with the barrier, pool by pool and profile by profile. Busy share is what th
 divided by the budget over time. The replay has no host readings, warm runners, restarts or recoveries, and each job
 gets the runner started for it.
 
-The backup of the owner's history, last 6 hours, 46 GiB, the configured slots, measured:
+`--since` counts back from the history's last job, so a backup replays its own last hours. The backup of the owner's
+history, 6 hours back from its last job at 02:39:50 UTC, 46 GiB, the configured slots, measured:
 
 | Pool | Jobs | Wait p50 / p95 / max without | With |
 |---|---:|---|---|
-| fretboard/jvm | 491 | 2m19s / 11m05s / 22m41s | 2m19s / 11m05s / 22m41s |
-| trellis/jvm | 26 | 45s / 6m10s / 6m29s | 52s / 5m56s / 5m56s |
-| fretboard/node | 487 | 6m07s / 21m14s / 30m11s | 6m28s / 21m10s / 30m27s |
-| fretboard/light | 1,495 | 0s / 36s / 1m04s | 0s / 3m51s / 10m34s |
-| trellis/light | 27 | 0s / 32s / 32s | 0s / 2m09s / 6m38s |
+| fretboard/jvm | 542 | 2m03s / 12m19s / 22m06s | 1m57s / 14m10s / 22m06s |
+| trellis/jvm | 37 | 29s / 18m03s / 18m37s | 0s / 17m25s / 18m04s |
+| fretboard/node | 531 | 3m35s / 18m27s / 25m05s | 4m28s / 19m02s / 25m07s |
+| fretboard/light | 1,671 | 0s / 37s / 1m18s | 0s / 1m44s / 16m31s |
+| trellis/light | 36 | 0s / 32s / 34s | 0s / 16m55s / 16m56s |
 
-A barrier stood for 24m59s with 152.5 GiB-minutes free meanwhile; the busy share went from 61.0% to 60.9%. This says
-nothing of the twelve starved jobs: they are still queued, have no run time, and are among the 82 queued jobs the replay
-leaves out. Their p95 is not claimed. What it does show is the price: light jobs, which never needed the room, wait
-out barriers they could have fit beside.
+A barrier stood for 43m28s with 285.2 GiB-minutes free meanwhile; the busy share went from 61.9% to 61.8%.
+
+These figures depend on where the window starts, because each window starts from an empty slice and a few minutes decide
+how the first burst lands. Over 13 starts from 5 to 6.5 hours back, light's p95 was 34 to 40 s without the barrier and
+anywhere from 34 s to 8m19s with it, while the barrier stood from 3m57s to 1h14m. No single number is the cost.
+
+Three things the replay cannot show:
+
+- The twelve starved jobs are still queued, have no run time, and are among the 82 queued jobs it leaves out. Their p95
+  is not claimed.
+- It holds `queued_at` fixed, though 2,714 of the 3,316 jobs finished in the last 12 hours queued after a job of the same
+  run ended. A light job held by a barrier delays the jvm or node job that follows it in that run, so the large jobs' real
+  arrivals move, and the light jobs' wait is not a cost to light jobs alone.
+- It has no host limit, and this run does not reproduce the host-limited starvation: trellis/jvm tops out near 18 minutes
+  without the barrier against the 39 to 61 live. The barrier's real gain shows only in a sandbox or live run.
 
 A deterministic workload shaped like the snapshot, with **assumed** run times (three hours of arrivals, caps, node 24
 minutes, mid 10, light 2, and twelve 11 GiB jobs running 5, 10 or 20 minutes in three runs): p95 of the large pool fell from 14m56s to 9m57s,
@@ -191,9 +206,8 @@ overload there, not a typical hour.
 ## Consequences
 
 A large job no longer loses to an endless stream of smaller ones. Small jobs pay: while a barrier stands, memory sits
-free that one of them could have used. In the owner's last 6 hours that took light's p95 from 36s to 3m51s, and under a
-sustained run of large jobs it costs far more. The surplus backfill above is the way to give that back if it proves too
-dear.
+free that one of them could have used, and a small job held back also holds back what follows it in its run. Replays of
+the owner's history put light's p95 anywhere from unchanged to 8m19s, and a sustained run of large jobs costs far more.
 
 ADR 0038's "`runnerd simulate` does not model this priority" no longer holds: it does, for both resources. Its
 statement that a held job's wait ends when a runner of the repository starts now means the runner is in its slot, and

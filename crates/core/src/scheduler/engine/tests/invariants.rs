@@ -458,6 +458,8 @@ struct Violation {
 
 /// A case: the engine on the fakes, and what GitHub and Docker hold as the world sees it.
 struct Case {
+    /// How many checks saw a barrier.
+    barriers: usize,
     github: FakeGithub,
     docker: FakeDocker,
     dir: TestDir,
@@ -505,6 +507,7 @@ impl Case {
         let shape = Shape::START;
         let (engine, handle) = Case::engine(&github, &docker, &dir, shape);
         Case {
+            barriers: 0,
             github,
             docker,
             dir,
@@ -1416,7 +1419,10 @@ impl Case {
     /// Invariant 2a (ADR 0096): at most one job holds younger ones back, memory and CPU together. It is queued, older
     /// than each of them and says what it lacks itself; and no wait is kept for a job a listing that succeeded no
     /// longer shows, so no hold outlives its job.
-    fn one_barrier_and_only_for_a_queued_job(&self, status: &api::Status) -> Result<(), Violation> {
+    fn one_barrier_and_only_for_a_queued_job(
+        &mut self,
+        status: &api::Status,
+    ) -> Result<(), Violation> {
         let behind = |reason: &Option<api::Waiting>| match reason {
             Some(api::Waiting::BehindMemory { job } | api::Waiting::BehindCpu { job }) => {
                 Some(*job)
@@ -1428,6 +1434,7 @@ impl Case {
             .iter()
             .filter_map(|job| behind(&job.waiting))
             .collect();
+        self.barriers += owners.len();
         if owners.len() > 1 {
             return violation(
                 self,
@@ -1743,7 +1750,7 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
 }
 
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
-async fn run(steps: &[Step]) -> Result<(), Violation> {
+async fn run(steps: &[Step]) -> Result<usize, Violation> {
     let mut case = Case::new();
     case.recover().await?;
     case.tick().await?;
@@ -1752,12 +1759,13 @@ async fn run(steps: &[Step]) -> Result<(), Violation> {
         case.apply(*step).await?;
     }
     case.step = steps.len();
-    case.drain().await
+    case.drain().await?;
+    Ok(case.barriers)
 }
 
 /// `run`, with a panic reported as the broken invariant `no_panic`, so it keeps its seed and shrinks like any other;
-/// its step is not known, and says 0.
-async fn attempt(steps: &[Step]) -> Result<(), Violation> {
+/// its step is not known, and says 0. Returns how many checks saw a barrier.
+async fn attempt(steps: &[Step]) -> Result<usize, Violation> {
     match AssertUnwindSafe(run(steps)).catch_unwind().await {
         Ok(outcome) => outcome,
         Err(panic) => Err(Violation {
@@ -1811,17 +1819,16 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         Some(seed) => vec![seed],
         None => (0..env_u64("RUNNERD_INVARIANT_CASES").unwrap_or(CASES)).collect(),
     };
+    let mut barriers = 0;
     // Cases at once: each waits now and then for its captures, which the others use.
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
             let steps = generate(&mut Rng(seed));
-            (
-                seed,
-                attempt(&steps).await.err().map(|found| (steps, found)),
-            )
+            (seed, attempt(&steps).await, steps)
         });
-        for (seed, failed) in futures_util::future::join_all(runs).await {
-            if let Some((steps, found)) = failed {
+        for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
+            barriers += outcome.as_ref().map_or(0, |barriers| *barriers);
+            if let Err(found) = outcome {
                 // Before shrinking, which may itself fail: the seed alone replays it.
                 eprintln!(
                     "seed {seed} breaks {} at step {}: {}; shrinking",
@@ -1836,6 +1843,10 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
             }
         }
     }
+    assert!(
+        barriers > 0 || seeds.len() == 1,
+        "the generated runs reach a barrier, or its invariant checks nothing"
+    );
 }
 
 /// Runs `steps` as the generated test does, and returns what broke.

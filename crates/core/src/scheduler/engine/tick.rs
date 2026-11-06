@@ -767,7 +767,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         pool: &crate::config::Repository,
         taken: &BTreeSet<u64>,
     ) -> Vec<QueuedJob> {
-        let state = &self.repositories[&pool.name];
         let claims = self.claims.get(&pool.name);
         let busy = self
             .slots
@@ -785,15 +784,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|claim| claim.profile == pool.profile)
             .count();
         let unnamed = busy + gone;
-        let mut queued: Vec<QueuedJob> = state
-            .queued
-            .iter()
-            .filter(|job| {
-                !taken.contains(&job.id)
-                    && !claims.is_some_and(|claims| claims.consumed.contains_key(&job.id))
-            })
-            .cloned()
-            .collect();
+        let mut queued = self.listed_unnamed(&pool.name, taken);
         let claimed: BTreeSet<u64> = {
             let mut matching: Vec<u64> = queued
                 .iter()
@@ -807,8 +798,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         queued
     }
 
+    /// The jobs listed on `repository` that no runner of this machine is known to have taken: not in `taken`, nor
+    /// consumed by a claim.
+    pub(super) fn listed_unnamed(&self, repository: &str, taken: &BTreeSet<u64>) -> Vec<QueuedJob> {
+        let claims = self.claims.get(repository);
+        self.repositories[repository]
+            .queued
+            .iter()
+            .filter(|job| {
+                !taken.contains(&job.id)
+                    && !claims.is_some_and(|claims| claims.consumed.contains_key(&job.id))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// The budgets a plan has beside what runs now, as `admitting` admits. `drained` keeps what no runner's end gives
-    /// back, and the host's limit is the one a slice with no runner goes by; neither reads the interlocks' zeros.
+    /// back and reads none of the interlocks' zeros. The host's limit in it is the one in force: the plain margin
+    /// comes back only with no runner in the slice, and a warm runner may keep it from ever being empty.
     fn plan_budget(&self, admitting: &Admitting) -> Budget {
         let committed = self.committed_memory();
         Budget {
@@ -838,9 +845,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .as_ref()
                     .and(self.cpu_budget())
                     .map(|budget| crate::scheduler::left(budget, 0)),
-                host: admitting.host.as_ref().map(|host| {
-                    crate::scheduler::left(host::limit(&host.memory, false), committed)
-                }),
+                host: admitting
+                    .host
+                    .as_ref()
+                    .map(|host| crate::scheduler::left(host.limit, committed)),
             },
         }
     }

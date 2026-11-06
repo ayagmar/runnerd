@@ -682,6 +682,12 @@ mod generated {
         memory: [u64; 3],
         removed: [bool; 3],
         running: Vec<Running>,
+        /// The warm runners, waiting for no job here, by what each takes.
+        warm: Vec<u64>,
+        /// How many warm runners `o/warm` wants.
+        warm_wanted: usize,
+        /// What the host's memory lets the slice hold, by the margin in force.
+        host: Option<u64>,
     }
 
     impl Model {
@@ -694,7 +700,15 @@ mod generated {
                 memory: [12 * GIB, 6 * GIB, GIB],
                 removed: [false; 3],
                 running: Vec::new(),
+                warm: Vec::new(),
+                warm_wanted: 0,
+                host: None,
             }
+        }
+
+        fn in_use(&self) -> u64 {
+            let running: u64 = self.running.iter().map(|running| running.memory).sum();
+            running + self.warm.iter().sum::<u64>()
         }
 
         fn at(&self) -> SystemTime {
@@ -710,7 +724,7 @@ mod generated {
         /// `apply_start` do, every start going through. Returns the plan.
         fn plan(&mut self, unlisted: Option<usize>, rng: &mut Rng) -> Plan {
             let at = self.at();
-            let in_use: u64 = self.running.iter().map(|running| running.memory).sum();
+            let in_use = self.in_use();
             let repositories: Vec<Repository> = (0..POOLS.len())
                 .filter(|pool| !self.removed[*pool])
                 .map(|pool| {
@@ -721,19 +735,54 @@ mod generated {
                     };
                     super::pool(POOLS[pool], self.memory[pool], self.waits[pool], queued)
                 })
+                .chain((self.warm_wanted > 0).then(|| warm("o/warm", "app", self.warm_wanted)))
                 .collect();
-            let slots = vec![Slot::Free; 8usize.saturating_sub(self.running.len())];
+            let mut slots: Vec<Slot> = self
+                .warm
+                .iter()
+                .map(|memory| {
+                    Slot::Runner(RunnerSlot {
+                        repository: "o/warm".to_owned(),
+                        busy: false,
+                        started_at: at,
+                        memory: *memory,
+                        cpu: 0,
+                    })
+                })
+                .collect();
+            let all = 8usize.saturating_sub(self.running.len()).max(slots.len());
+            slots.resize(all, Slot::Free);
             let budget = Budget {
                 memory: Some(crate::scheduler::left(BUDGET, in_use)),
+                host: self.host.map(|host| crate::scheduler::left(host, in_use)),
                 drained: Drained {
                     memory: Some(crate::scheduler::left(BUDGET, 0)),
+                    host: self.host.map(|host| crate::scheduler::left(host, 0)),
                     ..Drained::default()
                 },
                 ..Budget::default()
             };
             let plan = plan(&repositories, &profiles(slots), budget, at);
+            // Warm runners come first in the slots: the last of them goes first, so the others keep their place.
+            let mut stopped: Vec<usize> = plan
+                .decisions
+                .iter()
+                .filter_map(|decision| match decision {
+                    Decision::Stop { slot, .. } => Some(slot.index),
+                    Decision::Start { .. } => None,
+                })
+                .collect();
+            stopped.sort_unstable();
+            for index in stopped.into_iter().rev() {
+                self.warm.remove(index);
+            }
             for decision in &plan.decisions {
                 if let Decision::Start {
+                    warm: true, memory, ..
+                } = decision
+                {
+                    self.warm.push(*memory);
+                } else if let Decision::Start {
                     repository, memory, ..
                 } = decision
                 {
@@ -840,7 +889,7 @@ mod generated {
                     _ => {}
                 }
                 let unlisted = (rng.below(5) == 0).then(|| usize::try_from(rng.below(3)).unwrap());
-                let in_use: u64 = model.running.iter().map(|running| running.memory).sum();
+                let in_use = model.in_use();
                 let plan = model.plan(unlisted, &mut rng);
                 holds(&model, &plan, in_use);
                 let started = !starts(&plan.decisions).is_empty();
@@ -857,6 +906,49 @@ mod generated {
                 model.elapse();
             }
         }
+    }
+
+    /// A barrier that outlives what it waits for stops every queue for nothing: a warm runner that never gives its room
+    /// back, a host that holds the runner in no slice. With bounded run times only what started under it can keep one
+    /// standing, so each ends within one longest run of the last start.
+    #[test]
+    fn a_standing_barrier_ends_within_one_longest_run_of_the_last_start() {
+        let mut stood = 0;
+        for seed in 0..256 {
+            let mut rng = Rng(seed);
+            let mut model = Model::new();
+            model.warm_wanted = usize::try_from(rng.below(3)).unwrap();
+            // Two of these hold no 12G runner, whatever drains.
+            model.host = [None, Some(9 * GIB), Some(11 * GIB), Some(14 * GIB)]
+                [usize::try_from(rng.below(4)).unwrap()];
+            let mut standing: Option<(u64, u64)> = None;
+            for _ in 0..200 {
+                for _ in 0..rng.below(3) {
+                    model.queue(usize::try_from(rng.below(3)).unwrap());
+                }
+                let plan = model.plan(None, &mut rng);
+                let limit = model.host.unwrap_or(BUDGET).min(BUDGET);
+                assert!(
+                    model.in_use() <= limit,
+                    "seed {seed}: starts fit the budgets: {plan:?}"
+                );
+                let started = !starts(&plan.decisions).is_empty();
+                standing = plan.barrier.map(|barrier| match standing {
+                    Some((job, last)) if job == barrier.job && !started => (job, last),
+                    _ => (barrier.job, model.tick),
+                });
+                if let Some((job, last)) = standing {
+                    stood += 1;
+                    assert!(
+                        model.tick <= last + LONGEST + 1,
+                        "seed {seed}: job {job} still holds at tick {} with no start since {last}: {plan:?}",
+                        model.tick
+                    );
+                }
+                model.elapse();
+            }
+        }
+        assert!(stood > 0, "generated runs reach a barrier");
     }
 
     /// With bounded run times, fresh listings and no reload, an aged demand's pool starts a runner once the room
