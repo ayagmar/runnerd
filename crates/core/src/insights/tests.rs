@@ -1067,11 +1067,16 @@ fn held(waited: u64) -> HostHold {
 
 /// The insights at `at` of a history with no finished job and `hold` waiting.
 fn holding(hold: Option<HostHold>, at: u64) -> Vec<api::Insight> {
+    holding_by(hold, &config(), at)
+}
+
+/// The same under `config`.
+fn holding_by(hold: Option<HostHold>, config: &Config, at: u64) -> Vec<api::Insight> {
     let history = History {
         host: hold,
         ..History::default()
     };
-    insights(&history, &config(), 14, at).insights
+    insights(&history, config, 14, at).insights
 }
 
 #[test]
@@ -1126,6 +1131,27 @@ fn nothing_is_said_of_a_host_wait_that_is_short_unseen_stale_or_from_after_the_l
     let mut old_look = held(HOUR);
     old_look.seen = NOW - 61_000;
     assert!(!said(Some(old_look), NOW), "the engine's last look");
+    // A slow engine plans once a poll: its look is stale only past three of them.
+    let slow = Config::parse(&CONFIG.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\npoll_interval = \"1m\"",
+    ))
+    .unwrap();
+    let mut slow_plan = held(HOUR);
+    slow_plan.seen = NOW - 170_000;
+    assert!(
+        holding_by(Some(slow_plan.clone()), &config(), NOW).is_empty(),
+        "170 s is over the default's minute"
+    );
+    assert!(
+        !holding_by(Some(slow_plan.clone()), &slow, NOW).is_empty(),
+        "170 s is under three 1-minute polls"
+    );
+    slow_plan.seen = NOW - 190_000;
+    assert!(
+        holding_by(Some(slow_plan), &slow, NOW).is_empty(),
+        "190 s is over"
+    );
     let mut this_second = held(HOUR);
     this_second.seen = NOW + 400;
     assert!(

@@ -52,8 +52,9 @@ const HOST_HELD_AFTER: u64 = 30 * 60 * SECOND;
 /// The insight's key changes this often, so it is told once in each such window however long the wait lasts, in
 /// milliseconds.
 const HOST_HELD_EVERY: u64 = 6 * 3600 * SECOND;
-/// How old the host's reading and the engine's look at the waiting jobs may be for the insight to hold, in
-/// milliseconds: a daemon that stopped looking says nothing about now.
+/// How old the host's reading may be for the insight to hold, in milliseconds, and the least the engine's look at the
+/// waiting jobs may be, which is three `[host] poll_interval`s when that is more: a daemon that stopped looking says
+/// nothing about now.
 const HOST_HELD_FRESH: u64 = 60 * SECOND;
 
 /// One job the history closed, as insights read it. Times in milliseconds.
@@ -233,7 +234,12 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         found.extend(cpu_held(*key, runs, config));
     }
     found.extend(throttled(&window));
-    found.extend(history.host.as_ref().and_then(|hold| host_held(hold, now)));
+    found.extend(
+        history
+            .host
+            .as_ref()
+            .and_then(|hold| host_held(hold, config, now)),
+    );
     let waits = waits(history, now);
     found.extend(waits.iter().filter_map(waits_insight));
     found.sort_by(|a, b| {
@@ -308,14 +314,19 @@ pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
 /// programs `HostMemory::outside_line` names and says closing them frees only part of what is held, since the figure
 /// also counts the kernel and compressed swap.
 ///
-/// Holds from the host's reading and the engine's look at the waiting jobs, neither older than a minute nor from after
-/// `now`, the second of the look: a plan in that second is not from after it. With no reading, or a stale one,
-/// nothing is said. Its key is the same for 6 hours and then changes, so a
-/// notification target tells it once in each window of them (told keys are stored, so a restart repeats none).
-fn host_held(hold: &HostHold, now: u64) -> Option<Insight> {
+/// Holds from the host's reading and the engine's look at the waiting jobs: the reading no older than a minute, the
+/// look no older than that or three `[host] poll_interval`s, neither from after `now`, the second of the look (a plan
+/// in that second is not from after it). With no reading, or a stale one, nothing is said. Its key is the same for 6
+/// hours and then changes, so a notification target tells it once in each window of them (told keys are stored, so a
+/// restart repeats none).
+fn host_held(hold: &HostHold, config: &Config, now: u64) -> Option<Insight> {
     let reading = hold.memory.at.saturating_mul(SECOND);
-    let fresh = |at: u64| at / SECOND <= now / SECOND && now.saturating_sub(at) <= HOST_HELD_FRESH;
-    if !fresh(reading) || !fresh(hold.seen) {
+    // The engine plans once a `poll_interval`, so its look is as old as three of them before it is missed.
+    let poll = u64::try_from(config.host.poll_interval.as_millis()).unwrap_or(u64::MAX);
+    let plan_fresh = HOST_HELD_FRESH.max(poll.saturating_mul(3));
+    let fresh =
+        |at: u64, within: u64| at / SECOND <= now / SECOND && now.saturating_sub(at) <= within;
+    if !fresh(reading, HOST_HELD_FRESH) || !fresh(hold.seen, plan_fresh) {
         return None;
     }
     let longest = hold.jobs.iter().max_by_key(|job| job.waited)?;
