@@ -322,10 +322,12 @@ always returns, so the daemon closes and flushes the history.
   runs would make room for. Only plans that schedule commit a wait, never `publish`'s. It governs new admissions: a
   running runner is never stopped or lowered for it, and it stands down under the high-water mark or a host stall
   ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md)).
-- What starts behind a barrier keeps two bounds, and only those: with usual run times that hold, the owner starts no
-  later than with nothing behind it; whatever they do, it fits once the runners from before the barrier matured and
-  older jobs' have ended, as the caps of what started since leave it its room and a slot. `priority::Backfill` is the
-  one rule, for `plan` and `simulate`; it keeps nothing between plans
+- What starts behind a barrier keeps two bounds, and only those: if each run takes what the plan read, an owner that
+  keeps the barrier starts no later than with nothing behind it; whatever they take, it fits once the runners from
+  before the barrier matured and older jobs' have ended, as the caps of what started since leave it its room and a
+  slot. Plans read p95s, so a run that ends early can cost the owner what still runs behind the barrier, and neither
+  bound carries to a later owner. `priority::Backfill` is the one rule, for `plan` and `simulate`; it keeps nothing
+  between plans
   ([ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md)).
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
