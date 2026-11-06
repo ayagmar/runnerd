@@ -476,8 +476,9 @@ mod generated {
         }
     }
 
-    /// The bound `Backfill` gives an owner rests on this: taking a credited runner out frees at most what it takes, and
-    /// never less than nothing.
+    /// With the guards as they are: live, a runner's end loosens them and the credit can rise, up to `MOST_CREDIT`, which
+    /// is what `Backfill` allows for. This holds that the raw credit does not rise by itself, and that a runner frees at
+    /// most what it takes.
     #[test]
     fn a_runner_leaving_frees_no_more_than_it_took_and_never_raises_the_count() {
         let keys: Vec<Key> = (0..5)

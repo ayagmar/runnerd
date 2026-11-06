@@ -2,8 +2,8 @@
 //! below adding every runner's worst case. Jobs rarely peak at once, so the room between what each eligible runner
 //! counts and what it uses adds by root-sum-square across jobs, and linearly within a job, whose copies grow together.
 //! Nothing here reaches a runner: its reservation, what it learns from and what is stored of it stay as they are, and
-//! the credit is the budget's alone. `count` is the one implementation: the engine and `admission::simulate` build a
-//! `Snapshot` and call it. Pure: no I/O, no clock.
+//! the credit is `MemoryMax`'s alone: the host's limit reads the plain count, whose overcount is its margin. `count` is
+//! the one implementation: the engine and `admission::simulate` build a `Snapshot` and call it. Pure: no I/O, no clock.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

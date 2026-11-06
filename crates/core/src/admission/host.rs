@@ -43,9 +43,9 @@ pub fn margin(total: u64, short: bool) -> u64 {
     }
 }
 
-/// What the host keeps past the margin before a credit counts on it, as a divisor of its memory: a quarter. A pooled
-/// count spends what the overcount left the host, and sockets start to throttle under about 20G of 62G available, which
-/// the margin and this come to; with them a 46G slice's replay spends about as long under that line (ADR 0099).
+/// What the host keeps past the margin before a credit stands, as a divisor of its memory: a quarter. A credit lets the
+/// slice fill past what the plain count allows, so none stands near where sockets start to throttle, under about 20G of
+/// 62G available, which the margin and this come to (ADR 0099).
 const CREDIT_ALLOWANCE_SHARE: u64 = 4;
 
 /// The host as the pooled count reads it, by the margin in force.

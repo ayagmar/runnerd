@@ -431,11 +431,12 @@ always returns, so the daemon closes and flushes the history.
   once its reservation paid the host's deficit, and a seed container starts only where its cap fits the slice, the
   host with the plain margin and, under measured admission, the high-water mark; a requested reseed's cap counts in the budget once its
   profile drained ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
-- Under measured admission the budgets read one aggregate count (`admission::pooled::count`, called by `Engine::count`
-  for plans, `over_budget` and the status, and by the replay): every runner's take, less a credit of at most 6G for
-  settled runners of different jobs that will not all peak at once, within what the slice has under the high-water mark
-  less 2G and what the host has past its margin and a quarter of its memory. Reservations, learning and stored data
-  stay per runner; `[host] pooled_count = false` turns the credit off
+- Under measured admission one aggregate count (`admission::pooled::count`, called by `Engine::count` for plans,
+  `over_budget`, reseeds, shells and the status, and by the replay) gives every runner's take and a credit of at most 6G
+  for settled runners of different jobs that will not all peak at once, within what the slice has under the high-water
+  mark less 2G and what the host has past its margin and a quarter of its memory. `MemoryMax` reads the count less the
+  credit; the host's limit reads it without, as the overcount is the host's margin. Reservations, learning and stored
+  data stay per runner; `[host] pooled_count = false` turns the credit off
   ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most

@@ -55,7 +55,7 @@ impl Budget {
         }
     }
 
-    /// What the budgets go by, in bytes: `memory_in_use`, less what pooling takes off it (ADR 0099).
+    /// What `MemoryMax` goes by, in bytes: `memory_in_use`, less what pooling takes off it (ADR 0099).
     pub fn counted(&self) -> u64 {
         self.pooled
             .map_or(self.memory_in_use, |pooled| pooled.counted)

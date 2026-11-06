@@ -190,7 +190,8 @@ pub struct Budget {
 pub struct Pooled {
     /// What it takes off, in bytes.
     pub credit: u64,
-    /// `Budget::memory_in_use` less `credit`: what new runners fit beside.
+    /// `Budget::memory_in_use` less `credit`: what new runners fit beside under `MemoryMax`. The host's limit reads
+    /// `memory_in_use`.
     pub counted: u64,
     /// How many runners the credit counts on.
     pub runners: u64,
