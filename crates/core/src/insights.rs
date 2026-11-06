@@ -309,11 +309,12 @@ pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
 /// also counts the kernel and compressed swap.
 ///
 /// Holds from the host's reading and the engine's look at the waiting jobs, neither older than a minute nor from after
-/// `now`: with no reading, or a stale one, nothing is said. Its key is the same for 6 hours and then changes, so a
+/// `now`, the second of the look: a plan in that second is not from after it. With no reading, or a stale one,
+/// nothing is said. Its key is the same for 6 hours and then changes, so a
 /// notification target tells it once in each window of them (told keys are stored, so a restart repeats none).
 fn host_held(hold: &HostHold, now: u64) -> Option<Insight> {
     let reading = hold.memory.at.saturating_mul(SECOND);
-    let fresh = |at: u64| at <= now && now - at <= HOST_HELD_FRESH;
+    let fresh = |at: u64| at / SECOND <= now / SECOND && now.saturating_sub(at) <= HOST_HELD_FRESH;
     if !fresh(reading) || !fresh(hold.seen) {
         return None;
     }

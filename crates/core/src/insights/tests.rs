@@ -1126,6 +1126,15 @@ fn nothing_is_said_of_a_host_wait_that_is_short_unseen_stale_or_from_after_the_l
     let mut old_look = held(HOUR);
     old_look.seen = NOW - 61_000;
     assert!(!said(Some(old_look), NOW), "the engine's last look");
+    let mut this_second = held(HOUR);
+    this_second.seen = NOW + 400;
+    assert!(
+        said(Some(this_second), NOW),
+        "a plan in the second of the look is not from after it"
+    );
+    let mut next_second = held(HOUR);
+    next_second.seen = NOW + 1_000;
+    assert!(!said(Some(next_second), NOW), "one in the next is");
     assert!(
         !said(Some(held(HOUR)), NOW - 24 * HOUR),
         "a look from before the reading"
