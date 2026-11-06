@@ -251,13 +251,14 @@ async fn a_failed_start_names_the_container_it_left_only_while_docker_keeps_it()
 }
 
 /// A tar as Docker archives a stopped runner's `/home/runner/_diag`, rooted at the directory's own name, whose worker
-/// log names `job`. Before it, the pages the log capture kept hold more than `FILES_LIMIT`.
+/// log names `job`, in a run of the same number. Before it, the pages the log capture kept hold more than `FILES_LIMIT`.
 pub(crate) fn diag_archive(job: u64) -> Vec<u8> {
     use std::io::Read;
 
     let page = (FILES_LIMIT + 1) as u64;
     let worker = format!(
-        "[2026-10-31 12:00:01Z INFO Worker] Job message:\n {{\n  \"k\": \"check_run_id\",\n  \"v\": {job}.0\n}}\n"
+        "[2026-10-31 12:00:01Z INFO Worker] Job message:\n {{\n  \"k\": \"run_id\",\n  \"v\": \"{job}\"\n}},\n \
+         {{\n  \"k\": \"check_run_id\",\n  \"v\": {job}.0\n}}\n"
     );
     let mut tar = tar::Builder::new(Vec::new());
     let mut append = |path: &str, size: Option<u64>, contents: &mut dyn Read| {

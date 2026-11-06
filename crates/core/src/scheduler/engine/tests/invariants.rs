@@ -422,8 +422,6 @@ struct JobModel {
     phase: Phase,
     /// The profile and repository of the runner that took it.
     taken_by: Option<(String, String)>,
-    /// The container it ended in, with how many of its log captures had failed by then.
-    ended_in: Option<(String, u32)>,
     /// A tick saw it queued, so the engine follows it.
     listed: bool,
     /// A tick saw it running once it was listed and no longer queued: GitHub's details then name its runner,
@@ -625,7 +623,6 @@ impl Case {
                         labels,
                         phase: Phase::Queued,
                         taken_by: None,
-                        ended_in: None,
                         listed: false,
                         named_by_github: false,
                     },
@@ -845,12 +842,15 @@ impl Case {
             github.jobs.insert(id, running);
             assert!(runner_id.is_some(), "an assigned runner is registered");
         }
-        self.docker
-            .0
-            .lock()
-            .unwrap()
-            .container_captures
-            .insert(container.id.clone(), format!("@@job {id} {id}\n"));
+        {
+            let mut docker = self.docker.0.lock().unwrap();
+            docker
+                .container_captures
+                .insert(container.id.clone(), format!("@@job {id} {id}\n"));
+            docker
+                .diag
+                .insert(container.id.clone(), docker::tests::diag_archive(id));
+        }
         self.took_job.insert(container.id.clone());
         let job = self.jobs.get_mut(&id).unwrap();
         job.phase = Phase::Running {
@@ -883,12 +883,10 @@ impl Case {
     /// few seconds of lag, the engine no longer counts the job as taken once its runner exits, and starts a second
     /// runner for it, which waits out `IDLE_TIMEOUT`: one idle runner, rare enough to leave.
     fn end_job(&mut self, id: u64, container: &str, conclusion: &str) {
-        let faults = self.capture_faults_of(container);
         let job = self.jobs.get_mut(&id).unwrap();
         job.phase = Phase::Done {
             ran: job.taken_by.clone(),
         };
-        job.ended_in = Some((container.to_owned(), faults));
         let mut github = self.github.0.lock().unwrap();
         let name = github
             .jobs
@@ -1634,13 +1632,6 @@ impl Case {
         let ran: Vec<(u64, (String, String))> = self
             .jobs
             .iter()
-            // A capture that first ran once its container had stopped, as when Docker failed to inspect it before,
-            // reads its log only if Docker lets it.
-            .filter(|(_, job)| {
-                job.ended_in
-                    .as_ref()
-                    .is_none_or(|(container, faults)| self.capture_faults_of(container) == *faults)
-            })
             .filter_map(|(id, job)| match &job.phase {
                 Phase::Done { ran: Some(ran) } => Some((*id, ran.clone())),
                 _ => None,
@@ -1888,6 +1879,50 @@ async fn a_job_taking_a_waiting_runners_room_still_fits_what_the_host_leaves() {
         Step::Tick,
     ];
     assert_eq!(broken(&steps).await, None);
+}
+
+#[tokio::test]
+async fn a_job_that_ends_before_its_broken_capture_comes_back_keeps_its_runner_in_the_history() {
+    // Shrunk from seeds 4523 and 4496. The capture breaks and Docker cannot inspect the runner, so the job ends first.
+    // The stopped container's worker log still names it, and nothing else links the two.
+    let broke = [
+        Step::Queue {
+            second: false,
+            labels: Labels::Light,
+        },
+        Step::CaptureFails { mid_stream: true },
+        Step::RestartInspectFails(0),
+        Step::InspectFails(1),
+        Step::InspectFails(6),
+    ];
+    // A tick finds it stopped.
+    let tick = [Step::Tick, Step::Tick, Step::Assign(3)];
+    assert_eq!(broken(&[&broke[..], &tick].concat()).await, None);
+    // A pass reaps it before a tick looks.
+    let pass = [
+        Step::StartFails,
+        Step::Tick,
+        Step::Tick,
+        Step::Assign(3),
+        Step::Finish(0),
+        Step::Pass,
+    ];
+    assert_eq!(broken(&[&broke[..], &pass].concat()).await, None);
+    // A restart finds it stopped, its capture gone with the last daemon.
+    let restart = [
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Reload(Change::Policy),
+        Step::InspectFails(5),
+        Step::CaptureFails { mid_stream: false },
+        Step::Reload(Change::SecondRepository),
+        Step::AssignListed(4),
+        Step::Finish(4),
+        Step::RestartInspectFails(5),
+    ];
+    assert_eq!(broken(&restart).await, None);
 }
 
 #[tokio::test]

@@ -220,8 +220,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn remove_left(&mut self, mut left: Left) {
         if !left.container.running {
             match self.keep_left_record(&left.slot, &left.occupant).await {
-                Ok(true) => return,
-                Ok(false) => {}
+                // Its capture ended with the last daemon, which may have left the job unnamed. Read once it is
+                // decided, as one Docker cannot read comes back here until it is.
+                Ok(kept) => {
+                    self.claim_from_worker_log(&left.occupant).await;
+                    if kept {
+                        return;
+                    }
+                }
                 Err(error) => {
                     left.undecided += 1;
                     let wait = unread_backoff(self.config.host.poll_interval, left.undecided);

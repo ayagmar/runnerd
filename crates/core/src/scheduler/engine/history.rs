@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Meanwhile, Occupant};
 use crate::admission::Key;
-use crate::docker::{DockerApi, is_not_found};
+use crate::docker::{DockerApi, is_declined, is_not_found};
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
@@ -250,12 +250,45 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 // Its log ends where the capture broke off; `collect_finished` frees its slot.
                 Ok(_) => {
                     self.recaptures.remove(&occupant.runner_name);
+                    self.claim_from_worker_log(&occupant).await;
                 }
                 Err(error) if is_not_found(&error) => {
                     self.recaptures.remove(&occupant.runner_name);
                 }
                 Err(error) => warn!("cannot inspect {}: {error}", occupant.runner_name),
             }
+        }
+    }
+
+    /// Claims the job a stopped runner's worker log names, if no capture read one: nothing else may link the two, and a
+    /// job whose capture broke can end before a listing shows its runner.
+    pub(super) async fn claim_from_worker_log(&mut self, occupant: &Occupant) {
+        if occupant.job.is_some() {
+            return;
+        }
+        let read = self
+            .docker
+            .files(&occupant.container, capture::DIAG, capture::WORKER_LOG)
+            .await;
+        let claim = match read {
+            Ok(read) => read.files.iter().find_map(|file| {
+                let job = capture::worker_job(&file.contents)?;
+                Some((job, capture::worker_run(&file.contents)?))
+            }),
+            Err(error) if is_declined(&error) => None,
+            Err(error) => {
+                warn!("cannot read {}'s worker log: {error}", occupant.runner_name);
+                None
+            }
+        };
+        if let Some((job, run_id)) = claim {
+            let runner = occupant.runner_name.clone();
+            self.store.claimed(job, run_id, &runner, time::now_ms());
+            self.note_found(&Found {
+                runner,
+                job,
+                run_id,
+            });
         }
     }
 

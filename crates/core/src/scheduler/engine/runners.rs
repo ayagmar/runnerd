@@ -196,6 +196,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         logs: Option<&str>,
     ) -> bool {
         self.take_found();
+        // A pass can reap it before `recapture` looks: what the capture left unread goes with the container.
+        if self.recaptures.remove(&occupant.runner_name).is_some() {
+            self.claim_from_worker_log(occupant).await;
+        }
         self.count_mirror_bytes().await;
         logs.is_some_and(record::failed) && self.begin_record(slot, occupant).await
     }
