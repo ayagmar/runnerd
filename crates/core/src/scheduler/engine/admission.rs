@@ -670,11 +670,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         stops
     }
 
+    /// Whether a failure holds `repository`'s pool in `profile` back at `now`.
+    pub(super) fn backing_off(&self, repository: &str, profile: &str, now: SystemTime) -> bool {
+        self.repositories[repository]
+            .holds
+            .get(profile)
+            .and_then(|hold| hold.held)
+            .is_some_and(|hold| hold.until > now)
+    }
+
     /// Commits what the last plan of a tick or a pass found (ADR 0096): the pools it `held`, each wait starting with
-    /// the job the plan names, and its `barrier`. A pool that may not start a runner, paused, backing off or preparing,
-    /// loses its wait, as does one whose job a listing that succeeded no longer shows or a runner of this machine
-    /// is known to have taken. A listing that failed says nothing of the job: its wait stays, and the plan, which has no such job, puts
-    /// up no barrier for it. A status's plan never comes here, so reading the status changes no wait.
+    /// the job the plan names, and its `barrier`, which its pool remembers owning. A pool that may not start a runner,
+    /// paused, backing off or preparing, loses its wait and its served mark (ADR 0098). So does a job's wait that a
+    /// listing that succeeded no longer shows or a runner of this machine is known to have taken, and the mark goes once
+    /// such a listing leaves the pool nothing queued. A listing that failed says nothing of the job or the queue: both
+    /// stay, and the plan, which has no such job, puts up no barrier for it. A status's plan never comes here, so reading
+    /// the status changes no wait.
     pub(super) fn note_waits(&mut self, held: &[Demand], barrier: Option<Barrier>) {
         let budget = self.cpu_budget();
         let in_use = self.cpu_in_use();
@@ -696,11 +707,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .filter(|job| matches(job, &repository.labels))
                     .map(|job| job.id)
                     .collect();
-                let backing_off = self.repositories[&repository.name]
-                    .holds
-                    .get(&repository.profile)
-                    .and_then(|hold| hold.held)
-                    .is_some_and(|hold| hold.until > now);
+                let backing_off = self.backing_off(&repository.name, &repository.profile, now);
                 let preparing = self
                     .config
                     .profiles
@@ -720,6 +727,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 *waits = Waits::default();
             } else if listed {
                 waits.retain(|job| queued.contains(&job));
+                if queued.is_empty() {
+                    waits.emptied();
+                }
             }
             let mut cpu_held = false;
             for demand in held.iter().filter(|demand| demand.pool == pool) {
@@ -741,6 +751,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     ),
                     (Scarce::Cpu, None) => {}
                 }
+            }
+            if let Some(barrier) = barrier {
+                waits.own(barrier.job);
             }
             if waits.is_empty() {
                 state.waits.remove(&pool.profile);

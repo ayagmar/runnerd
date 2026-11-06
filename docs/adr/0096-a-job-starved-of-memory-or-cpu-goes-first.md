@@ -1,6 +1,7 @@
 # 0096. A job starved of memory or CPU goes first
 
-Status: **Accepted** (2026-11-06), amended by [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md). Amends [0033](0033-measured-admission.md),
+Status: **Accepted** (2026-11-06), amended by [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) and
+[0098](0098-a-pool-waits-longer-for-its-first-barrier.md), which replaces its 120 s limits. Amends [0033](0033-measured-admission.md),
 [0038](0038-cpu-admission.md), [0044](0044-queued-jobs-say-why-they-wait.md), [0050](0050-warm-runners.md),
 [0055](0055-admission-follows-the-hosts-memory.md), [0056](0056-adopted-runners-keep-their-reservations.md),
 [0058](0058-a-repository-served-by-several-profiles.md),

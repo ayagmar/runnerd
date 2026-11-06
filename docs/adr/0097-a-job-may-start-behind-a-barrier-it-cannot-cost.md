@@ -1,6 +1,7 @@
 # 0097. A job may start behind a barrier it cannot cost
 
-Status: **Accepted** (2026-11-06). Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Passes follow
+Status: **Accepted** (2026-11-06), amended by [0098](0098-a-pool-waits-longer-for-its-first-barrier.md), whose limits
+move every replay figure here. Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Passes follow
 [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md). No wire, schema or config change.
 
 ## Context
@@ -67,9 +68,9 @@ a strict barrier.**
 Runs do not. The plan reads p95s, so S is a late estimate of the room, and nearly every run ends before its p95: trellis's
 quality gate has a p50 of 2 minutes and a p95 of 13. If a runner ends early, the room comes before S, and a job behind
 the barrier may still be running. **A run that ends before its estimate can cost the owner up to what is still running
-behind the barrier.** Reading p50s for the running runners would end that lateness, but it cuts passes from 488 to 106 and
-gives back the gain (all runs 13m38 against 10m50 at 32G over 12 hours, with the pools as configured now), so the
-rule stays and the promise is this one.
+behind the barrier.** Reading p50s for the running runners would end that lateness, but it cut passes from 488 to 106 and
+gave back the gain (all runs 13m38 against 10m50 at 32G over 12 hours, with the pools as configured now, measured before
+rule 4 counted older jobs), so the rule stays and the promise is this one.
 
 **Whatever the run times do, the owner fits once every runner started before T0 has ended**, along with the runners of
 jobs older than it. Rule 4 leaves what those runners could not take, at their caps, for the owner. It holds if a job
@@ -79,16 +80,16 @@ So a job that overruns, or one that runs on after an early end, can delay the ow
 that delay small in practice; only rule 4 limits it.
 
 Neither bound composes across barriers. A pass kept the bounds of the barrier it passed, but it changes who runs when, so
-it can delay a later owner, including one whose barrier an older job took when it matured. In one generated world job
-102 owned a barrier at tick 90 and lost it to older jobs. Jobs passed behind the older barrier, an older job started a
+it can delay a later owner, including one whose barrier an older job took when it matured. In one generated world, under
+0096's single limit, job 102 owned a barrier at tick 90 and lost it to older jobs. Jobs passed behind the older barrier, an older job started a
 tick late, and 102 started a tick late. The next job of a pool waits out its own limit, and a hung runner started before
 its T0 counts as running, until the job's own timeout ends it.
 
 A backfilled runner that GitHub gives no job counts as ending now, and stays in its slot and on the budget up to
 `IDLE_TIMEOUT` unless `Warm::make_room` stops it. The first bound does not cover that wait.
 
-How late owners really are, measured by forking one state at each owner's first pass and going on with and without
-passes:
+How late owners really were, measured by forking one state at each owner's first pass and going on with and without
+passes. All three rows are from before rule 4 counted older jobs and before 0098, and the fork is not in the tree:
 
 | World | Owners | Late | Worst |
 |---|---|---|---|
@@ -101,13 +102,16 @@ pool, a job starved after one tick, and every pattern of arrivals 0 or 1 tick ap
 26,051,628 worlds of up to 6 jobs with memory and CPU both short, and 2,163,756 of up to 5 jobs with two pools sharing a
 profile.
 
-- A run takes what the plan read: no owner that kept its barrier started late. 140 that lost theirs did, by a tick.
+- A run takes what the plan read: no owner started late, whether it kept its barrier or not.
 - Estimates read double: no owner that kept its barrier started past the later of its strict start and the last end of
-  what passed it.
+  what passed it. 140 that lost theirs started late, by a tick.
 - Jobs behind a barrier hang: no owner was kept out, unless an older job took its barrier.
 
 These worlds have no warm runners, preparation, reloads or host limit. Up to 3 jobs run in every `cargo test`; the rest
-take about 6 minutes (`every_world_of_six`, ignored).
+take about 11 minutes with 0098's third shape (`every_world_of_six`, ignored).
+
+They are no evidence for the older jobs of rule 2: with that clause removed every count above is the same, up to 6 jobs. What
+fails without it is its unit tests and the replay and planner's shared fixture.
 
 ### Usual run times
 

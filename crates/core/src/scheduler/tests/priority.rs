@@ -2,9 +2,9 @@
 //! erects one, and over generated sequences, that it neither stalls the queue nor outlives its job.
 
 use super::*;
-use crate::scheduler::{Barrier, Drained, MEMORY_PRIORITY_AFTER};
+use crate::scheduler::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER};
 
-const LONG_AGO: Duration = Duration::from_secs(600);
+const LONG_AGO: Duration = Duration::from_mins(15);
 
 fn waited(job: u64) -> Wait {
     Wait {
@@ -86,7 +86,7 @@ fn younger_jobs_wait_behind_one_starved_of_memory_though_they_fit() {
             scarce: Scarce::Memory,
             memory: 8 * GIB,
             cpu: 2000,
-            since: now() - LONG_AGO + MEMORY_PRIORITY_AFTER,
+            since: now() - LONG_AGO + PRIORITY_AFTER,
         })
     );
 }
@@ -97,7 +97,7 @@ fn a_job_short_of_memory_lets_younger_ones_past_until_it_waited_long_enough() {
     let just_now = Waits {
         memory: Some(Wait {
             job: 1,
-            since: now() - MEMORY_PRIORITY_AFTER + Duration::from_secs(1),
+            since: now() - PRIORITY_AFTER + Duration::from_secs(1),
         }),
         ..Waits::default()
     };
@@ -113,6 +113,82 @@ fn a_job_short_of_memory_lets_younger_ones_past_until_it_waited_long_enough() {
         plan.held.contains(&held("o/big", 1, Scarce::Memory)),
         "the plan names the job whose wait goes on"
     );
+}
+
+/// One wait for `job` of `waited` ago.
+fn waited_for(job: u64, waited: Duration) -> Waits {
+    Waits {
+        memory: Some(Wait {
+            job,
+            since: now() - waited,
+        }),
+        ..Waits::default()
+    }
+}
+
+/// The two limits are the rule of ADR 0098: mixing them up either holds on every short wait or starves a large pool.
+#[test]
+fn a_job_holds_after_the_limit_of_whether_a_barrier_served_its_pool() {
+    let barrier = |waits: Waits| {
+        plan(
+            &a_big_job_and_a_small_one(waits),
+            &profiles(vec![Slot::Free, Slot::Free]),
+            memory_left(gib(4)),
+            now(),
+        )
+        .barrier
+        .map(|barrier| barrier.job)
+    };
+    let second = Duration::from_secs(1);
+    let served = |waits| Waits {
+        served: true,
+        ..waits
+    };
+    assert_eq!(
+        barrier(waited_for(1, PRIORITY_AFTER.saturating_sub(second))),
+        None
+    );
+    assert_eq!(barrier(waited_for(1, PRIORITY_AFTER)), Some(1));
+    assert_eq!(barrier(waited_for(1, SERVED_PRIORITY_AFTER)), None);
+    assert_eq!(
+        barrier(served(waited_for(
+            1,
+            SERVED_PRIORITY_AFTER.saturating_sub(second)
+        ))),
+        None
+    );
+    assert_eq!(
+        barrier(served(waited_for(1, SERVED_PRIORITY_AFTER))),
+        Some(1)
+    );
+}
+
+/// A served pool's shorter limit puts it first for a while; it must not keep an older job's turn from it.
+#[test]
+fn an_older_job_of_an_unserved_pool_takes_the_barrier_when_it_matures() {
+    let owner = |older_waited| {
+        let served = Waits {
+            served: true,
+            ..waited_for(2, SERVED_PRIORITY_AFTER)
+        };
+        plan(
+            &[
+                pool("o/older", 8 * GIB, waited_for(1, older_waited), &[1]),
+                pool("o/served", 8 * GIB, served, &[2]),
+                pool("o/small", GIB, Waits::default(), &[3]),
+            ],
+            &profiles(vec![Slot::Free, Slot::Free]),
+            memory_left(gib(4)),
+            now(),
+        )
+        .barrier
+        .map(|barrier| barrier.job)
+    };
+    assert_eq!(
+        owner(PRIORITY_AFTER.saturating_sub(Duration::from_secs(1))),
+        Some(2)
+    );
+    assert_eq!(owner(PRIORITY_AFTER), Some(1));
 }
 
 /// A wait is its job's: one left over from a job gone must not make the next job of the pool jump the queue.
@@ -378,7 +454,7 @@ fn a_job_starved_of_cpu_that_now_lacks_memory_owns_the_barrier_as_memory() {
             scarce: Scarce::Memory,
             memory: 8 * GIB,
             cpu: 2000,
-            since: now() - LONG_AGO + MEMORY_PRIORITY_AFTER,
+            since: now() - LONG_AGO + PRIORITY_AFTER,
         })
     );
     assert_eq!(plan.waiting[&2], Waiting::BehindMemory { job: 1 });
@@ -413,7 +489,7 @@ fn a_job_starved_of_memory_that_now_lacks_cpu_owns_the_barrier_as_cpu() {
             scarce: Scarce::Cpu,
             memory: 8 * GIB,
             cpu: 4000,
-            since: now() - LONG_AGO + MEMORY_PRIORITY_AFTER,
+            since: now() - LONG_AGO + PRIORITY_AFTER,
         })
     );
     assert_eq!(plan.waiting[&2], Waiting::BehindCpu { job: 1 });
@@ -803,7 +879,7 @@ mod generated {
                     // GitHub gives the runner any of its pool's jobs.
                     let taken = usize::try_from(rng.below(self.queued[pool].len() as u64));
                     self.queued[pool].remove(taken.unwrap());
-                    self.waits[pool] = Waits::default();
+                    self.waits[pool].started();
                     let ends = self.tick + 1 + rng.below(LONGEST);
                     self.running.push(Running {
                         memory: *memory,
@@ -822,6 +898,12 @@ mod generated {
                 if unlisted != Some(pool) {
                     let queued = &self.queued[pool];
                     self.waits[pool].retain(|job| queued.contains(&job));
+                    if queued.is_empty() {
+                        self.waits[pool].emptied();
+                    }
+                }
+                if let Some(barrier) = plan.barrier {
+                    self.waits[pool].own(barrier.job);
                 }
             }
             plan
@@ -926,7 +1008,7 @@ mod generated {
     /// standing, so each ends within one longest run of the last start.
     #[test]
     fn a_standing_barrier_ends_within_one_longest_run_of_the_last_start() {
-        let mut stood = 0;
+        let (mut stood, mut for_served) = (0, 0);
         for seed in 0..256 {
             let mut rng = Rng(seed);
             let mut model = Model::new();
@@ -952,6 +1034,7 @@ mod generated {
                 });
                 if let Some((job, last)) = standing {
                     stood += 1;
+                    for_served += u32::from(model.waits.iter().any(|waits| waits.served));
                     assert!(
                         model.tick <= last + LONGEST + 1,
                         "seed {seed}: job {job} still holds at tick {} with no start since {last}: {plan:?}",
@@ -962,13 +1045,14 @@ mod generated {
             }
         }
         assert!(stood > 0, "generated runs reach a barrier");
+        assert!(for_served > 0, "and one beside a pool a barrier served");
     }
 
     /// With bounded run times, fresh listings and no reload, an aged demand's pool starts a runner once the room
     /// drains: at most the threshold, then one longest run, after its wait began, whatever younger jobs keep arriving.
     #[test]
     fn a_starved_pool_starts_within_a_bound_under_a_stream_of_younger_jobs() {
-        let limit = MEMORY_PRIORITY_AFTER.as_secs() / TICK.as_secs();
+        let limit = PRIORITY_AFTER.as_secs() / TICK.as_secs();
         for seed in 0..256 {
             let mut rng = Rng(seed);
             let mut model = Model::new();

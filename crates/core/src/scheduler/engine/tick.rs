@@ -648,11 +648,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         self.start(&slot, &repository, admission, Purpose::Job)
             .await;
-        // Only a runner in its slot ends the wait: a start that failed served nothing.
+        // Only a runner in its slot ends the wait: a start that failed served nothing, even one that left a container
+        // there. Its backoff takes the wait.
         if self.holds_runner(&slot)
-            && let Some(state) = self.repositories.get_mut(&repository)
+            && !self.backing_off(&repository, &slot.profile, SystemTime::now())
+            && let Some(waits) = self
+                .repositories
+                .get_mut(&repository)
+                .and_then(|state| state.waits.get_mut(&slot.profile))
         {
-            state.waits.remove(&slot.profile);
+            let served = waits.served;
+            waits.started();
+            if waits.served && !served {
+                info!(
+                    "{repository}: a barrier served its pool in {}: its next jobs hold sooner until its queue empties",
+                    slot.profile
+                );
+            }
         }
         true
     }
@@ -1064,6 +1076,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             if let Some(state) = self.repositories.get_mut(&repository) {
+                // Before the plan: a start for the next job must not read the note of one that left the queue.
+                if listed {
+                    for waits in state.waits.values_mut() {
+                        waits.retain(|job| queued.iter().any(|listed| listed.id == job));
+                    }
+                }
                 state.queued = queued;
                 state.listed = listed;
             } else {

@@ -871,6 +871,19 @@ impl<'run> Replayer<'run> {
                 }
             }
         }
+        self.settle_waits(waiting);
+    }
+
+    /// What the engine does after a plan: a pool with nothing `waiting` loses its served mark, and one with nothing left
+    /// to keep goes.
+    fn settle_waits(&mut self, waiting: &[Queued<'run>]) {
+        let queued: BTreeSet<Pool> = waiting.iter().map(|queued| pool_of(queued.run)).collect();
+        self.pool_waits.retain(|pool, waits| {
+            if !queued.contains(pool) {
+                waits.emptied();
+            }
+            !waits.is_empty()
+        });
     }
 
     /// Unless `Barriers::Off`, ages the pool of `run`, which lacks what `short` says, and lets it put up the barrier, as
@@ -887,6 +900,9 @@ impl<'run> Replayer<'run> {
         }
         if self.barrier.is_none() {
             self.barrier = Barrier::of(short, waits, drained, at);
+            if self.barrier.is_some() {
+                waits.own(short.job);
+            }
         }
     }
 
@@ -1299,7 +1315,9 @@ impl<'run> Replayer<'run> {
         self.started.push(queued.job);
         self.backfilled.jobs += u64::from(usual.is_some());
         let pool = pool_of(run);
-        self.pool_waits.remove(&pool);
+        if let Some(waits) = self.pool_waits.get_mut(&pool) {
+            waits.started();
+        }
         self.pools.entry(pool).or_default().waits.push(waited);
         self.waits.push(waited);
         self.running.push(Running {

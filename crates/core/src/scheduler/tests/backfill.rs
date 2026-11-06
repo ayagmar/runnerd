@@ -2,13 +2,13 @@
 //! generated runs and over every small world, its two bounds and what run times that read long cost.
 
 use super::*;
-use crate::scheduler::{Drained, MEMORY_PRIORITY_AFTER};
+use crate::scheduler::{Drained, PRIORITY_AFTER};
 
 const MINUTE: Duration = Duration::from_secs(60);
 /// When the owner's wait began.
-const WAITED: Duration = Duration::from_secs(600);
+const WAITED: Duration = Duration::from_mins(15);
 /// Started before the owner's barrier matured.
-const BEFORE: Duration = Duration::from_mins(15);
+const BEFORE: Duration = Duration::from_mins(10);
 
 fn minutes(minutes: u32) -> Duration {
     MINUTE * minutes
@@ -252,7 +252,7 @@ fn gib(amount: i64) -> i64 {
 /// What started since the barrier matured may hang: at their caps they must leave the owner its room.
 #[test]
 fn the_caps_of_what_started_since_the_barrier_matured_leave_the_owner_its_room() {
-    let since = now() - WAITED + MEMORY_PRIORITY_AFTER;
+    let since = now() - WAITED + PRIORITY_AFTER;
     let backfilled = |started_at| {
         Slot::Runner(RunnerSlot {
             repository: "o/other".to_owned(),
@@ -729,8 +729,11 @@ mod generated {
     /// The limits of a model.
     #[derive(Debug)]
     struct Shape {
-        /// How long a tick is: a job that waited `MEMORY_PRIORITY_AFTER` holds.
+        /// How long a tick is, which says how many a job waits before it holds: `PRIORITY_AFTER`, or
+        /// `SERVED_PRIORITY_AFTER` once a barrier served its pool.
         tick: Duration,
+        /// How many ticks apart a small world's jobs may arrive.
+        gap: usize,
         memory: u64,
         cpu: Option<u64>,
         slots: usize,
@@ -742,7 +745,8 @@ mod generated {
 
     /// Long runs of many jobs: slots to spare, memory short.
     static STREAMS: Shape = Shape {
-        tick: Duration::from_secs(30),
+        tick: Duration::from_secs(150),
+        gap: 1,
         memory: 16 * GIB,
         cpu: None,
         slots: 16,
@@ -774,7 +778,8 @@ mod generated {
 
     /// A few jobs in two slots a pool, a job that waits a tick being starved: memory, CPU and slots each run out.
     static TIGHT: Shape = Shape {
-        tick: Duration::from_secs(120),
+        tick: Duration::from_secs(600),
+        gap: 1,
         memory: 8 * GIB,
         cpu: Some(4000),
         slots: 2,
@@ -806,7 +811,8 @@ mod generated {
 
     /// Two pools of one profile, its caps leaving room to pass, and two slots: a younger pool could take them both.
     static SHARED: Shape = Shape {
-        tick: Duration::from_secs(120),
+        tick: Duration::from_secs(600),
+        gap: 1,
         memory: 11 * GIB,
         cpu: None,
         slots: 2,
@@ -833,6 +839,18 @@ mod generated {
                 cpu: 0,
             },
         ],
+        hung_jobs_grow_at: 6,
+    };
+
+    /// `TIGHT` with the two limits apart: a job waits two ticks, or one once a barrier served its pool, and a job can
+    /// arrive behind a barrier that went up since the last.
+    static TWO_LIMITS: Shape = Shape {
+        tick: Duration::from_secs(300),
+        gap: 2,
+        memory: 8 * GIB,
+        cpu: Some(4000),
+        slots: 2,
+        pools: TIGHT.pools,
         hung_jobs_grow_at: 6,
     };
 
@@ -1079,7 +1097,7 @@ mod generated {
                     .position(|job| job.pool == index)
                     .unwrap();
                 let job = self.queued.remove(oldest);
-                self.waits[index] = Waits::default();
+                self.waits[index].started();
                 self.starts.insert(job.id, tick);
                 let end = tick + job.ticks;
                 if behind.is_some() {
@@ -1098,6 +1116,14 @@ mod generated {
             for demand in &plan.held {
                 let index = self.index_of(&demand.pool.repository);
                 self.waits[index].note(demand.scarce, demand.job, at);
+            }
+            for index in 0..self.waits.len() {
+                if !self.queued.iter().any(|job| job.pool == index) {
+                    self.waits[index].emptied();
+                }
+                if let Some(barrier) = plan.barrier {
+                    self.waits[index].own(barrier.job);
+                }
             }
             if let Some(barrier) = plan.barrier
                 && !self.owners.contains(&barrier.job)
@@ -1149,6 +1175,7 @@ mod generated {
         /// An owner that kept its barrier and started later than under a strict one: what bound 1 rules out.
         late: Vec<String>,
         /// How many that lost their barrier started later, and by how many ticks at most: what ADR 0097 says can happen.
+        /// On every small world so far, only with estimates that read long.
         lost_and_late: u64,
         most_late_after_losing: u64,
         /// An owner that kept its barrier and started later than strict and than the end of all that passed it.
@@ -1267,12 +1294,11 @@ mod generated {
         }
     }
 
-    /// The first bound of ADR 0097, over long generated runs. Seed 767 is a world in which an owner that lost its barrier
-    /// to older jobs starts late all the same, which is what the ADR says of the bound.
+    /// The first bound of ADR 0097, over long generated runs.
     #[test]
     fn with_run_times_that_hold_an_owner_that_keeps_its_barrier_starts_as_under_a_strict_one() {
         let mut tally = Tally::default();
-        for seed in (0..128).chain([767]) {
+        for seed in 0..128 {
             let arrivals = arrivals(&mut Rng(seed));
             tally.compare(&STREAMS, Estimates::Exact, &arrivals, &|| {
                 format!("seed {seed}")
@@ -1284,10 +1310,6 @@ mod generated {
             "generated runs reach barriers: {tally:?}"
         );
         assert!(tally.passed > 20, "and younger jobs pass them: {tally:?}");
-        assert!(
-            tally.lost_and_late > 0,
-            "seed 767 still shows it: {tally:?}"
-        );
     }
 
     /// Run times that read long put the owner's room too late, so it can come while jobs still run behind the barrier.
@@ -1360,9 +1382,9 @@ mod generated {
         assert!(most >= 3, "the caps fill with hung runners: {most}");
     }
 
-    /// Every world of `count` jobs of a shape's three pools, running 1 to 4 ticks, each arriving at or a tick after the one
-    /// before as the bits of `gaps` say: world `index` of `worlds_of(count)`.
-    fn world(count: u32, gaps: u32, index: u64) -> Vec<Vec<Job>> {
+    /// Every world of `count` jobs of a shape's three pools, running 1 to 4 ticks, each arriving with the one before or
+    /// `gap` ticks after it as the bits of `gaps` say: world `index` of `worlds_of(count)`.
+    fn world(count: u32, gaps: u32, gap: usize, index: u64) -> Vec<Vec<Job>> {
         let mut ticks: Vec<Vec<Job>> = vec![Vec::new()];
         let mut left = index;
         for id in 0..count {
@@ -1371,7 +1393,7 @@ mod generated {
             let run = 1 + left % 4;
             left /= 4;
             if id > 0 && gaps >> (id - 1) & 1 == 1 {
-                ticks.push(Vec::new());
+                ticks.extend(std::iter::repeat_n(Vec::new(), gap));
             }
             ticks.last_mut().unwrap().push(Job {
                 id: u64::from(id) + 1,
@@ -1404,7 +1426,7 @@ mod generated {
                         for gaps in 0..gap_patterns(count) {
                             let mut index = thread;
                             while index < worlds_of(count) {
-                                let arrivals = world(count, gaps, index);
+                                let arrivals = world(count, gaps, shape.gap, index);
                                 let name = || format!("{arrivals:?}");
                                 tally.worlds += 1;
                                 tally.compare(shape, Estimates::Exact, &arrivals, &name);
@@ -1445,19 +1467,48 @@ mod generated {
         assert_bounds_hold(&tally);
         assert!(tally.passed > 100, "jobs pass in these worlds: {tally:?}");
         assert!(tally.hung > 100, "and hang: {tally:?}");
+        let tally = every_world(&TWO_LIMITS, 4, |count| 1 << (count - 1), 1);
+        assert_bounds_hold(&tally);
+        assert!(tally.passed > 100, "and with two limits: {tally:?}");
+    }
+
+    /// The case the first bound excuses, as no run of fewer jobs reaches it: job 5 owns a barrier, older jobs take it, and
+    /// on estimates that read double what passed starts it a tick late. Found by `every_world_of_six`.
+    #[test]
+    fn an_owner_that_loses_its_barrier_can_start_later_than_under_a_strict_one() {
+        let job = |id, pool, ticks| Job { id, pool, ticks };
+        let arrivals = [
+            vec![job(1, 2, 4), job(2, 1, 2), job(3, 1, 3)],
+            vec![job(4, 1, 1), job(5, 0, 1), job(6, 2, 2)],
+        ];
+        let mut tally = Tally::default();
+        tally.compare(&TIGHT, Estimates::Double, &arrivals, &|| {
+            "pinned".to_owned()
+        });
+        assert!(tally.lost_and_late > 0, "{tally:?}");
+        assert_eq!(tally.past_the_ceiling, [] as [String; 0]);
     }
 
     /// The same up to 6 jobs: minutes in a release build, so not on every run. `cargo test --release -- --ignored
-    /// every_world_of_six`.
+    /// every_world_of_six`. Rule 2's older jobs change no count in these worlds: their unit tests and the replay and
+    /// planner's shared fixture stand for them.
     #[test]
-    #[ignore = "takes minutes; ADR 0097 records its last result"]
-    #[allow(clippy::print_stderr, reason = "its counts are what ADR 0097 records")]
+    #[ignore = "takes minutes; ADRs 0097 and 0098 record its last result"]
+    #[allow(
+        clippy::print_stderr,
+        reason = "its counts are what ADRs 0097 and 0098 record"
+    )]
     fn every_world_of_six() {
-        for (shape, most) in [(&SHARED, 5), (&TIGHT, 6)] {
+        for (shape, most, lost) in [
+            (&SHARED, 5, false),
+            (&TIGHT, 6, true),
+            (&TWO_LIMITS, 6, true),
+        ] {
             let tally = every_world(shape, most, |count| 1 << (count - 1).min(3), 8);
             eprintln!("{tally:?}");
             assert_bounds_hold(&tally);
             assert!(tally.hung > 100, "jobs hang in these worlds: {tally:?}");
+            assert_eq!(tally.lost_and_late > 0, lost, "{tally:?}");
         }
     }
 }

@@ -5,7 +5,7 @@
 use super::*;
 use crate::api::{AdmissionPolicy, Basis, JobPeak};
 use crate::observe::metrics::Events;
-use crate::scheduler::CPU_PRIORITY_AFTER;
+use crate::scheduler::PRIORITY_AFTER;
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -1061,7 +1061,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
         .and_then(|state| state.waits.get_mut("app"))
         .and_then(|waits| waits.cpu.as_mut())
         .expect("the build's wait is kept")
-        .since -= CPU_PRIORITY_AFTER;
+        .since -= PRIORITY_AFTER;
 
     // Every other tick the slice is at its high-water mark, and a lint queues every tick; one lint runner ends every
     // second round, so CPU keeps freeing up.
@@ -1101,9 +1101,13 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
         "the build started once the lints it waited for drained"
     );
     assert_eq!(runners_of(&mut engine, &handle, "o/b"), 0);
-    assert!(
-        engine.repositories["o/r"].waits.is_empty(),
-        "served, the build no longer waits"
+    assert_eq!(
+        engine.repositories["o/r"].waits["app"],
+        crate::scheduler::Waits {
+            served: true,
+            ..Default::default()
+        },
+        "started, the build no longer waits, and the barrier served its pool"
     );
 }
 

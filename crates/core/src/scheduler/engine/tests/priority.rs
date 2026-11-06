@@ -4,8 +4,9 @@
 
 use super::*;
 use crate::admission::{Key, Predictor};
+use crate::api::HoldCause;
 use crate::observe::metrics::{CpuHeld, Events};
-use crate::scheduler::{Decision, MEMORY_PRIORITY_AFTER, Wait};
+use crate::scheduler::{Decision, Hold, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, Wait, Waits};
 use crate::sizing::{Measure, Ran};
 use crate::store::{RunnerRecord, SampleRecord};
 
@@ -130,15 +131,26 @@ impl Fixture {
             .and_then(|waits| waits.memory)
     }
 
-    /// As if the wait began `MEMORY_PRIORITY_AFTER` earlier.
+    /// What o/big's pool keeps.
+    fn waits(&self) -> Waits {
+        let kept = self.engine.repositories["o/big"].waits.get("big");
+        kept.copied().unwrap_or_default()
+    }
+
+    /// As if the wait began `PRIORITY_AFTER` earlier.
     fn age(&mut self) {
+        self.age_by(PRIORITY_AFTER);
+    }
+
+    /// As if the wait began `by` earlier.
+    fn age_by(&mut self, by: Duration) {
         self.engine
             .repositories
             .get_mut("o/big")
             .and_then(|state| state.waits.get_mut("big"))
             .and_then(|waits| waits.memory.as_mut())
             .expect("o/big's next job waits")
-            .since -= MEMORY_PRIORITY_AFTER;
+            .since -= by;
     }
 
     /// The host's memory read now: 32G, whose 2G margin grows to 3G while the host is short, with `room` of it for the
@@ -201,6 +213,19 @@ impl Fixture {
         fixture.engine.tick(Shutdown::No).await;
         assert_eq!(fixture.wait().map(|wait| wait.job), Some(10));
         fixture.age();
+        fixture
+    }
+
+    /// Job 10 owned a barrier and its runner started once the small ones ended, in a slice that leaves job 12 of its
+    /// pool waiting. The runner has not taken its job yet.
+    async fn served() -> Fixture {
+        let mut fixture = Fixture::starved().await;
+        fixture.queue(vec![big(10), big(12)]);
+        fixture.engine.tick(Shutdown::No).await;
+        fixture.docker.0.lock().unwrap().containers.clear();
+        fixture.engine.tick(Shutdown::No).await;
+        assert_eq!(fixture.runners_of("o/big"), 1);
+        assert!(fixture.waits().served, "the barrier served its pool");
         fixture
     }
 }
@@ -284,7 +309,7 @@ async fn a_start_that_fails_preparing_its_caches_keeps_the_wait() {
         .or_default()
         .memory = Some(Wait {
         job: 10,
-        since: std::time::SystemTime::now() - MEMORY_PRIORITY_AFTER,
+        since: std::time::SystemTime::now() - PRIORITY_AFTER,
     });
     fixture.docker.0.lock().unwrap().fail_volumes = 1;
     fixture.engine.tick(Shutdown::No).await;
@@ -361,7 +386,7 @@ async fn a_pool_backing_off_after_failed_runners_loses_its_wait() {
         .or_default()
         .memory = Some(Wait {
         job: 10,
-        since: std::time::SystemTime::now() - MEMORY_PRIORITY_AFTER,
+        since: std::time::SystemTime::now() - PRIORITY_AFTER,
     });
     fixture.github.0.lock().unwrap().register_fails = true;
     fixture.engine.tick(Shutdown::No).await;
@@ -534,7 +559,7 @@ async fn a_runner_not_yet_named_leaves_the_oldest_jobs_wait() {
     assert_eq!(fixture.runners_of("o/big"), 1);
     let wait = Wait {
         job: 10,
-        since: std::time::SystemTime::now() - MEMORY_PRIORITY_AFTER,
+        since: std::time::SystemTime::now() - PRIORITY_AFTER,
     };
     fixture
         .engine
@@ -552,7 +577,7 @@ async fn a_runner_not_yet_named_leaves_the_oldest_jobs_wait() {
 }
 
 /// A restart loses the wait, so a job restarts its clock: nothing stale can hold a queue after one, and its age
-/// comes back in `MEMORY_PRIORITY_AFTER`.
+/// comes back in `PRIORITY_AFTER`.
 #[tokio::test]
 async fn a_restart_starts_the_wait_again() {
     let fixture = Fixture::starved().await;
@@ -569,9 +594,214 @@ async fn a_restart_starts_the_wait_again() {
         .and_then(|waits| waits.memory)
         .expect("the first plan held it again");
     assert!(
-        wait.since.elapsed().unwrap_or_default() < MEMORY_PRIORITY_AFTER,
+        wait.since.elapsed().unwrap_or_default() < PRIORITY_AFTER,
         "not carried over"
     );
+}
+
+/// Two minutes of waiting is what put the barrier up too often: a first job has the whole first limit to find room.
+#[tokio::test]
+async fn a_pools_first_job_holds_only_after_the_first_limit() {
+    let mut fixture = Fixture::new(9 * G).await;
+    fixture.queue((1..=2).map(small).collect());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.all_busy();
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.age_by(PRIORITY_AFTER.saturating_sub(Duration::from_secs(5)));
+    fixture.queue(vec![big(10), small(11)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "the job goes by it");
+    fixture.age_by(Duration::from_secs(5));
+    fixture.all_busy();
+    // The runner listed busy for the first time may have taken job 12.
+    fixture.queue(vec![big(10), small(12), small(13)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(
+        fixture.reason(13),
+        Some(api::Waiting::BehindMemory { job: 10 })
+    );
+}
+
+/// With the first limit for every job, a pool of many large jobs gets one runner per limit.
+#[tokio::test]
+async fn once_a_barrier_served_a_pool_its_next_job_holds_after_the_short_limit() {
+    let mut fixture = Fixture::served().await;
+    assert_eq!(fixture.wait().map(|wait| wait.job), Some(12));
+    fixture.age_by(SERVED_PRIORITY_AFTER.saturating_sub(Duration::from_secs(5)));
+    fixture.all_busy();
+    fixture.queue(vec![big(12), small(13)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 1, "not yet");
+    fixture.age_by(Duration::from_secs(5));
+    fixture.all_busy();
+    // The runner listed busy for the first time may have taken job 14.
+    fixture.queue(vec![big(12), small(14), small(15)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(
+        fixture.reason(15),
+        Some(api::Waiting::BehindMemory { job: 12 })
+    );
+}
+
+/// Reading a failed listing, which shows no job, as an empty queue would drop the mark whenever GitHub stumbles, and a
+/// mark that outlives the queue would make the next burst's first job hold early.
+#[tokio::test]
+async fn the_mark_stays_through_a_failed_listing_and_goes_when_a_listing_shows_the_queue_empty() {
+    let mut fixture = Fixture::served().await;
+    fixture.all_busy();
+    let failed = |fixture: &Fixture| {
+        let mut state = fixture.github.0.lock().unwrap();
+        state.failed_queued.insert("o/big".to_owned());
+    };
+    failed(&fixture);
+    fixture.queue(Vec::new());
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(fixture.waits().served, "a failed listing says nothing");
+    fixture.github.0.lock().unwrap().failed_queued.clear();
+    fixture.queue(vec![big(13)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(
+        fixture.waits().served,
+        "job 12 went elsewhere, 13 is queued"
+    );
+    fixture.queue(Vec::new());
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.waits(), Waits::default(), "the queue emptied");
+}
+
+/// A mark with no wait beside it is still a mark: the next job of the listing may not be short yet.
+#[tokio::test]
+async fn the_mark_outlives_the_wait_it_came_from() {
+    let mut fixture = Fixture::starved().await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.docker.0.lock().unwrap().containers.clear();
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert_eq!(fixture.wait(), None, "nothing waits");
+    assert!(fixture.waits().served, "job 10 is listed still");
+    fixture.queue(vec![big(12)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(fixture.waits().served, "the queue never emptied");
+}
+
+/// A barrier that gave its pool no runner proved nothing about the jobs behind its owner.
+#[tokio::test]
+async fn a_barrier_whose_job_went_elsewhere_served_nobody() {
+    let mut fixture = Fixture::starved().await;
+    fixture.queue(vec![big(10), big(12)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.waits().owner, Some(10));
+    fixture.queue(vec![big(12)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.waits().owner, None);
+    fixture.docker.0.lock().unwrap().containers.clear();
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert!(!fixture.waits().served, "job 12 owned no barrier");
+
+    // The tick that shows the job gone brings the room too, as a cancelled push does, or a large owner leaving a
+    // smaller runner: the plan starts job 12 before that tick's waits are committed.
+    let mut fixture = Fixture::starved().await;
+    fixture.queue(vec![big(10), big(12)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.waits().owner, Some(10));
+    fixture.queue(vec![big(12)]);
+    fixture.docker.0.lock().unwrap().containers.clear();
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert!(!fixture.waits().served, "the same tick");
+}
+
+/// A job that waited past the limit and then found room had no barrier to thank, as with a queue held by its slots.
+#[tokio::test]
+async fn a_start_no_barrier_came_before_serves_nobody() {
+    let mut fixture = Fixture::new(9 * G).await;
+    fixture.queue(vec![big(10)]);
+    let waits = fixture.engine.repositories.get_mut("o/big").unwrap();
+    waits.waits.entry("big".to_owned()).or_default().memory = Some(Wait {
+        job: 10,
+        since: std::time::SystemTime::now() - PRIORITY_AFTER,
+    });
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert_eq!(fixture.waits(), Waits::default());
+}
+
+/// A start that failed gave nothing, and the plan that retries has no barrier in it to say whose the job was.
+#[tokio::test]
+async fn only_a_runner_in_its_slot_serves_the_pool() {
+    let mut fixture = Fixture::starved().await;
+    fixture.queue(vec![big(10), big(12)]);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.docker.0.lock().unwrap().containers.clear();
+    fixture.docker.0.lock().unwrap().fail_volumes = 1;
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 0, "no runner went in its slot");
+    assert!(!fixture.waits().served);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert!(fixture.waits().served, "the retry was for the same owner");
+}
+
+/// Each of these keeps a pool from starting a runner, for longer than a mark should speak for its queue.
+#[tokio::test]
+async fn pausing_backing_off_or_preparing_takes_the_mark() {
+    async fn stopped(stop: impl FnOnce(&mut Fixture)) {
+        let mut fixture = Fixture::served().await;
+        stop(&mut fixture);
+        fixture.engine.tick(Shutdown::No).await;
+        assert_eq!(fixture.waits(), Waits::default(), "nothing is left behind");
+    }
+    let mut paused = Fixture::served().await;
+    paused
+        .engine
+        .pause(&one("o/big"), RunningJobs::Keep)
+        .await
+        .unwrap();
+    paused.engine.tick(Shutdown::No).await;
+    assert_eq!(paused.waits(), Waits::default(), "pausing");
+    stopped(|fixture| {
+        let state = fixture.engine.repositories.get_mut("o/big").unwrap();
+        state.holds.entry("big".to_owned()).or_default().held = Some(Hold {
+            until: std::time::SystemTime::now() + Duration::from_secs(60),
+            cause: HoldCause::NoJob,
+        });
+    })
+    .await;
+    stopped(|fixture| {
+        fixture.engine.reseed_requested.insert("big".to_owned());
+    })
+    .await;
+}
+
+/// A pool recreated in the profile must not inherit a stranger's mark.
+#[tokio::test]
+async fn a_reload_that_removes_the_pool_takes_the_mark() {
+    let mut fixture = Fixture::served().await;
+    let moved = big_and_small().replace(
+        "[[repositories]]\nname = \"o/big\"\nprofile = \"big\"\nlabels = [\"self-hosted\", \"big\"]\nwarm = 0\n",
+        "[[repositories]]\nname = \"o/big\"\nprofile = \"small\"\nlabels = [\"self-hosted\", \"big\"]\nwarm = 0\n",
+    );
+    fixture
+        .engine
+        .reload(Config::parse(&moved).unwrap(), Some(9 * G), None);
+    assert_eq!(fixture.waits(), Waits::default());
+}
+
+/// The mark lives as the waits do: a restart leaves nothing to read back, and the next job waits the first limit.
+#[tokio::test]
+async fn a_restart_loses_the_mark() {
+    let fixture = Fixture::served().await;
+    let (github, docker) = (fixture.github.clone(), fixture.docker.clone());
+    let dir = TestDir::new("restarted");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &big_and_small());
+    engine.memory_max = Some(9 * G);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let waits = engine.repositories["o/big"].waits.get("big");
+    assert!(!waits.is_some_and(|waits| waits.served));
 }
 
 /// A 1G job of o/small named `name`.
