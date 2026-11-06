@@ -663,9 +663,15 @@ async fn a_runner_whose_container_is_gone_counts_nothing_while_it_keeps_its_slot
         .map(|(_, occupant)| occupant.runner_name.clone())
         .next()
         .unwrap();
-    handle.store.containers_gone(vec![runner]);
+    engine.publish();
+    let counted = handle.status.borrow().budget.memory_in_use;
+    handle.store.containers_gone(vec![runner.clone()]);
     engine.publish();
     assert_eq!(handle.status.borrow().budget.memory_in_use, 0);
+    // A `docker restart` brings the same cgroup back: a live container's memory must not be spent twice.
+    handle.store.containers_read(&[runner]);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, counted);
 }
 
 #[tokio::test]

@@ -387,6 +387,8 @@ pub struct Sampled {
     pub host: Option<api::HostSample>,
     /// The runners whose container's cgroup was there at the last pass and is gone now: nothing of it holds memory.
     pub gone: Vec<String>,
+    /// The runners whose container's cgroup this pass read, sample or not: a container that came back is one of them.
+    pub read: Vec<String>,
 }
 
 /// Samples containers and their slice, turning CPU time into CPU use between samples.
@@ -443,6 +445,7 @@ impl Sampler {
     pub fn sample(&mut self, tracked: &[Tracked], at: u64) -> Sampled {
         let mut samples = Vec::new();
         let mut gone = Vec::new();
+        let mut read = Vec::new();
         let mut seen = HashMap::new();
         for container in tracked {
             let cgroup = self.paths.container(&self.slice, &container.container);
@@ -463,6 +466,7 @@ impl Sampler {
                     continue;
                 }
             };
+            read.push(container.runner.clone());
             seen.insert(container.runner.clone(), (at, usage.cpu_usage));
             let Ok((received, sent)) = read_network(&self.paths, container.pid) else {
                 continue;
@@ -496,6 +500,7 @@ impl Sampler {
             samples,
             host,
             gone,
+            read,
         }
     }
 }
@@ -527,6 +532,7 @@ pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: 
         if let Some(memory) = memory {
             store.host_memory(memory);
         }
+        store.containers_read(&sampled.read);
         store.containers_gone(sampled.gone);
         if !sampled.samples.is_empty() {
             store.samples(sampled.samples);

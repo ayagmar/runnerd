@@ -175,6 +175,25 @@ fn only_a_missing_cgroup_reads_as_gone() {
 }
 
 #[test]
+fn a_container_that_comes_back_is_read_though_its_old_process_gives_no_sample() {
+    // Docker restarts a container into the same cgroup with a new process, so the read alone has to say it is back.
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000, 0, 0);
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    state.sample(&runners, 1_000);
+    std::fs::remove_dir_all(paths.container("ci.slice", "a")).unwrap();
+    assert_eq!(state.sample(&runners, 3_000).gone, ["runner-a"]);
+
+    container(&paths, "a", 10, 4_000, 0, 0);
+    std::fs::remove_dir_all(paths.proc.join("10")).unwrap();
+    let back = state.sample(&runners, 5_000);
+    assert_eq!(back.read, ["runner-a"], "the cgroup is back");
+    assert!(back.samples.is_empty(), "its old process is not");
+}
+
+#[test]
 fn a_container_never_read_is_not_called_gone() {
     // A slice whose containers live elsewhere, such as under another cgroup driver: live runners with no files here.
     let dir = TestDir::new("observe");

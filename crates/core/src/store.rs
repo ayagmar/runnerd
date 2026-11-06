@@ -421,7 +421,7 @@ pub struct Store {
     latest_host_memory: Arc<Mutex<Option<api::HostMemory>>>,
     /// Each running runner's last sample, for admission to read without a query.
     latest_samples: Arc<Mutex<BTreeMap<String, SampleRecord>>>,
-    /// The runners whose container's cgroup the sampler saw go, until they are removed.
+    /// The runners whose container's cgroup the sampler saw go, until they are removed or it reads them again.
     gone: Arc<Mutex<BTreeSet<String>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
     backlog: Arc<Semaphore>,
@@ -620,6 +620,15 @@ impl Store {
     /// until they are removed. Kept in memory only: a restart finds such a container stopped.
     pub fn containers_gone(&self, runners: Vec<String>) {
         lock(&self.gone).extend(runners);
+    }
+
+    /// Notes that these runners' containers' cgroups were read (`metrics::Sampled::read`): one marked gone came back,
+    /// as a `docker restart` brings it, and holds memory again.
+    pub fn containers_read(&self, runners: &[String]) {
+        let mut gone = lock(&self.gone);
+        for runner in runners {
+            gone.remove(runner);
+        }
     }
 
     /// Whether a runner's container's cgroup is gone, though its slot may hold it a while yet.
