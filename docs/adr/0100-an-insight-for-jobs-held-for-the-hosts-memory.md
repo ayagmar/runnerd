@@ -30,9 +30,9 @@ held for the host.
   job waits as `Paused`, so it is not among them: pausing is the owner's own act. A job that starts between the plan
   and the look is left out, and the next longest waiter decides. `Run` is untouched: closed runs would fire the
   insight after the job ended.
-- **Fresh or silent.** The reading and the engine's look must each be a minute old at most and not from after the
-  look. A daemon that stopped planning, or no reading, says nothing; so does the digest's look at 24 hours ago, whose
-  window precedes any reading.
+- **Fresh or silent.** The reading must be a minute old at most, the engine's look a minute or three `[host]
+  poll_interval`s, whichever is more, and neither from after the look's second. A daemon that stopped planning, or
+  no reading, says nothing; so does the digest's look at 24 hours ago, whose window precedes any reading.
 - **Once in each 6-hour window.** The key is `host-held:<now / 6 h>` (`HOST_HELD_EVERY`). The notifier tells a key
   once and again only when it was gone for a day, so a fixed key would stay silent on the next evening; this one
   is new in each window the wait lasts into. Told keys are stored, so a restart inside a window repeats nothing, and
