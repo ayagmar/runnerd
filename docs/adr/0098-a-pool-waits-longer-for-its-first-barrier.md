@@ -31,7 +31,9 @@ plan. That takes two steps, because the plan that starts the owner has no barrie
 
 - `Waits::own` notes the job when `note_waits` commits a barrier that is its pool's. A status's plan never gets there.
 - The note stays when the barrier moves to an older job or falls under an interlock. The job owned a barrier during this
-  wait and the room it gathered is what it starts in. It also stays when a start is refused or fails, so the retry counts.
+  wait and the room it gathered is what it starts in. It also stays when `still_fits` refuses a start or preparing the caches
+  fails, as neither brings a backoff, so the retry counts. A failed registration or Docker start brings one, which clears
+  it like any other backoff.
 - `Waits::started` turns the note into the mark when the runner is in its slot, where 0096 ends the wait. A proposed start,
   a deferred one or one that failed preparing its caches does not.
 - A job that leaves the queue with no runner of ours, cancelled or taken elsewhere, takes its note with it, before the plan
@@ -109,7 +111,8 @@ unchanged. `TWO_LIMITS`, up to 6 jobs, is 26,051,628 worlds and 2,291,604 passes
 Seed 767, the one generated world 0097 quotes for a lost barrier, shows nothing under these limits, nor does any of the first
 1,500 seeds. The generated test no longer asserts it, and the small worlds above are what show that case now.
 
-The start that serves a pool logs one `info!` line, which is how a sandbox run sees the mark.
+The start that serves a pool logs one `info!` line, which is how a sandbox run sees the mark. A failed start logs none, even
+one that left a container in the slot.
 
 ## Replay
 
@@ -208,8 +211,10 @@ rule gives 67 minutes against 63 at 600 s and 67 at 120 s.
 ## Consequences
 
 Under contention most short shortages no longer stop younger jobs, and a light job's p95 falls by minutes. In exchange a large
-job that is really starved waits 10 minutes where it waited 2 before anything happens, and every restart inside that wait
-starts it again. A pool that started its jobs with no barrier has no mark, so its next starved job waits the 600 s too.
+job that is really starved waits 10 minutes where it waited 2 before anything happens. Every restart inside that wait starts
+it again, and so does a start that fails for a moment: one 502 from GitHub brings a 30 s backoff, the job then waits another
+600 s, and on a served pool the whole queue is back on the first limit. Both cost five times what they did at 120 s. A pool
+that started its jobs with no barrier has no mark, so its next starved job waits the 600 s too.
 
 0096's constants, its "2-minute windows" and the replay tables of 0096 and 0097 describe the 120 s limit. Those tables stay
 as what was measured then.

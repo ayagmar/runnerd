@@ -648,8 +648,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         self.start(&slot, &repository, admission, Purpose::Job)
             .await;
-        // Only a runner in its slot ends the wait: a start that failed served nothing.
+        // Only a runner in its slot ends the wait: a start that failed served nothing, even one that left a container
+        // there. Its backoff takes the wait.
         if self.holds_runner(&slot)
+            && !self.backing_off(&repository, &slot.profile, SystemTime::now())
             && let Some(waits) = self
                 .repositories
                 .get_mut(&repository)

@@ -670,6 +670,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         stops
     }
 
+    /// Whether a failure holds `repository`'s pool in `profile` back at `now`.
+    pub(super) fn backing_off(&self, repository: &str, profile: &str, now: SystemTime) -> bool {
+        self.repositories[repository]
+            .holds
+            .get(profile)
+            .and_then(|hold| hold.held)
+            .is_some_and(|hold| hold.until > now)
+    }
+
     /// Commits what the last plan of a tick or a pass found (ADR 0096): the pools it `held`, each wait starting with
     /// the job the plan names, and its `barrier`, which its pool remembers owning. A pool that may not start a runner,
     /// paused, backing off or preparing, loses its wait and its served mark (ADR 0098). So does a job's wait that a
@@ -698,11 +707,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .filter(|job| matches(job, &repository.labels))
                     .map(|job| job.id)
                     .collect();
-                let backing_off = self.repositories[&repository.name]
-                    .holds
-                    .get(&repository.profile)
-                    .and_then(|hold| hold.held)
-                    .is_some_and(|hold| hold.until > now);
+                let backing_off = self.backing_off(&repository.name, &repository.profile, now);
                 let preparing = self
                     .config
                     .profiles

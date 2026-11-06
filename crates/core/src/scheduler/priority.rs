@@ -45,7 +45,8 @@ pub struct Waits {
     /// Its wait for CPU.
     pub cpu: Option<Wait>,
     /// The waiting job, if a plan's barrier was ever its own. Not only the last plan's: the plan that starts it has no
-    /// barrier, as it fits, and a start it refused or that failed plans again.
+    /// barrier, as it fits, and a start refused, or that failed preparing its caches, plans again. A failure that brings
+    /// a backoff clears this with the waits.
     pub owner: Option<u64>,
     /// Whether a runner of the pool started for a job that owned a barrier, since its queue last emptied: its next jobs
     /// wait `SERVED_PRIORITY_AFTER`.
