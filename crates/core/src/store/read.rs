@@ -1356,6 +1356,7 @@ pub(super) fn trace(
         outside,
         total,
         overhead,
+        guard_overhead: overhead,
         host_overhead: high_percentile(host_overheads),
     })
 }

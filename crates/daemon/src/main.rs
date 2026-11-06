@@ -110,13 +110,32 @@ enum Command {
         /// replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs and hazards.
         #[arg(long)]
         causal: bool,
-        /// With --causal, give every run of a job the samples of its heaviest run: every cache cold at once.
+        /// With --causal, give every run of a job the samples of its heaviest run, placed so that the run reaches its
+        /// peak: every cache cold at once.
         #[arg(long, requires = "causal")]
         cold: bool,
-        /// With --causal, what the slice holds beside its runners (such as 8G) [default: the p99 of the window's busy
-        /// moments].
+        /// With --causal, what the slice holds beside its runners, as the hazards read it (such as 8G) [default: the
+        /// p99 of the window's busy moments].
         #[arg(long, requires = "causal")]
         overhead: Option<ByteSize>,
+        /// With --causal, what the guards read of that when they decide (such as 1G) [default: --overhead]: a slice
+        /// that reads low at a decision and high once the job runs.
+        #[arg(long, requires = "causal")]
+        guard_overhead: Option<ByteSize>,
+        /// With --causal, the credit of a row, 0G for the plain count; repeat it for more rows [default: 0, 4G, 6G, 8G].
+        #[arg(long, requires = "causal")]
+        credit: Vec<ByteSize>,
+        /// With --causal, what of a credit the host's bound leaves out: 0G spends it all, 3G what stands past that
+        /// [default: all of it, as the daemon's bound reads the plain count].
+        #[arg(long, requires = "causal")]
+        host_hold: Option<ByteSize>,
+        /// With --causal, move the host's other programs this much later, round the window (such as 90m): a desktop's
+        /// burst meeting other jobs than it met.
+        #[arg(long, requires = "causal", value_parser = parse_age)]
+        shift: Option<Duration>,
+        /// Replay a job in another profile than the history has, as REPOSITORY:JOB=PROFILE: pools made since it ran.
+        #[arg(long = "move", value_parser = simulate::moved)]
+        moves: Vec<simulate::Move>,
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
@@ -172,6 +191,11 @@ fn main() -> ExitCode {
             causal,
             cold,
             overhead,
+            guard_overhead,
+            credit,
+            host_hold,
+            shift,
+            moves,
         }) => config_or_default(config).and_then(|path| {
             run_simulation(
                 &path,
@@ -179,12 +203,20 @@ fn main() -> ExitCode {
                     memory_max,
                     cpus,
                     cpu_overcommit,
-                    causal: causal.then_some(Causal { cold, overhead }),
+                    causal: causal.then_some(Causal {
+                        cold,
+                        overhead,
+                        guard_overhead,
+                        credits: credit,
+                        host_hold,
+                        shift,
+                    }),
                     priority: if priority {
-                        Comparing::Priority
+                        simulate::Comparing::Priority
                     } else {
-                        Comparing::Policies
+                        simulate::Comparing::Policies
                     },
+                    moves,
                 },
                 since,
                 &slots.into_iter().collect(),
@@ -266,25 +298,31 @@ struct Limits {
     /// Millicores.
     cpus: Option<u64>,
     cpu_overcommit: Vec<f64>,
-    priority: Comparing,
+    priority: simulate::Comparing,
     causal: Option<Causal>,
+    moves: Vec<simulate::Move>,
 }
 
 /// How `runnerd simulate --causal` replays.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Causal {
     /// Every run takes its job's heaviest samples.
     cold: bool,
     /// What the slice holds beside its runners, where given.
     overhead: Option<ByteSize>,
+    /// What the guards read of that, where given.
+    guard_overhead: Option<ByteSize>,
+    /// The credit of each row; none, the usual rows.
+    credits: Vec<ByteSize>,
+    /// What of a credit the host's bound leaves out, where given.
+    host_hold: Option<ByteSize>,
+    /// How much later the host's other programs run, where given.
+    shift: Option<Duration>,
 }
 
-/// Whether `runnerd simulate` also compares the barrier for a starved job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Comparing {
-    Priority,
-    Policies,
-}
+/// The most credit of each row `runnerd simulate --causal` replays by default: the plain count, then the pooled one
+/// around its constant.
+const CREDITS: [u64; 4] = [0, 4 << 30, 6 << 30, 8 << 30];
 
 /// How far before a replay's window it reads what the daemon would know of the jobs by then, in ms: as far as the
 /// daemon reads back.
@@ -330,7 +368,7 @@ fn run_simulation(
         .map_err(|error| fail(&error))?
         .unwrap_or_default();
     let since = last.saturating_sub(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
-    let history = runnerd_core::store::sizing_at(&database, since)
+    let mut history = runnerd_core::store::sizing_at(&database, since)
         .map_err(|error| fail(&error))?
         .ok_or_else(|| {
             fail(&format_args!(
@@ -338,6 +376,10 @@ fn run_simulation(
                 database.display()
             ))
         })?;
+    limits
+        .moves
+        .iter()
+        .for_each(|moved| moved.apply(&mut history.jobs));
     if limits.causal.is_none() {
         output::line(simulate::report(
             &config,
@@ -350,13 +392,17 @@ fn run_simulation(
             slots,
         ));
     }
-    let compares = limits.priority == Comparing::Priority || limits.causal.is_some();
+    let compares = limits.priority == simulate::Comparing::Priority || limits.causal.is_some();
     if !compares {
         return Ok(ExitCode::SUCCESS);
     }
-    let known = runnerd_core::store::sizing_at(&database, since.saturating_sub(KNOWN_BEFORE))
+    let mut known = runnerd_core::store::sizing_at(&database, since.saturating_sub(KNOWN_BEFORE))
         .map_err(|error| fail(&error))?
         .unwrap_or_default();
+    limits
+        .moves
+        .iter()
+        .for_each(|moved| moved.apply(&mut known.jobs));
     let comparison = simulate::Comparison {
         memory_max: memory_max.map(|max| max.0),
         cpu_budget: config
@@ -368,29 +414,45 @@ fn run_simulation(
         slots,
         left_out: history.left_out,
     };
-    if limits.priority == Comparing::Priority {
+    if limits.priority == simulate::Comparing::Priority {
         output::line(simulate::priority(&config, &comparison));
     }
-    if let Some(causal) = limits.causal {
-        let poll = u64::try_from(config.host.poll_interval.as_millis()).unwrap_or(u64::MAX);
-        let trace = trace_of(&database, since, poll, causal, &history.jobs)?;
-        output::line(simulate::causal(&config, &comparison, &trace));
+    if let Some(causal) = &limits.causal {
+        let trace = trace_of(&config, &database, since, causal, &history.jobs)?;
+        let credits: Vec<u64> = if causal.credits.is_empty() {
+            CREDITS.to_vec()
+        } else {
+            causal.credits.iter().map(|credit| credit.0).collect()
+        };
+        let counts = simulate::Counts {
+            credits: &credits,
+            host_hold: causal.host_hold.map_or(u64::MAX, |hold| hold.0),
+            barriers: limits.priority,
+        };
+        output::line(simulate::causal(&config, &comparison, &trace, &counts));
     }
     Ok(ExitCode::SUCCESS)
 }
 
 /// How the jobs from `since` (ms) of the history at `database` ran, as `causal` asks.
 fn trace_of(
+    config: &Config,
     database: &Path,
     since: u64,
-    poll: u64,
-    causal: Causal,
+    causal: &Causal,
     jobs: &[runnerd_core::sizing::Ran],
 ) -> Result<Trace, ExitCode> {
+    let poll = u64::try_from(config.host.poll_interval.as_millis()).unwrap_or(u64::MAX);
     let overhead = causal.overhead.map(|overhead| overhead.0);
-    let trace = runnerd_core::store::trace_at(database, since, poll, overhead)
+    let mut trace = runnerd_core::store::trace_at(database, since, poll, overhead)
         .map_err(|error| fail(&error))?
         .unwrap_or_default();
+    if let Some(guard) = causal.guard_overhead {
+        trace.guard_overhead = guard.0;
+    }
+    if let Some(shift) = causal.shift {
+        trace = trace.shifted(u64::try_from(shift.as_millis()).unwrap_or(u64::MAX));
+    }
     Ok(if causal.cold { trace.cold(jobs) } else { trace })
 }
 

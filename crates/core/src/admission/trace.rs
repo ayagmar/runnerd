@@ -91,6 +91,31 @@ impl RunTrace {
             .max()
             .unwrap_or(0)
     }
+
+    /// Its samples for a run `lasting` ms: as they are if its peak comes in time, else the stretch of that length with
+    /// the peak at its middle, or as near as its samples reach, read from the start. A cold run must reach what the
+    /// job's heaviest run reached, however short the run it stands for.
+    fn heaviest(&self, lasting: u64) -> Vec<Point> {
+        let peak = self.peak();
+        let at = self.samples.iter().find(|point| point.memory == peak);
+        let (Some(at), Some(last)) = (at.map(|point| point.at), self.samples.last()) else {
+            return Vec::new();
+        };
+        if at < lasting {
+            return self.samples.clone();
+        }
+        let from = at
+            .saturating_sub(lasting / 2)
+            .min(last.at.saturating_sub(lasting));
+        self.samples
+            .iter()
+            .filter(|point| (from..=from + lasting).contains(&point.at))
+            .map(|point| Point {
+                at: point.at - from,
+                ..*point
+            })
+            .collect()
+    }
 }
 
 /// What the host's other programs held from a moment on.
@@ -113,8 +138,11 @@ pub struct Trace {
     /// The host's memory, in bytes; 0 with no reading, and then the replay has no host bound.
     pub total: u64,
     /// What the slice holds beside its runners' samples, in bytes: file cache read twice, seeds, the mirror. It cannot
-    /// follow reordered jobs, so a replay carries one constant, chosen high (`store::trace_at`).
+    /// follow reordered jobs, so a replay carries one constant, chosen high (`store::trace_at`). The hazards read this.
     pub overhead: u64,
+    /// What the guards read of the same: the slice as a sample shows it when a start is decided. `overhead` unless
+    /// asked otherwise, as a slice can read low at a decision and high once the job runs.
+    pub guard_overhead: u64,
     /// What the host's reading of the slice holds beside its runners' samples, in bytes: without page cache and
     /// reclaimable slab, so far less than `overhead`, and what `MemAvailable` is read from.
     pub host_overhead: u64,
@@ -133,8 +161,24 @@ impl Trace {
         self.outside.last().map_or(0, |point| point.at)
     }
 
-    /// The same window with every run of a job given the samples of that job's heaviest run: a dependency bump that
-    /// leaves every cache cold at once, whatever the run's own history was.
+    /// The same window with the host's other programs `by` ms later, what falls past the window's end coming round to
+    /// its start: a desktop's burst meeting other jobs than it really met.
+    #[must_use]
+    pub fn shifted(&self, by: u64) -> Trace {
+        let mut shifted = self.clone();
+        if let (Some(first), Some(last)) = (self.outside.first(), self.outside.last()) {
+            let span = last.at - first.at + 1;
+            for point in &mut shifted.outside {
+                point.at = first.at + (point.at - first.at + by) % span;
+            }
+            shifted.outside.sort_by_key(|point| point.at);
+        }
+        shifted
+    }
+
+    /// The same window with every run of a job given the samples of that job's heaviest run, placed so that the run
+    /// reaches its peak in the time it has: a dependency bump that leaves every cache cold at once, whatever the run's
+    /// own history was.
     #[must_use]
     pub fn cold(&self, jobs: &[Ran]) -> Trace {
         let mut heaviest: BTreeMap<Key, &RunTrace> = BTreeMap::new();
@@ -153,7 +197,13 @@ impl Trace {
                 cold.runs.get_mut(&RunId::of(run)),
                 heaviest.get(&Key::of(run)),
             ) {
-                trace.samples.clone_from(&heavy.samples);
+                let lasting = run
+                    .finished_at
+                    .zip(run.started_at)
+                    .map_or(u64::MAX, |(finished, started)| {
+                        finished.saturating_sub(started)
+                    });
+                trace.samples = heavy.heaviest(lasting);
             }
         }
         cold

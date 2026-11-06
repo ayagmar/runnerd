@@ -404,6 +404,20 @@ pub struct Replaying<'known> {
     pub trace: Option<&'known Trace>,
     /// The most the pooled count may take off the plain one (`pooled::Snapshot::most`); read only with a `trace`.
     pub most_credit: u64,
+    /// What of the credit the host's bound leaves out: all of it, `u64::MAX`, as the daemon's reads the plain count.
+    /// Less shows what a host bound that spent the credit would have done (ADR 0099).
+    pub host_hold: u64,
+    /// Whether `Backfill` expects what the credit may still give, as the daemon does.
+    pub credit_room: CreditRoom,
+}
+
+/// Whether a replay's `Backfill` reads `Budget::credit_room`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreditRoom {
+    /// As the daemon does.
+    Counted,
+    /// To show what that keeps: an owner may then start before the time its younger jobs were held to.
+    LeftOut,
 }
 
 impl From<Barriers> for Replaying<'_> {
@@ -414,6 +428,8 @@ impl From<Barriers> for Replaying<'_> {
             known: None,
             trace: None,
             most_credit: 0,
+            host_hold: u64::MAX,
+            credit_room: CreditRoom::Counted,
         }
     }
 }
@@ -572,6 +588,8 @@ pub fn simulate<'known>(
         known,
         trace,
         most_credit,
+        host_hold,
+        credit_room,
     } = how.into();
     let mirror = config.mirror_memory();
     let budget = memory_max.map(|max| max.saturating_sub(mirror));
@@ -632,6 +650,8 @@ pub fn simulate<'known>(
         mirror,
         trace,
         most_credit,
+        host_hold,
+        expects_credit: credit_room,
         short: false,
         next_plan: 0,
         needs: RefCell::new(BTreeMap::new()),
@@ -825,6 +845,8 @@ struct Replayer<'run> {
     mirror: u64,
     trace: Option<&'run Trace>,
     most_credit: u64,
+    host_hold: u64,
+    expects_credit: CreditRoom,
     /// Whether the last plan left a job waiting for the host's memory, so the larger margin stands.
     short: bool,
     /// When the next plan with no arrival or end is, in ms.
@@ -989,21 +1011,30 @@ impl<'run> Replayer<'run> {
         hazard.most_credit = hazard.most_credit.max(count.credit);
         if count.credit < self.last_credit {
             hazard.credit_falls += 1;
-            let fell = self.last_credit - count.credit;
-            let limit = self.limit_now();
-            let over = count.pooled() > limit && count.pooled() - fell <= limit;
-            self.hazard.overdrawn += u64::from(over);
+            let before = pooled::Count {
+                credit: self.last_credit,
+                ..count
+            };
+            self.hazard.overdrawn += u64::from(self.overdrawn(before, count));
         }
         self.last_credit = count.credit;
         self.note_unfunded(span);
     }
 
-    /// The least of the budgets the count goes by, with the mirror: `MemoryMax` and the host's limit.
-    fn limit_now(&self) -> u64 {
+    /// Whether the fall from `before` to `now` left the count past a budget it was within: `MemoryMax` or the host's
+    /// limit, each read as it reads the count.
+    fn overdrawn(&self, before: pooled::Count, now: pooled::Count) -> bool {
+        let max = self.memory_max.unwrap_or(u64::MAX);
         let host = self
             .host_memory()
             .map_or(u64::MAX, |memory| host::limit(&memory, self.short));
-        self.memory_max.unwrap_or(u64::MAX).min(host)
+        (now.pooled() > max && before.pooled() <= max)
+            || (self.hosted(now) > host && self.hosted(before) <= host)
+    }
+
+    /// What the host's limit reads of `count`.
+    fn hosted(&self, count: pooled::Count) -> u64 {
+        count.plain - count.credit.saturating_sub(self.host_hold)
     }
 
     /// Notes how far what any start left running uses now stands past the count that let it start.
@@ -1042,6 +1073,11 @@ impl<'run> Replayer<'run> {
     /// What the slice holds now as the mark reads it: its runners' use with the trace's overhead.
     fn slice(&self) -> u64 {
         self.used_now() + self.trace.map_or(0, |trace| trace.overhead)
+    }
+
+    /// What the guards read of the slice now, as a sample would show it at a decision.
+    fn slice_read(&self) -> u64 {
+        self.used_now() + self.trace.map_or(0, |trace| trace.guard_overhead)
     }
 
     /// What the running jobs use now, as their samples say.
@@ -1095,7 +1131,7 @@ impl<'run> Replayer<'run> {
             runners: &held,
             committed: self.mirror,
             slice: self.memory_max.map(|memory_max| pooled::Slice {
-                memory: self.slice(),
+                memory: self.slice_read(),
                 memory_max,
             }),
             host: host.map(|memory| {
@@ -1119,7 +1155,7 @@ impl<'run> Replayer<'run> {
     fn host_left(&self) -> Option<i64> {
         let memory = self.host_memory()?;
         let limit = host::limit(&memory, self.short && !self.running.is_empty());
-        Some(host::left(limit, self.count().pooled(), false))
+        Some(host::left(limit, self.hosted(self.count()), false))
     }
 
     /// Serves `waiting` at `now`, as one `scheduler::plan` does: each job in turn starts if it fits, until a job that
@@ -1255,7 +1291,10 @@ impl<'run> Replayer<'run> {
 
     /// How much more the credit could take off what runs, as `Budget::credit_room`.
     fn credit_room(&self) -> u64 {
-        if self.trace.is_none() || self.policy != Policy::Measured {
+        if self.trace.is_none()
+            || self.policy != Policy::Measured
+            || self.expects_credit == CreditRoom::LeftOut
+        {
             return 0;
         }
         self.most_credit.saturating_sub(self.count().credit)
@@ -1404,7 +1443,7 @@ impl<'run> Replayer<'run> {
         if self.trace.is_some() {
             return self.policy == Policy::Measured
                 && self.memory_max.is_some_and(|max| {
-                    self.slice().saturating_mul(100) >= max.saturating_mul(HIGH_WATER)
+                    self.slice_read().saturating_mul(100) >= max.saturating_mul(HIGH_WATER)
                 });
         }
         let peaks: u64 = self.running.iter().map(|running| running.peak).sum();

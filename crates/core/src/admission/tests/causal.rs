@@ -86,6 +86,7 @@ fn trace_of(jobs: &[Ran]) -> Trace {
         ],
         total: 64 * G,
         overhead: 0,
+        guard_overhead: 0,
         host_overhead: 0,
     }
 }
@@ -105,6 +106,8 @@ fn replay(jobs: &[Ran], trace: &Trace, most_credit: u64) -> Replay {
             known: Some(&known),
             trace: Some(trace),
             most_credit,
+            host_hold: u64::MAX,
+            credit_room: CreditRoom::Counted,
         },
     )
 }
@@ -256,6 +259,57 @@ fn a_cold_window_gives_every_run_its_jobs_heaviest_samples() {
     assert_eq!(peak(0), Reading::Used(4 * G), "the job's heaviest run");
     assert_eq!(peak(1), Reading::Used(4 * G));
     assert_eq!(peak(2), Reading::Used(USED), "another job keeps its own");
+}
+
+#[test]
+fn a_cold_run_shorter_than_the_heaviest_reaches_its_peak_in_the_time_it_has() {
+    // A job's short runs are most of them: a peak past their end would leave the stress with nothing to stress.
+    let long = in_run(check(NOW, 30), 1, 1);
+    let short = in_run(check(NOW + MINUTE, 5), 2, 1);
+    let jobs = [long, short];
+    let mut trace = trace_of(&jobs);
+    let heavy = &mut trace.runs.get_mut(&RunId::of(&jobs[0])).unwrap().samples;
+    heavy
+        .iter_mut()
+        .find(|point| point.at == 20 * MINUTE)
+        .unwrap()
+        .memory = 4 * G;
+    let cold = trace.cold(&jobs);
+    let lasted = jobs[1].finished_at.unwrap() - jobs[1].started_at.unwrap();
+    let run = &cold.runs[&RunId::of(&jobs[1])];
+    let at = run.samples.iter().find(|point| point.memory == 4 * G);
+    assert!(
+        at.is_some_and(|point| point.at < lasted),
+        "the peak falls inside its {lasted} ms: {at:?}"
+    );
+    assert_eq!(run.at(0), Reading::Used(USED), "it reads from its start");
+}
+
+#[test]
+fn a_shifted_host_keeps_every_reading_and_comes_round_the_window() {
+    let trace = Trace {
+        outside: [(0, 1), (10, 2), (20, 3), (30, 4)]
+            .map(|(at, memory)| Outside { at, memory })
+            .to_vec(),
+        ..Trace::default()
+    };
+    let shifted = trace.shifted(10);
+    assert_eq!(shifted.outside_at(0), Some(4), "what ended the window");
+    assert_eq!(shifted.outside_at(10), Some(1));
+    assert_eq!(shifted.outside_at(30), Some(3));
+    assert_eq!(shifted.outside.len(), 4);
+}
+
+#[test]
+fn a_slice_that_reads_low_at_a_decision_goes_past_the_mark_it_did_not_see() {
+    // The hazard is read at what the slice holds, the guards at what a sample showed them.
+    let jobs = jobs(NOW + 40 * MINUTE);
+    let mut trace = trace_of(&jobs);
+    trace.overhead = 8 * G;
+    trace.guard_overhead = 0;
+    let replay = replay(&jobs, &trace, 0);
+    assert!(replay.hazard.over_mark.count > 0, "{:?}", replay.hazard);
+    assert_eq!(replay.held_back, 0, "the guards saw room");
 }
 
 #[test]
