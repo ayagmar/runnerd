@@ -2,6 +2,7 @@
 //! repositories, turned into `api` types. Milliseconds in the database become seconds in the API. Shared by the
 //! API's reads and by the writer, which reads back what it announces.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use rusqlite::types::Value;
@@ -965,7 +966,36 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
     })?
     .collect::<rusqlite::Result<_>>()?;
     let kept_since = kept_since(db)?;
-    Ok(crate::insights::History { runs, kept_since })
+    Ok(crate::insights::History {
+        runs,
+        kept_since,
+        host: None,
+    })
+}
+
+/// Those of `jobs` still queued, with how long each waited for the host's memory.
+pub(super) fn held_jobs(
+    db: &Connection,
+    jobs: &BTreeSet<u64>,
+) -> rusqlite::Result<Vec<crate::insights::HeldJob>> {
+    let mut held = db.prepare_cached(
+        "SELECT repository, workflow, name, host_waited FROM jobs WHERE id = ?1 AND state = 'queued'",
+    )?;
+    let mut found = Vec::new();
+    for job in jobs {
+        found.extend(
+            held.query_row([job], |row| {
+                Ok(crate::insights::HeldJob {
+                    repository: row.get(0)?,
+                    workflow: row.get(1)?,
+                    name: row.get(2)?,
+                    waited: row.get(3)?,
+                })
+            })
+            .optional()?,
+        );
+    }
+    Ok(found)
 }
 
 pub(super) fn warm(

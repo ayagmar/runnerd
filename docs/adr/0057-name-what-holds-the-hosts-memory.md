@@ -1,6 +1,7 @@
 # 0057. Name the programs that hold the host's memory, by name only
 
-Status: **Accepted** (2026-10-25). Extends [0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-10-25), amended by [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md), which
+sends the same names in an insight and a notification. Extends [0055](0055-admission-follows-the-hosts-memory.md).
 
 ## Context
 

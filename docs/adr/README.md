@@ -64,7 +64,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk | Amended by 0089, 0090 |
 | [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache | Amended by 0063, 0070, 0078, 0084, 0096 |
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved | Amended by 0096 |
-| [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only | Accepted |
+| [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only | Amended by 0100 |
 | [0058](0058-a-repository-served-by-several-profiles.md) | A repository served by several profiles, each with its own labels | Amended by 0096 |
 | [0059](0059-clients-show-what-core-computes.md) | Clients show what core computes about a job | Amended by 0069 |
 | [0060](0060-clients-show-what-core-computes-about-the-host.md) | Clients show what core computes about the host | Accepted |
@@ -106,3 +106,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098 |
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098 |
 | [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Accepted |
+| [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Accepted |

@@ -1,7 +1,7 @@
 //! Insights from the job history (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on a re-run,
 //! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, repositories whose
-//! downloads memory pressure throttled, jobs their CPU cap held back by the rule auto sizing reads (ADR 0087), and
-//! how long each repository's jobs wait, this week against the last when the history holds all of last week; and the
+//! downloads memory pressure throttled, jobs their CPU cap held back by the rule auto sizing reads (ADR 0087), jobs
+//! held for the host's memory by programs outside CI (ADR 0100), and how long each repository's jobs wait, this week against the last when the history holds all of last week; and the
 //! daily digest. Pure: the daemon reads the history, the config and the clock and passes them in. It sends nothing
 //! and changes nothing.
 
@@ -46,6 +46,16 @@ const WAITS_ONE_IN_20: u32 = 20;
 
 /// A repository's runs the kernel throttled for memory pressure that make an insight.
 const THROTTLED_MIN_RUNS: u32 = 2;
+
+/// A queued job's wait for the host's memory that makes an insight, in milliseconds, while a job waits for it now.
+const HOST_HELD_AFTER: u64 = 30 * 60 * SECOND;
+/// The insight's key changes this often, so it is told once in each such window however long the wait lasts, in
+/// milliseconds.
+const HOST_HELD_EVERY: u64 = 6 * 3600 * SECOND;
+/// How old the host's reading may be for the insight to hold, in milliseconds, and the least the engine's look at the
+/// waiting jobs may be, which is three `[host] poll_interval`s when that is more: a daemon that stopped looking says
+/// nothing about now.
+const HOST_HELD_FRESH: u64 = 60 * SECOND;
 
 /// One job the history closed, as insights read it. Times in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +162,31 @@ impl Run {
     }
 }
 
+/// The jobs waiting for the host's memory at one moment, and the reading that says what holds it. What the daemon
+/// knows of now, not of the history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostHold {
+    /// The host's memory as last read.
+    pub memory: api::HostMemory,
+    /// When the engine last saw these jobs wait for it, in ms.
+    pub seen: u64,
+    /// The jobs waiting for it then that are still queued.
+    pub jobs: Vec<HeldJob>,
+}
+
+/// A queued job waiting for the host's memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldJob {
+    /// `owner/name`.
+    pub repository: String,
+    /// The workflow's name, when known.
+    pub workflow: Option<String>,
+    /// The job's name.
+    pub name: String,
+    /// How long it has waited for the host's memory, in ms (`jobs.host_waited`).
+    pub waited: u64,
+}
+
 /// What insights read from the job history.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
@@ -160,6 +195,8 @@ pub struct History {
     /// From when it holds every job that ended, in ms (`history_kept`): before that, pruning or the daemon's first
     /// start left only some, so no week before it is compared.
     pub kept_since: u64,
+    /// The jobs held for the host's memory now; `None` when none is, or the daemon has no reading of it.
+    pub host: Option<HostHold>,
 }
 
 /// A job as insights tell jobs apart: repository, workflow and name.
@@ -197,6 +234,12 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         found.extend(cpu_held(*key, runs, config));
     }
     found.extend(throttled(&window));
+    found.extend(
+        history
+            .host
+            .as_ref()
+            .and_then(|hold| host_held(hold, config, now)),
+    );
     let waits = waits(history, now);
     found.extend(waits.iter().filter_map(waits_insight));
     found.sort_by(|a, b| {
@@ -263,6 +306,55 @@ pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
             .collect(),
         savings: None,
     }
+}
+
+/// A job has waited for the host's memory for 30 minutes or more, and `hold` says a job waits for it at `now` (ms):
+/// the host's memory is short, and the programs outside CI that hold it are the owner's to close. Worded here once
+/// for `runnerctl`, the dashboard, the TUI and notifications, with the longest waiter's repository. It names the
+/// programs `HostMemory::outside_line` names and says closing them frees only part of what is held, since the figure
+/// also counts the kernel and compressed swap.
+///
+/// Holds from the host's reading and the engine's look at the waiting jobs: the reading no older than a minute, the
+/// look no older than that or three `[host] poll_interval`s, neither from after `now`, the second of the look (a plan
+/// in that second is not from after it). With no reading, or a stale one, nothing is said. Its key is the same for 6
+/// hours and then changes, so a notification target tells it once in each window of them (told keys are stored, so a
+/// restart repeats none).
+fn host_held(hold: &HostHold, config: &Config, now: u64) -> Option<Insight> {
+    let reading = hold.memory.at.saturating_mul(SECOND);
+    // The engine plans once a `poll_interval`, so its look is as old as three of them before it is missed.
+    let poll = u64::try_from(config.host.poll_interval.as_millis()).unwrap_or(u64::MAX);
+    let plan_fresh = HOST_HELD_FRESH.max(poll.saturating_mul(3));
+    let fresh =
+        |at: u64, within: u64| at / SECOND <= now / SECOND && now.saturating_sub(at) <= within;
+    if !fresh(reading, HOST_HELD_FRESH) || !fresh(hold.seen, plan_fresh) {
+        return None;
+    }
+    let longest = hold.jobs.iter().max_by_key(|job| job.waited)?;
+    if longest.waited < HOST_HELD_AFTER {
+        return None;
+    }
+    let jobs = u32::try_from(hold.jobs.len()).unwrap_or(u32::MAX);
+    let waited = longest.waited / SECOND;
+    let sentence = Insight::host_held_sentence(
+        jobs,
+        waited,
+        &subject((
+            &longest.repository,
+            longest.workflow.as_deref(),
+            &longest.name,
+        )),
+        &hold.memory,
+    );
+    Some(Insight {
+        key: format!("host-held:{}", now / HOST_HELD_EVERY),
+        severity: Severity::Warning,
+        repository: longest.repository.clone(),
+        workflow: None,
+        job: None,
+        sentence,
+        kind: InsightKind::HostHeld { jobs, waited },
+        runs: Vec::new(),
+    })
 }
 
 /// `repository: workflow / job`, or `repository: job` when the workflow is not known.

@@ -940,10 +940,13 @@ fn run_link() -> RunLink {
     }
 }
 
-/// One insight of each kind.
+/// One insight of each kind the previous release knows. A kind it does not is read as its `Unknown` fallback, which
+/// the `insight-kind` document accepts on its own (ADR 0100), so that a real break of an insight, a digest or a
+/// notification still fails here.
 fn insights_of_every_kind() -> Vec<Insight> {
     insight_kind()
         .into_iter()
+        .filter(|kind| !matches!(kind, InsightKind::HostHeld { .. }))
         .map(|kind| Insight {
             key: "tidewater/halyard:ci:build".to_owned(),
             severity: Severity::Warning,
@@ -957,7 +960,7 @@ fn insights_of_every_kind() -> Vec<Insight> {
         .collect()
 }
 
-fn insight_kind() -> Vec<InsightKind> {
+pub(crate) fn insight_kind() -> Vec<InsightKind> {
     let every = vec![
         InsightKind::Slower {
             branch: Some("main".to_owned()),
@@ -996,6 +999,10 @@ fn insight_kind() -> Vec<InsightKind> {
             raised_from: Some(6),
             set: Some(14),
         },
+        InsightKind::HostHeld {
+            jobs: 3,
+            waited: 2530,
+        },
     ];
     for kind in &every {
         match kind {
@@ -1006,6 +1013,7 @@ fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::Throttled { .. }
             | InsightKind::Waits { .. }
             | InsightKind::CpuHeld { .. }
+            | InsightKind::HostHeld { .. }
             // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
             | InsightKind::Unknown => {}
         }

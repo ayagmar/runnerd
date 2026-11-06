@@ -1223,6 +1223,10 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         [short.clone(), short],
         "the two left wait for the host's memory"
     );
+    // Insights are told the same two jobs, with the reading that says who holds the memory.
+    let hold = handle.store.insights(0).await.unwrap().host.unwrap();
+    assert_eq!(hold.jobs.len(), 2, "the two left wait: {hold:?}");
+    assert_eq!(hold.memory.holders[0].name, "java");
     let reason = {
         let status = handle.status.borrow();
         let job = &status.queued[2];
@@ -1252,6 +1256,11 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);
     handle.store.flush().await;
+    assert_eq!(
+        handle.store.insights(0).await.unwrap().host,
+        None,
+        "once they start, no job waits for the host's memory"
+    );
     let waited = waited(&dir, "host_waited");
     assert_eq!(waited[..2], [0, 0], "the jobs that started waited not");
     assert!(

@@ -1,6 +1,6 @@
 //! Insights from synthetic histories of fictional repositories: one `halyard/api` job run a few times a day.
 
-use super::{History, Run, digest, insights};
+use super::{HeldJob, History, HostHold, Run, digest, insights};
 use crate::api::{self, AutoNote, InsightKind, JobState, Severity};
 use crate::config::Config;
 
@@ -73,6 +73,7 @@ fn whole(runs: &[Run]) -> History {
     History {
         runs: runs.to_vec(),
         kept_since: 0,
+        host: None,
     }
 }
 
@@ -867,6 +868,7 @@ fn a_week_before_the_history_holds_every_job_is_not_compared() {
     let young = History {
         runs,
         kept_since: NOW - 8 * 24 * HOUR,
+        host: None,
     };
     let found = insights(&young, &config(), 14, NOW);
     let api = &found.waits[0];
@@ -893,6 +895,7 @@ fn a_week_before_the_history_holds_every_job_is_not_compared() {
     );
     let kept = History {
         kept_since: NOW - 14 * 24 * HOUR,
+        host: None,
         ..young
     };
     assert!(
@@ -921,6 +924,7 @@ fn a_job_queued_before_runnerd_first_ran_waits_from_when_it_did() {
     let history = History {
         runs,
         kept_since: first,
+        host: None,
     };
     let found = insights(&history, &config(), 14, NOW);
     assert_eq!(found.waits[0].now.all.p95, Some(60));
@@ -1017,5 +1021,161 @@ fn an_insight_of_a_kind_from_a_later_release_still_reads_by_its_sentence() {
     assert_eq!(
         read.insights[0].sentence,
         "halyard/api: something a later release finds."
+    );
+}
+
+/// Two jobs waiting for the host's memory at `NOW`, the longer for `waited` ms, beside a reading that names java and
+/// claude.
+fn held(waited: u64) -> HostHold {
+    HostHold {
+        memory: api::HostMemory {
+            at: NOW / 1000 - 2,
+            total: 64 * G,
+            available: 8 * G,
+            slice: 18 * G,
+            some: None,
+            full: None,
+            holders: vec![
+                api::Holder {
+                    name: "java".to_owned(),
+                    memory: 9 * G,
+                },
+                api::Holder {
+                    name: "claude".to_owned(),
+                    memory: 5 * G,
+                },
+            ],
+            ceiling: None,
+        },
+        seen: NOW - 3_000,
+        jobs: vec![
+            HeldJob {
+                repository: "halyard/web".to_owned(),
+                workflow: Some("CI".to_owned()),
+                name: "lint".to_owned(),
+                waited: 5 * MINUTE,
+            },
+            HeldJob {
+                repository: "halyard/api".to_owned(),
+                workflow: Some("CI".to_owned()),
+                name: "test".to_owned(),
+                waited,
+            },
+        ],
+    }
+}
+
+/// The insights at `at` of a history with no finished job and `hold` waiting.
+fn holding(hold: Option<HostHold>, at: u64) -> Vec<api::Insight> {
+    holding_by(hold, &config(), at)
+}
+
+/// The same under `config`.
+fn holding_by(hold: Option<HostHold>, config: &Config, at: u64) -> Vec<api::Insight> {
+    let history = History {
+        host: hold,
+        ..History::default()
+    };
+    insights(&history, config, 14, at).insights
+}
+
+#[test]
+fn a_job_held_half_an_hour_for_the_hosts_memory_is_a_warning_naming_who_holds_it() {
+    // Catches a message that blames the wrong repository, drops the holders, or says closing them frees the whole
+    // figure the host holds outside CI.
+    let found = holding(Some(held(42 * MINUTE)), NOW);
+    let [insight] = found.as_slice() else {
+        panic!("one insight: {found:#?}");
+    };
+    assert_eq!(insight.severity, Severity::Warning);
+    assert_eq!(insight.repository, "halyard/api", "the longest waiter's");
+    assert_eq!(
+        insight.kind,
+        InsightKind::HostHeld {
+            jobs: 2,
+            waited: 42 * 60
+        }
+    );
+    assert_eq!(
+        insight.sentence,
+        "2 jobs wait for the host's memory, the longest for 42m 00s (halyard/api: CI / test); programs outside CI \
+         hold 38G, most java 9G and claude 5G. Closing programs frees only part of that."
+    );
+    // The same for the whole of a 6-hour window and another after it.
+    let key = |at: u64| {
+        let mut hold = held(42 * MINUTE);
+        hold.memory.at = at / 1000;
+        hold.seen = at;
+        holding(Some(hold), at)[0].key.clone()
+    };
+    let window = 6 * HOUR;
+    let start = NOW / window * window;
+    assert_eq!(key(start), key(start + window - 1000));
+    assert_ne!(key(start + window - 1000), key(start + window));
+}
+
+#[test]
+fn nothing_is_said_of_a_host_wait_that_is_short_unseen_stale_or_from_after_the_look() {
+    // Catches a message for every short span, one from a daemon that stopped looking, and the digest's look at 24
+    // hours ago finding today's wait.
+    let said = |hold, at| !holding(hold, at).is_empty();
+    assert!(said(Some(held(30 * MINUTE)), NOW), "30 minutes is enough");
+    assert!(!said(Some(held(30 * MINUTE - 1)), NOW), "29m 59s is not");
+    assert!(!said(None, NOW), "no job waits for it now");
+    let mut no_jobs = held(HOUR);
+    no_jobs.jobs.clear();
+    assert!(!said(Some(no_jobs), NOW));
+    let mut old_reading = held(HOUR);
+    old_reading.memory.at = NOW / 1000 - 61;
+    assert!(!said(Some(old_reading), NOW), "a reading of a minute ago");
+    let mut old_look = held(HOUR);
+    old_look.seen = NOW - 61_000;
+    assert!(!said(Some(old_look), NOW), "the engine's last look");
+    // A slow engine plans once a poll: its look is stale only past three of them.
+    let slow = Config::parse(&CONFIG.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\npoll_interval = \"1m\"",
+    ))
+    .unwrap();
+    let mut slow_plan = held(HOUR);
+    slow_plan.seen = NOW - 170_000;
+    assert!(
+        holding_by(Some(slow_plan.clone()), &config(), NOW).is_empty(),
+        "170 s is over the default's minute"
+    );
+    assert!(
+        !holding_by(Some(slow_plan.clone()), &slow, NOW).is_empty(),
+        "170 s is under three 1-minute polls"
+    );
+    slow_plan.seen = NOW - 190_000;
+    assert!(
+        holding_by(Some(slow_plan), &slow, NOW).is_empty(),
+        "190 s is over"
+    );
+    let mut this_second = held(HOUR);
+    this_second.seen = NOW + 400;
+    assert!(
+        said(Some(this_second), NOW),
+        "a plan in the second of the look is not from after it"
+    );
+    let mut next_second = held(HOUR);
+    next_second.seen = NOW + 1_000;
+    assert!(!said(Some(next_second), NOW), "one in the next is");
+    assert!(
+        !said(Some(held(HOUR)), NOW - 24 * HOUR),
+        "a look from before the reading"
+    );
+}
+
+#[test]
+fn a_host_held_insight_without_names_says_how_much_the_host_holds_and_no_more() {
+    // Catches a failure to word a host whose cgroups it cannot read (no holders), or a stray separator.
+    let mut hold = held(HOUR);
+    hold.memory.holders.clear();
+    let found = holding(Some(hold), NOW);
+    assert_eq!(
+        found[0].sentence,
+        "2 jobs wait for the host's memory, the longest for 1h 00m (halyard/api: CI / test); programs outside CI \
+         hold 38G. Closing programs frees only part of that."
     );
 }

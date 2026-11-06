@@ -4,7 +4,7 @@
 //! pruning run on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about
 //! scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -419,6 +419,8 @@ pub struct Store {
     latest_host: Arc<Mutex<Option<api::HostSample>>>,
     /// The last reading of the host's memory, which is not stored.
     latest_host_memory: Arc<Mutex<Option<api::HostMemory>>>,
+    /// The jobs the last plan had waiting for the host's memory, and when (ms); insights read it.
+    host_waiting: Arc<Mutex<(BTreeSet<u64>, u64)>>,
     /// Each running runner's last sample, for admission to read without a query.
     latest_samples: Arc<Mutex<BTreeMap<String, SampleRecord>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
@@ -475,6 +477,7 @@ impl Store {
             held,
             latest_host: Arc::new(Mutex::new(None)),
             latest_host_memory: Arc::new(Mutex::new(None)),
+            host_waiting: Arc::new(Mutex::new((BTreeSet::new(), 0))),
             latest_samples: Arc::new(Mutex::new(BTreeMap::new())),
             events,
             backlog: Arc::new(Semaphore::new(
@@ -649,6 +652,12 @@ impl Store {
     /// The latest reading of the host's memory; `None` before the first.
     pub fn latest_host_memory(&self) -> Option<api::HostMemory> {
         lock(&self.latest_host_memory).clone()
+    }
+
+    /// Keeps which `jobs` the plan at `at` (ms) had waiting for the host's memory, for insights to read with the
+    /// reading; it is not stored. A plan that finds none replaces the last one's.
+    pub fn host_waiting(&self, jobs: BTreeSet<u64>, at: u64) {
+        *lock(&self.host_waiting) = (jobs, at);
     }
 
     /// Adds `ms` to how long each of `jobs` waited because the host's memory could not take its runner, which
@@ -923,10 +932,21 @@ impl Store {
         self.read(move |db| read::pricing(db, since)).await
     }
 
-    /// The jobs completed or lost that were queued at or after `since` (ms), as insights read them, and from when the
-    /// history holds every job.
+    /// The jobs completed or lost that were queued at or after `since` (ms), as insights read them, from when the
+    /// history holds every job, and the queued jobs the last plan had waiting for the host's memory.
     pub async fn insights(&self, since: u64) -> Result<crate::insights::History, StoreError> {
-        self.read(move |db| read::insights(db, since)).await
+        let memory = self.latest_host_memory();
+        let (waiting, seen) = lock(&self.host_waiting).clone();
+        self.read(move |db| {
+            let mut history = read::insights(db, since)?;
+            if let Some(memory) = memory.filter(|_| !waiting.is_empty()) {
+                let jobs = read::held_jobs(db, &waiting)?;
+                history.host =
+                    (!jobs.is_empty()).then_some(crate::insights::HostHold { memory, seen, jobs });
+            }
+            Ok(history)
+        })
+        .await
     }
 
     /// The newest durable event's ID; 0 before the first.

@@ -350,6 +350,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|(_, reason)| matches!(reason, api::Waiting::HostMemory { .. }))
             .map(|(job, _)| *job)
             .collect();
+        self.store.host_waiting(waiting_now.clone(), now);
         let (waited, since) =
             std::mem::replace(&mut self.measured.host_waiting, (waiting_now, now));
         if !waited.is_empty() {
