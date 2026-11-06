@@ -41,6 +41,9 @@ const HOST_TOTAL: u64 = 64 * G;
 /// The host's margin for page cache (ADR 0055): the larger of 2G and a sixteenth of the host.
 const HOST_MARGIN: u64 = HOST_TOTAL / 16;
 
+/// How a seed container's start ends in the names of what a tick started.
+const SEED_START: &str = "'s seed container";
+
 /// Cases run by default; `RUNNERD_INVARIANT_CASES` sets another number.
 const CASES: u64 = 64;
 
@@ -1221,7 +1224,7 @@ impl Case {
             .reseed_memory
             .keys()
             .filter(|profile| !seeds_before.contains(*profile))
-            .map(|profile| format!("{profile}'s seed container"))
+            .map(|profile| format!("{profile}{SEED_START}"))
             .collect::<Vec<_>>();
         if let Some(after) = self.starts_after_a_reading(&starts) {
             started = after;
@@ -1378,6 +1381,8 @@ impl Case {
             return Ok(());
         }
         let budget = &status.budget;
+        // A seed container reserves no CPU, so it starts past a CPU budget a reload lowered under the runners in.
+        let runner_started = started.iter().any(|name| !name.ends_with(SEED_START));
         // Under caps, what Docker runs them with, whatever the engine counts.
         if self.shape.admission == Admission::Caps {
             let running = self.running_containers();
@@ -1392,7 +1397,7 @@ impl Case {
                 .sum();
             drop(docker);
             // The CPU budget is the slice's CPUs times 1.0; seeds and the mirror reserve none.
-            if self.shape.cpu_overcommit && cpus > SLICE_CPUS {
+            if runner_started && self.shape.cpu_overcommit && cpus > SLICE_CPUS {
                 return violation(
                     self,
                     "starts_fit_the_budget",
@@ -1424,6 +1429,7 @@ impl Case {
             );
         }
         if let Some(cpu) = &budget.cpu
+            && runner_started
             && cpu.in_use > cpu.budget
         {
             return violation(
@@ -2196,6 +2202,34 @@ async fn a_job_taking_a_waiting_runners_room_still_fits_the_cpu_budget() {
         Step::InspectFails(1),
         Step::Finish(2),
         Step::Tick,
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+#[tokio::test]
+async fn a_seed_container_starts_past_a_cpu_budget_a_reload_lowered() {
+    // Shrunk from seed 1006. The runners in hold 4000 millicores when a reload turns on a CPU budget of 3000, and the
+    // tick that follows starts a seed container, which reserves none.
+    let steps = [
+        Step::Assign(6),
+        Step::Queue {
+            second: false,
+            labels: Labels::Light,
+        },
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Reload(Change::HeavyMemory),
+        Step::AssignListed(4),
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Finish(5),
+        Step::Reload(Change::LightSlots(1)),
+        Step::Reload(Change::HeavySlots(3)),
+        Step::Reload(Change::CpuOvercommit),
     ];
     assert_eq!(broken(&steps).await, None);
 }
