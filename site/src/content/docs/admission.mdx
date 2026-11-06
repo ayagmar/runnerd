@@ -125,9 +125,9 @@ cpu ×1.5  jvm 3, node 8                 0s     2m08s     4m21s       21s       
 - `PEAKS`: every running job's peak added up at the busiest moment. `UNDER`: jobs that peaked above what admission reserved. `HELD`: starts the high-water mark held back.
 - `cpu ×N`: a CPU budget of N times the slice's CPUs. `CPU`: the most the jobs' average CPUs added up to. `CPU HELD`: starts the budget held back.
 
-Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d`, `--cpus`, and `--cpu-overcommit`, repeated to compare factors.
+Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d` (counted back from the history's last job, so a backup replays its own last days), `--cpus`, and `--cpu-overcommit`, repeated to compare factors.
 
-`--priority` adds the config's policy and slots replayed without and with [the barrier for a starved job](#a-starved-job-goes-first), pool by pool, with the budget's busy share. Every row above already goes by the barrier. Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. The replay also has no host readings, warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool.
+`--priority` adds the config's policy and slots replayed without and with [the barrier for a starved job](#a-starved-job-goes-first), pool by pool, with the budget's busy share. Every row above already goes by the barrier. Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. The replay also has no host readings, warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool. Each job keeps the time it was queued, though a job that follows another in its workflow would really queue later if that one waited. Each window starts from an empty slice, so moving its start by minutes can change the figures a lot.
 
 ## CPU admission
 

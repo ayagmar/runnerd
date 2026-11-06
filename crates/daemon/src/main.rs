@@ -87,7 +87,7 @@ enum Command {
         /// Replay against this MemoryMax (such as 33G) instead of reading it from systemd.
         #[arg(long)]
         memory_max: Option<ByteSize>,
-        /// Replay the jobs queued in the last 30m, 12h, 7d, 2w, …
+        /// Replay the jobs queued in the 30m, 12h, 7d, 2w, … up to the history's last job
         #[arg(long, default_value = "30d", value_parser = parse_age)]
         since: Duration,
         /// The slots a profile may use beyond its configured ones, as PROFILE=SLOTS [default: as many as the slice
@@ -296,13 +296,10 @@ fn run_simulation(
         .clone()
         .or_else(default_database)
         .ok_or_else(|| fail(&"neither XDG_STATE_HOME nor HOME is set"))?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let since = u64::try_from(now)
-        .unwrap_or(u64::MAX)
-        .saturating_sub(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+    let last = runnerd_core::store::last_queued_at(&database)
+        .map_err(|error| fail(&error))?
+        .unwrap_or_default();
+    let since = last.saturating_sub(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
     let history = runnerd_core::store::sizing_at(&database, since)
         .map_err(|error| fail(&error))?
         .ok_or_else(|| {

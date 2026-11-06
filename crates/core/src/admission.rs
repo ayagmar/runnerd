@@ -629,11 +629,6 @@ impl<'run> Replayer<'run> {
     /// waited long enough puts up the barrier; the jobs behind it still age by what they lack themselves.
     fn pass(&mut self, waiting: &mut Vec<Queued<'run>>, now: u64) {
         let at = SystemTime::UNIX_EPOCH + Duration::from_millis(now);
-        let drained = (!self.at_high_water()).then_some(Drained {
-            memory: self.budget.map(signed),
-            cpu: self.cpu_budget.map(signed),
-            host: None,
-        });
         self.barrier = None;
         let mut index = 0;
         while let Some(queued) = waiting.get(index).copied() {
@@ -647,14 +642,14 @@ impl<'run> Replayer<'run> {
                     if self.barrier.is_none() && short.scarce == Scarce::Cpu {
                         self.cpu_held += 1;
                     }
-                    self.hold(queued.run, short, drained, at);
+                    self.hold(queued.run, short, at);
                     index += 1;
                 }
                 Err(Refused::HighWater(short)) => {
                     if self.barrier.is_none() {
                         self.held_back += 1;
                     }
-                    self.hold(queued.run, short, drained, at);
+                    self.hold(queued.run, short, at);
                     index += 1;
                 }
             }
@@ -662,11 +657,17 @@ impl<'run> Replayer<'run> {
     }
 
     /// Under `Barriers::On`, ages the pool of `run`, which lacks what `short` says, and lets it put up the barrier, as
-    /// `scheduler::plan` and the engine do. None ages while `drained` is `None`: an interlock's zeros say nothing.
-    fn hold(&mut self, run: &Ran, short: Short, drained: Option<Drained>, at: SystemTime) {
+    /// `scheduler::plan` and the engine do. None ages at the high-water mark, read job by job as `admits` reads it:
+    /// its zeros say nothing.
+    fn hold(&mut self, run: &Ran, short: Short, at: SystemTime) {
         if self.barriers == Barriers::Off {
             return;
         }
+        let drained = (!self.at_high_water()).then_some(Drained {
+            memory: self.budget.map(signed),
+            cpu: self.cpu_budget.map(signed),
+            host: None,
+        });
         let waits = self.pool_waits.entry(pool_of(run)).or_default();
         if drained.is_some() {
             waits.note(short.scarce, short.job, at);

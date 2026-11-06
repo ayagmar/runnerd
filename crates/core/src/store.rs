@@ -1011,13 +1011,33 @@ impl Store {
 /// `-wal` and `-shm` files a read of a WAL database needs next to it; in one it may not, it reads the file as it is,
 /// or refuses when the `-wal` holds changes the file does not have yet.
 pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, StoreError> {
+    read_only(path, |db| sizing_of(db, since))
+}
+
+/// When the last job of the history at `path` was queued, in ms, read as [`sizing_at`] reads; `None` with no job yet.
+/// A replay's window counts back from it, so a backup replays its own last hours.
+pub fn last_queued_at(path: &Path) -> Result<Option<u64>, StoreError> {
+    let last = read_only(path, |db| {
+        if version(db)? == 0 {
+            return Ok(None);
+        }
+        Ok(db.query_row("SELECT MAX(queued_at) FROM jobs", [], |row| row.get(0))?)
+    })?;
+    Ok(last.flatten())
+}
+
+/// What `read` finds in the database at `path`, opened read-only and left as it is; `None` when there is none.
+fn read_only<T>(
+    path: &Path,
+    read: impl Fn(&Connection) -> Result<T, StoreError>,
+) -> Result<Option<T>, StoreError> {
     if !path.exists() {
         return Ok(None);
     }
-    let read = |path: &str, flags| -> Result<sizing::History, StoreError> {
+    let read = |path: &str, flags| -> Result<T, StoreError> {
         let db = Connection::open_with_flags(path, flags)?;
         db.busy_timeout(Duration::from_secs(5))?;
-        sizing_of(&db, since)
+        read(&db)
     };
     let name = path.to_string_lossy();
     match read(&name, OpenFlags::SQLITE_OPEN_READ_ONLY) {

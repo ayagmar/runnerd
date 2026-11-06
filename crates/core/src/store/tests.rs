@@ -1050,6 +1050,8 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
     );
     // `runnerd doctor` reads the same without a daemon.
     assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
+    // A backup's window counts back from its own last job, not from today.
+    assert_eq!(super::last_queued_at(&path).unwrap(), Some(1_000_002));
     assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
 }
 
