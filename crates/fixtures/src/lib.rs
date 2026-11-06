@@ -681,9 +681,34 @@ pub fn sizing(at: u64) -> api::Sizing {
     }
 }
 
+/// The host's memory at `at` (s) while java and claude hold much of what is not available.
+fn held_host(at: u64) -> HostMemory {
+    HostMemory {
+        at,
+        total: 64 * GIB,
+        available: 8 * GIB + 512 * MIB,
+        slice: 18 * GIB,
+        some: None,
+        full: None,
+        holders: vec![
+            api::Holder {
+                name: "java".to_owned(),
+                memory: 9 * GIB + 307 * MIB,
+            },
+            api::Holder {
+                name: "claude".to_owned(),
+                memory: 5 * GIB + 102 * MIB,
+            },
+        ],
+        ceiling: None,
+    }
+}
+
 /// `GET /v1/insights` at `at` (s) under measured admission and auto sizing: ledger's tests held back by jvm's CPU cap
 /// after a raise that did not help them, a warning; storefront's held back by node's, which auto sizing raises, a
-/// notice; and memory pressure that slowed storefront's downloads. The sentences are core's (`insights::insights`).
+/// notice; memory pressure that slowed storefront's downloads; and jobs held 42 minutes for the host's memory by
+/// java and claude. The sentences are core's (`insights::insights`); the host-held one is worded by core's own
+/// function from its figures.
 pub fn insights(at: u64) -> api::Insights {
     let link = |job: u64, back: u64| api::RunLink {
         job,
@@ -710,6 +735,22 @@ pub fn insights(at: u64) -> api::Insights {
         since: at - 14 * 86_400,
         until: at,
         insights: vec![
+            insight(
+                "host-held:2987",
+                api::Severity::Warning,
+                LEDGER,
+                None,
+                &api::Insight::host_held_sentence(
+                    3,
+                    2530,
+                    "halyard/ledger: CI / test",
+                    &held_host(at),
+                ),
+                api::InsightKind::HostHeld {
+                    jobs: 3,
+                    waited: 2530,
+                },
+            ),
             insight(
                 "throttled:halyard/storefront",
                 api::Severity::Warning,

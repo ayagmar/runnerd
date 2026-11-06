@@ -996,6 +996,10 @@ fn insight_kind() -> Vec<InsightKind> {
             raised_from: Some(6),
             set: Some(14),
         },
+        InsightKind::HostHeld {
+            jobs: 3,
+            waited: 2530,
+        },
     ];
     for kind in &every {
         match kind {
@@ -1006,6 +1010,7 @@ fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::Throttled { .. }
             | InsightKind::Waits { .. }
             | InsightKind::CpuHeld { .. }
+            | InsightKind::HostHeld { .. }
             // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
             | InsightKind::Unknown => {}
         }

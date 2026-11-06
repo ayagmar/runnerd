@@ -17,6 +17,7 @@ A job is its repository, workflow and job name. Notifications send warnings, not
 | `cold-cache` | At least 3 of a job's last 5 runs that could write to the [build cache](../running/#build-cache) looked up 10 or more entries and found 10% or less. A notice. |
 | `throttled` | The kernel throttled the downloads (`sock_throttled`) of 2 or more of a repository's jobs. A warning. |
 | `cpu-held` | At least 3 of a job's last 10 successful runs were throttled by the CPU quota in 15% of their run or more. A notice while auto sizing raises `cpus`, else a warning. |
+| `host-held` | A queued job has waited 30 minutes or more for the [host's memory](../admission/#the-hosts-memory) while a job waits for it now. A warning, with the longest wait and the programs outside CI that hold the most memory; closing them frees only part of what they hold. Sent at most once in each 6-hour window. |
 | `waits` | A repository's p95 wait this week is half again and a minute more than last week's. A notice ([how a wait is counted](../admission/#how-a-wait-is-counted)). |
 
 ```console wrap=false
@@ -26,6 +27,7 @@ This month: 264 job-minutes here, about $1.58 at GitHub's 2-core Linux rate befo
 
 warning slower    halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.
 warning near-cap  halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing is off: raise jvm's memory, or turn it on.
+warning host-held 3 jobs wait for the host's memory, the longest for 42m 10s (halyard/ledger: CI / test); programs outside CI hold 30G, most java 9.3G and claude 5.1G. Closing programs frees only part of that.
 notice  waits     halyard/storefront: 1 job in 20 waits 4m 10s or more for a runner this week, up from 1m 30s the week before.
 ```
 
@@ -59,7 +61,7 @@ Reload or restart runnerd, then `runnerctl notify test` sends every target a tes
 | `failed` | a job failed or timed out | on |
 | `lost` | a job's runner vanished before the job completed | on |
 | `runner` | a runner could not start | on |
-| `insights` | a new warning insight, told again only after runnerd saw it gone for a day | on |
+| `insights` | a new warning insight, told again only after runnerd saw it gone for a day; `host-held` once in each 6-hour window | on |
 | `digest` | daily at `digest_at` (default `09:00`): the day's jobs, new insights, longest waits | off |
 
 A burst is one message: runnerd waits 10 seconds after the first event and sends to a target at most once a minute, so twenty failures arrive as one. A failed delivery is retried with backoff, 5 seconds to 10 minutes.

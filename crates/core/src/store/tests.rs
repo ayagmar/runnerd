@@ -1,6 +1,6 @@
 //! The history database: its schema version, the log cap, and job listing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -11,7 +11,7 @@ use super::{
     LOG_BACKLOG, LogPosition, Measured, MirrorPosition, RunnerRecord, SampleRecord, Store,
     StoreError, VERSION,
 };
-use crate::api::{Bucket, HostSample, JobQuery, JobState, Started, StatsQuery};
+use crate::api::{self, Bucket, HostSample, JobQuery, JobState, Started, StatsQuery};
 use crate::github::QueuedJob;
 use crate::observe::metrics::{CpuHeld, Events};
 use crate::sizing::Measure;
@@ -210,6 +210,23 @@ async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
             ("runnerd-pnpm".to_owned(), 30),
         ])
     );
+}
+
+/// A reading of a host whose java holds 9G.
+fn host_reading() -> api::HostMemory {
+    api::HostMemory {
+        at: crate::time::now_ms() / 1000,
+        total: 64 << 30,
+        available: 8 << 30,
+        slice: 18 << 30,
+        some: None,
+        full: None,
+        holders: vec![api::Holder {
+            name: "java".to_owned(),
+            memory: 9 << 30,
+        }],
+        ceiling: None,
+    }
 }
 
 fn runner(name: &str, started_at: u64) -> RunnerRecord {
@@ -451,7 +468,7 @@ fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord 
 }
 
 /// Runs job 1 on runner `r1` from 1 000 200 to 1 000 400 ms with `samples`, and returns its metrics.
-async fn metrics_of(samples: Vec<SampleRecord>) -> crate::api::JobMetrics {
+async fn metrics_of(samples: Vec<SampleRecord>) -> api::JobMetrics {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     store.queued("o/r", &queued(1), crate::time::now_ms());
@@ -502,7 +519,7 @@ fn held(
 
 #[tokio::test]
 async fn what_held_a_jobs_cpu_back_counts_from_its_start_and_only_where_every_sample_says() {
-    let figures = |metrics: crate::api::JobMetrics| {
+    let figures = |metrics: api::JobMetrics| {
         (
             metrics.cpu_periods,
             metrics.cpu_throttled,
@@ -711,10 +728,10 @@ async fn a_log_batch_larger_than_the_backlog_waits_for_the_writer_too() {
     );
 }
 
-fn repository(name: &str) -> crate::api::RepositoryStatus {
-    crate::api::RepositoryStatus {
+fn repository(name: &str) -> api::RepositoryStatus {
+    api::RepositoryStatus {
         name: name.to_owned(),
-        pools: vec![crate::api::PoolStatus {
+        pools: vec![api::PoolStatus {
             profile: "app".to_owned(),
             labels: vec!["self-hosted".to_owned()],
             queued_jobs: 0,
@@ -724,8 +741,8 @@ fn repository(name: &str) -> crate::api::RepositoryStatus {
     }
 }
 
-fn profile(name: &str) -> crate::api::ProfileStatus {
-    crate::api::ProfileStatus {
+fn profile(name: &str) -> api::ProfileStatus {
+    api::ProfileStatus {
         name: name.to_owned(),
         image: format!("runnerd-runner:{name}"),
         cpus: 2,
@@ -738,14 +755,14 @@ fn profile(name: &str) -> crate::api::ProfileStatus {
 #[tokio::test]
 async fn auto_sizing_reads_each_profile_s_cpus_and_slots_as_the_daemon_ran_them_and_a_restart_reads_them_back()
  {
-    use crate::api::Event;
+    use api::Event;
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    let at = |cpus, slots| crate::api::ProfileStatus {
+    let at = |cpus, slots| api::ProfileStatus {
         cpus,
         slots: (1..=slots)
-            .map(|slot| crate::api::SlotStatus { slot, runner: None })
+            .map(|slot| api::SlotStatus { slot, runner: None })
             .collect(),
         ..profile("app")
     };
@@ -807,7 +824,7 @@ async fn auto_sizing_reads_each_profile_s_cpus_and_slots_as_the_daemon_ran_them_
 
 #[tokio::test]
 async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_profile() {
-    use crate::api::Event;
+    use api::Event;
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     store.event(Event::RepositoryChanged {
@@ -829,8 +846,8 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
         profile: "small".to_owned(),
     });
     store.event(Event::BudgetChanged {
-        budget: crate::api::Budget {
-            admission: crate::api::AdmissionPolicy::Caps,
+        budget: api::Budget {
+            admission: api::AdmissionPolicy::Caps,
             held: false,
             slice: "ci.slice".to_owned(),
             memory_max: None,
@@ -980,7 +997,7 @@ async fn a_repository_event_that_does_not_read_fails_the_startup_read() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.event(crate::api::Event::RepositoryChanged {
+    store.event(api::Event::RepositoryChanged {
         repository: repository("o/r"),
     });
     store.flush().await;
@@ -1114,12 +1131,12 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(RunnerRecord {
-        admission: Some(crate::api::Admission {
-            policy: crate::api::AdmissionPolicy::Measured,
+        admission: Some(api::Admission {
+            policy: api::AdmissionPolicy::Measured,
             reserved: 1 << 30,
-            basis: crate::api::Basis::Job {
+            basis: api::Basis::Job {
                 runs: 10,
-                peak: crate::api::JobPeak::P95,
+                peak: api::JobPeak::P95,
             },
             free: Some(8 << 30),
             slice: Some(1 << 30),
@@ -1309,16 +1326,16 @@ async fn a_runners_own_limit_failing_reclaim_is_read_apart_from_a_limit_below_it
     assert_eq!(own(&after), [None, Some(false), Some(true), None]);
 }
 
-fn sizing_change(profile: &str, at: u64) -> crate::api::SizingChange {
-    crate::api::SizingChange {
+fn sizing_change(profile: &str, at: u64) -> api::SizingChange {
+    api::SizingChange {
         at,
         profile: profile.to_owned(),
-        from: crate::api::Resize {
+        from: api::Resize {
             memory: 7 << 30,
             slots: 2,
             cpus: Some(8),
         },
-        to: crate::api::Resize {
+        to: api::Resize {
             memory: 5376 << 20,
             slots: 2,
             cpus: Some(6),
@@ -1382,7 +1399,7 @@ async fn an_auto_sizing_change_holds_its_interval_from_before_its_file_is_writte
     let announced = events.recv().await.unwrap();
     assert_eq!(
         announced.event,
-        crate::api::Event::SizingChanged {
+        api::Event::SizingChanged {
             change: sizing_change("jvm", 1_700_000_000)
         }
     );
@@ -1507,6 +1524,45 @@ async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory_and_for_a_sl
 }
 
 #[tokio::test]
+async fn insights_read_the_queued_jobs_the_last_plan_had_waiting_for_the_host_and_what_they_waited()
+{
+    // Catches a message built from a job that already started, or a wait kept past the plan that saw it.
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let (reading, now) = (host_reading(), crate::time::now_ms());
+    store.queued("o/r", &queued(1), now);
+    store.queued("o/r", &queued(2), now);
+    store.host_waited(vec![1, 2], 40 * 60_000);
+    store.flush().await;
+
+    assert_eq!(
+        store.insights(0).await.unwrap().host,
+        None,
+        "no reading yet"
+    );
+    store.host_memory(reading.clone());
+    assert_eq!(store.insights(0).await.unwrap().host, None, "no plan yet");
+    store.host_waiting([1, 2].into(), now);
+    let hold = store.insights(0).await.unwrap().host.unwrap();
+    assert_eq!(hold.memory, reading);
+    assert_eq!(hold.seen, now);
+    assert_eq!(
+        hold.jobs.iter().map(|job| job.waited).collect::<Vec<_>>(),
+        [40 * 60_000, 40 * 60_000]
+    );
+
+    // Job 1 started between the plan and the look: only job 2 is held.
+    store.runner_started(runner("r1", now));
+    store.claimed(1, 10, "r1", now);
+    store.flush().await;
+    let hold = store.insights(0).await.unwrap().host.unwrap();
+    assert_eq!(hold.jobs.len(), 1, "{hold:?}");
+    // The next plan finds none waiting.
+    store.host_waiting(BTreeSet::new(), now + 5_000);
+    assert_eq!(store.insights(0).await.unwrap().host, None);
+}
+
+#[tokio::test]
 async fn pricing_reads_the_jobs_this_machine_ran_by_when_they_ended_and_visibility_across_a_restart()
  {
     let dir = TestDir::new("store");
@@ -1519,8 +1575,8 @@ async fn pricing_reads_the_jobs_this_machine_ran_by_when_they_ended_and_visibili
     store.claimed(2, 10, "r2", 1_000_200);
     store.lost(2, 1_000_300);
     store.queued("o/r", &queued(3), crate::time::now_ms());
-    store.visibility("o/r".to_owned(), crate::api::Visibility::Public, 5);
-    store.visibility("o/r".to_owned(), crate::api::Visibility::Private, 6);
+    store.visibility("o/r".to_owned(), api::Visibility::Public, 5);
+    store.visibility("o/r".to_owned(), api::Visibility::Private, 6);
     store.flush().await;
     drop(store);
 
@@ -1541,7 +1597,7 @@ async fn pricing_reads_the_jobs_this_machine_ran_by_when_they_ended_and_visibili
     );
     assert_eq!(
         history.visibility,
-        BTreeMap::from([("o/r".to_owned(), crate::api::Visibility::Private)]),
+        BTreeMap::from([("o/r".to_owned(), api::Visibility::Private)]),
         "the latest answer stands"
     );
     let later = store.pricing((since + 300) * 1000).await.unwrap();
@@ -1577,11 +1633,11 @@ async fn pruning_job_records_moves_where_the_priced_history_starts_across_a_rest
     let history = store.pricing(0).await.unwrap();
     assert_eq!(history.kept_since, now - DAY_MS);
     assert!(history.runs.is_empty(), "job 1 was pruned");
-    let pricing = crate::api::Pricing {
+    let pricing = api::Pricing {
         profiles: BTreeMap::new(),
-        default_sku: crate::api::Sku::ActionsLinux,
+        default_sku: api::Sku::ActionsLinux,
     };
-    let window = crate::api::Savings::of(&history, &pricing, now).last_30_days;
+    let window = api::Savings::of(&history, &pricing, now).last_30_days;
     assert!(
         window.cut,
         "the window reads as cut short, not as one without jobs: {}",

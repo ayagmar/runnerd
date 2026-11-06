@@ -49,11 +49,29 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[Accepted {
-    reader: Reader::Previous,
-    item: "waiting/behind-memory",
-    adr: "0096",
-}];
+const ACCEPTED: &[Accepted] = &[
+    Accepted {
+        reader: Reader::Previous,
+        item: "waiting/behind-memory",
+        adr: "0096",
+    },
+    // The previous release reads a `host-held` insight as its `Unknown` fallback, by its sentence.
+    Accepted {
+        reader: Reader::Previous,
+        item: "insights/full",
+        adr: "0100",
+    },
+    Accepted {
+        reader: Reader::Previous,
+        item: "digest/full",
+        adr: "0100",
+    },
+    Accepted {
+        reader: Reader::Previous,
+        item: "notification/full",
+        adr: "0100",
+    },
+];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;

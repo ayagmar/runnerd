@@ -12,10 +12,11 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use runnerd_core::api::{
-    Digest, Event, Insight, InsightKind, JobMetrics, JobState, JobSummary, LogSummary, LongWait,
-    Notification, NotifyEvent, Priority, Severity, Timeline,
+    Digest, Event, HostMemory, Insight, InsightKind, JobMetrics, JobState, JobSummary, LogSummary,
+    LongWait, Notification, NotifyEvent, Priority, Severity, Timeline,
 };
 use runnerd_core::config::{Config, DayTime};
+use runnerd_core::insights::{HeldJob, History, HostHold};
 use runnerd_core::store::Store;
 use tokio::sync::{Mutex, Notify, watch};
 
@@ -357,6 +358,90 @@ async fn an_insight_is_told_once_and_again_only_after_it_went_away_for_a_day() {
 }
 
 #[tokio::test]
+async fn a_host_wait_is_told_once_in_each_six_hour_window_across_a_restart_and_a_wait_that_ended() {
+    // Catches a message at every look, none on the evening after the first, a repeat after a restart in the same
+    // window, and one for a wait that ended between two looks.
+    const MINUTE: u64 = 60_000;
+    const HOUR: u64 = 60 * MINUTE;
+    let timing = Timing {
+        gather: Duration::ZERO,
+        gap: Duration::ZERO,
+        ..SETUP.timing
+    };
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = Config::parse(&webhook(&format!("http://{}/hook", endpoint.address))).unwrap();
+    let phone = &config.notify.targets[0];
+    let http = client(timing.timeout).unwrap();
+    let mut target = start(&store, None, phone, &config).await.unwrap();
+    // The start of a 6-hour window.
+    let base = 1_800_000_000_000 / (6 * HOUR) * (6 * HOUR);
+    // What the daemon knows at `at`: a job that has waited 45 minutes for the host's memory, or none waiting.
+    let look = async |target: &mut super::Target, waiting: bool, at: u64| {
+        let hold = waiting.then(|| HostHold {
+            memory: HostMemory {
+                at: at / 1000,
+                total: 64 << 30,
+                available: 8 << 30,
+                slice: 18 << 30,
+                some: None,
+                full: None,
+                holders: Vec::new(),
+                ceiling: None,
+            },
+            seen: at,
+            jobs: vec![HeldJob {
+                repository: "halyard/api".to_owned(),
+                workflow: None,
+                name: "test".to_owned(),
+                waited: 45 * MINUTE,
+            }],
+        });
+        let history = History {
+            host: hold,
+            ..History::default()
+        };
+        target.look(&super::warnings(&history, &config, at), at);
+        send_due(&store, &http, &timing, target).await;
+    };
+
+    // Held every five minutes for two hours, then it ends between looks, and returns past the next window.
+    for minutes in (60..180).step_by(5) {
+        look(&mut target, true, base + minutes * MINUTE).await;
+    }
+    assert_eq!(endpoint.count(), 1, "held across many looks: told once");
+    look(&mut target, false, base + 4 * HOUR).await;
+    assert_eq!(endpoint.count(), 1, "a wait that ended is no message");
+    look(&mut target, true, base + 5 * HOUR).await;
+    assert_eq!(endpoint.count(), 1, "back in the same window: not again");
+
+    // A restart inside the window remembers it; the next window is told once more.
+    let kept = store.notify_state().await.unwrap().remove("phone");
+    let mut target = start(&store, kept, phone, &config).await.unwrap();
+    look(&mut target, false, base + 5 * HOUR + 30 * MINUTE).await;
+    look(&mut target, true, base + 5 * HOUR + 55 * MINUTE).await;
+    assert_eq!(
+        endpoint.count(),
+        1,
+        "a restart inside the window: not again"
+    );
+    look(&mut target, true, base + 6 * HOUR + 5 * MINUTE).await;
+    look(&mut target, true, base + 8 * HOUR).await;
+    // The evening after: a new window, told again.
+    look(&mut target, false, base + 9 * HOUR).await;
+    look(&mut target, true, base + 26 * HOUR).await;
+    let sent = endpoint.notifications();
+    assert_eq!(sent.len(), 3, "{sent:#?}");
+    assert_eq!(sent[0].title, "Jobs wait for the host's memory");
+    assert_eq!(sent[0].event, NotifyEvent::Insights);
+    assert_eq!(
+        sent[0].insights[0].sentence,
+        "1 job waits for the host's memory, the longest for 45m 00s (halyard/api: test); programs outside CI \
+         hold 38G. Closing programs frees only part of that."
+    );
+}
+
+#[tokio::test]
 async fn a_digest_delivered_after_midnight_counts_for_the_day_it_was_made() {
     const HOUR: u64 = 3600;
     let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
@@ -374,7 +459,7 @@ async fn a_digest_delivered_after_midnight_counts_for_the_day_it_was_made() {
     };
     // Made at 23:50 UTC yesterday; the endpoint answers only today.
     target.digest = Some(runnerd_core::insights::digest(
-        &runnerd_core::insights::History::default(),
+        &History::default(),
         &config,
         (midnight - 10 * 60) * 1000,
     ));

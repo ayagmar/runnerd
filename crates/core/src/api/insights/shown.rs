@@ -3,11 +3,11 @@
 //! [`Insights`] and [`Digest`]; the dashboard, `runnerctl`, the TUI and notifications only lay them out.
 
 use super::{Digest, Insight, InsightKind, Insights, LongWait, Severity, WaitSpread};
-use crate::api::Tone;
+use crate::api::{HostMemory, Tone, duration};
 
 impl InsightKind {
     /// Its name as a label: `Slower`, `Flaky`, `Near its cap`, `Cold cache`, `Memory pressure`, `CPU cap`,
-    /// `Waits`, or `Insight` for a kind from a later release.
+    /// `Host memory`, `Waits`, or `Insight` for a kind from a later release.
     pub fn label(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "Slower",
@@ -16,13 +16,14 @@ impl InsightKind {
             InsightKind::ColdCache { .. } => "Cold cache",
             InsightKind::Throttled { .. } => "Memory pressure",
             InsightKind::CpuHeld { .. } => "CPU cap",
+            InsightKind::HostHeld { .. } => "Host memory",
             InsightKind::Waits { .. } => "Waits",
             InsightKind::Unknown => "Insight",
         }
     }
 
     /// Its name as one word, the API's `kind`: `slower`, `flaky`, `near-cap`, `cold-cache`, `throttled`,
-    /// `cpu-held` or `waits`; `unknown` for a kind from a later release.
+    /// `cpu-held`, `host-held` or `waits`; `unknown` for a kind from a later release.
     pub fn word(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "slower",
@@ -31,9 +32,36 @@ impl InsightKind {
             InsightKind::ColdCache { .. } => "cold-cache",
             InsightKind::Throttled { .. } => "throttled",
             InsightKind::CpuHeld { .. } => "cpu-held",
+            InsightKind::HostHeld { .. } => "host-held",
             InsightKind::Waits { .. } => "waits",
             InsightKind::Unknown => "unknown",
         }
+    }
+}
+
+impl Insight {
+    /// What a [`HostHeld`](InsightKind::HostHeld) insight says: `3 jobs wait for the host's memory, the longest for
+    /// 42m 10s (halyard/api: CI / build); programs outside CI hold 30G, most java 9.3G and claude 5.1G. Closing programs
+    /// frees only part of that.` `longest` names the job that waited longest; `memory` is the
+    /// reading that names who holds the memory. The part the programs named leave is the kernel, compressed swap and
+    /// the many small programs, so the sentence never says closing them frees the whole figure.
+    pub fn host_held_sentence(
+        jobs: u32,
+        waited: u64,
+        longest: &str,
+        memory: &HostMemory,
+    ) -> String {
+        let who = if jobs == 1 {
+            "1 job waits".to_owned()
+        } else {
+            format!("{jobs} jobs wait")
+        };
+        format!(
+            "{who} for the host's memory, the longest for {} ({longest}); {}. Closing programs frees only part of \
+             that.",
+            duration(waited),
+            memory.outside_line()
+        )
     }
 }
 
@@ -120,7 +148,7 @@ impl LongWait {
             "{} {} waited {}",
             self.repository,
             crate::api::job_title(self.workflow.as_deref(), &self.name, Some(self.job)),
-            crate::api::duration(self.waited)
+            duration(self.waited)
         )
     }
 }

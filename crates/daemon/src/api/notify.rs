@@ -821,6 +821,13 @@ fn message(target: &Target) -> Notification {
 }
 
 fn insight_title(insight: &Insight) -> String {
+    // About the host and every job waiting for it, not about the repository of the longest waiter.
+    if matches!(
+        insight.kind,
+        runnerd_core::api::InsightKind::HostHeld { .. }
+    ) {
+        return "Jobs wait for the host's memory".to_owned();
+    }
     let subject = match &insight.job {
         Some(job) => format!(
             "{}: {}",
@@ -837,6 +844,7 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::Throttled { .. } => "was slowed by memory pressure",
         runnerd_core::api::InsightKind::CpuHeld { .. } => "is held back by its CPU cap",
         runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
+        runnerd_core::api::InsightKind::HostHeld { .. } => "waits for the host's memory",
         runnerd_core::api::InsightKind::Unknown => "has an insight",
     };
     format!("{subject} {what}")

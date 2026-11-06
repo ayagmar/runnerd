@@ -1,5 +1,5 @@
 //! Insights as clients read them: what got slower, what is flaky, what nears its memory cap, what memory pressure
-//! throttled, what its CPU cap held back and how long jobs wait, computed from the job history (ADR 0051); the daily digest; and what the
+//! throttled, what its CPU cap held back, jobs held for the host's memory and how long jobs wait, computed from the job history (ADR 0051); the daily digest; and what the
 //! daemon's notifications carry. Times are seconds since the Unix epoch, durations seconds, sizes bytes.
 
 use serde::{Deserialize, Serialize};
@@ -141,6 +141,14 @@ pub enum InsightKind {
         raised_from: Option<u32>,
         /// The `cpus` to set by hand; `None` while auto sizing raises them.
         set: Option<u32>,
+    },
+    /// A queued job has waited 30 minutes or more for the host's memory, and a job waits for it now: programs
+    /// outside CI hold it, which closing is the owner's to do (ADR 0100).
+    HostHeld {
+        /// Jobs waiting for the host's memory now.
+        jobs: u32,
+        /// The longest of their waits for it, in seconds.
+        waited: u64,
     },
     /// A kind from a later release, which this one reads only by its sentence. The daemon never sends it.
     #[serde(other)]
