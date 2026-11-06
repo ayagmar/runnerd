@@ -2,6 +2,7 @@
 //! into one message, a failing endpoint retried while the history goes on, a target added later replaying nothing,
 //! an insight told once, the daily digest, ntfy's and Discord's JSON, and no URL or token in a log line.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
@@ -16,7 +17,7 @@ use runnerd_core::api::{
     LongWait, Notification, NotifyEvent, Priority, Severity, Timeline,
 };
 use runnerd_core::config::{Config, DayTime};
-use runnerd_core::insights::{HeldJob, History, HostHold};
+use runnerd_core::github::QueuedJob;
 use runnerd_core::store::Store;
 use tokio::sync::{Mutex, Notify, watch};
 
@@ -357,88 +358,169 @@ async fn an_insight_is_told_once_and_again_only_after_it_went_away_for_a_day() {
     assert_eq!(sent[1].title, "halyard/api: CI / test is flaky");
 }
 
-#[tokio::test]
-async fn a_host_wait_is_told_once_in_each_six_hour_window_across_a_restart_and_a_wait_that_ended() {
-    // Catches a message at every look, none on the evening after the first, a repeat after a restart in the same
-    // window, and one for a wait that ended between two looks.
+/// The same numbers for the same seed: `SplitMix64`.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number in `low..high`.
+    fn between(&mut self, low: u64, high: u64) -> u64 {
+        low + self.next() % (high - low)
+    }
+}
+
+/// Two queued jobs of `halyard/api`: job 1 has waited 45 minutes for the host's memory, job 2 ten.
+async fn queue_two_jobs_held_for_the_host(store: &Store) {
     const MINUTE: u64 = 60_000;
-    const HOUR: u64 = 60 * MINUTE;
+    for (id, waited) in [(1, 45 * MINUTE), (2, 10 * MINUTE)] {
+        let job = QueuedJob {
+            id,
+            run_id: id,
+            name: "test".to_owned(),
+            labels: vec!["app".to_owned()],
+            created_at: 1_000 + id,
+            run_attempt: 1,
+            ..QueuedJob::default()
+        };
+        store.queued("halyard/api", &job, 1_000 + id);
+        store.host_waited(vec![id], waited);
+    }
+    store.flush().await;
+}
+
+/// A reading of a 64G host that leaves 38G outside the slice, taken at `at` (s).
+fn reading_at(at: u64) -> HostMemory {
+    HostMemory {
+        at,
+        total: 64 << 30,
+        available: 8 << 30,
+        slice: 18 << 30,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+        ceiling: None,
+    }
+}
+
+#[tokio::test]
+async fn a_host_wait_is_told_once_a_window_across_restarts_stale_looks_and_ended_waits() {
+    // Catches a message at every look, none on a later evening, a repeat after a restart, a message from a wait that
+    // ended or went stale, and a look lost because the engine planned in the second the look ran. Drives the real
+    // store, insights and target with seeded sequences at uneven milliseconds: the engine's plan, the host's
+    // reading, held and ended waits, stale looks and restarts.
+    const MINUTE: u64 = 60_000;
+    const WINDOW: u64 = 6 * 60 * MINUTE;
     let timing = Timing {
         gather: Duration::ZERO,
         gap: Duration::ZERO,
         ..SETUP.timing
     };
-    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
-    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    let config = Config::parse(&webhook(&format!("http://{}/hook", endpoint.address))).unwrap();
-    let phone = &config.notify.targets[0];
-    let http = client(timing.timeout).unwrap();
-    let mut target = start(&store, None, phone, &config).await.unwrap();
-    // The start of a 6-hour window.
-    let base = 1_800_000_000_000 / (6 * HOUR) * (6 * HOUR);
-    // What the daemon knows at `at`: a job that has waited 45 minutes for the host's memory, or none waiting.
-    let look = async |target: &mut super::Target, waiting: bool, at: u64| {
-        let hold = waiting.then(|| HostHold {
-            memory: HostMemory {
-                at: at / 1000,
-                total: 64 << 30,
-                available: 8 << 30,
-                slice: 18 << 30,
-                some: None,
-                full: None,
-                holders: Vec::new(),
-                ceiling: None,
-            },
-            seen: at,
-            jobs: vec![HeldJob {
-                repository: "halyard/api".to_owned(),
-                workflow: None,
-                name: "test".to_owned(),
-                waited: 45 * MINUTE,
-            }],
-        });
-        let history = History {
-            host: hold,
-            ..History::default()
-        };
-        target.look(&super::warnings(&history, &config, at), at);
-        send_due(&store, &http, &timing, target).await;
-    };
+    for seed in 0..40 {
+        let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+        let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+        let config = Config::parse(&webhook(&format!("http://{}/hook", endpoint.address))).unwrap();
+        let phone = &config.notify.targets[0];
+        let http = client(timing.timeout).unwrap();
+        let mut target = start(&store, None, phone, &config).await.unwrap();
+        queue_two_jobs_held_for_the_host(&store).await;
 
-    // Held every five minutes for two hours, then it ends between looks, and returns past the next window.
-    for minutes in (60..180).step_by(5) {
-        look(&mut target, true, base + minutes * MINUTE).await;
+        let mut rng = Rng(seed);
+        let mut at = 1_800_000_000_000 + rng.between(0, WINDOW);
+        // When the engine last planned, and whether job 1 was among the jobs it had waiting.
+        let mut plan: Option<(u64, bool)> = None;
+        // The windows with a look that must have told, and the windows with a look that might have.
+        let (mut owed, mut allowed) = (BTreeSet::new(), BTreeSet::new());
+        for _ in 0..160 {
+            at += rng.between(MINUTE, 90 * MINUTE) + rng.between(0, 1000);
+            // The engine's plan ran a moment before, or a long while: fresh is under 50 s, stale over 70 s.
+            let planned = at
+                - if rng.between(0, 4) == 0 {
+                    rng.between(70_000, 300_000)
+                } else {
+                    rng.between(0, 50_000)
+                };
+            match rng.between(0, 100) {
+                0..40 => plan = Some((planned, true)),
+                40..55 => plan = Some((planned, false)),
+                // It found nothing waiting for the host.
+                55..75 => plan = None,
+                // Nothing new from the engine since the last look.
+                75..90 => {}
+                _ => {
+                    let kept = store.notify_state().await.unwrap().remove("phone");
+                    target = start(&store, kept, phone, &config).await.unwrap();
+                    plan = Some((planned, true));
+                }
+            }
+            let (waiting, seen) = match plan {
+                Some((seen, true)) => (BTreeSet::from([1, 2]), seen),
+                Some((seen, false)) => (BTreeSet::from([2]), seen),
+                None => (BTreeSet::new(), at),
+            };
+            store.host_waiting(waiting, seen);
+            store.host_memory(reading_at(seen / 1000));
+            // The notifier looks at a whole second.
+            let now = at / 1000 * 1000;
+            let window = now / WINDOW;
+            let mut must_tell = false;
+            if let Some((seen, true)) = plan {
+                match at - seen {
+                    // The first such look in a window tells it, not a later one that finds it fresh again.
+                    0..50_000 => must_tell = owed.insert(window),
+                    50_000..=70_000 => {
+                        allowed.insert(window);
+                    }
+                    _ => {}
+                }
+            }
+            let runs = super::insight_runs_of(&store, 14, now).await.unwrap();
+            target.look(&super::warnings(&runs, &config, now), now);
+            send_due(&store, &http, &timing, &mut target).await;
+            assert!(
+                !must_tell || target.told.contains_key(&format!("host-held:{window}")),
+                "seed {seed}: the first fresh hold past 30 minutes in window {window}, at {at}, was not told"
+            );
+        }
+
+        let told: Vec<u64> = endpoint
+            .notifications()
+            .iter()
+            .flat_map(|sent| &sent.insights)
+            .map(|insight| {
+                insight
+                    .key
+                    .strip_prefix("host-held:")
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        let once: BTreeSet<u64> = told.iter().copied().collect();
+        assert_eq!(
+            told.len(),
+            once.len(),
+            "seed {seed}: a key told twice: {told:?}"
+        );
+        for window in &owed {
+            assert!(
+                once.contains(window),
+                "seed {seed}: window {window} held fresh past 30 minutes and was not told: {told:?}"
+            );
+        }
+        for window in &once {
+            assert!(
+                owed.contains(window) || allowed.contains(window),
+                "seed {seed}: window {window} was told with no fresh hold in it: {told:?}"
+            );
+        }
     }
-    assert_eq!(endpoint.count(), 1, "held across many looks: told once");
-    look(&mut target, false, base + 4 * HOUR).await;
-    assert_eq!(endpoint.count(), 1, "a wait that ended is no message");
-    look(&mut target, true, base + 5 * HOUR).await;
-    assert_eq!(endpoint.count(), 1, "back in the same window: not again");
-
-    // A restart inside the window remembers it; the next window is told once more.
-    let kept = store.notify_state().await.unwrap().remove("phone");
-    let mut target = start(&store, kept, phone, &config).await.unwrap();
-    look(&mut target, false, base + 5 * HOUR + 30 * MINUTE).await;
-    look(&mut target, true, base + 5 * HOUR + 55 * MINUTE).await;
-    assert_eq!(
-        endpoint.count(),
-        1,
-        "a restart inside the window: not again"
-    );
-    look(&mut target, true, base + 6 * HOUR + 5 * MINUTE).await;
-    look(&mut target, true, base + 8 * HOUR).await;
-    // The evening after: a new window, told again.
-    look(&mut target, false, base + 9 * HOUR).await;
-    look(&mut target, true, base + 26 * HOUR).await;
-    let sent = endpoint.notifications();
-    assert_eq!(sent.len(), 3, "{sent:#?}");
-    assert_eq!(sent[0].title, "Jobs wait for the host's memory");
-    assert_eq!(sent[0].event, NotifyEvent::Insights);
-    assert_eq!(
-        sent[0].insights[0].sentence,
-        "1 job waits for the host's memory, the longest for 45m 00s (halyard/api: test); programs outside CI \
-         hold 38G. Closing programs frees only part of that."
-    );
 }
 
 #[tokio::test]
@@ -459,7 +541,7 @@ async fn a_digest_delivered_after_midnight_counts_for_the_day_it_was_made() {
     };
     // Made at 23:50 UTC yesterday; the endpoint answers only today.
     target.digest = Some(runnerd_core::insights::digest(
-        &History::default(),
+        &runnerd_core::insights::History::default(),
         &config,
         (midnight - 10 * 60) * 1000,
     ));
