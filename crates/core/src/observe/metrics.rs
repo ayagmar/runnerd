@@ -438,8 +438,8 @@ impl Sampler {
     }
 
     /// One sample of every tracked container that still exists, and of the slice, at `at` (ms). A container
-    /// whose files are gone gets no sample, and is forgotten; one read before says so in `Sampled::gone`. One never
-    /// read says nothing: it may be a slice whose containers live elsewhere.
+    /// whose cgroup directory is gone gets no sample, and is forgotten; one read before says so in `Sampled::gone`.
+    /// One never read says nothing: it may be a slice whose containers live elsewhere.
     pub fn sample(&mut self, tracked: &[Tracked], at: u64) -> Sampled {
         let mut samples = Vec::new();
         let mut gone = Vec::new();
@@ -451,7 +451,7 @@ impl Sampler {
                 Ok(usage) => usage,
                 Err(error) => {
                     match before {
-                        Some(_) if error.kind() == io::ErrorKind::NotFound => {
+                        Some(_) if error.kind() == io::ErrorKind::NotFound && !cgroup.exists() => {
                             gone.push(container.runner.clone());
                         }
                         // Not gone yet as far as this read says: the next one tells.

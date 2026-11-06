@@ -141,6 +141,40 @@ fn a_container_that_disappears_ends_its_series_and_the_others_go_on() {
 }
 
 #[test]
+fn only_a_missing_cgroup_reads_as_gone() {
+    // A read that fails while the cgroup stands says nothing of the container: it must keep counting.
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000, 0, 0);
+    let cgroup = paths.container("ci.slice", "a");
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    state.sample(&runners, 1_000);
+
+    std::fs::write(cgroup.join("memory.current"), "not a number\n").unwrap();
+    let unreadable = state.sample(&runners, 3_000);
+    assert!(
+        unreadable.gone.is_empty(),
+        "a bad file is not a gone container"
+    );
+    assert!(unreadable.samples.is_empty(), "nor a reading");
+
+    container(&paths, "a", 10, 4_000, 0, 0);
+    std::fs::remove_file(cgroup.join("memory.stat")).unwrap();
+    assert!(
+        state.sample(&runners, 5_000).gone.is_empty(),
+        "one missing file in a cgroup that stands is not a gone container"
+    );
+
+    std::fs::remove_dir_all(&cgroup).unwrap();
+    assert_eq!(
+        state.sample(&runners, 7_000).gone,
+        ["runner-a"],
+        "failed reads keep what the next one needs to tell it went"
+    );
+}
+
+#[test]
 fn a_container_never_read_is_not_called_gone() {
     // A slice whose containers live elsewhere, such as under another cgroup driver: live runners with no files here.
     let dir = TestDir::new("observe");
