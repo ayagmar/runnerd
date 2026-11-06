@@ -1257,6 +1257,7 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         "the two left wait for the host's memory"
     );
     // Insights are told the same two jobs, with the reading that says who holds the memory.
+    handle.store.flush().await;
     let hold = handle.store.insights(0).await.unwrap().host.unwrap();
     assert_eq!(hold.jobs.len(), 2, "the two left wait: {hold:?}");
     assert_eq!(hold.memory.holders[0].name, "java");
