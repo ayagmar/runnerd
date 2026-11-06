@@ -17,7 +17,7 @@ use futures_util::FutureExt as _;
 use super::*;
 use crate::config::Admission;
 use crate::observe::metrics::Events;
-use crate::scheduler::{CPU_PRIORITY_AFTER, IDLE_TIMEOUT, MEMORY_PRIORITY_AFTER};
+use crate::scheduler::{IDLE_TIMEOUT, PRIORITY_AFTER};
 use crate::store::SampleRecord;
 use crate::time;
 
@@ -1076,10 +1076,10 @@ impl Case {
             }
             for waits in state.waits.values_mut() {
                 if let Some(wait) = waits.memory.as_mut() {
-                    wait.since -= MEMORY_PRIORITY_AFTER;
+                    wait.since -= PRIORITY_AFTER;
                 }
                 if let Some(wait) = waits.cpu.as_mut() {
-                    wait.since -= CPU_PRIORITY_AFTER;
+                    wait.since -= PRIORITY_AFTER;
                 }
             }
         }
@@ -1483,6 +1483,13 @@ impl Case {
                     self,
                     "one_barrier_and_only_for_a_queued_job",
                     format!("{name} keeps a wait for job {}, listed no more", wait.job),
+                );
+            }
+            if state.queued.is_empty() && state.waits.values().any(|waits| waits.served) {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("{name} keeps a served mark with nothing queued"),
                 );
             }
         }

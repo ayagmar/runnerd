@@ -347,8 +347,9 @@ struct RepositoryState {
     /// By the profile of each of its pools, what that pool's next job has waited for and since when (ADR 0096): from
     /// the first plan of a tick or a pass that held it, not one a status runs, until a runner of the pool is in its
     /// slot, the pool may no longer start one, or a listing that succeeded no longer shows the job. A plan that holds
-    /// it for a slot or for the other resource does not make it younger, nor does a listing that failed. Not kept over
-    /// a restart.
+    /// it for a slot or for the other resource does not make it younger, nor does a listing that failed. With them,
+    /// whether a barrier has served the pool (ADR 0098), until a listing that succeeded shows its queue empty or the
+    /// pool may no longer start a runner. Not kept over a restart.
     waits: BTreeMap<String, Waits>,
     /// The profiles of its pools whose next job the last plan held for CPU.
     cpu_held: BTreeSet<String>,

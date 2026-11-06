@@ -650,9 +650,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .await;
         // Only a runner in its slot ends the wait: a start that failed served nothing.
         if self.holds_runner(&slot)
-            && let Some(state) = self.repositories.get_mut(&repository)
+            && let Some(waits) = self
+                .repositories
+                .get_mut(&repository)
+                .and_then(|state| state.waits.get_mut(&slot.profile))
         {
-            state.waits.remove(&slot.profile);
+            let served = waits.served;
+            waits.started();
+            if waits.served && !served {
+                info!(
+                    "{repository}: a barrier served its pool in {}: its next jobs hold sooner until its queue empties",
+                    slot.profile
+                );
+            }
         }
         true
     }

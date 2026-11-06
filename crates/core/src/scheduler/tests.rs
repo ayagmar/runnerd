@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Budget, CPU_PRIORITY_AFTER, Decision, Demand, Hold, IDLE_TIMEOUT, Plan, Pool, Preparing,
-    Profile, Repository, RunnerSlot, Scarce, Slot, SlotRef, StopReason, Wait, Waits, plan,
+    Budget, Decision, Demand, Hold, IDLE_TIMEOUT, PRIORITY_AFTER, Plan, Pool, Preparing, Profile,
+    Repository, RunnerSlot, Scarce, Slot, SlotRef, StopReason, Wait, Waits, plan,
 };
 use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
@@ -359,7 +359,7 @@ fn a_runner_at_its_profiles_cpus_that_do_not_fit_holds_its_repository_once() {
 /// Ticks 15 s apart against a 4-CPU budget: o/heavy's job, queued first, takes all 4; o/light queues a 1-CPU job
 /// every tick, each running a minute. Its runners start staggered, so a CPU frees up every tick. Returns the tick
 /// o/heavy's job started at, if it did within `ticks`, and how many light jobs started from the tick it waited
-/// `CPU_PRIORITY_AFTER` until then.
+/// `PRIORITY_AFTER` until then.
 fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
     const TICK: Duration = Duration::from_secs(15);
     // Light jobs started at ticks -3 … 0, ending at ticks 1 … 4.
@@ -419,7 +419,7 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
                 return (Some(tick), light_after_limit);
             }
             if waiting_since
-                .is_some_and(|since| at.duration_since(since).unwrap() >= CPU_PRIORITY_AFTER)
+                .is_some_and(|since| at.duration_since(since).unwrap() >= PRIORITY_AFTER)
             {
                 light_after_limit += 1;
             }
@@ -438,10 +438,10 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
 
 #[test]
 fn a_job_held_for_cpu_long_enough_starts_once_younger_jobs_stop_taking_the_cpu_it_waits_for() {
-    let (started, light_after_limit) = heavy_job_beside_a_stream_of_light_ones(40);
-    // It waits 120 s from tick 1, then the light runners drain within a minute.
+    let (started, light_after_limit) = heavy_job_beside_a_stream_of_light_ones(60);
+    // It waits 600 s from tick 1, then the light runners drain within a minute.
     let started = started.expect("o/heavy's job starts");
-    assert!(started <= 1 + 8 + 4, "started at tick {started}");
+    assert!(started <= 1 + 40 + 4, "started at tick {started}");
     assert_eq!(light_after_limit, 0, "no light job started past the limit");
 }
 
@@ -659,7 +659,7 @@ fn a_job_an_idle_runner_will_take_waits_for_that_runner() {
 
 #[test]
 fn younger_jobs_wait_behind_one_starved_of_cpu() {
-    let long_ago = now() - CPU_PRIORITY_AFTER;
+    let long_ago = now() - PRIORITY_AFTER;
     let repositories = [
         Repository {
             runner_cpu: Some(4000),

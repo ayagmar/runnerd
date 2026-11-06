@@ -98,23 +98,23 @@ The caps still stop a container that goes over them, but several jobs going over
 
 ### A starved job goes first
 
-Smaller runners can take all the memory that frees up, so a large runner would never fit. Once a pool's next job has waited 2 minutes for memory with a free slot, no younger job starts until a runner of that pool does. It works under `caps` and `measured`, and there is nothing to set.
+Smaller runners can take all the memory that frees up, so a large runner would never fit. Once a pool's next job has waited 10 minutes for memory with a free slot, no younger job starts until a runner of that pool does. Its next jobs then wait 2 minutes, until a listing shows its queue empty, so a pool of many large jobs is not held to one runner per 10 minutes. It works under `caps` and `measured`, and there is nothing to set.
 
 - One job holds at a time, for memory and [CPU](#cpu-admission) together: the oldest one that waited long enough. A job with no free slot, or a paused or backing-off pool, does not hold.
 - A job holds only for room that running jobs would give back. A runner bigger than the slice beside the mirror, or a host short because of programs outside the slice, holds nothing: younger jobs go on, and the job keeps saying why it waits.
 - The jobs behind it say `Behind <job>, which waits for memory`. A job with no free slot of its own keeps saying that.
 - Runners already started keep running. No warm runner starts meanwhile.
 - While the slice is at 90% of `MemoryMax` or the host stalls, no job holds. Nothing starts then anyway, and waits keep their age.
-- The wait ends when a runner of the pool is in its slot, or when the job leaves the queue. It starts again after a pause, a backoff, a reseed or image pull, or a restart. A failed GitHub listing keeps it, and nothing is held back until a listing answers.
+- The wait ends when a runner of the pool is in its slot, or when the job leaves the queue. It starts again after a pause, a backoff, a reseed or image pull, or a restart, and the pool is back to 10 minutes. A failed GitHub listing keeps both, and nothing is held back until a listing answers.
 
 A younger job still starts behind that job if all of this holds:
 
 - It has a free slot and fits the budgets left. In the waiting job's profile, it leaves that job a free slot too.
 - The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
 - Every job its runner could take usually ends by then. The usual run time is the p95 of a job's last 20 successful runs, from 3 of them. A pool with one queued job that has no estimate stays behind.
-- Everything started since the wait reached its 2 minutes, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger.
+- Everything started since the wait reached its limit, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger.
 
-So if every job takes exactly its usual run time, the waiting job starts when it would with nothing behind it. Usual run times err long, so a job that ends early can bring the room while a job behind the barrier still runs, and the waiting job then waits for that one too. It always fits once the runners from before those 2 minutes and any older jobs' have ended, even if a job behind it hangs.
+So if every job takes exactly its usual run time, the waiting job starts when it would with nothing behind it. Usual run times err long, so a job that ends early can bring the room while a job behind the barrier still runs, and the waiting job then waits for that one too. It always fits once the runners from before that moment and any older jobs' have ended, even if a job behind it hangs.
 
 Small jobs still pay when none of that holds: memory stays free that one of them could have used. `runnerd simulate --priority` shows what it does on your history.
 
@@ -155,7 +155,7 @@ cpu_overcommit = 1.0
 - The slice's CPUs are its `AllowedCPUs`, or the host's, fewer when its `CPUQuota` allows less, read from systemd.
 - Under `measured` a runner reserves its job's average CPU, predicted from the history as memory is, with no margin: the factor is the margin. Under `caps` it reserves its profile's `cpus`.
 
-A job that had a slot and memory but not CPU waits; after 2 minutes [it goes first](#a-starved-job-goes-first), by the same rule as memory. The status line says so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`).
+A job that had a slot and memory but not CPU waits; after the same 10 or 2 minutes [it goes first](#a-starved-job-goes-first), by the same rule as memory. The status line says so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`).
 
 Averages are far under peaks, so on a host with many CPUs they admit nearly everything; on 8 CPUs ([above](#simulating)) the budget holds jobs. Start at `1.0`: peaks that land together cost a short slowdown, not a kill.
 

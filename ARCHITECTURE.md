@@ -163,8 +163,9 @@ queued → slot → container → removed
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)). For each job it leaves queued it says
    why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)). A job that does
    not fit takes the room of warm runners of other repositories, which stop, or is passed by younger jobs that fit,
-   until it has waited 2 minutes for memory or CPU: then the first such job that draining what runs would make room
-   for puts up the plan's one barrier (`scheduler::priority`), and no younger job starts until a runner of its pool
+   until it has waited 10 minutes for memory or CPU, or 2 in a pool a barrier has served until its queue empties
+   ([ADR 0098](docs/adr/0098-a-pool-waits-longer-for-its-first-barrier.md)): then the first such job that draining
+   what runs would make room for puts up the plan's one barrier (`scheduler::priority`), and no younger job starts until a runner of its pool
    does, but one that usually ends before the running runners' usual ends let the owner or an older waiting job
    start, and whose cap leaves the owner its room even if it never ends. `plan` names each pool's held job and the engine keeps its wait, from the
    plans of ticks and passes only; the high-water mark and a host stall suspend the barrier
@@ -322,6 +323,11 @@ always returns, so the daemon closes and flushes the history.
   runs would make room for. Only plans that schedule commit a wait, never `publish`'s. It governs new admissions: a
   running runner is never stopped or lowered for it, and it stands down under the high-water mark or a host stall
   ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md)).
+- A pool's job may own a barrier after `PRIORITY_AFTER`, or `SERVED_PRIORITY_AFTER` once a runner of the pool is in its
+  slot for a job that owned one. That mark is kept with the waits, in memory, and goes when a listing that succeeded
+  shows the pool's queue empty, on a pause, a backoff or preparation, and with the pool or the daemon. A failed listing
+  changes nothing
+  ([ADR 0098](docs/adr/0098-a-pool-waits-longer-for-its-first-barrier.md)).
 - What starts behind a barrier keeps two bounds, and only those: if each run takes what the plan read, an owner that
   keeps the barrier starts no later than with nothing behind it; whatever they take, it fits once the runners from
   before the barrier matured and older jobs' have ended, as the caps of what started since leave it its room and a
@@ -423,8 +429,8 @@ always returns, so the daemon closes and flushes the history.
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no
-  runner is stopped for CPU, and a job held 2 minutes for CPU stops younger starts until it fits
-  ([ADR 0038](docs/adr/0038-cpu-admission.md)).
+  runner is stopped for CPU, and a job held for CPU as long as for memory stops younger starts until it fits
+  ([ADR 0038](docs/adr/0038-cpu-admission.md), [ADR 0098](docs/adr/0098-a-pool-waits-longer-for-its-first-barrier.md)).
 - Every runner container and record shell has CPU shares of 1024 a CPU of its `cpus` (`docker::cpu_shares`), so a
   full slice's CPUs go to its runners by `cpus`, and the mirror keeps Docker's default weight; `cpus` stays each
   container's quota, with no ceiling above it

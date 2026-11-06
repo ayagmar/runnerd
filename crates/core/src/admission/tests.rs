@@ -872,9 +872,9 @@ fn a_replay_starts_a_starved_job_where_younger_jobs_would_take_all_the_room_befo
     let ledger = pool("halyard/ledger", "jvm");
     let storefront = pool("halyard/storefront", "node");
     let waited = |replay: &Replay| replay.pools[&ledger].waits[0];
-    // Past the whole stream without it; with it, the 2 minutes, then what ran by then ending.
+    // Past the whole stream without it; with it, the 10 minutes, then what ran by then ending.
     assert!(waited(&without) > 100 * 60, "{}s", waited(&without));
-    assert!(waited(&with) <= (2 + 8) * 60, "{}s", waited(&with));
+    assert!(waited(&with) <= (10 + 8) * 60, "{}s", waited(&with));
     assert_eq!(with.jobs, without.jobs);
     assert_eq!(with.never_started, 0);
     // What it costs: node jobs wait out the barrier and the jvm job.
@@ -889,13 +889,16 @@ fn a_replay_starts_a_starved_job_where_younger_jobs_would_take_all_the_room_befo
 #[test]
 fn a_replay_puts_up_a_barrier_at_the_limit_with_no_job_arriving_then() {
     let jobs = [
-        run("halyard/storefront", "site", "node", NOW, 10, G),
+        run("halyard/storefront", "site", "node", NOW, 18, G),
         run("halyard/ledger", "check", "jvm", NOW + MINUTE, 1, G),
     ];
     let replay = replayed(&jobs, 12 * G, Barriers::On);
-    // It waits from minute 1, holds from minute 3, and the node job ends at minute 10.
+    // It waits from minute 1, holds from minute 11, and the node job ends at minute 18.
     assert_eq!(replay.barrier_for, 7 * MINUTE);
-    assert_eq!(replay.pools[&pool("halyard/ledger", "jvm")].waits, [9 * 60]);
+    assert_eq!(
+        replay.pools[&pool("halyard/ledger", "jvm")].waits,
+        [17 * 60]
+    );
 }
 
 #[test]
@@ -1226,7 +1229,7 @@ labels = ["light"]
 }
 
 /// With `with_light()` and 17G, 16.5G past the mirror: two node runners of 7G end at minute 20, so a 9G jvm job queued at
-/// minute 1 owns a barrier from minute 3 to then, and 1-minute lint jobs of 1G arrive behind it. `known` says how long
+/// minute 1 owns a barrier from minute 11 to then, and 1-minute lint jobs of 1G arrive behind it. `known` says how long
 /// each job usually runs: 20, 4 and 1 minutes, and 30 for `report`. Run times are this test's own.
 fn a_barrier_with_room_behind_it() -> (Vec<Ran>, History) {
     let check = |queued, minutes| run("halyard/ledger", "check", "jvm", queued, minutes, G);
@@ -1244,7 +1247,7 @@ fn a_barrier_with_room_behind_it() -> (Vec<Ran>, History) {
         site(NOW + 10_000, 20),
         check(NOW + MINUTE, 4),
     ];
-    jobs.extend((0..3).map(|i| lint(NOW + (4 + 2 * i) * MINUTE, 1)));
+    jobs.extend((0..3).map(|i| lint(NOW + (12 + 2 * i) * MINUTE, 1)));
     let history = History {
         jobs: known,
         ..History::default()
@@ -1252,7 +1255,7 @@ fn a_barrier_with_room_behind_it() -> (Vec<Ran>, History) {
     (jobs, history)
 }
 
-/// An owner that needs both node runners gone, the first of which ends at minute 6 and lets a node job older than the
+/// An owner that needs both node runners gone, the first of which ends at minute 14 and lets a node job older than the
 /// owner into its slot. A lint job queued half a minute before that would run a minute, past that start.
 fn a_barrier_behind_an_older_job() -> (Vec<Ran>, History) {
     let page = |queued, minutes| run("halyard/storefront", "page", "node", queued, minutes, G);
@@ -1262,14 +1265,14 @@ fn a_barrier_behind_an_older_job() -> (Vec<Ran>, History) {
     let (_, mut known) = a_barrier_with_room_behind_it();
     known
         .jobs
-        .extend((0..3).map(|i| page(NOW - 600 * MINUTE + i * 40 * MINUTE, 6)));
+        .extend((0..3).map(|i| page(NOW - 600 * MINUTE + i * 40 * MINUTE, 14)));
     let jobs = vec![
-        page(NOW, 6),
+        page(NOW, 14),
         site(NOW + 1000, 20),
         report(NOW + 2000, 30),
         site(NOW + MINUTE / 2, 20),
         check(NOW + MINUTE, 4),
-        lint(NOW + 5 * MINUTE + MINUTE / 2, 1),
+        lint(NOW + 13 * MINUTE + MINUTE / 2, 1),
     ];
     (jobs, known)
 }
@@ -1318,6 +1321,126 @@ fn a_replay_counts_the_jobs_that_ran_past_the_usual_time_they_passed_by() {
     let replay = replay_with_light(&jobs, &known, Barriers::On);
     assert_eq!(replay.backfilled.overran, 1);
     assert_eq!(replay.backfilled.most_overrun, 3 * 60);
+}
+
+/// Thirteen 11G jobs queued at minute 9 in three slots of a 42G slice that a stream fills: a 7G job every 80 s for three
+/// hours, each running 8 minutes, six of which take all of it. One end leaves too little, and the next of the stream takes
+/// it. Each large job runs 10 minutes. Run times are this test's own: 0096's replays assumed 5, 10 or 20 for a large job.
+fn thirteen_large_jobs_in_a_stream() -> (Config, Vec<Ran>, History) {
+    let config = r#"
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+
+[caches]
+mirror = { enabled = false, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles.heavy]
+image_stage = "jvm"
+cpus = 8
+memory = "11G"
+slots = 3
+
+[profiles.mid]
+image_stage = "jvm"
+cpus = 8
+memory = "7G"
+slots = 6
+
+[[repositories]]
+name = "halyard/ledger"
+profile = "heavy"
+labels = ["heavy"]
+
+[[repositories]]
+name = "halyard/storefront"
+profile = "mid"
+labels = ["mid"]
+"#;
+    let heavy = |queued| run("halyard/ledger", "static", "heavy", queued, 10, G);
+    let mid = |queued| run("halyard/storefront", "check", "mid", queued, 8, G);
+    let known = (0..3)
+        .flat_map(|i| {
+            let at = NOW - 600 * MINUTE + i * 40 * MINUTE;
+            [heavy(at), mid(at)]
+        })
+        .collect();
+    let mut jobs: Vec<Ran> = (0..135).map(|i| mid(NOW + i * 80_000)).collect();
+    jobs.extend((0..13).map(|i| heavy(NOW + 9 * MINUTE + i)));
+    jobs.sort_by_key(|run| run.queued_at);
+    let history = History {
+        jobs: known,
+        ..History::default()
+    };
+    (Config::parse(config).unwrap(), jobs, history)
+}
+
+/// A pool's wait starts again with each job. With the first limit for every job, each of the large jobs would start a
+/// limit after the last, and the last would wait over two hours; the replay of a flat 600 s says 132 minutes.
+#[test]
+fn a_pool_of_many_large_jobs_is_not_held_to_one_runner_per_first_limit() {
+    let (config, jobs, known) = thirteen_large_jobs_in_a_stream();
+    let replay = |barriers| {
+        let how = Replaying {
+            barriers,
+            arrivals: Arrivals::AsQueued,
+            known: Some(&known),
+        };
+        simulate(
+            &config,
+            Some(42 * G),
+            None,
+            &jobs,
+            Policy::Caps,
+            &BTreeMap::new(),
+            how,
+        )
+    };
+    let minutes_waited = |replay: &Replay| -> Vec<u64> {
+        let waits = &replay.pools[&pool("halyard/ledger", "heavy")].waits;
+        waits.iter().map(|wait| wait / 60).collect()
+    };
+    assert_eq!(
+        minutes_waited(&replay(Barriers::On)),
+        [12, 16, 17, 22, 26, 27, 32, 36, 37, 42, 46, 47, 52],
+        "the first limit, then what a served limit and the room take"
+    );
+    let without = minutes_waited(&replay(Barriers::Off));
+    assert!(without[0] > 150, "the stream keeps them out: {without:?}");
+}
+
+/// A mark that outlived the queue would put the next burst's barrier up early, in front of what may still go by.
+#[test]
+fn a_replay_goes_back_to_the_first_limit_once_a_pools_queue_emptied() {
+    let (mut jobs, known) = a_barrier_with_room_behind_it();
+    let later = NOW + 60 * MINUTE;
+    jobs.extend([
+        site(later, 20),
+        site(later + 1000, 20),
+        run("halyard/ledger", "check", "jvm", later + MINUTE, 4, G),
+        run(
+            "halyard/lint",
+            "report",
+            "light",
+            later + 5 * MINUTE,
+            30,
+            G / 2,
+        ),
+    ]);
+    let replay = replay_with_light(&jobs, &known, Barriers::On);
+    assert_eq!(
+        replay.pools[&pool("halyard/lint", "light")].waits.last(),
+        Some(&0),
+        "4 minutes into its wait, the jvm job holds nothing back"
+    );
+    let replayed: BTreeMap<Pool, Vec<u64>> = replay
+        .pools
+        .iter()
+        .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
+        .collect();
+    assert_eq!(through_the_planner(&jobs, &known), replayed);
 }
 
 /// `jobs` through `scheduler::plan` itself, second by second, as a model of the engine commits it: each pool's waits in
@@ -1439,7 +1562,9 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
             let (_, run) = queued.remove(oldest);
             let ran_for = run.finished_at.unwrap() - run.started_at.unwrap();
             let usual = predictor.usual(&Key::of(run), &pool.profile);
-            waits.remove(&pool);
+            if let Some(waits) = waits.get_mut(&pool) {
+                waits.started();
+            }
             waited
                 .entry(pool.clone())
                 .or_default()
@@ -1451,6 +1576,15 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
                 .entry(demand.pool.clone())
                 .or_default()
                 .note(demand.scarce, demand.job, at);
+        }
+        for pool in &pools {
+            let waits = waits.entry(pool.clone()).or_default();
+            if !queued.iter().any(|(_, run)| of_pool(pool, run)) {
+                waits.emptied();
+            }
+            if let Some(barrier) = plan.barrier {
+                waits.own(barrier.job);
+            }
         }
         now += 1000;
     }
@@ -1468,7 +1602,7 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
             "halyard/lint",
             "report",
             "light",
-            NOW + 5 * MINUTE,
+            NOW + 13 * MINUTE,
             30,
             G / 2,
         ),
@@ -1487,6 +1621,27 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
         replay.backfilled.jobs, 0,
         "the lint job waits for the older one"
     );
+    let replayed: BTreeMap<Pool, Vec<u64>> = replay
+        .pools
+        .iter()
+        .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
+        .collect();
+    assert_eq!(through_the_planner(&jobs, &known), replayed);
+    // A served pool: job two's short limit is up at minute 22, so what would take its room waits; with the first limit
+    // the page and report jobs start at minute 23 and it waits out the report's 30 minutes.
+    let (mut jobs, mut known) = a_barrier_with_room_behind_it();
+    let page = |queued, minutes| run("halyard/storefront", "page", "node", queued, minutes, G);
+    let report = |queued, minutes| run("halyard/lint", "report", "light", queued, minutes, G / 2);
+    let check = run("halyard/ledger", "check", "jvm", NOW + MINUTE + 1000, 4, G);
+    jobs.insert(3, check);
+    jobs.extend([page(NOW + 23 * MINUTE, 6), report(NOW + 23 * MINUTE, 30)]);
+    known.jobs.extend((0..3).flat_map(|i| {
+        let at = NOW - 600 * MINUTE + i * 40 * MINUTE;
+        [page(at, 6), report(at, 30)]
+    }));
+    let replay = replay_with_light(&jobs, &known, Barriers::On);
+    let ledger = pool("halyard/ledger", "jvm");
+    assert_eq!(replay.pools[&ledger].waits, [19 * 60, 23 * 60 - 1]);
     let replayed: BTreeMap<Pool, Vec<u64>> = replay
         .pools
         .iter()

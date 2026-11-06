@@ -14,9 +14,7 @@ pub mod priority;
 pub mod warm;
 
 use priority::{Around, Backfill, Candidate, Caps, Older, Runner};
-pub use priority::{
-    Barrier, CPU_PRIORITY_AFTER, Drained, MEMORY_PRIORITY_AFTER, Scarce, Wait, Waits,
-};
+pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, Scarce, Wait, Waits};
 
 /// How long a started runner may wait for a job before it counts as surplus: covers the container's start and
 /// GitHub's assignment.
@@ -72,7 +70,7 @@ pub struct Repository {
     /// What a new runner of it takes of the CPU budget, in millicores: `None`, its profile's `cpus`. Under measured
     /// admission, the largest predicted average CPU of its queued jobs.
     pub runner_cpu: Option<u64>,
-    /// What its next job has waited for, and since when (ADR 0096).
+    /// What its next job has waited for, and since when (ADR 0096), and whether a barrier has served it (ADR 0098).
     pub waits: Waits,
     /// The largest usual run time among the queued jobs its labels match, since GitHub may give a runner any of them;
     /// `None` if any has no estimate, and then none of its jobs starts behind a barrier (ADR 0097).
