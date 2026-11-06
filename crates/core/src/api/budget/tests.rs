@@ -3,7 +3,7 @@
 use crate::api::{
     AdmissionPolicy, Budget, ClosedKind, HostBudget, HostMemory, Job, JobMetrics, JobRunner,
     JobState, JobSummary, LimitSource, LogSummary, ProfileStatus, RunnerStatus, SeedMemory,
-    SlotStatus, Status, Timeline,
+    SlotStatus, Status, Swap, Timeline,
 };
 
 const G: u64 = 1 << 30;
@@ -137,6 +137,7 @@ fn host(limit: u64, stalled: bool) -> HostBudget {
             full: None,
             holders: vec![],
             ceiling: None,
+            swap: None,
         },
         limit,
         spare: limit.saturating_sub(8 * G),
@@ -262,6 +263,31 @@ fn without_memory_max_the_host_line_says_what_the_host_leaves_free() {
     assert_eq!(
         budget.host_line().as_deref(),
         Some("host: 20G of 64G available; leaves the slice 13G, so 5G is free")
+    );
+}
+
+#[test]
+fn the_host_line_says_how_much_swap_is_used_and_nothing_on_a_host_without() {
+    // Catches a swap clause on a host without swap, and the used figure read as the free one.
+    let mut budget = status(AdmissionPolicy::Measured, Some(13 * G)).budget;
+    let mut reading = host(13 * G, false);
+    reading.memory.swap = Some(Swap {
+        total: 15 * G + G / 2,
+        free: 3 * G + G / 2,
+    });
+    budget.host = Some(reading);
+    assert_eq!(
+        budget.host_line().as_deref(),
+        Some("host: 20G of 64G available, swap 12G of 15.5G used; leaves the slice 13G")
+    );
+    // Swap is never counted: the room is as without it.
+    let mut without = budget.clone();
+    if let Some(host) = &mut without.host {
+        host.memory.swap = None;
+    }
+    assert_eq!(
+        without.host_line().as_deref(),
+        Some("host: 20G of 64G available; leaves the slice 13G")
     );
 }
 

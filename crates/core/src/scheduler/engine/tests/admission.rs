@@ -1170,6 +1170,7 @@ fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
             },
         ],
         ceiling: None,
+        swap: None,
     });
 }
 
@@ -1385,6 +1386,7 @@ fn idle_vm_at(store: &Store, stalled: u32) {
         }),
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     });
 }
 
@@ -1605,6 +1607,7 @@ async fn without_a_recent_reading_of_the_host_only_the_slice_bounds_starts() {
         full: None,
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     });
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);

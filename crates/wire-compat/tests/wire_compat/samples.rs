@@ -25,7 +25,7 @@ use runnerd_core::api::{
     SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
     ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused,
     SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status,
-    Step, Stopping, Timeline, Usd, WaitSpread, Waiting, WeekWaits,
+    Step, Stopping, Swap, Timeline, Usd, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -40,13 +40,14 @@ pub(crate) fn status() -> Status {
     }
 }
 
-/// A status with nothing that serializing skips: a host reading that names no programs and has no ceiling, no CPU
+/// A status with nothing that serializing skips: a host reading that names no programs and has no ceiling or swap, no CPU
 /// budget, a queued job without a pool or a reason.
 pub(crate) fn status_empty() -> Status {
     let mut status = status();
     if let Some(host) = &mut status.budget.host {
         host.memory.holders = Vec::new();
         host.memory.ceiling = None;
+        host.memory.swap = None;
     }
     status.budget.cpu = None;
     status.budget.slice_cpus = None;
@@ -107,6 +108,10 @@ fn host_memory() -> HostMemory {
             memory: 9 << 30,
         }],
         ceiling: Some(96 << 30),
+        swap: Some(Swap {
+            total: 16 << 30,
+            free: 4 << 30,
+        }),
     }
 }
 

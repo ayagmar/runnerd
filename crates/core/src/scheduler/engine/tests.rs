@@ -3618,6 +3618,7 @@ async fn a_requested_reseed_the_host_could_never_fit_holds_no_room_against_other
         full: None,
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     });
     engine.recover().await.unwrap();
     engine.request_reseed("small").unwrap();

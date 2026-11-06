@@ -1046,6 +1046,7 @@ fn held(waited: u64) -> HostHold {
                 },
             ],
             ceiling: None,
+            swap: None,
         },
         seen: NOW - 3_000,
         jobs: vec![

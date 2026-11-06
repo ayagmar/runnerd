@@ -226,6 +226,7 @@ fn host_reading() -> api::HostMemory {
             memory: 9 << 30,
         }],
         ceiling: None,
+        swap: None,
     }
 }
 

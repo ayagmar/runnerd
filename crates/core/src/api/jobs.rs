@@ -589,6 +589,26 @@ pub struct HostMemory {
     /// memory as the guest asks for it (ADR 0084). From the config, not from `/proc`; absent unless it is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ceiling: Option<u64>,
+    /// `SwapTotal` and `SwapFree`, from the same read of `/proc/meminfo`; absent on a host without swap (ADR 0101).
+    /// Admission counts none of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap: Option<Swap>,
+}
+
+/// A host's swap at one reading: zram and zswap's device included, as `/proc/meminfo` counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Swap {
+    /// `SwapTotal`, in bytes. Never 0: a host without swap has none.
+    pub total: u64,
+    /// `SwapFree`, in bytes.
+    pub free: u64,
+}
+
+impl Swap {
+    /// What is in use, in bytes.
+    pub fn used(&self) -> u64 {
+        self.total.saturating_sub(self.free)
+    }
 }
 
 impl HostMemory {

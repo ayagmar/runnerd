@@ -168,6 +168,10 @@ fn host() -> HostBudget {
             full: None,
             holders: Vec::new(),
             ceiling: None,
+            swap: Some(api::Swap {
+                total: 16 * GIB,
+                free: 4 * GIB + 512 * MIB,
+            }),
         },
         limit: 22 * GIB + 512 * MIB,
         spare: 512 * MIB,
@@ -701,6 +705,7 @@ fn held_host(at: u64) -> HostMemory {
             },
         ],
         ceiling: None,
+        swap: None,
     }
 }
 

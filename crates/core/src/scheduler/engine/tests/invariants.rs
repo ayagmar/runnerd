@@ -1724,6 +1724,7 @@ fn sample(
         }),
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     });
     HostReading {
         at: now / 1000,
