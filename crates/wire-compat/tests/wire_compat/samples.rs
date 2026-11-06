@@ -190,6 +190,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
         Waiting::HostMemory { needs: 6, free: 2 },
         Waiting::Cpu { needs: 4, free: 1 },
         Waiting::BehindCpu { job: 41 },
+        Waiting::BehindMemory { job: 41 },
         Waiting::BehindStart { job: 41 },
         Waiting::NoPool {
             labels: vec!["halyard-lite".to_owned()],
@@ -207,6 +208,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
             | Waiting::HostMemory { .. }
             | Waiting::Cpu { .. }
             | Waiting::BehindCpu { .. }
+            | Waiting::BehindMemory { .. }
             | Waiting::BehindStart { .. }
             | Waiting::NoPool { .. }
             // What a client reads a later daemon's reason as; no daemon sends it, so it has no sample.

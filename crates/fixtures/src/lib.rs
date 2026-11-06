@@ -51,6 +51,8 @@ pub const UNNAMED: u64 = 9206;
 pub const NO_POOL: u64 = 9301;
 /// A queued job waiting for the host's memory, which leaves less than `MemoryMax` does.
 pub const HOST_SHORT: u64 = 9302;
+/// A queued job that fits, behind [`HOST_SHORT`], which waited long enough that no younger job starts before it.
+pub const BEHIND_MEMORY: u64 = 9303;
 
 const LEDGER: &str = "halyard/ledger";
 const STOREFRONT: &str = "halyard/storefront";
@@ -251,28 +253,40 @@ fn status() -> Status {
             repository(LEDGER, pool("jvm", &["self-hosted", "jvm"]), 1),
             repository(STOREFRONT, pool("node", &["self-hosted", "node"]), 1),
         ],
-        queued: vec![
-            queued(
-                NO_POOL,
-                LEDGER,
-                "render",
-                125,
-                Waiting::NoPool {
-                    labels: vec!["self-hosted".to_owned(), "gpu".to_owned()],
-                },
-            ),
-            queued(
-                HOST_SHORT,
-                STOREFRONT,
-                "lint",
-                47,
-                Waiting::HostMemory {
-                    needs: GIB,
-                    free: 512 * MIB,
-                },
-            ),
-        ],
+        queued: queued_jobs(),
     }
+}
+
+/// The queue: a job no pool serves, one the host is short for, and one behind it.
+fn queued_jobs() -> Vec<QueuedJob> {
+    vec![
+        queued(
+            NO_POOL,
+            LEDGER,
+            "render",
+            125,
+            Waiting::NoPool {
+                labels: vec!["self-hosted".to_owned(), "gpu".to_owned()],
+            },
+        ),
+        queued(
+            HOST_SHORT,
+            STOREFRONT,
+            "lint",
+            47,
+            Waiting::HostMemory {
+                needs: GIB,
+                free: 512 * MIB,
+            },
+        ),
+        queued(
+            BEHIND_MEMORY,
+            LEDGER,
+            "compile",
+            12,
+            Waiting::BehindMemory { job: HOST_SHORT },
+        ),
+    ]
 }
 
 /// A job of `repository`'s `CI / test` that has not started, with no times yet.

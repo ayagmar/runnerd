@@ -96,6 +96,19 @@ slots = 8       # 8 × 7G may exceed MemoryMax
 
 The caps still stop a container that goes over them, but several jobs going over their predictions at once can fill the slice, and the kernel then kills a process in it. `runnerctl job <id>` says what a runner reserved and why.
 
+### A starved job goes first
+
+Smaller runners can take all the memory that frees up, so a large runner would never fit. Once a pool's next job has waited 2 minutes for memory with a free slot, no younger job starts until a runner of that pool does. It works under `caps` and `measured`, and there is nothing to set.
+
+- One job holds at a time, for memory and [CPU](#cpu-admission) together: the oldest one that waited long enough. A job with no free slot, or a paused or backing-off pool, does not hold.
+- A job holds only for room that running jobs would give back. A runner bigger than the slice beside the mirror, or a host short because of programs outside the slice, holds nothing: younger jobs go on, and the job keeps saying why it waits.
+- The jobs behind it say `Behind <job>, which waits for memory`. A job with no free slot of its own keeps saying that.
+- Runners already started keep running. No warm runner starts meanwhile.
+- While the slice is at 90% of `MemoryMax` or the host stalls, no job holds. Nothing starts then anyway, and waits keep their age.
+- The wait ends when a runner of the pool is in its slot, or when the job leaves the queue. It starts again after a pause, a backoff, a reseed or image pull, or a restart. A failed GitHub listing keeps it, and nothing is held back until a listing answers.
+
+Small jobs pay for this: memory stays free that one of them could have used. `runnerd simulate --priority` shows what it does on your history.
+
 ### Simulating
 
 `runnerd simulate` replays the last 30 days through each policy, every job queued when it was and running as long as it ran. It changes nothing. This history on 8 CPUs, node's slots raised to 8:
@@ -114,6 +127,8 @@ cpu ×1.5  jvm 3, node 8                 0s     2m08s     4m21s       21s       
 
 Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d`, `--cpus`, and `--cpu-overcommit`, repeated to compare factors.
 
+`--priority` adds the config's policy and slots replayed without and with [the barrier for a starved job](#a-starved-job-goes-first), pool by pool, with the budget's busy share. Every row above already goes by the barrier. Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. The replay also has no host readings, warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool.
+
 ## CPU admission
 
 `cpu_overcommit` under `[host]` adds a CPU budget, the slice's CPUs times the factor, and a runner starts only when what it reserves of that fits too:
@@ -127,7 +142,7 @@ cpu_overcommit = 1.0
 - The slice's CPUs are its `AllowedCPUs`, or the host's, fewer when its `CPUQuota` allows less, read from systemd.
 - Under `measured` a runner reserves its job's average CPU, predicted from the history as memory is, with no margin: the factor is the margin. Under `caps` it reserves its profile's `cpus`.
 
-A job that had a slot and memory but not CPU waits; after 2 minutes no younger job starts first. The status line says so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`).
+A job that had a slot and memory but not CPU waits; after 2 minutes [it goes first](#a-starved-job-goes-first), by the same rule as memory. The status line says so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`).
 
 Averages are far under peaks, so on a host with many CPUs they admit nearly everything; on 8 CPUs ([above](#simulating)) the budget holds jobs. Start at `1.0`: peaks that land together cost a short slowdown, not a kill.
 

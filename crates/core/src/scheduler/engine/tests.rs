@@ -113,6 +113,8 @@ struct GithubState {
     held_registrations: tokio::sync::watch::Sender<bool>,
     /// Repositories whose queued jobs listings do not answer, while others do.
     held_queued: tokio::sync::watch::Sender<BTreeSet<String>>,
+    /// Repositories whose queued jobs listings fail.
+    failed_queued: BTreeSet<String>,
     /// Listings, job reads, registrations and deletes waiting for an answer.
     waiting: usize,
     /// How long each listing, registration and delete takes to answer, where a test says: a workload's figures.
@@ -282,6 +284,14 @@ impl GithubApi for FakeGithub {
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
+        if state.failed_queued.contains(repository) {
+            return Err(github::Error::Status {
+                method: reqwest::Method::GET,
+                path: format!("/repos/{repository}/actions/runs"),
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "bad gateway".to_owned(),
+            });
+        }
         let queued = state
             .queued
             .iter()
@@ -5538,6 +5548,7 @@ mod build_cache;
 mod invariants;
 mod pacing;
 mod pools;
+mod priority;
 mod records;
 mod stop;
 mod warm;

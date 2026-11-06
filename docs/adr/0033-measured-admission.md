@@ -1,6 +1,6 @@
 # 0033. Admission by measured peaks, behind a flag
 
-Status: **Accepted**, amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md), [0037](0037-memory-without-page-cache.md), [0055](0055-admission-follows-the-hosts-memory.md), [0056](0056-adopted-runners-keep-their-reservations.md), [0058](0058-a-repository-served-by-several-profiles.md), [0070](0070-predictions-follow-recent-runs.md).
+Status: **Accepted**, amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md), [0037](0037-memory-without-page-cache.md), [0055](0055-admission-follows-the-hosts-memory.md), [0056](0056-adopted-runners-keep-their-reservations.md), [0058](0058-a-repository-served-by-several-profiles.md), [0070](0070-predictions-follow-recent-runs.md), [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md).
 
 ## Context
 

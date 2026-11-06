@@ -1,6 +1,6 @@
 # 0056. A runner a restart adopts keeps what it reserved
 
-Status: **Accepted** (2026-10-24). Amends [0033](0033-measured-admission.md).
+Status: **Accepted** (2026-10-24), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Amends [0033](0033-measured-admission.md).
 
 ## Context
 

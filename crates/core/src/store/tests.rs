@@ -1041,6 +1041,13 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
         .collect();
     assert_eq!(peaks, [("job 1", 3 << 30, Some(4 << 30))]);
     assert_eq!(history.runners.len(), 2, "both runners held a slot");
+    assert_eq!(
+        history.left_out,
+        crate::sizing::LeftOut {
+            cancelled: 1,
+            ..crate::sizing::LeftOut::default()
+        }
+    );
     // `runnerd doctor` reads the same without a daemon.
     assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
     assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);

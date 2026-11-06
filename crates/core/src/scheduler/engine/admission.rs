@@ -24,7 +24,9 @@ use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::{Decision, Pool, Repository, StopReason, matches};
+use crate::scheduler::{
+    Barrier, Decision, Demand, Pool, Repository, Scarce, StopReason, Waits, matches,
+};
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -49,6 +51,8 @@ pub(super) struct Measured {
     /// The waiting runners `rereserve` raised for a heavier queued job, until they take a job or go. A raise stays
     /// once made, so a pass's raise is still known to the tick after it, which stops those past the budget.
     raised: Vec<String>,
+    /// The job the last plan let no younger job start before, so the change is logged once.
+    barrier: Option<u64>,
 }
 
 /// What one plan admits by.
@@ -637,71 +641,93 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         stops
     }
 
-    /// Notes which pools this plan held for CPU (`held`). A held pool without a wait starts one for its oldest
-    /// queued job, logging it; a wait ends when its runner starts or, once a listing succeeded, its job is no
-    /// longer queued, not when a later plan holds the job for memory or a slot instead.
-    pub(super) fn note_held_for_cpu(&mut self, held: &BTreeSet<Pool>) {
+    /// Commits what the last plan of a tick or a pass found (ADR 0096): the pools it `held`, each wait starting with
+    /// the job the plan names, and its `barrier`. A pool that may not start a runner, paused, backing off or preparing,
+    /// loses its wait, as does one whose job a listing that succeeded no longer shows or a runner of this machine
+    /// took. A listing that failed says nothing of the job: its wait stays, and the plan, which has no such job, puts
+    /// up no barrier for it. A status's plan never comes here, so reading the status changes no wait.
+    pub(super) fn note_waits(&mut self, held: &[Demand], barrier: Option<Barrier>) {
         let budget = self.cpu_budget();
         let in_use = self.cpu_in_use();
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
-        let mut idle: BTreeMap<Pool, usize> = BTreeMap::new();
-        for (slot, occupant) in self.occupied() {
-            if !occupant.busy && occupant.job.is_none() {
-                let pool = Pool {
-                    repository: occupant.repository.clone(),
-                    profile: slot.profile,
-                };
-                *idle.entry(pool).or_default() += 1;
-            }
-        }
-        for repository in &self.config.repositories {
-            let name = &repository.name;
-            let pool = Pool::from(repository);
-            let Some(state) = self.repositories.get_mut(name) else {
+        let now = SystemTime::now();
+        let pools: Vec<(Pool, BTreeSet<u64>, bool)> = self
+            .config
+            .repositories
+            .iter()
+            .map(|repository| {
+                let queued = self
+                    .listed_demand(repository, &taken)
+                    .iter()
+                    .filter(|job| matches(job, &repository.labels))
+                    .map(|job| job.id)
+                    .collect();
+                let backing_off = self.repositories[&repository.name]
+                    .holds
+                    .get(&repository.profile)
+                    .and_then(|hold| hold.held)
+                    .is_some_and(|hold| hold.until > now);
+                let preparing = self
+                    .config
+                    .profiles
+                    .get(&repository.profile)
+                    .is_some_and(|profile| self.preparing(&repository.profile, profile).is_some());
+                let stopped = self.control.is_paused(&repository.name) || backing_off || preparing;
+                (Pool::from(repository), queued, stopped)
+            })
+            .collect();
+        for (pool, queued, stopped) in pools {
+            let Some(state) = self.repositories.get_mut(&pool.repository) else {
                 continue;
             };
-            let queued = state
-                .queued
-                .iter()
-                .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels));
-            if state.listed
-                && let Some(wait) = state.cpu_wait.get(&repository.profile)
-                && !queued.clone().any(|job| job.id == wait.job)
-            {
-                state.cpu_wait.remove(&repository.profile);
+            let listed = state.listed;
+            let waits = state.waits.entry(pool.profile.clone()).or_default();
+            if stopped {
+                *waits = Waits::default();
+            } else if listed {
+                waits.retain(|job| queued.contains(&job));
             }
-            let cpu_held = held.contains(&pool);
-            if cpu_held {
-                state.cpu_held.insert(repository.profile.clone());
-            } else {
-                state.cpu_held.remove(&repository.profile);
-            }
-            // As `plan` serves them: its waiting runners take the oldest jobs, the next one is held.
-            let mut ids: Vec<u64> = queued.map(|job| job.id).collect();
-            ids.sort_unstable();
-            if cpu_held
-                && !state.cpu_wait.contains_key(&repository.profile)
-                && let Some(oldest) = ids.get(idle.get(&pool).copied().unwrap_or(0)).copied()
-            {
-                state.cpu_wait.insert(
-                    repository.profile.clone(),
-                    super::CpuWait {
-                        job: oldest,
-                        since: SystemTime::now(),
-                    },
-                );
-                if let Some(budget) = budget {
-                    info!(
-                        "{name}: its next job in {} waits for CPU: runners reserve {} of the budget's {}",
-                        repository.profile,
+            let mut cpu_held = false;
+            for demand in held.iter().filter(|demand| demand.pool == pool) {
+                cpu_held |= demand.scarce == Scarce::Cpu;
+                if !waits.note(demand.scarce, demand.job, now) {
+                    continue;
+                }
+                match (demand.scarce, budget) {
+                    (Scarce::Memory, _) => info!(
+                        "{}: its next job in {} waits for memory",
+                        pool.repository, pool.profile
+                    ),
+                    (Scarce::Cpu, Some(budget)) => info!(
+                        "{}: its next job in {} waits for CPU: runners reserve {} of the budget's {}",
+                        pool.repository,
+                        pool.profile,
                         api::cpus(in_use),
                         api::cpus(budget)
-                    );
+                    ),
+                    (Scarce::Cpu, None) => {}
                 }
             }
+            if waits.is_empty() {
+                state.waits.remove(&pool.profile);
+            }
+            if cpu_held {
+                state.cpu_held.insert(pool.profile);
+            } else {
+                state.cpu_held.remove(&pool.profile);
+            }
+        }
+        let job = barrier.map(|barrier| barrier.job);
+        if job != self.measured.barrier {
+            if let Some(job) = job {
+                info!("job {job} waited long enough: no younger job starts until its runner fits");
+            } else {
+                info!("no job holds younger ones back any more");
+            }
+            self.measured.barrier = job;
         }
     }
 

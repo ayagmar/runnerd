@@ -17,7 +17,7 @@ use futures_util::FutureExt as _;
 use super::*;
 use crate::config::Admission;
 use crate::observe::metrics::Events;
-use crate::scheduler::IDLE_TIMEOUT;
+use crate::scheduler::{CPU_PRIORITY_AFTER, IDLE_TIMEOUT, MEMORY_PRIORITY_AFTER};
 use crate::store::SampleRecord;
 use crate::time;
 
@@ -1071,6 +1071,14 @@ impl Case {
                     held.until = past;
                 }
             }
+            for waits in state.waits.values_mut() {
+                if let Some(wait) = waits.memory.as_mut() {
+                    wait.since -= MEMORY_PRIORITY_AFTER;
+                }
+                if let Some(wait) = waits.cpu.as_mut() {
+                    wait.since -= CPU_PRIORITY_AFTER;
+                }
+            }
         }
     }
 
@@ -1184,6 +1192,7 @@ impl Case {
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
+        self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_removal_of_a_running_job()
     }
 
@@ -1210,6 +1219,7 @@ impl Case {
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
         self.starts_fit_the_budget(&after, &starts)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
+        self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_removal_of_a_running_job()
     }
 
@@ -1397,6 +1407,75 @@ impl Case {
                         "started {started:?} while the host stalls with {} available",
                         reading.available
                     ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Invariant 2a (ADR 0096): at most one job holds younger ones back, memory and CPU together. It is queued, older
+    /// than each of them and says what it lacks itself; and no wait is kept for a job a listing that succeeded no
+    /// longer shows, so no hold outlives its job.
+    fn one_barrier_and_only_for_a_queued_job(&self, status: &api::Status) -> Result<(), Violation> {
+        let behind = |reason: &Option<api::Waiting>| match reason {
+            Some(api::Waiting::BehindMemory { job } | api::Waiting::BehindCpu { job }) => {
+                Some(*job)
+            }
+            _ => None,
+        };
+        let owners: BTreeSet<u64> = status
+            .queued
+            .iter()
+            .filter_map(|job| behind(&job.waiting))
+            .collect();
+        if owners.len() > 1 {
+            return violation(
+                self,
+                "one_barrier_and_only_for_a_queued_job",
+                format!("jobs wait behind each of {owners:?}"),
+            );
+        }
+        for owner in &owners {
+            let Some(queued) = status.queued.iter().find(|job| job.id == *owner) else {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("jobs wait behind {owner}, which no longer waits"),
+                );
+            };
+            if behind(&queued.waiting).is_some() {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("{owner} holds others back and says {:?}", queued.waiting),
+                );
+            }
+            if let Some(younger) = status
+                .queued
+                .iter()
+                .find(|job| behind(&job.waiting).is_some() && job.id <= *owner)
+            {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!(
+                        "{} is older than {owner}, which it waits behind",
+                        younger.id
+                    ),
+                );
+            }
+        }
+        for (name, state) in self.engine.repositories.iter().filter(|(_, s)| s.listed) {
+            let waits = state.waits.values();
+            let kept = waits.flat_map(|waits| waits.memory.iter().chain(&waits.cpu));
+            if let Some(wait) = kept
+                .into_iter()
+                .find(|wait| !state.queued.iter().any(|job| job.id == wait.job))
+            {
+                return violation(
+                    self,
+                    "one_barrier_and_only_for_a_queued_job",
+                    format!("{name} keeps a wait for job {}, listed no more", wait.job),
                 );
             }
         }

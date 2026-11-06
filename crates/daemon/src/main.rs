@@ -101,6 +101,10 @@ enum Command {
         /// `cpu_overcommit`, else 1].
         #[arg(long, value_parser = simulate::overcommit)]
         cpu_overcommit: Vec<f64>,
+        /// Also replay the config's policy and slots, `--slots` over them, without and with the barrier for a starved
+        /// job, pool by pool.
+        #[arg(long)]
+        priority: bool,
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
@@ -152,6 +156,7 @@ fn main() -> ExitCode {
             slots,
             cpus,
             cpu_overcommit,
+            priority,
         }) => config_or_default(config).and_then(|path| {
             run_simulation(
                 &path,
@@ -159,6 +164,11 @@ fn main() -> ExitCode {
                     memory_max,
                     cpus,
                     cpu_overcommit,
+                    priority: if priority {
+                        Comparing::Priority
+                    } else {
+                        Comparing::Policies
+                    },
                 },
                 since,
                 &slots.into_iter().collect(),
@@ -240,6 +250,14 @@ struct Limits {
     /// Millicores.
     cpus: Option<u64>,
     cpu_overcommit: Vec<f64>,
+    priority: Comparing,
+}
+
+/// Whether `runnerd simulate` also compares the barrier for a starved job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Comparing {
+    Priority,
+    Policies,
 }
 
 fn run_simulation(
@@ -303,6 +321,21 @@ fn run_simulation(
         &history.jobs,
         slots,
     ));
+    if limits.priority == Comparing::Priority {
+        output::line(simulate::priority(
+            &config,
+            &simulate::Comparison {
+                memory_max: memory_max.map(|max| max.0),
+                cpu_budget: config
+                    .host
+                    .cpu_overcommit
+                    .map(|factor| runnerd_core::config::cpu_budget(cpus, factor)),
+                jobs: &history.jobs,
+                slots,
+                left_out: history.left_out,
+            },
+        ));
+    }
     Ok(ExitCode::SUCCESS)
 }
 

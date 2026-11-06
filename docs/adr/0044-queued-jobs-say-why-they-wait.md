@@ -1,6 +1,6 @@
 # 0044. Queued jobs say why they wait
 
-Status: **Accepted** (2026-10-24), amended by [0058](0058-a-repository-served-by-several-profiles.md).
+Status: **Accepted** (2026-10-24), amended by [0058](0058-a-repository-served-by-several-profiles.md), [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md).
 
 ## Context
 
@@ -18,7 +18,7 @@ with numbers (predicted peaks, the high-water mark, CPU priority) the status doe
   a pause or resume a moment ago), and `GET /v1/status` gives each job in `queued` an optional `waiting` (`api::Waiting`):
   `paused`, `backoff` (until when), `runner-starting`, `reseeding` and `pulling-image` (of which profile),
   `no-slot` (of which profile), `memory` and `cpu` (what the runner would reserve and what is left), and
-  `behind-cpu` (the older job starved of CPU that goes first), and `behind-start` (the older job a runner starts for
+  `behind-cpu` (the older job starved of CPU that goes first), `behind-memory` (the same for memory, [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md)), and `behind-start` (the older job a runner starts for
   first, which takes the slot, memory or CPU this one lacks).
 - A job that an idle runner will take is `runner-starting`: GitHub hands a runner any job its labels match, so the
   reason is about the repository's next job, not this one in particular. A job the plan would start a runner for has

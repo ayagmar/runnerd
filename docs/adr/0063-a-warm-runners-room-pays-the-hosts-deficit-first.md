@@ -1,6 +1,6 @@
 # 0063. A warm runner's room pays the host's deficit first, and a seed container fits the budget
 
-Status: **Accepted** (2026-10-25). Amends [0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-10-25), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Amends [0055](0055-admission-follows-the-hosts-memory.md).
 
 ## Context
 

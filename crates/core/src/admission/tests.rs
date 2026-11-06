@@ -3,9 +3,11 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, Replay, UNPREDICTABLE_FOR, simulate,
+    Barriers, Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, Replay,
+    UNPREDICTABLE_FOR, simulate,
 };
 use crate::config::Config;
+use crate::scheduler::Pool;
 use crate::sizing::{Measure, Ran};
 
 const G: u64 = 1 << 30;
@@ -479,7 +481,15 @@ fn bursts() -> Vec<Ran> {
 fn measured_admission_runs_more_bursts_at_once_without_the_peaks_crossing_memory_max() {
     let jobs = bursts();
     let slots = BTreeMap::from([("node".to_owned(), 8)]);
-    let caps = simulate(&config(), Some(33 * G), None, &jobs, Policy::Caps, &slots);
+    let caps = simulate(
+        &config(),
+        Some(33 * G),
+        None,
+        &jobs,
+        Policy::Caps,
+        &slots,
+        Barriers::Off,
+    );
     let measured = simulate(
         &config(),
         Some(33 * G),
@@ -487,6 +497,7 @@ fn measured_admission_runs_more_bursts_at_once_without_the_peaks_crossing_memory
         &jobs,
         Policy::Measured,
         &slots,
+        Barriers::Off,
     );
     // At 7G caps the 32.5G budget holds 4 of a burst; the other 4 wait. Predicted at 2.5G, all 8 run.
     assert_eq!((caps.most_running, measured.most_running), (4, 8));
@@ -524,6 +535,7 @@ fn the_high_water_mark_holds_back_what_the_predictions_have_room_for() {
         &jobs,
         Policy::Measured,
         &slots,
+        Barriers::Off,
     );
     assert!(measured.held_back > 0, "{measured:?}");
     // The budget is 32.5G: high water is 90% of it; one more 3G peak may cross it, never two.
@@ -582,6 +594,7 @@ fn a_runner_starts_reserving_the_largest_prediction_among_the_waiting_jobs_of_it
         &jobs,
         Policy::Measured,
         &slots,
+        Barriers::Off,
     );
     assert_eq!(replay.never_started, 0);
     // Both waited the 29 minutes; nearest-rank p95 of 23 waits is the 22nd.
@@ -676,6 +689,7 @@ fn burst_after_young_history(peak: u64) -> Replay {
         &jobs,
         Policy::Measured,
         &slots,
+        Barriers::Off,
     )
 }
 
@@ -694,6 +708,7 @@ fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_
         &jobs,
         Policy::Measured,
         &slots,
+        Barriers::Off,
     );
     // The first reserves 1.5G, each other 5.5G: 4 of the 20G budget at once, not the 6 that 1.5G each would fit.
     assert_eq!(replay.most_running, 4);
@@ -792,6 +807,7 @@ fn a_cpu_budget_holds_back_jobs_that_memory_has_room_for() {
             &jobs,
             Policy::Measured,
             &slots,
+            Barriers::Off,
         )
     };
     let unbounded = replay(None);
@@ -802,6 +818,128 @@ fn a_cpu_budget_holds_back_jobs_that_memory_has_room_for() {
     assert!(bounded.cpu_held > 0, "the CPU budget held a job back");
     assert_eq!(bounded.worst_cpu, 6000);
     assert_eq!(bounded.never_started, 0);
+}
+
+/// A node job every 5 minutes running 8, so two of them always overlap in a 16G slice, and at minute 3 a jvm job of
+/// 9G, which fits beside none of them. Run times are this test's own.
+fn a_stream_of_node_jobs_and_a_large_jvm_one() -> Vec<Ran> {
+    let mut jobs: Vec<Ran> = (0..24)
+        .map(|i| {
+            run(
+                "halyard/storefront",
+                "site",
+                "node",
+                NOW + i * 5 * MINUTE,
+                8,
+                G,
+            )
+        })
+        .collect();
+    jobs.insert(
+        1,
+        run("halyard/ledger", "check", "jvm", NOW + 3 * MINUTE, 4, G),
+    );
+    jobs
+}
+
+fn replayed(jobs: &[Ran], memory_max: u64, barriers: Barriers) -> Replay {
+    simulate(
+        &config(),
+        Some(memory_max),
+        None,
+        jobs,
+        Policy::Caps,
+        &BTreeMap::new(),
+        barriers,
+    )
+}
+
+fn pool(repository: &str, profile: &str) -> Pool {
+    Pool {
+        repository: repository.to_owned(),
+        profile: profile.to_owned(),
+    }
+}
+
+#[test]
+fn a_replay_starts_a_starved_job_where_younger_jobs_would_take_all_the_room_before_it() {
+    let jobs = a_stream_of_node_jobs_and_a_large_jvm_one();
+    let without = replayed(&jobs, 16 * G, Barriers::Off);
+    let with = replayed(&jobs, 16 * G, Barriers::On);
+    let ledger = pool("halyard/ledger", "jvm");
+    let storefront = pool("halyard/storefront", "node");
+    let waited = |replay: &Replay| replay.pools[&ledger].waits[0];
+    // Past the whole stream without it; with it, the 2 minutes, then what ran by then ending.
+    assert!(waited(&without) > 100 * 60, "{}s", waited(&without));
+    assert!(waited(&with) <= (2 + 8) * 60, "{}s", waited(&with));
+    assert_eq!(with.jobs, without.jobs);
+    assert_eq!(with.never_started, 0);
+    // What it costs: node jobs wait out the barrier and the jvm job.
+    let total = |replay: &Replay| replay.pools[&storefront].waits.iter().sum::<u64>();
+    assert!(total(&with) > total(&without), "the node jobs pay for it");
+    assert!(with.barrier_for > 0, "a barrier stood");
+    assert_eq!(without.barrier_for, 0);
+    assert!(with.withheld > 0, "and held free memory back");
+}
+
+/// A replay that moves only on arrivals and ends never sees a quiet queue reach the limit.
+#[test]
+fn a_replay_puts_up_a_barrier_at_the_limit_with_no_job_arriving_then() {
+    let jobs = [
+        run("halyard/storefront", "site", "node", NOW, 10, G),
+        run("halyard/ledger", "check", "jvm", NOW + MINUTE, 1, G),
+    ];
+    let replay = replayed(&jobs, 12 * G, Barriers::On);
+    // It waits from minute 1, holds from minute 3, and the node job ends at minute 10.
+    assert_eq!(replay.barrier_for, 7 * MINUTE);
+    assert_eq!(replay.pools[&pool("halyard/ledger", "jvm")].waits, [9 * 60]);
+}
+
+#[test]
+fn a_replay_keeps_no_barrier_for_a_job_no_empty_slice_holds() {
+    let jobs = [
+        run("halyard/ledger", "check", "jvm", NOW, 1, G),
+        run(
+            "halyard/storefront",
+            "site",
+            "node",
+            NOW + 10 * MINUTE,
+            1,
+            G,
+        ),
+    ];
+    let replay = replayed(&jobs, 8 * G, Barriers::On);
+    assert_eq!(replay.barrier_for, 0);
+    assert_eq!(
+        replay.pools[&pool("halyard/ledger", "jvm")].never_started,
+        1
+    );
+    assert_eq!(replay.pools[&pool("halyard/storefront", "node")].waits, [0]);
+}
+
+/// Equal queue times are the rule for one workflow's jobs: the replay serves them in the planner's order, the IDs'.
+#[test]
+fn a_replay_serves_jobs_of_one_moment_in_the_order_it_was_given() {
+    let jobs = [
+        run("halyard/storefront", "first", "node", NOW, 5, G),
+        run("halyard/ledger", "second", "jvm", NOW, 5, G),
+    ];
+    let replay = replayed(&jobs, 10 * G, Barriers::Off);
+    assert_eq!(replay.pools[&pool("halyard/storefront", "node")].waits, [0]);
+    assert_eq!(replay.pools[&pool("halyard/ledger", "jvm")].waits, [5 * 60]);
+}
+
+/// The busy share reports budget-time, not a count: what ran over all there was.
+#[test]
+fn a_replay_counts_what_ran_over_the_budgets_time() {
+    let jobs = [run("halyard/storefront", "site", "node", NOW, 10, G)];
+    // Beside the mirror's 512M.
+    let replay = replayed(&jobs, 14 * G + 512 * M, Barriers::On);
+    assert_eq!(
+        replay.charged * 2,
+        replay.capacity,
+        "7G of 14G the whole time"
+    );
 }
 
 #[test]

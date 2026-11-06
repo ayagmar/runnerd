@@ -507,6 +507,11 @@ pub enum Waiting {
         /// The older job's ID.
         job: u64,
     },
+    /// An older job has waited long enough for memory that no younger one starts before it (ADR 0096).
+    BehindMemory {
+        /// The older job's ID.
+        job: u64,
+    },
     /// An older job is about to have a runner start for it, which takes the slot, memory or CPU this one would
     /// otherwise start with: what holds it is that start, not what runs now.
     BehindStart {
@@ -551,7 +556,8 @@ impl Waiting {
             | Waiting::Memory { .. }
             | Waiting::HostMemory { .. }
             | Waiting::Cpu { .. }
-            | Waiting::BehindCpu { .. } => WaitKind::Full,
+            | Waiting::BehindCpu { .. }
+            | Waiting::BehindMemory { .. } => WaitKind::Full,
         }
     }
 
@@ -640,6 +646,9 @@ impl Waiting {
             }
             Waiting::BehindCpu { job: older } => {
                 format!("Behind {}, which waits for CPU", older_name(*older))
+            }
+            Waiting::BehindMemory { job: older } => {
+                format!("Behind {}, which waits for memory", older_name(*older))
             }
             Waiting::BehindStart { job: older } => {
                 format!(
