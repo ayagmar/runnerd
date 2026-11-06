@@ -700,6 +700,18 @@ async fn a_barrier_whose_job_went_elsewhere_served_nobody() {
     fixture.engine.tick(Shutdown::No).await;
     assert_eq!(fixture.runners_of("o/big"), 1);
     assert!(!fixture.waits().served, "job 12 owned no barrier");
+
+    // The tick that shows the job gone brings the room too, as a cancelled push does, or a large owner leaving a
+    // smaller runner: the plan starts job 12 before that tick's waits are committed.
+    let mut fixture = Fixture::starved().await;
+    fixture.queue(vec![big(10), big(12)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.waits().owner, Some(10));
+    fixture.queue(vec![big(12)]);
+    fixture.docker.0.lock().unwrap().containers.clear();
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert!(!fixture.waits().served, "the same tick");
 }
 
 /// A job that waited past the limit and then found room had no barrier to thank, as with a queue held by its slots.

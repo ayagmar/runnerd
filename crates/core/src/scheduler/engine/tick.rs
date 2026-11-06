@@ -1074,6 +1074,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             if let Some(state) = self.repositories.get_mut(&repository) {
+                // Before the plan: a start for the next job must not read the note of one that left the queue.
+                if listed {
+                    for waits in state.waits.values_mut() {
+                        waits.retain(|job| queued.iter().any(|listed| listed.id == job));
+                    }
+                }
                 state.queued = queued;
                 state.listed = listed;
             } else {

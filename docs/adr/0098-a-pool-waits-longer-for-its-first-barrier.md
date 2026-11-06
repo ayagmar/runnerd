@@ -34,8 +34,8 @@ plan. That takes two steps, because the plan that starts the owner has no barrie
   wait and the room it gathered is what it starts in. It also stays when a start is refused or fails, so the retry counts.
 - `Waits::started` turns the note into the mark when the runner is in its slot, where 0096 ends the wait. A proposed start,
   a deferred one or one that failed preparing its caches does not.
-- A job that leaves the queue with no runner of ours, cancelled or taken elsewhere, takes its note with it. The barrier gave
-  the pool nothing, so the next job waits 600 s.
+- A job that leaves the queue with no runner of ours, cancelled or taken elsewhere, takes its note with it, before the plan
+  of the tick whose listing shows it gone. The barrier gave the pool nothing, so the next job waits 600 s.
 - A job that passed its limit and started without a barrier ever standing marks nothing. That is the case of a pool held by
   its slots, whose clock ran on while it had none free and for which no room was ever held. Marking it would give the busiest
   pools the short limit for free. At 32G the two readings give the same figures in all three windows, so the reason is
