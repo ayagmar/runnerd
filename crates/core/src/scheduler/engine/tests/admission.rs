@@ -1963,8 +1963,16 @@ async fn settled_jobs_of_two_kinds_make_room_a_start_goes_by_and_every_reader_ag
     );
     assert_eq!(
         budget.host.map(|host| host.spare),
-        Some(G + 40 * G - 4 * G - pooled.counted),
-        "the host bound reads the same count"
+        Some(G + 40 * G - 4 * G - budget.memory_in_use),
+        "the host's limit reads the plain count: the overcount is its margin"
+    );
+    assert_eq!(
+        plan.host,
+        Some(crate::scheduler::left(
+            G + 40 * G - 4 * G,
+            budget.memory_in_use
+        )),
+        "and so does a plan's"
     );
 
     // 1G is left of the plain count: lint's 1.25G fits only in the pooled one.

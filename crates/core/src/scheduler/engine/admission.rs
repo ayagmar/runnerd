@@ -319,7 +319,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let memory = self.host_memory()?;
         Some(host::budget(
             memory,
-            self.count(remembered).pooled(),
+            self.count(remembered).plain,
             remembered,
         ))
     }

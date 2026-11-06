@@ -98,7 +98,7 @@ pub struct Count {
 }
 
 impl Count {
-    /// What the budgets read: `plain` less `credit`.
+    /// What `MemoryMax` reads: `plain` less `credit`. The host's limit reads `plain`: the overcount is its margin.
     pub fn pooled(self) -> u64 {
         self.plain - self.credit
     }

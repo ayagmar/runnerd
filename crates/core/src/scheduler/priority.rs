@@ -6,7 +6,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use super::Left;
+use super::{Left, signed};
 use crate::api::Waiting;
 
 /// Once a pool's next job has waited this long for memory or CPU, no younger job starts until its runner fits: smaller
@@ -363,9 +363,12 @@ impl<'plan> Backfill<'plan> {
             older,
         } = around;
         // The room may come sooner than ends bring it: a credit can grow at any moment, and an end gives back at most
-        // what its runner counts. So the time found is the earliest the owner could start.
+        // what its runner counts. So the time found is the earliest the owner could start. The host's limit reads the
+        // plain count, which no credit moves.
         let mut left = left;
-        left.give(credit_room, 0);
+        left.memory = left
+            .memory
+            .map(|memory| memory.saturating_add(signed(credit_room)));
         let mut ending: Vec<(Duration, Runner<'_>)> = runners
             .iter()
             .map(|runner| (runner.left_to_run(now), *runner))

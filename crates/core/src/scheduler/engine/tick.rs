@@ -865,7 +865,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             host: admitting
                 .host
                 .as_ref()
-                .map(|host| host::left(host.limit, count.pooled(), host.stalled)),
+                .map(|host| host::left(host.limit, count.plain, host.stalled)),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
             credit_room: self.most_credit().saturating_sub(count.credit),
             drained: Drained {

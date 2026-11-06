@@ -15,6 +15,7 @@ use std::time::SystemTime;
 use futures_util::FutureExt as _;
 
 use super::*;
+use crate::admission::host;
 use crate::admission::pooled::{self, POOL_AFTER};
 use crate::api::{Basis, JobPeak};
 use crate::config::Admission;
@@ -1490,6 +1491,18 @@ impl Case {
             .map(|max| crate::scheduler::left(max, budget.counted()));
         if !admitting.held && plan.memory != left {
             let detail = format!("a plan reads {:?}, the status {left:?}", plan.memory);
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        // The host's limit reads the plain count, credit or none: the overcount is its margin.
+        let host = admitting
+            .host
+            .as_ref()
+            .map(|host| host::left(host.limit, budget.memory_in_use, host.stalled));
+        if !admitting.held && plan.host != host {
+            let detail = format!(
+                "a plan's host reads {:?}, the plain count {host:?}",
+                plan.host
+            );
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
         if credit == 0 {
