@@ -98,7 +98,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             info!("{profile}: waiting for the reseed an earlier run started");
             let docker = self.docker.clone();
             let id = container.id.clone();
-            let memory = self.running_caps(&container.id, &profile).await.memory;
+            let memory = self.running_caps(&container, &profile).await.memory;
             self.reseed_memory.insert(profile.clone(), memory);
             self.reseeds.insert(
                 profile,
@@ -108,16 +108,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The memory and CPU caps a container left by an earlier daemon runs with, which a reload since may have
-    /// changed in the config; the profile's configured caps only when Docker cannot tell. Also when it started.
-    async fn running_caps(&self, container: &str, profile: &str) -> Caps {
-        let state = self.docker.inspect(container).await.ok();
+    /// changed in the config; when Docker cannot tell, the larger of the memory cap its record kept and the
+    /// configured one, as a reload may have lowered that past what it runs with, and the configured CPUs. Also when it
+    /// started.
+    async fn running_caps(&self, container: &docker::Container, profile: &str) -> Caps {
+        let state = self.docker.inspect(&container.id).await.ok();
         let configured = self.config.profiles.get(profile);
+        let memory = if let Some(memory) = state.as_ref().and_then(|state| state.memory) {
+            memory
+        } else {
+            let stored = self.store.runner_memory_cap(&container.name).await;
+            let stored = stored.ok().flatten().unwrap_or(0);
+            stored.max(configured.map_or(0, |settings| settings.memory.0))
+        };
         Caps {
-            memory: state
-                .as_ref()
-                .and_then(|state| state.memory)
-                .or_else(|| configured.map(|settings| settings.memory.0))
-                .unwrap_or(0),
+            memory,
             cpus: state
                 .as_ref()
                 .and_then(|state| state.cpus)
@@ -328,7 +333,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let known_caps = retired.is_some() || self.config.profiles.contains_key(&profile);
             let caps = match retired {
                 Some(caps) => caps,
-                None => self.running_caps(&container.id, &profile).await,
+                None => self.running_caps(&container, &profile).await,
             };
             let occupant = self.adopted(&container, caps).await;
             // A runner the config no longer has room for drains as it would have without the restart: in a slot

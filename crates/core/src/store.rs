@@ -1041,6 +1041,13 @@ impl Store {
             .await
     }
 
+    /// The memory cap a runner started with, as its record kept it, for when Docker cannot tell.
+    pub async fn runner_memory_cap(&self, runner: &str) -> Result<Option<u64>, StoreError> {
+        let runner = runner.to_owned();
+        self.read(move |db| read::runner_memory_cap(db, &runner))
+            .await
+    }
+
     /// Where a job's log capture continues.
     pub async fn log_position(&self, job: u64) -> Result<LogPosition, StoreError> {
         self.read(move |db| read::log_position(db, job)).await

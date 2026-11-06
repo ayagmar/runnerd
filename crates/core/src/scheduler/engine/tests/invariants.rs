@@ -1021,9 +1021,8 @@ impl Case {
             }
             Change::CpuOvercommit => shape.cpu_overcommit = !shape.cpu_overcommit,
             Change::PooledCount => shape.pooled_count = !shape.pooled_count,
-            // Only up: a restart whose inspect fails counts a runner at its profile's memory, which lowered would
-            // read less than Docker runs it with.
-            Change::HeavyMemory => shape.heavy_memory = (shape.heavy_memory + 1).min(6),
+            // Down and back: a restart whose inspect fails must still count a runner at the cap it started with.
+            Change::HeavyMemory => shape.heavy_memory = if shape.heavy_memory == 4 { 2 } else { 4 },
         }
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.engine
@@ -2123,6 +2122,28 @@ async fn a_stopped_runner_that_recovery_cannot_remove_is_removed_later() {
         Step::RemoveFails,
         Step::Finish(0),
         Step::Restart,
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+#[tokio::test]
+async fn a_runner_whose_inspect_fails_after_a_reload_lowered_its_memory_counts_at_its_own_cap() {
+    // Shrunk from seed 487: two heavy runners started at 4G; a reload lowers the profile to 2G; a restart cannot read
+    // them. Counted at 2G each, the next start would fit caps that add past the budget.
+    let heavy = |second| Step::Queue {
+        second,
+        labels: Labels::Heavy,
+    };
+    let steps = [
+        heavy(false),
+        heavy(true),
+        Step::Tick,
+        Step::Assign(0),
+        Step::Assign(0),
+        Step::Reload(Change::HeavyMemory),
+        Step::RestartInspectFails(7),
+        heavy(false),
+        Step::Reload(Change::HeavySlots(3)),
     ];
     assert_eq!(broken(&steps).await, None);
 }
