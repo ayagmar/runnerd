@@ -1160,6 +1160,25 @@ fn a_job_that_followed_another_arrives_as_long_after_its_replayed_end() {
     );
 }
 
+/// A job that follows a delayed one queues behind what arrived meanwhile, whatever its ID in the history says: run 7's
+/// second job arrives at 14m30s, after a job of the history's minute 6, though it queued before that one.
+#[test]
+fn a_follower_that_arrives_late_queues_behind_what_arrived_before_it() {
+    let jobs = [
+        in_run(site(NOW, 10), 5, 1),
+        in_run(site(NOW + MINUTE, 4), 7, 1),
+        in_run(site(NOW + 2 * MINUTE, 2), 6, 1),
+        in_run(site(NOW + 5 * MINUTE + 30_000, 2), 7, 1),
+        in_run(site(NOW + 6 * MINUTE, 1), 8, 1),
+    ];
+    let replay = replay_of(&jobs, 8 * G, after_needs(Barriers::Off, None));
+    // One at a time: minutes 0, 10, 14; then the job of minute 6 at 16, and the follower at 17.
+    assert_eq!(
+        replay.pools[&pool("halyard/storefront", "node")].waits,
+        [0, 540, 720, 600, 150]
+    );
+}
+
 /// A re-run comes back hours later: it follows nothing of the attempt before it.
 #[test]
 fn a_rerun_follows_nothing_of_the_attempt_before_it() {
@@ -1444,7 +1463,7 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
     let (mut jobs, known) = a_barrier_with_room_behind_it();
     // Too long to pass, and while it is queued its pool goes by it: the next lint job waits with it.
     jobs.insert(
-        5,
+        4,
         run(
             "halyard/lint",
             "report",

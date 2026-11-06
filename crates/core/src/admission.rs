@@ -621,7 +621,9 @@ pub fn simulate<'known>(
                 ..queue[at]
             });
         }
-        waiting.sort_by_key(|queued| queued.job);
+        // By arrival, as IDs follow queue time in the daemon: a job that follows a delayed one queues after what arrived
+        // meanwhile, though its ID in the history is older.
+        waiting.sort_by_key(|queued| (queued.arrived, queued.job));
         replayer.pass(&mut waiting, now);
         replayer.note_worst(mirror);
     }
@@ -726,6 +728,12 @@ struct Admitted {
     peak: u64,
     /// Millicores.
     cpu: u64,
+}
+
+/// Whether `one` and `other` are the same job, as `Key` tells them apart. A long queue asks this of every pair of its
+/// jobs in every pass, too often for keys to be built.
+fn same_job(one: &Ran, other: &Ran) -> bool {
+    one.name == other.name && one.repository == other.repository && one.workflow == other.workflow
 }
 
 /// What a job's runner starts with at a moment of a replay.
@@ -847,8 +855,9 @@ impl<'run> Replayer<'run> {
                     if self.barrier.is_none() && short.scarce == Scarce::Cpu {
                         self.cpu_held += 1;
                     }
+                    let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
-                    if self.barrier.is_some() && self.backfill.is_none() {
+                    if first && self.barrier.is_some() {
                         self.backfill_behind(queued.run, &waiting[..index], &listed, now);
                     }
                     index += 1;
@@ -1204,19 +1213,19 @@ impl<'run> Replayer<'run> {
         let run = queued.run;
         let profile = run.profile.as_str();
         let cap = self.config.profiles[profile].memory.0;
-        let running = |key: &Key| {
+        let running = |job: &Ran| {
             self.running
                 .iter()
-                .any(|running| Key::of(running.run) == *key)
+                .any(|running| same_job(running.run, job))
         };
         // A waiting job with a copy waiting or running beside it, as the daemon sees its queue.
         let predicted = |job: &Ran| {
             let key = Key::of(job);
             let waiting = waiting
                 .iter()
-                .filter(|other| Key::of(other.run) == key)
+                .filter(|other| same_job(other.run, job))
                 .count();
-            let copies = if waiting > 1 || running(&key) {
+            let copies = if waiting > 1 || running(job) {
                 Copies::Several
             } else {
                 Copies::Alone
@@ -1228,7 +1237,7 @@ impl<'run> Replayer<'run> {
         // The started job, once known: the first of its copies to run goes by its own runs.
         let started = || {
             let key = Key::of(run);
-            let copies = if running(&key) {
+            let copies = if running(run) {
                 Copies::Several
             } else {
                 Copies::Alone
