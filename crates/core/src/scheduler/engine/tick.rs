@@ -990,7 +990,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Admission::Caps => occupant.memory,
             // What it uses when that is more: a job past its prediction, or one in a burst of starts. Its cap when
             // that is not known: the slice's or its own last sample is older than three intervals, as when the
-            // sampler stalls or cannot read its container.
+            // sampler stalls or cannot read its container. Nothing once its container's cgroup is gone: its job ended
+            // and its memory with it, though its slot waits for its log and its removal, for 20 s after a burst.
+            Admission::Measured if self.store.container_gone(&occupant.runner_name) => 0,
             Admission::Measured => {
                 let now = time::now_ms();
                 let fresh = 3 * u64::try_from(SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX);

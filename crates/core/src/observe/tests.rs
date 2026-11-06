@@ -75,11 +75,11 @@ fn memory_leaves_out_page_cache_the_kernel_can_take_back_and_cpu_is_use_between_
     container(&paths, "a", 10, 4_000_000, 1_500_000, 1_000_000);
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let runners = [tracked("runner-a", "a", 10)];
-    let (first, _) = state.sample(&runners, 10_000);
+    let first = state.sample(&runners, 10_000).samples;
     // Two seconds later the container used 3 CPU seconds: 1.5 cores. Its build read the same files twice, so a
     // third of its page cache is active: page cache all the same, so left out.
     container(&paths, "a", 10, 5_000_000, 3_000_000, 4_000_000);
-    let (second, _) = state.sample(&runners, 12_000);
+    let second = state.sample(&runners, 12_000).samples;
     let observed: Vec<(u64, u64)> = first
         .iter()
         .chain(&second)
@@ -111,7 +111,7 @@ fn a_job_whose_page_cache_fills_its_cap_peaks_without_it_and_keeps_its_slab() {
     )
     .unwrap();
     let mut state = Sampler::new(paths.clone(), "ci.slice");
-    let (samples, _) = state.sample(&[tracked("runner-a", "a", 10)], 1_000);
+    let samples = state.sample(&[tracked("runner-a", "a", 10)], 1_000).samples;
     // anon + shmem + all of its kernel memory.
     assert_eq!(samples[0].memory, 329_342_080 + 46_301_184 + 41_672_024);
 }
@@ -124,11 +124,29 @@ fn a_container_that_disappears_ends_its_series_and_the_others_go_on() {
     container(&paths, "b", 11, 8_000, 0, 0);
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let runners = [tracked("runner-a", "a", 10), tracked("runner-b", "b", 11)];
-    assert_eq!(state.sample(&runners, 1_000).0.len(), 2);
+    assert_eq!(state.sample(&runners, 1_000).samples.len(), 2);
     std::fs::remove_dir_all(paths.container("ci.slice", "a")).unwrap();
-    let (after, _) = state.sample(&runners, 3_000);
-    let names: Vec<&str> = after.iter().map(|sample| sample.runner.as_str()).collect();
+    let after = state.sample(&runners, 3_000);
+    let names: Vec<&str> = after
+        .samples
+        .iter()
+        .map(|sample| sample.runner.as_str())
+        .collect();
     assert_eq!(names, ["runner-b"]);
+    assert_eq!(after.gone, ["runner-a"], "its cgroup went after a read");
+    assert!(
+        state.sample(&runners, 5_000).gone.is_empty(),
+        "a gone container is told once"
+    );
+}
+
+#[test]
+fn a_container_never_read_is_not_called_gone() {
+    // A slice whose containers live elsewhere, such as under another cgroup driver: live runners with no files here.
+    let dir = TestDir::new("observe");
+    let mut state = Sampler::new(paths(&dir.0), "ci.slice");
+    let sampled = state.sample(&[tracked("runner-a", "a", 10)], 1_000);
+    assert!(sampled.gone.is_empty(), "it was never there to go");
 }
 
 #[test]
@@ -141,7 +159,7 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
     let runners = [tracked("runner-a", "a", 10)];
     let mut events_after = |text: &str, at| {
         std::fs::write(&events, text).unwrap();
-        state.sample(&runners, at).0[0].events
+        state.sample(&runners, at).samples[0].events
     };
     // Reclaim at the cap (`max`) is not running out of memory: page cache filling the cap counts there too.
     assert_eq!(
@@ -189,7 +207,7 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
     );
     std::fs::remove_file(&events).unwrap();
     assert_eq!(
-        state.sample(&runners, 9_000).0[0].events,
+        state.sample(&runners, 9_000).samples[0].events,
         Events::default(),
         "no memory.events"
     );
@@ -210,7 +228,7 @@ fn a_limit_a_jobs_own_container_hit_is_told_from_the_runners_own() {
         "max 0\noom 0\noom_kill 0\n",
     )
     .unwrap();
-    let inner = state.sample(&runners, 1_000).0[0].events;
+    let inner = state.sample(&runners, 1_000).samples[0].events;
     assert_eq!((inner.oom, inner.local_oom), (Some(1), Some(0)));
     // Then the runner's own cap stopped an allocation.
     std::fs::write(
@@ -218,7 +236,10 @@ fn a_limit_a_jobs_own_container_hit_is_told_from_the_runners_own() {
         "max 9\noom 1\noom_kill 0\n",
     )
     .unwrap();
-    assert_eq!(state.sample(&runners, 3_000).0[0].events.local_oom, Some(1));
+    assert_eq!(
+        state.sample(&runners, 3_000).samples[0].events.local_oom,
+        Some(1)
+    );
 }
 
 #[test]
@@ -234,7 +255,7 @@ fn the_slice_counts_its_active_page_cache_for_the_high_water_mark() {
     )
     .unwrap();
     std::fs::write(slice.join("cpu.stat"), "usage_usec 0\n").unwrap();
-    let (_, host) = Sampler::new(paths, "ci.slice").sample(&[], 1_000);
+    let host = Sampler::new(paths, "ci.slice").sample(&[], 1_000).host;
     assert_eq!(host.map(|host| host.memory), Some(6000));
 }
 
@@ -716,7 +737,7 @@ fn what_held_a_containers_cpu_back_is_read_where_the_kernel_keeps_it_and_unknown
     container(&paths, "a", 10, 4_000, 0, 1_000_000);
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let runners = [tracked("runner-a", "a", 10)];
-    let (bare, _) = state.sample(&runners, 1_000);
+    let bare = state.sample(&runners, 1_000).samples;
     assert_eq!(bare.len(), 1, "the sample is taken");
     assert_eq!(bare[0].cpu_held, CpuHeld::default());
     let cgroup = paths.container("ci.slice", "a");
@@ -731,7 +752,7 @@ fn what_held_a_containers_cpu_back_is_read_where_the_kernel_keeps_it_and_unknown
         "some avg10=12.50 avg60=8.00 avg300=2.00 total=409000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1000\n",
     )
     .unwrap();
-    let (held, _) = state.sample(&runners, 3_000);
+    let held = state.sample(&runners, 3_000).samples;
     assert_eq!(
         held[0].cpu_held,
         CpuHeld {

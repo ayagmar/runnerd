@@ -4,7 +4,7 @@
 //! pruning run on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about
 //! scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -421,6 +421,8 @@ pub struct Store {
     latest_host_memory: Arc<Mutex<Option<api::HostMemory>>>,
     /// Each running runner's last sample, for admission to read without a query.
     latest_samples: Arc<Mutex<BTreeMap<String, SampleRecord>>>,
+    /// The runners whose container's cgroup the sampler saw go, until they are removed.
+    gone: Arc<Mutex<BTreeSet<String>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
     backlog: Arc<Semaphore>,
 }
@@ -476,6 +478,7 @@ impl Store {
             latest_host: Arc::new(Mutex::new(None)),
             latest_host_memory: Arc::new(Mutex::new(None)),
             latest_samples: Arc::new(Mutex::new(BTreeMap::new())),
+            gone: Arc::new(Mutex::new(BTreeSet::new())),
             events,
             backlog: Arc::new(Semaphore::new(
                 usize::try_from(LOG_BACKLOG).unwrap_or(usize::MAX),
@@ -507,6 +510,7 @@ impl Store {
     /// Records that a runner's container and registration were removed at `at` (ms).
     pub fn runner_removed(&self, runner: &str, at: u64) {
         lock(&self.latest_samples).remove(runner);
+        lock(&self.gone).remove(runner);
         self.send(Write::RunnerRemoved {
             runner: runner.to_owned(),
             at,
@@ -517,6 +521,7 @@ impl Store {
     /// found gone, so it stops counting as holding a slot.
     pub fn runners_gone(&self, running: Vec<String>, at: u64) {
         lock(&self.latest_samples).retain(|runner, _| running.contains(runner));
+        lock(&self.gone).retain(|runner| running.contains(runner));
         self.send(Write::RunnersGone { running, at });
     }
 
@@ -609,6 +614,17 @@ impl Store {
     /// A runner's last sample, stored or not; `None` before its first sample or once it is removed.
     pub fn latest_sample(&self, runner: &str) -> Option<SampleRecord> {
         lock(&self.latest_samples).get(runner).cloned()
+    }
+
+    /// Notes that the cgroups of these runners' containers are gone (`metrics::Sampled::gone`), for admission to read
+    /// until they are removed. Kept in memory only: a restart finds such a container stopped.
+    pub fn containers_gone(&self, runners: Vec<String>) {
+        lock(&self.gone).extend(runners);
+    }
+
+    /// Whether a runner's container's cgroup is gone, though its slot may hold it a while yet.
+    pub fn container_gone(&self, runner: &str) -> bool {
+        lock(&self.gone).contains(runner)
     }
 
     /// Records what a runner reserves now, when measured admission changed it after the start.

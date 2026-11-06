@@ -378,6 +378,17 @@ pub struct Tracked {
     pub pid: u32,
 }
 
+/// What one pass of `Sampler::sample` read.
+#[derive(Debug)]
+pub struct Sampled {
+    /// A sample of each container it could read.
+    pub samples: Vec<SampleRecord>,
+    /// The slice's sample.
+    pub host: Option<api::HostSample>,
+    /// The runners whose container's cgroup was there at the last pass and is gone now: nothing of it holds memory.
+    pub gone: Vec<String>,
+}
+
 /// Samples containers and their slice, turning CPU time into CPU use between samples.
 #[derive(Debug)]
 pub struct Sampler {
@@ -427,28 +438,36 @@ impl Sampler {
     }
 
     /// One sample of every tracked container that still exists, and of the slice, at `at` (ms). A container
-    /// whose files are gone gets no sample, and is forgotten.
-    pub fn sample(
-        &mut self,
-        tracked: &[Tracked],
-        at: u64,
-    ) -> (Vec<SampleRecord>, Option<api::HostSample>) {
+    /// whose files are gone gets no sample, and is forgotten; one read before says so in `Sampled::gone`. One never
+    /// read says nothing: it may be a slice whose containers live elsewhere.
+    pub fn sample(&mut self, tracked: &[Tracked], at: u64) -> Sampled {
         let mut samples = Vec::new();
+        let mut gone = Vec::new();
         let mut seen = HashMap::new();
         for container in tracked {
             let cgroup = self.paths.container(&self.slice, &container.container);
-            let (Ok(usage), Ok((received, sent))) = (
-                read_usage(&cgroup),
-                read_network(&self.paths, container.pid),
-            ) else {
+            let before = self.previous.get(&container.runner).copied();
+            let usage = match read_usage(&cgroup) {
+                Ok(usage) => usage,
+                Err(error) => {
+                    match before {
+                        Some(_) if error.kind() == io::ErrorKind::NotFound => {
+                            gone.push(container.runner.clone());
+                        }
+                        // Not gone yet as far as this read says: the next one tells.
+                        Some(before) => {
+                            seen.insert(container.runner.clone(), before);
+                        }
+                        None => {}
+                    }
+                    continue;
+                }
+            };
+            seen.insert(container.runner.clone(), (at, usage.cpu_usage));
+            let Ok((received, sent)) = read_network(&self.paths, container.pid) else {
                 continue;
             };
-            let cpu = millicores(
-                self.previous.get(&container.runner).copied(),
-                at,
-                usage.cpu_usage,
-            );
-            seen.insert(container.runner.clone(), (at, usage.cpu_usage));
+            let cpu = millicores(before, at, usage.cpu_usage);
             samples.push(SampleRecord {
                 runner: container.runner.clone(),
                 at,
@@ -473,7 +492,11 @@ impl Sampler {
                     memory: usage.memory_with_active_file,
                 }
             });
-        (samples, host)
+        Sampled {
+            samples,
+            host,
+            gone,
+        }
     }
 }
 
@@ -490,7 +513,7 @@ pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: 
         let containers = tracked.borrow().clone();
         let state = state.clone();
         // Reading cgroup files is quick but blocking.
-        let Ok(((samples, host), memory)) = tokio::task::spawn_blocking(move || {
+        let Ok((sampled, memory)) = tokio::task::spawn_blocking(move || {
             // A panic midway through a sample leaves the counters of the last or of this one, either of which the
             // next sample measures from.
             let mut state = lock(&state);
@@ -504,10 +527,11 @@ pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: 
         if let Some(memory) = memory {
             store.host_memory(memory);
         }
-        if !samples.is_empty() {
-            store.samples(samples);
+        store.containers_gone(sampled.gone);
+        if !sampled.samples.is_empty() {
+            store.samples(sampled.samples);
         }
-        if let Some(host) = host {
+        if let Some(host) = sampled.host {
             store.host_sample(host);
         }
     }
