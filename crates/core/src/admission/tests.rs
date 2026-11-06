@@ -983,6 +983,7 @@ fn a_job_of_one_name_in_two_pools_is_predicted_from_its_runs_in_each() {
     );
 }
 
+mod causal;
 mod recent;
 
 fn minutes(minutes: u64) -> Duration {
@@ -1116,6 +1117,8 @@ fn after_needs(barriers: Barriers, known: Option<&History>) -> Replaying<'_> {
         barriers,
         arrivals: Arrivals::AfterNeeds,
         known,
+        trace: None,
+        most_credit: 0,
     }
 }
 
@@ -1283,6 +1286,8 @@ fn replay_with_light(jobs: &[Ran], known: &History, barriers: Barriers) -> Repla
         barriers,
         arrivals: Arrivals::AsQueued,
         known: Some(known),
+        trace: None,
+        most_credit: 0,
     };
     simulate(
         &with_light(),
@@ -1387,6 +1392,8 @@ fn a_pool_of_many_large_jobs_is_not_held_to_one_runner_per_first_limit() {
             barriers,
             arrivals: Arrivals::AsQueued,
             known: Some(&known),
+            trace: None,
+            most_credit: 0,
         };
         simulate(
             &config,

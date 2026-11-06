@@ -1,11 +1,13 @@
 //! `runnerd simulate`: the job history replayed through admission by caps and by measured peaks, with and without
 //! a CPU budget (`admission::simulate`), as a table; and with `--priority`, with no barrier for a starved job, a strict
-//! one (ADR 0096) and the daemon's (ADR 0097), pool by pool and run by run. Reads the history database read-only, as
+//! one (ADR 0096) and the daemon's (ADR 0097), pool by pool and run by run; and with `--causal`, by each job's own samples
+//! under the plain and the pooled count, with what each risks (ADR 0099). Reads the history database read-only, as
 //! `runnerd doctor` does; changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use runnerd_core::admission::trace::{Episodes, Trace};
 use runnerd_core::admission::{
     Arrivals, Barriers, Policy, PoolReplay, Replay, Replaying, simulate,
 };
@@ -138,6 +140,8 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
                 barriers,
                 arrivals: Arrivals::AfterNeeds,
                 known: Some(comparison.known),
+                trace: None,
+                most_credit: 0,
             },
         )
     };
@@ -193,6 +197,180 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
          and what follows what is read from the times."
     );
     out
+}
+
+/// The most credit each row of `causal` replays, in GiB: the plain count, then the pooled one around its constant.
+const CREDITS: [u64; 4] = [0, 4, 6, 8];
+
+/// The same replay as the jobs really ran (`Replaying::trace`) with the plain count and with each credit of `CREDITS`:
+/// waits, runs, what held jobs, and what each count risked. ADR 0099 reads these tables.
+pub(crate) fn causal(config: &Config, comparison: &Comparison<'_>, trace: &Trace) -> String {
+    let slots: BTreeMap<String, u32> = config
+        .profiles
+        .iter()
+        .map(|(name, profile)| {
+            let slots = comparison.slots.get(name).copied();
+            (name.clone(), slots.unwrap_or(profile.slots))
+        })
+        .collect();
+    let policy = match config.host.admission {
+        Admission::Caps => Policy::Caps,
+        Admission::Measured => Policy::Measured,
+    };
+    let replays = CREDITS.map(|credit| {
+        simulate(
+            config,
+            comparison.memory_max,
+            comparison.cpu_budget,
+            comparison.jobs,
+            policy,
+            &slots,
+            Replaying {
+                barriers: Barriers::On,
+                arrivals: Arrivals::AfterNeeds,
+                known: Some(comparison.known),
+                trace: Some(trace),
+                most_credit: credit << 30,
+            },
+        )
+    });
+    let mut out = String::new();
+    let sampled = comparison
+        .jobs
+        .iter()
+        .filter(|run| {
+            trace
+                .runs
+                .contains_key(&runnerd_core::admission::trace::RunId::of(run))
+        })
+        .count();
+    let _ = writeln!(
+        out,
+        "\n\nAs the jobs really ran: {sampled} of {} with samples, the slice holding {} beside its runners. Credit 0G is \
+         the plain count.\n",
+        comparison.jobs.len(),
+        ByteSize(trace.overhead)
+    );
+    let _ = writeln!(
+        out,
+        "{:<6} {:>9} {:>9} {:>10} {:>9} {:>9} {:>7}",
+        "CREDIT", "RUN MEAN", "RUN WORST", "NEVER", "HOST H", "SLICE H", "BEHIND"
+    );
+    for (credit, replay) in CREDITS.iter().zip(&replays) {
+        let runs = runs_of(replay, None);
+        let _ = writeln!(
+            out,
+            "{:<6} {:>9} {:>9} {:>10} {:>9} {:>9} {:>7}",
+            format!("{credit}G"),
+            duration(mean(&runs)),
+            duration(runs.iter().copied().max().unwrap_or(0)),
+            replay.never_started,
+            job_hours(replay.host_waited),
+            job_hours(replay.slice_waited),
+            replay.backfilled.jobs,
+        );
+    }
+    out.push_str(&causal_waits(&replays));
+    out.push_str(&causal_hazards(&replays));
+    out
+}
+
+/// Each pool's waits in `replays`, a column a credit.
+fn causal_waits(replays: &[Replay; CREDITS.len()]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "\nEach pool's wait, mean / p95:\n");
+    let names: BTreeSet<_> = replays
+        .iter()
+        .flat_map(|replay| replay.pools.keys())
+        .collect();
+    for pool in names {
+        let mut line = format!("{:<36}", format!("{}/{}", pool.repository, pool.profile));
+        for replay in replays {
+            let of_pool = replay.pools.get(pool).cloned().unwrap_or_default();
+            let wait = of_pool.wait();
+            let _ = write!(
+                line,
+                " {:>16}",
+                format!(
+                    "{} / {}",
+                    duration(mean(&of_pool.waits)),
+                    duration(wait.p95)
+                )
+            );
+        }
+        let _ = writeln!(out, "{line}");
+    }
+    out
+}
+
+/// What each of `replays` risks, a row a credit.
+fn causal_hazards(replays: &[Replay; CREDITS.len()]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "\nHazards (episodes, time, worst):\n\n{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>6} {:>9}",
+        "CREDIT",
+        "SLICE MAX",
+        "PAST 90%",
+        "PAST MAX",
+        "USE PAST COUNT",
+        "<20G",
+        "<6.2G",
+        "LOWEST",
+        "FALLS",
+        "OVER",
+        "CREDIT GH"
+    );
+    for (credit, replay) in CREDITS.iter().zip(replays) {
+        let hazard = &replay.hazard;
+        let tenths = hazard.credit / (u128::from(1_u32 << 30) * 360_000);
+        let _ = writeln!(
+            out,
+            "{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>6} {:>9}",
+            format!("{credit}G"),
+            ByteSize(hazard.slice_peak).to_string(),
+            episodes(hazard.over_mark),
+            episodes(hazard.over_max),
+            episodes(hazard.unfunded),
+            duration(hazard.under_throttling / 1000),
+            duration(hazard.under_oomd / 1000),
+            hazard
+                .lowest_available
+                .map_or_else(|| "-".to_owned(), |lowest| ByteSize(lowest).to_string()),
+            hazard.credit_falls,
+            hazard.overdrawn,
+            format!("{}.{}", tenths / 10, tenths % 10),
+        );
+    }
+    let active = replays[0].hazard.active / 1000;
+    let _ = write!(
+        out,
+        "\n<20G and <6.2G: time with the host's MemAvailable under those lines, of {} with a runner running. FALLS: times the \
+         credit fell; OVER: those that left the count past a budget. The host's programs are as recorded and do not react \
+         to a fuller slice; no pressure, no reseeds, shells, warm runners or restarts; a job's run time stays as it ran.",
+        duration(active)
+    );
+    out
+}
+
+/// The mean of `values`.
+fn mean(values: &[u64]) -> u64 {
+    values.iter().sum::<u64>() / (values.len() as u64).max(1)
+}
+
+/// `waited` ms as job-hours, to a tenth.
+fn job_hours(waited: u64) -> String {
+    format!("{}.{}", waited / 3_600_000, waited / 360_000 % 10)
+}
+
+/// `spans` as `2 / 1m30s / 1.5G`.
+fn episodes(spans: Episodes) -> String {
+    format!(
+        "{} / {} / {}",
+        spans.count,
+        duration(spans.time / 1000),
+        ByteSize(spans.worst)
+    )
 }
 
 /// The tables of `replays`: each pool and profile of `slots` by its jobs' waits, then whole runs.

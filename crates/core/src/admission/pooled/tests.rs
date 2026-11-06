@@ -191,6 +191,7 @@ fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
         }),
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     };
     let count = count(&Snapshot {
         runners: &runners,
@@ -301,6 +302,7 @@ fn a_host_short_of_memory_keeps_more_of_it() {
         full: None,
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     };
     let plain = host::pooling(&memory, Remembered::default());
     assert_eq!(plain.keeps, 4 * G + 16 * G, "the margin and a quarter");

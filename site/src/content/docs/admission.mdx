@@ -160,7 +160,9 @@ Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d` (counted back from th
 
 These replays know the history from before the window, as the daemon would. A job that queued after another of its run ended arrives as long after that job's replayed end, so a job held back also holds back what follows it. The history has no `needs`, so this is read from the times.
 
-Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. The replay also has no host readings, warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool. With no host limit there is less contention than the daemon sees, so try a smaller `--memory-max` too. Each window starts from an empty slice, so moving its start by minutes can change the figures a lot.
+`runnerd simulate --causal` replays the config's policy with each job using what its own samples say, shifted to its replayed start, for the plain count and credits of 4G, 6G and 8G. A job counts as known when the daemon could name it, and the host's recorded readings bound what starts. Besides waits and run times it shows what each count risks: the slice past 90% and past `MemoryMax`, what runners used past the count that let them start, the host under 20G and 6.2G available, and how often the credit fell. `--cold` gives every run its job's heaviest samples, and `--overhead 4G` sets what the slice holds beside its runners, by default the history's 99th percentile.
+
+Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. Without `--causal` the replay has no host readings. It never has warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool. With no host limit there is less contention than the daemon sees, so try a smaller `--memory-max` too. Each window starts from an empty slice, so moving its start by minutes can change the figures a lot.
 
 ## CPU admission
 

@@ -2,7 +2,7 @@
 //! repositories, turned into `api` types. Milliseconds in the database become seconds in the API. Shared by the
 //! API's reads and by the writer, which reads back what it announces.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use rusqlite::types::Value;
@@ -11,6 +11,7 @@ use tracing::warn;
 
 use super::{LogPosition, OpenJob, SlotJob};
 use crate::admission::Key;
+use crate::admission::trace::{Outside, Point, RunId, RunTrace, Trace};
 use crate::api::{self, EventEnvelope, JobState};
 use crate::sizing;
 
@@ -554,8 +555,8 @@ pub(super) fn last_event(db: &Connection) -> rusqlite::Result<u64> {
 /// What the notifier keeps for each target, by target, then key.
 pub(super) fn notify_state(
     db: &Connection,
-) -> rusqlite::Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>>> {
-    let mut targets = std::collections::BTreeMap::<_, std::collections::BTreeMap<_, _>>::new();
+) -> rusqlite::Result<BTreeMap<String, BTreeMap<String, u64>>> {
+    let mut targets = BTreeMap::<_, BTreeMap<_, _>>::new();
     let rows = db
         .prepare_cached("SELECT target, key, value FROM notify ORDER BY target, key")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
@@ -602,8 +603,8 @@ pub(super) fn announced(db: &Connection) -> rusqlite::Result<super::Announced> {
         )?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut profiles = std::collections::BTreeMap::new();
-    let mut repositories = std::collections::BTreeMap::new();
+    let mut profiles = BTreeMap::new();
+    let mut repositories = BTreeMap::new();
     for body in bodies {
         match serde_json::from_str(&body) {
             Ok(api::Event::ProfileChanged { profile }) => {
@@ -1130,7 +1131,7 @@ pub(super) fn slot_jobs(db: &Connection) -> rusqlite::Result<Vec<SlotJob>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     // A reseed that made a snapshot dropped every slot's layer of its profile: what ran before it left nothing.
-    let mut reseeded = std::collections::BTreeMap::<String, u64>::new();
+    let mut reseeded = BTreeMap::<String, u64>::new();
     let bodies: Vec<(u64, String)> = db
         .prepare_cached("SELECT at, body FROM events WHERE body LIKE '%\"cache.reseeded\"%'")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -1210,4 +1211,177 @@ pub(super) fn mirror_log_until(db: &Connection) -> rusqlite::Result<super::Mirro
         at: value("mirror_log_until")?,
         seen: value("mirror_log_seen")?,
     })
+}
+
+/// What a replay reads the slice's overhead from: instants with at least this much use by runners, in bytes. Under it
+/// a reseed's container fills the slice and says nothing of what a busy slice holds beside its runners.
+const BUSY_USE: u64 = 8 << 30;
+
+/// The share of busy instants the overhead covers, in percent. It neither grows with the runners nor with their use on
+/// the host studied (ADR 0099), so a replay carries one high figure.
+const OVERHEAD_PERCENTILE: usize = 99;
+
+/// The jobs of a trace.
+struct Started {
+    /// Each run with its samples, not named yet.
+    runs: BTreeMap<RunId, RunTrace>,
+    /// Each run and its start, by job ID.
+    jobs: BTreeMap<u64, (RunId, u64)>,
+}
+
+/// The jobs that started from `since` (ms) on a runner, each run's samples counted from its job's start.
+fn started_since(db: &Connection, since: u64) -> rusqlite::Result<Started> {
+    let mut runs = BTreeMap::new();
+    let mut jobs = BTreeMap::new();
+    let mut statement = db.prepare(
+        "SELECT id, run_id, run_attempt, name, started_at, runner FROM jobs
+         WHERE started_at >= ?1 AND runner IS NOT NULL",
+    )?;
+    let rows = statement.query_map([since], |row| {
+        Ok((
+            row.get::<_, u64>(0)?,
+            row.get::<_, u64>(1)?,
+            row.get::<_, u32>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, u64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut of_runner =
+        db.prepare("SELECT at, memory FROM samples WHERE runner = ?1 ORDER BY at")?;
+    for row in rows {
+        let (job, run_id, run_attempt, name, started_at, runner) = row?;
+        let samples = of_runner
+            .query_map([&runner], |row| {
+                Ok(Point {
+                    at: row.get::<_, u64>(0)?.saturating_sub(started_at),
+                    memory: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<Point>>>()?;
+        let id = RunId {
+            run_id,
+            run_attempt,
+            name,
+        };
+        jobs.insert(job, (id.clone(), started_at));
+        runs.insert(
+            id,
+            RunTrace {
+                samples,
+                named_after: u64::MAX,
+            },
+        );
+    }
+    Ok(Started { runs, jobs })
+}
+
+/// How the jobs that started from `since` (ms) ran (`store::trace_at`). A job counts as named `named_by` ms after it
+/// started, the next plan's reading, if its queued or started event had its name; else at the first event of its that
+/// GitHub's details made, a step or its end.
+pub(super) fn trace(
+    db: &Connection,
+    since: u64,
+    named_by: u64,
+    overhead: Option<u64>,
+) -> rusqlite::Result<Trace> {
+    let Started { mut runs, jobs } = started_since(db, since)?;
+    let used = busy_use(db, since)?;
+    let mut host_overheads = Vec::new();
+    let mut outside = Vec::new();
+    let mut total = 0;
+    let mut events = db.prepare("SELECT at, body FROM events WHERE at >= ?1 ORDER BY id")?;
+    // A job that starts in the window may have queued a while before it.
+    let bodies = events.query_map([since.saturating_sub(DAY_MS)], |row| {
+        Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in bodies {
+        let (at, body) = row?;
+        let Ok(event) = serde_json::from_str::<api::Event>(&body) else {
+            continue;
+        };
+        let named = match event {
+            api::Event::BudgetChanged { budget } => {
+                if let Some(host) = budget.host.filter(|_| at >= since) {
+                    total = host.memory.total;
+                    if let Some(used) = used.get(&(host.memory.at * 1000)) {
+                        host_overheads.push(host.memory.slice.saturating_sub(*used));
+                    }
+                    outside.push(Outside {
+                        at,
+                        memory: host.memory.outside(),
+                    });
+                }
+                continue;
+            }
+            api::Event::JobQueued { job } | api::Event::JobStarted { job } => {
+                (!job.name.is_empty()).then_some((job.id, 0))
+            }
+            api::Event::JobStep { job, .. } => Some((job, at)),
+            api::Event::JobFinished { job } => Some((job.id, at)),
+            _ => None,
+        };
+        let Some((job, at)) = named else {
+            continue;
+        };
+        if let Some((id, started_at)) = jobs.get(&job)
+            && let Some(run) = runs.get_mut(id)
+        {
+            let after = at.saturating_sub(*started_at).max(named_by);
+            run.named_after = run.named_after.min(after);
+        }
+    }
+    for run in runs.values_mut() {
+        if run.named_after == u64::MAX {
+            run.named_after = named_by;
+        }
+    }
+    let overhead = match overhead {
+        Some(overhead) => overhead,
+        None => measured_overhead(db, &used, since)?,
+    };
+    Ok(Trace {
+        runs,
+        outside,
+        total,
+        overhead,
+        host_overhead: high_percentile(host_overheads),
+    })
+}
+
+/// What the runners' samples add up to at each busy second since `since` (ms), by that second in ms.
+fn busy_use(db: &Connection, since: u64) -> rusqlite::Result<BTreeMap<u64, u64>> {
+    let mut statement = db.prepare(
+        "SELECT at / 1000 * 1000, SUM(memory) FROM samples WHERE at >= ?1 GROUP BY 1 HAVING SUM(memory) >= ?2",
+    )?;
+    statement
+        .query_map([since, BUSY_USE], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+}
+
+/// `values` at `OVERHEAD_PERCENTILE`; 0 with none.
+fn high_percentile(mut values: Vec<u64>) -> u64 {
+    values.sort_unstable();
+    let at = values.len() * OVERHEAD_PERCENTILE / 100;
+    values.get(at).copied().unwrap_or(0)
+}
+
+/// What the slice held beside its runners' samples at the busy seconds of `used` since `since` (ms).
+fn measured_overhead(
+    db: &Connection,
+    used: &BTreeMap<u64, u64>,
+    since: u64,
+) -> rusqlite::Result<u64> {
+    let mut statement = db.prepare("SELECT at, memory FROM host_samples WHERE at >= ?1")?;
+    let samples = statement.query_map([since], |row| {
+        Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+    })?;
+    let mut overheads = Vec::new();
+    for sample in samples {
+        let (at, memory) = sample?;
+        if let Some(used) = used.get(&at) {
+            overheads.push(memory.saturating_sub(*used));
+        }
+    }
+    Ok(high_percentile(overheads))
 }

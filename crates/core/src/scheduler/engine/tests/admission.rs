@@ -2051,6 +2051,7 @@ async fn any_stale_reading_takes_the_credit_back() {
         full: Some(api::Pressure::default()),
         holders: Vec::new(),
         ceiling: None,
+        swap: None,
     });
     assert_eq!(credit(&mut engine), None, "without a recent host reading");
 

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use runnerd_core::admission::trace::Trace;
 use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
@@ -105,6 +106,17 @@ enum Command {
         /// one and the daemon's, pool by pool and run by run.
         #[arg(long)]
         priority: bool,
+        /// Also replay the config's policy and slots as the jobs really ran, each using its recorded samples from its
+        /// replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs and hazards.
+        #[arg(long)]
+        causal: bool,
+        /// With --causal, give every run of a job the samples of its heaviest run: every cache cold at once.
+        #[arg(long, requires = "causal")]
+        cold: bool,
+        /// With --causal, what the slice holds beside its runners (such as 8G) [default: the p99 of the window's busy
+        /// moments].
+        #[arg(long, requires = "causal")]
+        overhead: Option<ByteSize>,
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
@@ -157,6 +169,9 @@ fn main() -> ExitCode {
             cpus,
             cpu_overcommit,
             priority,
+            causal,
+            cold,
+            overhead,
         }) => config_or_default(config).and_then(|path| {
             run_simulation(
                 &path,
@@ -164,6 +179,7 @@ fn main() -> ExitCode {
                     memory_max,
                     cpus,
                     cpu_overcommit,
+                    causal: causal.then_some(Causal { cold, overhead }),
                     priority: if priority {
                         Comparing::Priority
                     } else {
@@ -251,6 +267,16 @@ struct Limits {
     cpus: Option<u64>,
     cpu_overcommit: Vec<f64>,
     priority: Comparing,
+    causal: Option<Causal>,
+}
+
+/// How `runnerd simulate --causal` replays.
+#[derive(Debug, Clone, Copy)]
+struct Causal {
+    /// Every run takes its job's heaviest samples.
+    cold: bool,
+    /// What the slice holds beside its runners, where given.
+    overhead: Option<ByteSize>,
 }
 
 /// Whether `runnerd simulate` also compares the barrier for a starved job.
@@ -312,36 +338,60 @@ fn run_simulation(
                 database.display()
             ))
         })?;
-    output::line(simulate::report(
-        &config,
-        memory_max.map(|max| max.0),
-        &simulate::Cpus {
-            millicores: cpus,
-            overcommit: &overcommit,
-        },
-        &history.jobs,
-        slots,
-    ));
-    if limits.priority == Comparing::Priority {
-        let known = runnerd_core::store::sizing_at(&database, since.saturating_sub(KNOWN_BEFORE))
-            .map_err(|error| fail(&error))?
-            .unwrap_or_default();
-        output::line(simulate::priority(
+    if limits.causal.is_none() {
+        output::line(simulate::report(
             &config,
-            &simulate::Comparison {
-                memory_max: memory_max.map(|max| max.0),
-                cpu_budget: config
-                    .host
-                    .cpu_overcommit
-                    .map(|factor| runnerd_core::config::cpu_budget(cpus, factor)),
-                jobs: &history.jobs,
-                known: &known,
-                slots,
-                left_out: history.left_out,
+            memory_max.map(|max| max.0),
+            &simulate::Cpus {
+                millicores: cpus,
+                overcommit: &overcommit,
             },
+            &history.jobs,
+            slots,
         ));
     }
+    let compares = limits.priority == Comparing::Priority || limits.causal.is_some();
+    if !compares {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let known = runnerd_core::store::sizing_at(&database, since.saturating_sub(KNOWN_BEFORE))
+        .map_err(|error| fail(&error))?
+        .unwrap_or_default();
+    let comparison = simulate::Comparison {
+        memory_max: memory_max.map(|max| max.0),
+        cpu_budget: config
+            .host
+            .cpu_overcommit
+            .map(|factor| runnerd_core::config::cpu_budget(cpus, factor)),
+        jobs: &history.jobs,
+        known: &known,
+        slots,
+        left_out: history.left_out,
+    };
+    if limits.priority == Comparing::Priority {
+        output::line(simulate::priority(&config, &comparison));
+    }
+    if let Some(causal) = limits.causal {
+        let poll = u64::try_from(config.host.poll_interval.as_millis()).unwrap_or(u64::MAX);
+        let trace = trace_of(&database, since, poll, causal, &history.jobs)?;
+        output::line(simulate::causal(&config, &comparison, &trace));
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// How the jobs from `since` (ms) of the history at `database` ran, as `causal` asks.
+fn trace_of(
+    database: &Path,
+    since: u64,
+    poll: u64,
+    causal: Causal,
+    jobs: &[runnerd_core::sizing::Ran],
+) -> Result<Trace, ExitCode> {
+    let overhead = causal.overhead.map(|overhead| overhead.0);
+    let trace = runnerd_core::store::trace_at(database, since, poll, overhead)
+        .map_err(|error| fail(&error))?
+        .unwrap_or_default();
+    Ok(if causal.cold { trace.cold(jobs) } else { trace })
 }
 
 fn doctor(path: Option<&Path>) -> ExitCode {
