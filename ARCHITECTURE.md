@@ -165,9 +165,11 @@ queued → slot → container → removed
    not fit takes the room of warm runners of other repositories, which stop, or is passed by younger jobs that fit,
    until it has waited 2 minutes for memory or CPU: then the first such job that draining what runs would make room
    for puts up the plan's one barrier (`scheduler::priority`), and no younger job starts until a runner of its pool
-   does. `plan` names each pool's held job and the engine keeps its wait, from the plans of ticks and passes only;
-   the high-water mark and a host stall suspend the barrier
-   ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md)). Once every job it can start has its
+   does, but one that usually ends before the running runners' usual ends let the owner or an older waiting job
+   start, and whose cap leaves the owner its room even if it never ends. `plan` names each pool's held job and the engine keeps its wait, from the
+   plans of ticks and passes only; the high-water mark and a host stall suspend the barrier
+   ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md),
+   [ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md)). Once every job it can start has its
    runner and none waits for room, it starts the warm runners each active repository wants
    (`scheduler::warm`: `[[repositories]] warm` in its active hours, plus the jobs its workflow runs seen so far are
    expected to queue still), so a job finds a runner already registered
@@ -320,6 +322,13 @@ always returns, so the daemon closes and flushes the history.
   runs would make room for. Only plans that schedule commit a wait, never `publish`'s. It governs new admissions: a
   running runner is never stopped or lowered for it, and it stands down under the high-water mark or a host stall
   ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md)).
+- What starts behind a barrier keeps two bounds, and only those: if each run takes what the plan read, an owner that
+  keeps the barrier starts no later than with nothing behind it; whatever they take, it fits once the runners from
+  before the barrier matured and older jobs' have ended, as the caps of what started since leave it its room and a
+  slot. Plans read p95s, so a run that ends early can cost the owner what still runs behind the barrier, and neither
+  bound carries to a later owner. `priority::Backfill` is the one rule, for `plan` and `simulate`; it keeps nothing
+  between plans
+  ([ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md)).
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
 - A warm runner never holds back upkeep: a due reseed, or the shared caches' check an hour after the last, stops

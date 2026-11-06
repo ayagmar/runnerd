@@ -13,6 +13,7 @@ pub mod engine;
 pub mod priority;
 pub mod warm;
 
+use priority::{Around, Backfill, Candidate, Caps, Older, Runner};
 pub use priority::{
     Barrier, CPU_PRIORITY_AFTER, Drained, MEMORY_PRIORITY_AFTER, Scarce, Wait, Waits,
 };
@@ -73,6 +74,9 @@ pub struct Repository {
     pub runner_cpu: Option<u64>,
     /// What its next job has waited for, and since when (ADR 0096).
     pub waits: Waits,
+    /// The largest usual run time among the queued jobs its labels match, since GitHub may give a runner any of them;
+    /// `None` if any has no estimate, and then none of its jobs starts behind a barrier (ADR 0097).
+    pub usual: Option<Duration>,
     /// How many idle runners it keeps beyond its queued jobs, for jobs not queued yet (`warm::target`).
     pub warm: usize,
 }
@@ -143,6 +147,8 @@ pub struct RunnerSlot {
     pub memory: u64,
     /// What it takes of the CPU budget, in millicores.
     pub cpu: u64,
+    /// How long its job usually keeps it from `started_at`, once that job and its runs are known (ADR 0097).
+    pub usual: Option<Duration>,
 }
 
 /// Where slots are, by profile name and slot index (0 is slot 1).
@@ -172,6 +178,8 @@ pub enum Decision {
         /// The warm runners this plan stops to make room for it, just before: if one is still there, it took a job
         /// meanwhile and the start waits for the next plan.
         replacing: Vec<SlotRef>,
+        /// The barrier's owner, for a start behind a barrier (ADR 0097).
+        behind: Option<u64>,
     },
     /// Remove the slot's idle runner, for `reason`.
     Stop {
@@ -356,8 +364,9 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// memory or CPU is held once for each (`Plan::held`). An idle runner stops once no queued job is left for it,
 /// it is not one of its repository's `warm` runners, and it waited `IDLE_TIMEOUT`. The first such job that waited
 /// long enough, and that draining the running jobs would make room for, puts up the plan's one barrier
-/// (`priority::Barrier`): no younger job starts until a runner of its pool does. Last, while no job waits for room,
-/// each repository short of its `warm` runners starts them at its profile's caps, one per repository at a time.
+/// (`priority::Barrier`): no younger job starts until a runner of its pool does, unless it fits and `Backfill` says it
+/// costs the owner neither of ADR 0097's bounds. Last, while no job waits for room, each repository short of its `warm`
+/// runners starts them at its profile's caps, one per repository at a time.
 pub fn plan(
     repositories: &[Repository],
     profiles: &BTreeMap<String, Profile>,
@@ -383,6 +392,7 @@ pub fn plan(
     let mut slot_bound = SlotBound::default();
     // Under a safety interlock, what is left says nothing of the room there is.
     let drained = (!budget.held).then_some(budget.drained);
+    let mut behind = Behind::new(profiles);
     for (position, &(job, repository)) in jobs.iter().enumerate() {
         let Some(missing) = wanted.get_mut(&pool_key(repository)) else {
             continue;
@@ -411,8 +421,16 @@ pub fn plan(
             started: &started,
         };
         if let Some(barrier) = decided.barrier {
-            turn.behind(barrier, &mut decided);
-            continue;
+            let candidate = Candidate {
+                profile: &repository.profile,
+                free_slots: taken.iter().filter(|taken| !**taken).count(),
+                usual: repository.usual,
+                caps: profile.caps(),
+            };
+            if !fits || !behind.admits(candidate) {
+                turn.behind(barrier, &mut decided);
+                continue;
+            }
         }
         let room = if fits || profile.preparing.is_some() {
             None
@@ -424,33 +442,125 @@ pub fn plan(
             (None, Some(index)) if fits => index,
             (None, _) => {
                 turn.waits(drained, &mut slot_bound, now, &mut decided);
+                let job = Older {
+                    profile: &repository.profile,
+                    free_slot: free_index.is_some() || profile.preparing.is_some(),
+                    memory,
+                    cpu,
+                };
+                behind.left_waiting(job, decided.barrier, left, budget.drained, now);
                 continue;
             }
         };
-        // The warm runners whose room it takes stop first.
-        let replacing = room.map_or_else(Vec::new, |room| {
-            left.give(room.memory, room.cpu);
-            for slot in &room.stopped {
-                decided.warm.remove(slot);
-                decided.decisions.push(Decision::Stop {
-                    slot: slot.clone(),
-                    reason: StopReason::Room,
-                });
-            }
-            room.stopped
-        });
+        let replacing = room.map_or_else(Vec::new, |room| stop_for(room, &mut left, &mut decided));
         taken[index] = true;
         *missing -= 1;
         started.note(&repository.profile, job);
         left.take(memory, cpu);
-        decided
-            .decisions
-            .push(start(repository, index, memory, cpu, replacing));
+        behind.started(&repository.profile, profile.caps(), memory, cpu, now);
+        decided.decisions.push(start(
+            repository,
+            index,
+            memory,
+            cpu,
+            replacing,
+            decided.barrier,
+        ));
     }
     if !budget.held {
         start_warm(&warm_wanted, profiles, &mut taken, left, &mut decided);
     }
     decided
+}
+
+/// Stops the warm runners whose `room` a start takes, before it: they give back what they took.
+fn stop_for(room: Room, left: &mut Left, decided: &mut Plan) -> Vec<SlotRef> {
+    left.give(room.memory, room.cpu);
+    for slot in &room.stopped {
+        decided.warm.remove(slot);
+        decided.decisions.push(Decision::Stop {
+            slot: slot.clone(),
+            reason: StopReason::Room,
+        });
+    }
+    room.stopped
+}
+
+/// What a plan gathers for what may start behind its barrier.
+struct Behind<'plan> {
+    /// The runners in slots, and those started so far.
+    runners: Vec<Runner<'plan>>,
+    /// The jobs left waiting before any barrier went up.
+    older: Vec<Older<'plan>>,
+    /// The room behind the barrier, once one stands and has any.
+    backfill: Option<Backfill<'plan>>,
+}
+
+impl<'plan> Behind<'plan> {
+    /// The runners in `profiles`' slots: what one that waits for a job will run is not known.
+    fn new(profiles: &'plan BTreeMap<String, Profile>) -> Behind<'plan> {
+        let mut runners = Vec::new();
+        for (name, profile) in profiles {
+            for slot in &profile.slots {
+                if let Slot::Runner(runner) = slot {
+                    runners.push(Runner {
+                        profile: name,
+                        started_at: runner.started_at,
+                        usual: runner.usual.filter(|_| runner.busy),
+                        memory: runner.memory,
+                        cpu: runner.cpu,
+                        caps: profile.caps(),
+                    });
+                }
+            }
+        }
+        Behind {
+            runners,
+            older: Vec::new(),
+            backfill: None,
+        }
+    }
+
+    /// Notes `job`, which did not start: it put up `barrier`, or goes before any barrier to come.
+    fn left_waiting(
+        &mut self,
+        job: Older<'plan>,
+        barrier: Option<Barrier>,
+        left: Left,
+        drained: Drained,
+        now: SystemTime,
+    ) {
+        let Some(barrier) = barrier else {
+            self.older.push(job);
+            return;
+        };
+        let around = Around {
+            left,
+            drained,
+            runners: &self.runners,
+            older: &self.older,
+        };
+        self.backfill = Backfill::behind(barrier, job.profile, around, now);
+    }
+
+    /// Whether `candidate` may start behind the barrier, counting it if so.
+    fn admits(&mut self, candidate: Candidate<'_>) -> bool {
+        let backfill = self.backfill.as_mut();
+        backfill.is_some_and(|backfill| backfill.admits(candidate))
+    }
+
+    /// Notes a runner started now. It has no job yet: GitHub may give it a shorter one than its pool's longest, so its
+    /// room may come sooner than that says.
+    fn started(&mut self, profile: &'plan str, caps: Caps, memory: u64, cpu: u64, now: SystemTime) {
+        self.runners.push(Runner {
+            profile,
+            started_at: now,
+            usual: None,
+            memory,
+            cpu,
+            caps,
+        });
+    }
 }
 
 /// What `sort_out` leaves the plan to serve.
@@ -780,6 +890,7 @@ fn start(
     memory: u64,
     cpu: u64,
     replacing: Vec<SlotRef>,
+    barrier: Option<Barrier>,
 ) -> Decision {
     Decision::Start {
         slot: SlotRef {
@@ -791,6 +902,7 @@ fn start(
         cpu,
         warm: false,
         replacing,
+        behind: barrier.map(|barrier| barrier.job),
     }
 }
 
@@ -851,6 +963,7 @@ fn start_warm(
                 cpu,
                 warm: true,
                 replacing: Vec::new(),
+                behind: None,
             });
         }
         if !any {
@@ -862,11 +975,21 @@ fn start_warm(
 /// The memory, CPU and host budgets a plan has left; `None`, no budget. Each is negative while what runs takes past
 /// it: a stopped runner's reservation pays that back first, so a start never takes room that is owed.
 #[derive(Debug, Clone, Copy)]
-struct Left {
-    memory: Option<i64>,
-    cpu: Option<i64>,
+pub(crate) struct Left {
+    pub(crate) memory: Option<i64>,
+    pub(crate) cpu: Option<i64>,
     /// The host's memory to spare, which a runner's memory takes from as it does from `memory`.
-    host: Option<i64>,
+    pub(crate) host: Option<i64>,
+}
+
+impl Profile {
+    /// What a runner of this profile could take.
+    fn caps(&self) -> Caps {
+        Caps {
+            memory: self.memory,
+            cpu: self.cpus,
+        }
+    }
 }
 
 impl Left {

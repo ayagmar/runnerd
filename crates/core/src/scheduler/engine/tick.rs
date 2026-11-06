@@ -594,6 +594,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cpu,
             warm,
             replacing,
+            behind,
         } = start
         else {
             return true;
@@ -610,6 +611,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 slot.profile
             );
             return false;
+        }
+        if let Some(owner) = behind {
+            info!(
+                "{repository}: a runner in {} starts behind the barrier of job {owner}",
+                slot.profile
+            );
         }
         let pool = Pool {
             repository,
@@ -680,10 +687,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .get(&repository.profile)
                         .copied()
                         .unwrap_or_default(),
+                    usual: None,
                     warm: warm.get(&Pool::from(repository)).copied().unwrap_or(0),
                 }
             })
             .collect();
+        self.usual_runs(&mut repositories, &taken);
         let profiles = self
             .config
             .profiles
@@ -898,6 +907,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     started_at: occupant.started_at,
                     memory: self.takes(occupant),
                     cpu: self.reserves_cpu(occupant),
+                    usual: self.usual_run(occupant, name),
                 }),
             })
             .collect();

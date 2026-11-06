@@ -5,9 +5,10 @@
 //! reads the same rows decides the same.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::time::Duration;
 
 use super::Key;
-use crate::sizing::{Capped, History, Measure, Ran};
+use crate::sizing::{Capped, History, Measure, Ran, spread};
 
 /// Admission's window: a job's last this many successful runs, or `[sizing] min_jobs` when more. Under nearest rank
 /// a p95 of fewer than 20 values is their largest; 20 is the fewest at which it can leave one outlier out.
@@ -19,6 +20,10 @@ pub const SIZING_TIMES: u64 = 3;
 
 /// A hold at the cap ends after this many successful runs in a row clear of their cap.
 pub const CLEAN_RUNS: u32 = 3;
+
+/// A job's usual run time needs this many successful runs in its window: one or two say little of the next, and a job
+/// without one starts behind no barrier (ADR 0097).
+pub const USUAL_RUNS: u64 = 3;
 
 /// How a row ended, as the history keeps it apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +51,8 @@ pub struct Counted {
     pub capped: Capped,
     /// Whether it completed with success.
     pub succeeded: bool,
+    /// How long it kept its runner, in ms (`Ran::occupied`); `None` with no finish recorded.
+    pub occupied: Option<u64>,
 }
 
 /// The latest run of a job that met its cap or was killed for memory, and how many successful runs clear of their
@@ -114,6 +121,14 @@ impl JobRuns {
     /// The largest of them; 0 for none.
     pub fn max(&self) -> u64 {
         self.sorted.last().copied().unwrap_or(0)
+    }
+
+    /// How long a run usually keeps its runner: the p95 of the window's successful runs, from `USUAL_RUNS` of them. A
+    /// failed or cancelled run may have stopped anywhere, so it says nothing of how long the next one takes.
+    pub fn usual(&self) -> Option<Duration> {
+        let runs = self.window.iter().filter(|run| run.succeeded);
+        let occupied: Vec<u64> = runs.filter_map(|run| run.occupied).collect();
+        (occupied.len() as u64 >= USUAL_RUNS).then(|| Duration::from_millis(spread(occupied).p95))
     }
 
     /// The hold at the cap, if it has not ended by `CLEAN_RUNS` clear runs; `for_ms` ends it that long after its
@@ -245,6 +260,7 @@ impl Recent {
                 cap,
                 capped,
                 succeeded: ending == Ending::Finished && run.succeeded,
+                occupied: run.occupied(),
             });
             let mut peaks: Vec<u64> = self
                 .jobs

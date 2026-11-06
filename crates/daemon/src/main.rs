@@ -101,8 +101,8 @@ enum Command {
         /// `cpu_overcommit`, else 1].
         #[arg(long, value_parser = simulate::overcommit)]
         cpu_overcommit: Vec<f64>,
-        /// Also replay the config's policy and slots, `--slots` over them, without and with the barrier for a starved
-        /// job, pool by pool.
+        /// Also replay the config's policy and slots, `--slots` over them, with no barrier for a starved job, a strict
+        /// one and the daemon's, pool by pool and run by run.
         #[arg(long)]
         priority: bool,
     },
@@ -260,6 +260,10 @@ enum Comparing {
     Policies,
 }
 
+/// How far before a replay's window it reads what the daemon would know of the jobs by then, in ms: as far as the
+/// daemon reads back.
+const KNOWN_BEFORE: u64 = 30 * 24 * 3600 * 1000;
+
 fn run_simulation(
     path: &Path,
     limits: Limits,
@@ -319,6 +323,9 @@ fn run_simulation(
         slots,
     ));
     if limits.priority == Comparing::Priority {
+        let known = runnerd_core::store::sizing_at(&database, since.saturating_sub(KNOWN_BEFORE))
+            .map_err(|error| fail(&error))?
+            .unwrap_or_default();
         output::line(simulate::priority(
             &config,
             &simulate::Comparison {
@@ -328,6 +335,7 @@ fn run_simulation(
                     .cpu_overcommit
                     .map(|factor| runnerd_core::config::cpu_budget(cpus, factor)),
                 jobs: &history.jobs,
+                known: &known,
                 slots,
                 left_out: history.left_out,
             },

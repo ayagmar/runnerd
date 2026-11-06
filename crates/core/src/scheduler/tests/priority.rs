@@ -83,7 +83,10 @@ fn younger_jobs_wait_behind_one_starved_of_memory_though_they_fit() {
         plan.barrier,
         Some(Barrier {
             job: 1,
-            scarce: Scarce::Memory
+            scarce: Scarce::Memory,
+            memory: 8 * GIB,
+            cpu: 2000,
+            since: now() - LONG_AGO + MEMORY_PRIORITY_AFTER,
         })
     );
 }
@@ -330,6 +333,7 @@ fn a_starved_pool_without_a_free_slot_erects_no_barrier_and_keeps_its_wait() {
         started_at: now(),
         memory: 4 * GIB,
         cpu: 2000,
+        usual: None,
     })]);
     profiles.insert(
         "small".to_owned(),
@@ -371,7 +375,10 @@ fn a_job_starved_of_cpu_that_now_lacks_memory_owns_the_barrier_as_memory() {
         plan.barrier,
         Some(Barrier {
             job: 1,
-            scarce: Scarce::Memory
+            scarce: Scarce::Memory,
+            memory: 8 * GIB,
+            cpu: 2000,
+            since: now() - LONG_AGO + MEMORY_PRIORITY_AFTER,
         })
     );
     assert_eq!(plan.waiting[&2], Waiting::BehindMemory { job: 1 });
@@ -403,7 +410,10 @@ fn a_job_starved_of_memory_that_now_lacks_cpu_owns_the_barrier_as_cpu() {
         plan.barrier,
         Some(Barrier {
             job: 1,
-            scarce: Scarce::Cpu
+            scarce: Scarce::Cpu,
+            memory: 8 * GIB,
+            cpu: 4000,
+            since: now() - LONG_AGO + MEMORY_PRIORITY_AFTER,
         })
     );
     assert_eq!(plan.waiting[&2], Waiting::BehindCpu { job: 1 });
@@ -500,6 +510,7 @@ fn a_job_behind_a_barrier_with_no_slot_says_so_and_asks_for_no_slot() {
             started_at: now(),
             memory: GIB,
             cpu: 1000,
+            usual: None,
         })],
     };
     profiles.insert("full".to_owned(), other.clone());
@@ -564,6 +575,7 @@ fn warm_runner(repository: &str, memory: u64) -> Slot {
         started_at: now(),
         memory,
         cpu: 500,
+        usual: None,
     })
 }
 
@@ -747,6 +759,7 @@ mod generated {
                         started_at: at,
                         memory: *memory,
                         cpu: 0,
+                        usual: None,
                     })
                 })
                 .collect();

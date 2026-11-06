@@ -1,14 +1,16 @@
 //! Predictions and replays over synthetic histories: two profiles of a 33G slice, jobs of fictional repositories.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
 
 use super::{
-    Barriers, Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, Replay,
-    UNPREDICTABLE_FOR, simulate,
+    Arrivals, Barriers, Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, Replay,
+    Replaying, UNPREDICTABLE_FOR, simulate,
 };
 use crate::config::Config;
-use crate::scheduler::Pool;
-use crate::sizing::{Measure, Ran};
+use crate::github::QueuedJob;
+use crate::scheduler::{self, Budget, Decision, Drained, Pool, Profile, Repository, Slot, Waits};
+use crate::sizing::{History, Measure, Ran};
 
 const G: u64 = 1 << 30;
 const M: u64 = 1 << 20;
@@ -82,6 +84,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         succeeded: true,
         failed: false,
         run_id: queued,
+        run_attempt: 1,
         branch: Some("main".to_owned()),
     }
 }
@@ -978,3 +981,516 @@ fn a_job_of_one_name_in_two_pools_is_predicted_from_its_runs_in_each() {
 }
 
 mod recent;
+
+fn minutes(minutes: u64) -> Duration {
+    Duration::from_secs(minutes * 60)
+}
+
+/// Learned in the order given, each run ending when it says.
+fn learned(runs: &[Ran]) -> Predictor {
+    let mut predictor = predictor();
+    for run in runs {
+        predictor.learn(run, &run.profile, 7 * G, run.finished_at.unwrap());
+    }
+    predictor
+}
+
+fn site(queued: u64, minutes: u64) -> Ran {
+    run("halyard/storefront", "site", "node", queued, minutes, G)
+}
+
+/// A job's estimate is what a backfill stakes the owner's room on: the p95 errs long, and two runs are no estimate.
+#[test]
+fn a_jobs_usual_run_time_is_the_p95_of_its_last_successful_runs_from_three_of_them() {
+    let key = key_of("site");
+    assert_eq!(predictor().usual(&key, "node"), None, "an empty history");
+    let two: Vec<Ran> = (0..2).map(|i| site(NOW + i * MINUTE, 4)).collect();
+    assert_eq!(learned(&two).usual(&key, "node"), None);
+    let three: Vec<Ran> = [2, 9, 4]
+        .iter()
+        .zip(0..)
+        .map(|(minutes, i)| site(NOW + i * MINUTE, *minutes))
+        .collect();
+    let usual = learned(&three).usual(&key, "node");
+    assert_eq!(usual, Some(minutes(9)), "of few runs, the longest");
+    // 20 runs of 5 minutes push the 9 out of the window, an outlier of one in 20 stays out of the p95.
+    let mut many = three;
+    many.extend((0..19).map(|i| site(NOW + (10 + i) * MINUTE, 5)));
+    many.push(site(NOW + 40 * MINUTE, 50));
+    assert_eq!(learned(&many).usual(&key, "node"), Some(minutes(5)));
+}
+
+fn key_of(name: &str) -> Key {
+    Key {
+        repository: "halyard/storefront".to_owned(),
+        workflow: Some("CI".to_owned()),
+        name: name.to_owned(),
+    }
+}
+
+/// A failed or cancelled run stopped anywhere: its time says nothing of how long the next one takes.
+#[test]
+fn only_successful_runs_teach_a_usual_run_time() {
+    let failed = |i| Ran {
+        succeeded: false,
+        failed: true,
+        ..site(NOW + i * MINUTE, 1)
+    };
+    let runs: Vec<Ran> = (0..3).map(failed).collect();
+    assert_eq!(learned(&runs).usual(&key_of("site"), "node"), None);
+    let mut predictor = predictor();
+    for i in 0..3 {
+        let cancelled = Ran {
+            succeeded: false,
+            ..site(NOW + i * MINUTE, 1)
+        };
+        predictor.mark(&cancelled, "node", 7 * G, NOW + i * MINUTE);
+    }
+    assert_eq!(predictor.usual(&key_of("site"), "node"), None);
+    let mut runs: Vec<Ran> = (0..3).map(|i| site(NOW + i * MINUTE, 10)).collect();
+    runs.extend((3..6).map(failed));
+    assert_eq!(
+        learned(&runs).usual(&key_of("site"), "node"),
+        Some(minutes(10)),
+        "the short failures do not pull it down"
+    );
+}
+
+/// No finish recorded is no run time: read as 0, it would let any job past a barrier.
+#[test]
+fn a_successful_run_with_no_finish_teaches_no_usual_run_time() {
+    let mut predictor = predictor();
+    for i in 0..3 {
+        let unfinished = Ran {
+            finished_at: None,
+            ..site(NOW + i * MINUTE, 1)
+        };
+        predictor.learn(&unfinished, "node", 7 * G, NOW + i * MINUTE);
+    }
+    assert_eq!(predictor.usual(&key_of("site"), "node"), None);
+}
+
+/// A slot's runner is what a plan sees end, so its start counts; a warm runner's wait for the job does not.
+#[test]
+fn a_run_keeps_its_runner_from_the_runners_start_or_from_queueing_on_a_warm_one() {
+    let fresh = |i| Ran {
+        started_at: Some(NOW + i * MINUTE + 30_000),
+        runner_started_at: NOW + i * MINUTE,
+        ..site(NOW + i * MINUTE, 5)
+    };
+    let runs: Vec<Ran> = (0..3).map(fresh).collect();
+    let usual = learned(&runs).usual(&key_of("site"), "node");
+    assert_eq!(usual, Some(minutes(5)), "from the container's start");
+    let warm = |i| Ran {
+        runner_started_at: NOW + i * MINUTE - 3_600_000,
+        ..site(NOW + i * MINUTE, 5)
+    };
+    let runs: Vec<Ran> = (0..3).map(warm).collect();
+    let usual = learned(&runs).usual(&key_of("site"), "node");
+    assert_eq!(usual, Some(minutes(5)), "not the hour it stood idle");
+}
+
+/// GitHub may give a pool's runner any job its labels match, so a 2-minute job must not speak for a 24-minute one.
+#[test]
+fn a_pool_goes_by_its_longest_queued_job_and_by_none_if_one_has_no_estimate() {
+    let lint = |i| run("halyard/storefront", "lint", "node", NOW + i * MINUTE, 2, G);
+    let mut runs: Vec<Ran> = (0..3).map(lint).collect();
+    runs.extend((0..3).map(|i| site(NOW + i * MINUTE, 24)));
+    let predictor = learned(&runs);
+    let keys = |names: &[&str]| names.iter().map(|name| key_of(name)).collect::<Vec<_>>();
+    let longest = predictor.longest_usual(keys(&["lint", "site"]), "node");
+    assert_eq!(longest, Some(minutes(24)));
+    let unknown = predictor.longest_usual(keys(&["lint", "never seen"]), "node");
+    assert_eq!(unknown, None);
+    assert_eq!(predictor.longest_usual(keys(&[]), "node"), None);
+    let other = predictor.longest_usual(keys(&["lint"]), "jvm");
+    assert_eq!(other, None, "its runs in another profile say nothing");
+}
+
+/// What a replay with needs shows: a job held back holds back what follows it in its run.
+fn after_needs(barriers: Barriers, known: Option<&History>) -> Replaying<'_> {
+    Replaying {
+        barriers,
+        arrivals: Arrivals::AfterNeeds,
+        known,
+    }
+}
+
+fn in_run(run: Ran, run_id: u64, run_attempt: u32) -> Ran {
+    Ran {
+        run_id,
+        run_attempt,
+        ..run
+    }
+}
+
+fn replay_of<'known>(jobs: &[Ran], memory_max: u64, how: impl Into<Replaying<'known>>) -> Replay {
+    simulate(
+        &config(),
+        Some(memory_max),
+        None,
+        jobs,
+        Policy::Caps,
+        &BTreeMap::new(),
+        how,
+    )
+}
+
+/// A run whose second job queued 30 s after its first ended, in a slice that holds one node runner: the first waits
+/// out another's 5 minutes, so the second arrives that much later, and waits for nothing.
+#[test]
+fn a_job_that_followed_another_arrives_as_long_after_its_replayed_end() {
+    let jobs = [
+        site(NOW, 5),
+        in_run(site(NOW + MINUTE, 4), 7, 1),
+        in_run(site(NOW + 5 * MINUTE + 30_000, 2), 7, 1),
+    ];
+    let replay = replay_of(&jobs, 8 * G, after_needs(Barriers::Off, None));
+    // The second starts at minute 5 and ends at 9; the third arrives at 9m30s.
+    assert_eq!(
+        replay.pools[&pool("halyard/storefront", "node")].waits,
+        [0, 240, 0]
+    );
+    let of_run_7 = replay.runs.iter().map(|run| run.took).max();
+    assert_eq!(of_run_7, Some(10 * 60 + 30), "from minute 1 to 11m30s");
+    let as_queued = replay_of(&jobs, 8 * G, Barriers::Off);
+    assert_eq!(
+        as_queued.pools[&pool("halyard/storefront", "node")].waits,
+        [0, 240, 210]
+    );
+}
+
+/// A job that follows a delayed one queues behind what arrived meanwhile, whatever its ID in the history says: run 7's
+/// second job arrives at 14m30s, after a job of the history's minute 6, though it queued before that one.
+#[test]
+fn a_follower_that_arrives_late_queues_behind_what_arrived_before_it() {
+    let jobs = [
+        in_run(site(NOW, 10), 5, 1),
+        in_run(site(NOW + MINUTE, 4), 7, 1),
+        in_run(site(NOW + 2 * MINUTE, 2), 6, 1),
+        in_run(site(NOW + 5 * MINUTE + 30_000, 2), 7, 1),
+        in_run(site(NOW + 6 * MINUTE, 1), 8, 1),
+    ];
+    let replay = replay_of(&jobs, 8 * G, after_needs(Barriers::Off, None));
+    // One at a time: minutes 0, 10, 14; then the job of minute 6 at 16, and the follower at 17.
+    assert_eq!(
+        replay.pools[&pool("halyard/storefront", "node")].waits,
+        [0, 540, 720, 600, 150]
+    );
+}
+
+/// A re-run comes back hours later: it follows nothing of the attempt before it.
+#[test]
+fn a_rerun_follows_nothing_of_the_attempt_before_it() {
+    let jobs = [
+        in_run(site(NOW, 5), 7, 1),
+        in_run(site(NOW + 60 * MINUTE, 5), 7, 2),
+    ];
+    let replay = replay_of(&jobs, 16 * G, after_needs(Barriers::Off, None));
+    assert_eq!(replay.runs.len(), 2);
+    assert!(
+        replay.runs.iter().all(|run| run.took == 5 * 60),
+        "each attempt took its own 5 minutes: {:?}",
+        replay.runs
+    );
+}
+
+#[test]
+fn a_job_that_follows_one_never_started_counts_as_never_started() {
+    let jobs = [
+        in_run(run("halyard/storefront", "check", "jvm", NOW, 5, G), 7, 1),
+        in_run(site(NOW + 6 * MINUTE, 1), 7, 1),
+    ];
+    let replay = replay_of(&jobs, 8 * G, after_needs(Barriers::Off, None));
+    assert_eq!(
+        replay.never_started, 2,
+        "9G fits no 8G slice, so neither ran"
+    );
+}
+
+/// `CONFIG` with `light` 4 × 1G, for jobs that fit behind a barrier.
+fn with_light() -> Config {
+    let light = r#"
+[profiles.light]
+image_stage = "node"
+cpus = 1
+memory = "1G"
+slots = 4
+
+[[repositories]]
+name = "halyard/lint"
+profile = "light"
+labels = ["light"]
+"#;
+    Config::parse(&format!("{CONFIG}{light}")).unwrap()
+}
+
+/// With `with_light()` and 17G, 16.5G past the mirror: two node runners of 7G end at minute 20, so a 9G jvm job queued at
+/// minute 1 owns a barrier from minute 3 to then, and 1-minute lint jobs of 1G arrive behind it. `known` says how long
+/// each job usually runs: 20, 4 and 1 minutes, and 30 for `report`. Run times are this test's own.
+fn a_barrier_with_room_behind_it() -> (Vec<Ran>, History) {
+    let check = |queued, minutes| run("halyard/ledger", "check", "jvm", queued, minutes, G);
+    let lint = |queued, minutes| run("halyard/lint", "lint", "light", queued, minutes, G / 2);
+    let report = |queued, minutes| run("halyard/lint", "report", "light", queued, minutes, G / 2);
+    let before = NOW - 600 * MINUTE;
+    let known = (0..3)
+        .flat_map(|i| {
+            let at = before + i * 40 * MINUTE;
+            [site(at, 20), check(at, 4), lint(at, 1), report(at, 30)]
+        })
+        .collect();
+    let mut jobs = vec![
+        site(NOW, 20),
+        site(NOW + 10_000, 20),
+        check(NOW + MINUTE, 4),
+    ];
+    jobs.extend((0..3).map(|i| lint(NOW + (4 + 2 * i) * MINUTE, 1)));
+    let history = History {
+        jobs: known,
+        ..History::default()
+    };
+    (jobs, history)
+}
+
+/// An owner that needs both node runners gone, the first of which ends at minute 6 and lets a node job older than the
+/// owner into its slot. A lint job queued half a minute before that would run a minute, past that start.
+fn a_barrier_behind_an_older_job() -> (Vec<Ran>, History) {
+    let page = |queued, minutes| run("halyard/storefront", "page", "node", queued, minutes, G);
+    let lint = |queued, minutes| run("halyard/lint", "lint", "light", queued, minutes, G / 2);
+    let report = |queued, minutes| run("halyard/lint", "report", "light", queued, minutes, G / 2);
+    let check = |queued, minutes| run("halyard/ledger", "check", "jvm", queued, minutes, G);
+    let (_, mut known) = a_barrier_with_room_behind_it();
+    known
+        .jobs
+        .extend((0..3).map(|i| page(NOW - 600 * MINUTE + i * 40 * MINUTE, 6)));
+    let jobs = vec![
+        page(NOW, 6),
+        site(NOW + 1000, 20),
+        report(NOW + 2000, 30),
+        site(NOW + MINUTE / 2, 20),
+        check(NOW + MINUTE, 4),
+        lint(NOW + 5 * MINUTE + MINUTE / 2, 1),
+    ];
+    (jobs, known)
+}
+
+/// `jobs` replayed with `with_light()` in 17G, `known` known from the start.
+fn replay_with_light(jobs: &[Ran], known: &History, barriers: Barriers) -> Replay {
+    let how = Replaying {
+        barriers,
+        arrivals: Arrivals::AsQueued,
+        known: Some(known),
+    };
+    simulate(
+        &with_light(),
+        Some(17 * G),
+        None,
+        jobs,
+        Policy::Caps,
+        &BTreeMap::new(),
+        how,
+    )
+}
+
+#[test]
+fn a_replay_starts_behind_a_barrier_what_a_strict_one_holds_and_the_owner_starts_all_the_same() {
+    let (jobs, known) = a_barrier_with_room_behind_it();
+    let strict = replay_with_light(&jobs, &known, Barriers::Strict);
+    let backfill = replay_with_light(&jobs, &known, Barriers::On);
+    let ledger = pool("halyard/ledger", "jvm");
+    let lint = pool("halyard/lint", "light");
+    assert_eq!(strict.backfilled.jobs, 0);
+    assert_eq!(backfill.backfilled.jobs, 3, "the lint jobs pass");
+    assert_eq!(backfill.backfilled.overran, 0, "each within its usual time");
+    assert_eq!(strict.pools[&ledger].waits, [19 * 60]);
+    assert_eq!(
+        backfill.pools[&ledger].waits, strict.pools[&ledger].waits,
+        "the owner starts when it would"
+    );
+    assert_eq!(backfill.pools[&lint].waits, [0, 0, 0]);
+}
+
+#[test]
+fn a_replay_counts_the_jobs_that_ran_past_the_usual_time_they_passed_by() {
+    let (mut jobs, known) = a_barrier_with_room_behind_it();
+    let overrun = jobs.last_mut().unwrap();
+    overrun.finished_at = overrun.finished_at.map(|end| end + 3 * MINUTE);
+    let replay = replay_with_light(&jobs, &known, Barriers::On);
+    assert_eq!(replay.backfilled.overran, 1);
+    assert_eq!(replay.backfilled.most_overrun, 3 * 60);
+}
+
+/// `jobs` through `scheduler::plan` itself, second by second, as a model of the engine commits it: each pool's waits in
+/// the order its jobs started. Under caps, whose runners take their profile's memory; `known` gives every usual run time.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one loop models a tick of the engine; split up, it reads worse"
+)]
+fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>> {
+    let config = with_light();
+    let predictor = Predictor::read(&config.sizing, known, |_| None);
+    let budget = 17 * G - config.mirror_memory();
+    let pools: Vec<Pool> = config.repositories.iter().map(Pool::from).collect();
+    let mut waits: BTreeMap<Pool, Waits> = BTreeMap::new();
+    let mut waited: BTreeMap<Pool, Vec<u64>> = BTreeMap::new();
+    let mut queued: Vec<(u64, &Ran)> = Vec::new();
+    // Each runner: its pool, when it started and ends, in ms, and how long its job usually runs.
+    let mut running: Vec<(Pool, u64, u64, Option<Duration>)> = Vec::new();
+    let mut arriving: Vec<(u64, &Ran)> = (0_u64..).zip(jobs).collect();
+    arriving.reverse();
+    let mut now = NOW;
+    while !arriving.is_empty() || !queued.is_empty() || !running.is_empty() {
+        running.retain(|(_, _, ends, _)| *ends > now);
+        while arriving.last().is_some_and(|(_, run)| run.queued_at <= now) {
+            queued.extend(arriving.pop());
+        }
+        let at = SystemTime::UNIX_EPOCH + Duration::from_millis(now);
+        let of_pool = |pool: &Pool, run: &Ran| {
+            run.repository == pool.repository && run.profile == pool.profile
+        };
+        let repositories: Vec<Repository> = pools
+            .iter()
+            .map(|pool| {
+                let matching = queued.iter().filter(|(_, run)| of_pool(pool, run));
+                let usual = predictor
+                    .longest_usual(matching.clone().map(|(_, run)| Key::of(run)), &pool.profile);
+                Repository {
+                    name: pool.repository.clone(),
+                    profile: pool.profile.clone(),
+                    labels: vec![pool.profile.clone()],
+                    paused: false,
+                    held: None,
+                    queued: matching
+                        .map(|(id, _)| QueuedJob {
+                            id: *id,
+                            labels: vec![pool.profile.clone()],
+                            ..QueuedJob::default()
+                        })
+                        .collect(),
+                    runner_memory: None,
+                    runner_cpu: None,
+                    waits: waits.get(pool).copied().unwrap_or_default(),
+                    usual,
+                    warm: 0,
+                }
+            })
+            .collect();
+        let mut used = 0;
+        let profiles: BTreeMap<String, Profile> = config
+            .profiles
+            .iter()
+            .map(|(name, limits)| {
+                let mut slots: Vec<Slot> = running
+                    .iter()
+                    .filter(|(pool, ..)| pool.profile == *name)
+                    .map(|(pool, started, _, usual)| {
+                        used += limits.memory.0;
+                        Slot::Runner(scheduler::RunnerSlot {
+                            repository: pool.repository.clone(),
+                            busy: true,
+                            started_at: SystemTime::UNIX_EPOCH + Duration::from_millis(*started),
+                            memory: limits.memory.0,
+                            cpu: 0,
+                            usual: *usual,
+                        })
+                    })
+                    .collect();
+                slots.resize(limits.slots as usize, Slot::Free);
+                let profile = Profile {
+                    memory: limits.memory.0,
+                    cpus: 0,
+                    preparing: None,
+                    upkeep_due: false,
+                    count: limits.slots as usize,
+                    ran: Vec::new(),
+                    slots,
+                };
+                (name.clone(), profile)
+            })
+            .collect();
+        let plan = scheduler::plan(
+            &repositories,
+            &profiles,
+            Budget {
+                memory: Some(i64::try_from(budget - used).unwrap()),
+                drained: Drained {
+                    memory: Some(i64::try_from(budget).unwrap()),
+                    ..Drained::default()
+                },
+                ..Budget::default()
+            },
+            at,
+        );
+        for decision in &plan.decisions {
+            let Decision::Start {
+                repository, slot, ..
+            } = decision
+            else {
+                continue;
+            };
+            let pool = Pool {
+                repository: repository.clone(),
+                profile: slot.profile.clone(),
+            };
+            let oldest = queued
+                .iter()
+                .position(|(_, run)| of_pool(&pool, run))
+                .unwrap();
+            let (_, run) = queued.remove(oldest);
+            let ran_for = run.finished_at.unwrap() - run.started_at.unwrap();
+            let usual = predictor.usual(&Key::of(run), &pool.profile);
+            waits.remove(&pool);
+            waited
+                .entry(pool.clone())
+                .or_default()
+                .push((now - run.queued_at) / 1000);
+            running.push((pool, now, now + ran_for, usual));
+        }
+        for demand in &plan.held {
+            waits
+                .entry(demand.pool.clone())
+                .or_default()
+                .note(demand.scarce, demand.job, at);
+        }
+        now += 1000;
+    }
+    waited
+}
+
+/// `simulate` promises what `plan` does: a replay that drifted from the rule would show figures the daemon never gives.
+#[test]
+fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
+    let (mut jobs, known) = a_barrier_with_room_behind_it();
+    // Too long to pass, and while it is queued its pool goes by it: the next lint job waits with it.
+    jobs.insert(
+        4,
+        run(
+            "halyard/lint",
+            "report",
+            "light",
+            NOW + 5 * MINUTE,
+            30,
+            G / 2,
+        ),
+    );
+    let replay = replay_with_light(&jobs, &known, Barriers::On);
+    assert_eq!(replay.backfilled.jobs, 1, "the first lint job alone passed");
+    let replayed: BTreeMap<Pool, Vec<u64>> = replay
+        .pools
+        .iter()
+        .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
+        .collect();
+    assert_eq!(through_the_planner(&jobs, &known), replayed);
+    let (jobs, known) = a_barrier_behind_an_older_job();
+    let replay = replay_with_light(&jobs, &known, Barriers::On);
+    assert_eq!(
+        replay.backfilled.jobs, 0,
+        "the lint job waits for the older one"
+    );
+    let replayed: BTreeMap<Pool, Vec<u64>> = replay
+        .pools
+        .iter()
+        .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
+        .collect();
+    assert_eq!(through_the_planner(&jobs, &known), replayed);
+}
