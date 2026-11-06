@@ -643,6 +643,37 @@ async fn a_runner_whose_own_sample_is_old_counts_at_its_cap() {
     assert_eq!(handle.status.borrow().budget.memory_in_use, 4 * G);
 }
 
+/// A burst of jobs ending left 20 runners counted at 88.8G with 7G in use on 2026-11-05: each stayed in its slot for
+/// its log and its removal, past the sample that would have said it holds nothing, and counted at its cap.
+#[tokio::test]
+async fn a_runner_whose_container_is_gone_counts_nothing_while_it_keeps_its_slot() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    github.0.lock().unwrap().queued = vec![job(1)];
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    runners_used(&github, &handle.store, G, time::now_ms() - 60_000);
+    slice_at(&handle.store, 2 * G);
+    let runner = engine
+        .occupied()
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .next()
+        .unwrap();
+    engine.publish();
+    let counted = handle.status.borrow().budget.memory_in_use;
+    handle.store.containers_gone(vec![runner.clone()]);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 0);
+    // A `docker restart` brings the same cgroup back: a live container's memory must not be spent twice.
+    handle.store.containers_read(&[runner]);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, counted);
+}
+
 #[tokio::test]
 async fn two_light_runs_then_a_burst_of_heavy_copies_with_warm_up_never_overlap_past_memory_max() {
     let (github, docker, dir) = (
