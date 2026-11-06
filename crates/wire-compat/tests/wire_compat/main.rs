@@ -366,6 +366,29 @@ fn the_previous_release_reads_a_job_behind_memory_as_a_reason_it_does_not_know()
     );
 }
 
+/// What ADR 0100 accepts: a client of the previous release shows a host-held insight under its `Insight` label, by its
+/// sentence, and goes on reading the insights beside it.
+#[test]
+fn the_previous_release_reads_a_host_held_insight_as_a_kind_it_does_not_know() {
+    let mut insights = samples::insights();
+    let mut held = insights.insights[0].clone();
+    held.sentence = "2 jobs wait for the host's memory".to_owned();
+    held.kind = api::InsightKind::HostHeld {
+        jobs: 2,
+        waited: 2700,
+    };
+    insights.insights.push(held);
+    let read = previous::Insights::deserialize(&json(insights)).unwrap();
+    let held = read.insights.last().unwrap();
+    assert_eq!(held.kind, previous::InsightKind::Unknown);
+    assert_eq!(held.sentence, "2 jobs wait for the host's memory");
+    assert_eq!(
+        read.insights.len(),
+        samples::insights().insights.len() + 1,
+        "the insights beside it still read"
+    );
+}
+
 #[test]
 fn this_version_reads_what_the_previous_release_wrote() {
     let documents: BTreeMap<_, _> = documents()

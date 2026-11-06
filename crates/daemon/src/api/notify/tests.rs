@@ -409,6 +409,22 @@ fn reading_at(at: u64) -> HostMemory {
     }
 }
 
+/// What the owner reads of the host-held insight: titled for the host, not the longest waiter's repository, with the
+/// sentence core words.
+fn assert_host_held_message(first: &Notification, seed: u64) {
+    assert_eq!(
+        first.title, "Jobs wait for the host's memory",
+        "seed {seed}"
+    );
+    assert_eq!(first.event, NotifyEvent::Insights, "seed {seed}");
+    assert_eq!(
+        first.insights[0].sentence,
+        "2 jobs wait for the host's memory, the longest for 45m 00s (halyard/api: test); programs outside CI hold \
+         38G. Closing programs frees only part of that.",
+        "seed {seed}"
+    );
+}
+
 #[tokio::test]
 async fn a_host_wait_is_told_once_a_window_across_restarts_stale_looks_and_ended_waits() {
     // Catches a message at every look, none on a later evening, a repeat after a restart, a message from a wait that
@@ -502,6 +518,9 @@ async fn a_host_wait_is_told_once_a_window_across_restarts_stale_looks_and_ended
                     .unwrap()
             })
             .collect();
+        if let Some(first) = endpoint.notifications().first() {
+            assert_host_held_message(first, seed);
+        }
         let once: BTreeSet<u64> = told.iter().copied().collect();
         assert_eq!(
             told.len(),
