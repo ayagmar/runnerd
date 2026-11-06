@@ -642,12 +642,14 @@ impl Writer<'_> {
     }
 
     /// Closes a running job once GitHub reports it completed and its runner is removed.
+    /// A job GitHub completed closes once its runner is gone. A runner the history never recorded, as Docker failed to
+    /// inspect it, leaves no removal to wait for.
     fn close_if_done(&self, job: u64, announced: &mut Announced) -> rusqlite::Result<()> {
         let done = self
             .db
             .query_row(
-                "SELECT j.github_completed AND r.removed_at IS NOT NULL FROM jobs j \
-                 JOIN runners r ON r.name = j.runner WHERE j.id = ?1 AND j.state = 'running'",
+                "SELECT j.github_completed AND (r.name IS NULL OR r.removed_at IS NOT NULL) FROM jobs j \
+                 LEFT JOIN runners r ON r.name = j.runner WHERE j.id = ?1 AND j.state = 'running'",
                 [job],
                 |row| row.get::<_, bool>(0),
             )

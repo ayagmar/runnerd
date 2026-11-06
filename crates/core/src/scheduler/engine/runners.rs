@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use futures_util::StreamExt;
 use tracing::{info, warn};
 
-use super::history::CAPTURE_DRAIN;
+use super::history::{CAPTURE_DRAIN, Capture};
 use super::{DockerInStop, Engine, Occupant, Purpose, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
@@ -30,6 +30,15 @@ pub(super) const SPEC: &str = "runnerd.spec";
 
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
+
+/// What a release's first step found of a runner that ended.
+#[derive(Debug, Default)]
+pub(super) struct Collected {
+    /// Its log, if Docker read it.
+    pub(super) logs: Option<String>,
+    /// Its capture broke off, or was still reading when its time ran out: no tick saw that, as the runner goes first.
+    capture_unread: bool,
+}
 
 /// The labels of a runner container: what a restart adopts it by.
 fn container_labels(
@@ -149,10 +158,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// its slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start. In steps a pass runs
     /// for several runners at once: `drain`, `record`, `remove`, `released`.
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant) {
-        let logs = self.drain(occupant).await;
-        let recorded = self.record(slot, occupant, logs.as_deref()).await;
+        let drained = self.drain(occupant).await;
+        let recorded = self.record(slot, occupant, &drained).await;
         let removed = self.remove(occupant, recorded).await;
-        self.released(slot, occupant, logs.as_deref(), removed);
+        self.released(slot, occupant, drained.logs.as_deref(), removed);
     }
 
     /// A release's first step, on its own: reads the log of a runner that ended, then lets its capture end, which it
@@ -160,7 +169,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn drain(
         &mut self,
         occupant: &Occupant,
-    ) -> impl Future<Output = Option<String>> + Send + 'static {
+    ) -> impl Future<Output = Collected> + Send + 'static {
         self.take_found();
         let capture = self.captures.remove(&occupant.runner_name);
         let docker = self.docker.clone();
@@ -176,14 +185,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             };
             // The capture ends with the container; its last lines must be stored before the job's record closes.
-            if let Some(mut task) = capture
-                && tokio::time::timeout(CAPTURE_DRAIN, &mut task)
-                    .await
-                    .is_err()
-            {
-                task.abort();
+            let capture_unread = match capture {
+                Some(mut task) => match tokio::time::timeout(CAPTURE_DRAIN, &mut task).await {
+                    Ok(Ok(Capture::Done)) => false,
+                    Ok(_) => true,
+                    Err(_) => {
+                        task.abort();
+                        true
+                    }
+                },
+                None => false,
+            };
+            Collected {
+                logs,
+                capture_unread,
             }
-            logs
         }
     }
 
@@ -193,11 +209,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         &mut self,
         slot: &SlotRef,
         occupant: &Occupant,
-        logs: Option<&str>,
+        drained: &Collected,
     ) -> bool {
         self.take_found();
+        // A pass can reap it before `recapture` looks: what the capture left unread goes with the container.
+        if self.recaptures.remove(&occupant.runner_name).is_some() || drained.capture_unread {
+            self.claim_from_worker_log(occupant).await;
+        }
         self.count_mirror_bytes().await;
-        logs.is_some_and(record::failed) && self.begin_record(slot, occupant).await
+        drained.logs.as_deref().is_some_and(record::failed)
+            && self.begin_record(slot, occupant).await
     }
 
     /// A release's third step, on its own: removes the container, unless it is `recorded`, then deletes the

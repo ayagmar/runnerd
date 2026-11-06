@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Meanwhile, Occupant};
 use crate::admission::Key;
-use crate::docker::{DockerApi, is_not_found};
+use crate::docker::{DockerApi, is_declined, is_not_found};
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
@@ -250,11 +250,60 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 // Its log ends where the capture broke off; `collect_finished` frees its slot.
                 Ok(_) => {
                     self.recaptures.remove(&occupant.runner_name);
+                    self.claim_from_worker_log(&occupant).await;
                 }
                 Err(error) if is_not_found(&error) => {
                     self.recaptures.remove(&occupant.runner_name);
                 }
                 Err(error) => warn!("cannot inspect {}: {error}", occupant.runner_name),
+            }
+        }
+    }
+
+    /// The job a runner took: its capture's last report may have named it after `occupant` was taken.
+    pub(super) fn named_job(&self, occupant: &Occupant) -> Option<u64> {
+        self.occupied()
+            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
+            .and_then(|(_, candidate)| candidate.job)
+            .or(occupant.job)
+    }
+
+    /// Claims the job a stopped runner's worker log names, if no capture read one: nothing else may link the two, and a
+    /// job whose capture broke can end before a listing shows its runner.
+    pub(super) async fn claim_from_worker_log(&mut self, occupant: &Occupant) {
+        if self.named_job(occupant).is_some() {
+            return;
+        }
+        let read = self
+            .docker
+            .files(&occupant.container, capture::DIAG, capture::WORKER_LOG)
+            .await;
+        let claim = match read {
+            Ok(read) => read.files.iter().find_map(|file| {
+                let job = capture::worker_job(&file.contents)?;
+                Some((job, capture::worker_run(&file.contents)?))
+            }),
+            Err(error) if is_declined(&error) => None,
+            Err(error) => {
+                warn!("cannot read {}'s worker log: {error}", occupant.runner_name);
+                None
+            }
+        };
+        if let Some((job, run_id)) = claim {
+            let runner = occupant.runner_name.clone();
+            self.store.claimed(job, run_id, &runner, time::now_ms());
+            self.note_found(&Found {
+                runner,
+                job,
+                run_id,
+            });
+            // A left runner is in no slot, so no `forget` closes what the claim opened.
+            let held = self
+                .occupied()
+                .any(|(_, candidate)| candidate.runner_name == occupant.runner_name);
+            if !held {
+                self.closing.insert(job, Closing::now(&occupant.repository));
+                self.consume(&occupant.repository, job);
             }
         }
     }
@@ -575,11 +624,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Records a runner's removal and what the build cache served it, and stops watching it; its job, if it took
     /// one, closes once GitHub reports it completed.
     pub(super) fn forget(&mut self, occupant: &Occupant) {
-        let job = self
-            .occupied()
-            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
-            .and_then(|(_, candidate)| candidate.job)
-            .or(occupant.job);
+        let job = self.named_job(occupant);
         // Before the record of its removal, which the job's record then shows.
         self.detach_build_cache(occupant, job);
         let now = SystemTime::now();

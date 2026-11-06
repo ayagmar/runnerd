@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::capture::{Captured, MAX_LINE, Parser, worker_job};
+use super::capture::{Captured, MAX_LINE, Parser, worker_job, worker_run};
 use super::metrics::{CpuHeld, Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
 use super::mirror::{self, Leases};
 use crate::api;
@@ -612,6 +612,7 @@ fn a_stopped_runners_worker_log_names_its_job_by_the_check_run_id_alone() {
         },
 "#;
     assert_eq!(worker_job(log), Some(120_038_758_684));
+    assert_eq!(worker_run(log), Some(39_840_158_500), "quoted in the log");
     let before =
         "[2026-10-31 12:00:00Z INFO Worker] Waiting to receive the job message from the channel.\n";
     assert_eq!(worker_job(before), None, "no job taken yet");
