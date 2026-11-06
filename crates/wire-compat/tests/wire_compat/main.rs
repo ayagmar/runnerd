@@ -55,20 +55,10 @@ const ACCEPTED: &[Accepted] = &[
         item: "waiting/behind-memory",
         adr: "0096",
     },
-    // The previous release reads a `host-held` insight as its `Unknown` fallback, by its sentence.
+    // The previous release reads a `host-held` insight kind as its `Unknown` fallback, by the insight's sentence.
     Accepted {
         reader: Reader::Previous,
-        item: "insights/full",
-        adr: "0100",
-    },
-    Accepted {
-        reader: Reader::Previous,
-        item: "digest/full",
-        adr: "0100",
-    },
-    Accepted {
-        reader: Reader::Previous,
-        item: "notification/full",
+        item: "insight-kind/host-held",
         adr: "0100",
     },
 ];
@@ -255,6 +245,7 @@ documents! {
     "activity": Activity => full(samples::activity(), None),
     "sizing": Sizing => full(samples::sizing(), Some(json(samples::sizing_empty()))),
     "insights": Insights => full(samples::insights(), None),
+    "insight-kind": InsightKind => variants(samples::insight_kind()),
     "severity": Severity => variants(samples::severity()),
     "auto-note": AutoNote => variants(samples::auto_note()),
     "digest": Digest => full(samples::digest(), None),

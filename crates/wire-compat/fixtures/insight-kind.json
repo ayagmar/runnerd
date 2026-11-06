@@ -1,0 +1,53 @@
+{
+  "cold-cache": {
+    "branch": "main",
+    "hits": 2,
+    "kind": "cold-cache",
+    "lookups": 100
+  },
+  "cpu-held": {
+    "cpus": 9,
+    "held": 3,
+    "kind": "cpu-held",
+    "profile": "halyard",
+    "raised_from": 6,
+    "set": 14,
+    "total": 10
+  },
+  "flaky": {
+    "flaky": 2,
+    "kind": "flaky",
+    "total": 20
+  },
+  "near-cap": {
+    "auto": "raises",
+    "cap": 8589934592,
+    "kind": "near-cap",
+    "peak": 7516192768,
+    "profile": "halyard"
+  },
+  "slower": {
+    "before": 300,
+    "branch": "main",
+    "kind": "slower",
+    "now": 600,
+    "since": {
+      "at": 1761400000,
+      "branch": "main",
+      "job": 42,
+      "run_attempt": 1,
+      "run_id": 900,
+      "url": "https://github.com/tidewater/halyard/actions/runs/900"
+    }
+  },
+  "throttled": {
+    "kind": "throttled",
+    "throttled": 3,
+    "total": 20
+  },
+  "waits": {
+    "before": 30,
+    "kind": "waits",
+    "now": 300
+  }
+}
