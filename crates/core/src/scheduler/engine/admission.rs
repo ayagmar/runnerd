@@ -53,7 +53,7 @@ pub(super) struct Measured {
     pub high_water: bool,
     /// The waiting runners `rereserve` raised for a heavier queued job, until they take a job or go. A raise stays
     /// once made, so a pass's raise is still known to the tick after it, which stops those past the budget.
-    raised: Vec<String>,
+    pub(super) raised: Vec<String>,
     /// The job the last plan let no younger job start before, so the change is logged once.
     barrier: Option<u64>,
 }

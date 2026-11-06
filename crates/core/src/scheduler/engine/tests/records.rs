@@ -489,6 +489,24 @@ async fn a_shell_holds_a_slots_memory_and_is_refused_while_the_budget_is_full() 
 }
 
 #[tokio::test]
+async fn a_shell_opens_in_room_the_status_shows_though_the_plain_count_has_none() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell");
+    let config = recording().replace("slots = 2", "slots = 4").replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nadmission = \"measured\"",
+    );
+    let (mut engine, _) = admission::two_settled_jobs(&github, &docker, &dir, &config).await;
+    // The 4G a shell takes beside 7G plain is past 10.5G; the status counts 5.24G of it.
+    engine.memory_max = Some(10 * (1 << 30) + (1 << 29));
+    assert!(
+        engine.open_shell(10, SIZE).await.is_ok(),
+        "the shell is told what the status shows"
+    );
+}
+
+#[tokio::test]
 async fn under_measured_admission_no_shell_opens_while_the_slice_is_at_the_high_water_mark() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     docker.0.lock().unwrap().images = vec![record_image(10, 60)];

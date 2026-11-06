@@ -267,7 +267,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// slice at its high-water mark. The profile's own runners, which stop before it starts, and the room its
     /// waiting seed holds count as free. The host's limit is `waiting_seed`'s, without the larger margin of a short
     /// host: the room it holds keeps other jobs waiting for the host and so the host short.
-    fn fits_seed(&self, profile: &str) -> bool {
+    pub(super) fn fits_seed(&self, profile: &str) -> bool {
         let memory = self.config.profiles.get(profile).map_or(0, |p| p.memory.0);
         let runners: u64 = self
             .slots
@@ -278,10 +278,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|occupant| self.takes(occupant))
             .sum();
         let own = runners.saturating_add(self.waiting_seed(profile).unwrap_or(0));
-        let in_use = self.memory_in_use().saturating_sub(own);
+        // As a plan reads them: `MemoryMax` the pooled count, or plans would keep spending room a reseed waits for.
+        let count = self.count(self.host_remembered());
+        let in_use = count.pooled().saturating_sub(own);
         self.memory_max
             .is_none_or(|max| max.saturating_sub(in_use) >= memory)
             && self.host_budget().is_none_or(|host| {
+                let in_use = count.plain.saturating_sub(own);
                 host::left(host::limit(&host.memory, false), in_use, host.stalled)
                     >= i64::try_from(memory).unwrap_or(i64::MAX)
             })

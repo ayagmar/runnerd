@@ -1893,7 +1893,7 @@ fn first_minute_passes(engine: &mut Engine<FakeGithub, FakeDocker>) {
 
 /// An 8G slice running `build` and `e2e`, each predicted at 3.5G and using 512M, 1G left of the plain count: their
 /// runners' room above use is 3G each, which comes to 1.76G of credit.
-async fn two_settled_jobs(
+pub(super) async fn two_settled_jobs(
     github: &FakeGithub,
     docker: &FakeDocker,
     dir: &TestDir,
@@ -1997,6 +1997,102 @@ async fn settled_jobs_of_two_kinds_make_room_a_start_goes_by_and_every_reader_ag
         .filter(|call| call.starts_with("delete "))
         .count();
     assert_eq!(stopped, 0, "what fits the pooled count stays");
+}
+
+#[tokio::test]
+async fn a_raised_waiting_runner_stops_only_once_the_pooled_count_is_past_the_budget() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    github.0.lock().unwrap().queued = vec![small(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3, "lint's runner waits");
+    github.0.lock().unwrap().queued = Vec::new();
+    let waiting = engine
+        .occupied()
+        .find(|(_, occupant)| occupant.job.is_none())
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .unwrap();
+    engine.measured.raised.push(waiting);
+
+    // 8.25G plain of the 8G budget: past it, but the count is not.
+    roomy_readings(&github, &handle.store, 512 * M);
+    assert_eq!(engine.over_budget(&[]), [], "the pooled count fits");
+
+    // The host's reading goes old, the credit with it: the same runner is now past the budget.
+    handle.store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000 - 60,
+        total: 64 * G,
+        available: 40 * G,
+        slice: G,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    });
+    assert_eq!(engine.over_budget(&[]).len(), 1, "the plain count does not");
+}
+
+#[tokio::test]
+async fn the_last_check_before_a_start_keeps_the_margin_its_plan_chose() {
+    // The runners a plan starts into an empty slice need only the first runner's margin, and the credit's host guard
+    // goes by that margin: read afresh, the larger one takes the credit back from a start the plan allowed.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    // 21G available: 1G past the 20G kept by the margin, under the 22G kept by the larger one.
+    host_at(&handle.store, G, 21 * G, 0);
+    engine.measured.host.short = true;
+    let lint = 1280 * M;
+    let mut plan = engine.admitting(&mut [], None);
+    plan.remembered.short = false;
+    assert!(
+        engine.still_fits(&plan, "app", lint, 0),
+        "1G left and 1G of credit, by the plan's margin"
+    );
+    plan.remembered.short = true;
+    assert!(
+        !engine.still_fits(&plan, "app", lint, 0),
+        "no credit by the larger margin"
+    );
+}
+
+#[tokio::test]
+async fn a_reseed_reads_the_room_a_plan_reads() {
+    // A plan fills what the pooled count leaves; a reseed reading the plain count would wait on room plans keep taking.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let second_profile = |config: String| {
+        config.replace(
+            "[[repositories]]",
+            "[profiles.spare]\nimage_stage = \"spare\"\ncpus = 2\nmemory = \"2G\"\nslots = 1\n\n\
+             [[repositories]]\nname = \"o/s\"\nprofile = \"spare\"\nlabels = [\"spare\"]\nwarm = 0\n\n\
+             [[repositories]]",
+        )
+    };
+    let (engine, _) = two_settled_jobs(&github, &docker, &dir, &second_profile(measured())).await;
+    assert!(
+        engine.fits_seed("spare"),
+        "2G of the 2.76G the count leaves"
+    );
+
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (engine, _) = two_settled_jobs(&github, &docker, &dir, &second_profile(unpooled())).await;
+    assert!(!engine.fits_seed("spare"), "1G left of the plain count");
 }
 
 #[tokio::test]

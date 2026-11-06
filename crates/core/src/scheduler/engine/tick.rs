@@ -890,7 +890,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// on, such as a runner whose stop failed. Without a recent sample of the slice, measured admission counts it at
     /// its cap, as the plan would then. The host keeps the margin the plan chose: the runners a plan starts into an
     /// empty slice all need only the first runner's.
-    fn still_fits(&self, plan: &Admitting, profile: &str, memory: u64, cpu: u64) -> bool {
+    pub(super) fn still_fits(
+        &self,
+        plan: &Admitting,
+        profile: &str,
+        memory: u64,
+        cpu: u64,
+    ) -> bool {
         let mut now = self.admitting(&mut [], None);
         now.host = self.host_budget_by(plan.remembered);
         now.remembered = plan.remembered;
@@ -978,17 +984,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .is_some_and(Option::is_some)
     }
 
-    /// What the runners take (`takes`), and the memory caps of the seed containers (which run with their profile's
-    /// limits) and the room waiting ones hold (`seed_memory`), the shells and the mirror.
-    pub(super) fn memory_in_use(&self) -> u64 {
-        let runners: u64 = self
-            .occupied()
-            .map(|(_, occupant)| self.takes(occupant))
-            .sum();
-        runners + self.committed_memory()
-    }
-
-    /// The part of `memory_in_use` no runner's end gives back: the seed containers and the room waiting ones hold, the
+    /// The part of the plain count no runner's end gives back: the seed containers and the room waiting ones hold, the
     /// shells and the mirror.
     pub(super) fn committed_memory(&self) -> u64 {
         let reseeds: u64 = self.seed_memory().values().sum();
