@@ -1280,11 +1280,25 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         "{reason}"
     );
 
-    // Room for both again by the 4G margin alone: at the edge, so they wait until the host has the larger margin.
+    // Room for one more by the 4G margin, none by the larger one: this plan holds it, and as it fits the plain margin
+    // the next plan has that (ADR 0102).
     tokio::time::sleep(Duration::from_millis(20)).await;
-    host_at(&handle.store, 0, 4 * G + 4 * 1280 * M + 100 * M, 0);
+    host_at(&handle.store, 0, 4 * G + 3 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
-    assert_eq!(registered(&github.calls()).len(), 2, "no start at the edge");
+    assert_eq!(registered(&github.calls()).len(), 2, "the larger margin");
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        3,
+        "one fits the plain one"
+    );
+    // The last fits neither, so the larger margin stands again, until the host has room for it.
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3, "no room is left");
+    assert!(
+        engine.measured.host.short,
+        "no waiter fits the plain margin"
+    );
     tokio::time::sleep(Duration::from_millis(20)).await;
     host_at(&handle.store, 0, 6 * G + 4 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
@@ -1298,8 +1312,8 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     let waited = waited(&dir, "host_waited");
     assert_eq!(waited[..2], [0, 0], "the jobs that started waited not");
     assert!(
-        waited[2..].iter().all(|&ms| ms >= 40),
-        "the two that waited count both ticks: {waited:?}"
+        waited[2] >= 20 && waited[3] >= 40,
+        "each that waited counts the ticks it waited: {waited:?}"
     );
     assert!(removed(&docker.calls()).is_empty(), "no runner was stopped");
 }

@@ -844,11 +844,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The budgets a plan has beside what runs now, as `admitting` admits. `drained` keeps what no runner's end gives
-    /// back and reads none of the interlocks' zeros. The host's limit in it is the one in force: the plain margin
-    /// comes back only with no runner in the slice, and a warm runner may keep it from ever being empty.
+    /// back and reads none of the interlocks' zeros. For a job the host holds, the host's limit in it is the larger
+    /// margin's while a runner runs, whichever margin is in force: that one follows the jobs waiting (ADR 0102), and a
+    /// barrier that followed it would take them from the waiters that decide it. The empty slice's plain margin counts
+    /// only once it is empty, as a warm runner may keep it from ever being. For any other job it is the plain margin's.
     pub(super) fn plan_budget(&self, admitting: &Admitting) -> Budget {
         let committed = self.committed_memory();
         let count = self.count(admitting.remembered);
+        let running = self.occupied().next().is_some();
         Budget {
             // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
             memory: if admitting.held {
@@ -877,10 +880,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .as_ref()
                     .and(self.cpu_budget())
                     .map(|budget| crate::scheduler::left(budget, 0)),
-                host: admitting
-                    .host
-                    .as_ref()
-                    .map(|host| crate::scheduler::left(host.limit, committed)),
+                host: admitting.host.as_ref().map(|host| {
+                    let limit = host::limit(&host.memory, running || host.stalled);
+                    crate::scheduler::left(limit, committed)
+                }),
+                host_plain: admitting.host.as_ref().map(|host| {
+                    crate::scheduler::left(host::limit(&host.memory, false), committed)
+                }),
             },
         }
     }

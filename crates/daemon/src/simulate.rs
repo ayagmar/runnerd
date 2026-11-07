@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use runnerd_core::admission::trace::{Episodes, Trace};
 use runnerd_core::admission::{
-    Arrivals, Barriers, CreditRoom, Policy, PoolReplay, Replay, Replaying, pooled, simulate,
+    Arrivals, Band, Barriers, CreditRoom, Policy, PoolReplay, Replay, Replaying, pooled, simulate,
 };
 use runnerd_core::api;
 use runnerd_core::config::{self, Admission, ByteSize, Config};
@@ -144,6 +144,7 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
                 most_credit: 0,
                 host_hold: u64::MAX,
                 credit_room: CreditRoom::Counted,
+                band: Band::NoWaiterFits,
             },
         )
     };
@@ -207,6 +208,8 @@ pub(crate) struct Counts<'credits> {
     /// The most credit of each row, in bytes: 0 is the plain count.
     pub(crate) credits: &'credits [u64],
     pub(crate) host_hold: u64,
+    /// What holds up the host's larger margin.
+    pub(crate) band: Band,
     /// Whether to also compare what a barrier may do beside `pooled::MOST_CREDIT`.
     pub(crate) barriers: Comparing,
 }
@@ -254,6 +257,7 @@ pub(crate) fn causal(
                 most_credit,
                 host_hold: counts.host_hold,
                 credit_room,
+                band: counts.band,
             },
         )
     };
@@ -282,8 +286,8 @@ pub(crate) fn causal(
     );
     let _ = writeln!(
         out,
-        "{:<6} {:>9} {:>9} {:>10} {:>9} {:>9} {:>7}",
-        "CREDIT", "RUN MEAN", "RUN WORST", "NEVER", "HOST H", "SLICE H", "BEHIND"
+        "{:<6} {:>9} {:>9} {:>10} {:>9} {:>9} {:>9} {:>7}",
+        "CREDIT", "RUN MEAN", "RUN WORST", "NEVER", "WAIT H", "HOST H", "SLICE H", "BEHIND"
     );
     for (credit, replay) in counts.credits.iter().zip(&replays) {
         let _ = writeln!(
@@ -317,14 +321,24 @@ pub(crate) fn causal(
 fn causal_line(name: &str, replay: &Replay) -> String {
     let runs = runs_of(replay, None);
     format!(
-        "{name:<6} {:>9} {:>9} {:>10} {:>9} {:>9} {:>7}",
+        "{name:<6} {:>9} {:>9} {:>10} {:>9} {:>9} {:>9} {:>7}",
         duration(mean(&runs)),
         duration(runs.iter().copied().max().unwrap_or(0)),
         replay.never_started,
+        job_hours(1000 * all_waits(replay)),
         job_hours(replay.host_waited),
         job_hours(replay.slice_waited),
         replay.backfilled.jobs,
     )
+}
+
+/// What every job of `replay` waited, in seconds.
+fn all_waits(replay: &Replay) -> u64 {
+    replay
+        .pools
+        .values()
+        .flat_map(|pool| &pool.waits)
+        .sum::<u64>()
 }
 
 /// The runs with a job of each profile of `slots` in `replays`, mean / worst, a column a credit.
@@ -385,7 +399,7 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "\nHazards (episodes, time, worst):\n\n{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>6} {:>9}",
+        "\nHazards (episodes, time, worst):\n\n{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>7} {:>6} {:>9}",
         "CREDIT",
         "SLICE MAX",
         "PAST 90%",
@@ -393,6 +407,7 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
         "USE PAST COUNT",
         "<20G",
         "<6.2G",
+        "BAND",
         "LOWEST",
         "FALLS",
         "OVER",
@@ -403,7 +418,7 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
         let tenths = hazard.credit / (u128::from(1_u32 << 30) * 360_000);
         let _ = writeln!(
             out,
-            "{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>6} {:>9}",
+            "{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>7} {:>6} {:>9}",
             ByteSize(*credit).to_string(),
             ByteSize(hazard.slice_peak).to_string(),
             episodes(hazard.over_mark),
@@ -411,6 +426,7 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
             episodes(hazard.unfunded),
             duration(hazard.under_throttling / 1000),
             duration(hazard.under_oomd / 1000),
+            duration(hazard.in_band / 1000),
             hazard
                 .lowest_available
                 .map_or_else(|| "-".to_owned(), |lowest| ByteSize(lowest).to_string()),
@@ -422,7 +438,8 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
     let active = replays.first().map_or(0, |replay| replay.hazard.active) / 1000;
     let _ = write!(
         out,
-        "\n<20G and <6.2G: time with the host's MemAvailable under those lines, of {} with a runner running. FALLS: times the \
+        "\n<20G and <6.2G: time with the host's MemAvailable under those lines, of {} with a runner running. BAND: time at the \
+         host's larger margin. FALLS: times the \
          credit fell; OVER: those that left the count past a budget. The host's programs are as recorded and do not react \
          to a fuller slice; no pressure, no reseeds, shells, warm runners or restarts; a job's run time stays as it ran.",
         duration(active)

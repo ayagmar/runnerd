@@ -108,6 +108,7 @@ fn replay(jobs: &[Ran], trace: &Trace, most_credit: u64) -> Replay {
             most_credit,
             host_hold: u64::MAX,
             credit_room: CreditRoom::Counted,
+            band: Band::NoWaiterFits,
         },
     )
 }

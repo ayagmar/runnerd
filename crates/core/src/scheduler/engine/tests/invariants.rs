@@ -21,7 +21,7 @@ use crate::api::{Basis, JobPeak};
 use crate::config::Admission;
 use crate::observe::metrics::Events;
 use crate::scheduler::engine::clock::Clock;
-use crate::scheduler::{IDLE_TIMEOUT, PRIORITY_AFTER};
+use crate::scheduler::{Decision, IDLE_TIMEOUT, PRIORITY_AFTER};
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -371,7 +371,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             47 => Step::RemoveFails,
             48..=54 => Step::Sample {
                 percent: [10, 50, 90, 120][rng.index() % 4],
-                available: [3, 8, 20, 50][rng.index() % 4],
+                available: [3, 6, 8, 9, 20, 50][rng.index() % 6],
                 stalled: rng.below(5) == 0,
             },
             55..=62 => Step::Reload(match rng.below(9) {
@@ -489,6 +489,10 @@ struct Violation {
 struct Seen {
     barriers: usize,
     credits: usize,
+    /// Ticks that left the larger margin standing with waiters, none fitting the plain one.
+    bands: usize,
+    /// Ticks that gave it up for a job that fits the plain one, which the next plan starts.
+    released: usize,
 }
 
 struct Case {
@@ -1268,6 +1272,7 @@ impl Case {
 
     async fn tick(&mut self) -> Result<(), Violation> {
         self.unregistered_runners_exit();
+        let was_short = self.engine.measured.host.short;
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
@@ -1315,7 +1320,10 @@ impl Case {
             .filter(|profile| !seeds_before.contains(*profile))
             .map(|profile| format!("{profile}{SEED_START}"))
             .collect::<Vec<_>>();
-        if let Some(after) = self.starts_after_a_reading(&starts) {
+        let read_during_start = self.starts_after_a_reading(&starts);
+        let same_reading = read_during_start.is_none();
+        let seeded = !seeds.is_empty();
+        if let Some(after) = read_during_start {
             started = after;
         }
         started.extend(seeds);
@@ -1324,6 +1332,9 @@ impl Case {
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
+        if same_reading {
+            self.the_band_follows_the_waiters(was_short, seeded)?;
+        }
         self.no_removal_of_a_running_job()
     }
 
@@ -1653,6 +1664,61 @@ impl Case {
             let detail = format!("{credit} of credit beside the slice's {slice:?}");
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
+        Ok(())
+    }
+
+    /// Invariant 12 (ADR 0102), after a tick: a stall keeps the larger margin, and no reading leaves none. A plan by what
+    /// the tick remembered shows a job waiting for the host only if the margin stands while it fits the plain one not
+    /// at all; and with nothing to start, a host no waiter fits keeps it. The plan may start one and leave others
+    /// waiting: the tick after decides for those. A reading taken during the tick's starts binds the next tick, so the
+    /// caller skips this then. A seed started after the tick's last plan only raises the count, which can leave a host no
+    /// waiter fits at the plain margin for one tick (`seeded`): that plan starts nothing, and the next tick decides.
+    fn the_band_follows_the_waiters(
+        &mut self,
+        was_short: bool,
+        seeded: bool,
+    ) -> Result<(), Violation> {
+        let remembered = self.engine.measured.host;
+        let (plan, admitting) = self.engine.plan();
+        let Some(host) = admitting.host.as_ref() else {
+            if remembered.short {
+                let detail = "the larger margin with no reading".to_owned();
+                return violation(self, "the_band_follows_the_waiters", detail);
+            }
+            return Ok(());
+        };
+        if host.stalled {
+            if !remembered.short {
+                let detail = format!("a stall without the larger margin: {:?}", host.memory);
+                return violation(self, "the_band_follows_the_waiters", detail);
+            }
+            return Ok(());
+        }
+        let in_use = self.engine.count(self.engine.host_remembered()).plain;
+        let room = host::left(host::limit(&host.memory, false), in_use, false);
+        let needs: Vec<i64> = plan
+            .waiting
+            .values()
+            .filter_map(|reason| match reason {
+                api::Waiting::HostMemory { needs, .. } => i64::try_from(*needs).ok(),
+                _ => None,
+            })
+            .collect();
+        let fits = needs.iter().any(|needs| *needs <= room);
+        let starts = plan
+            .decisions
+            .iter()
+            .any(|decision| matches!(decision, Decision::Start { .. }));
+        if remembered.short && fits {
+            let detail = format!("{needs:?} wait, {room} is left by the plain margin");
+            return violation(self, "the_band_follows_the_waiters", detail);
+        }
+        if !remembered.short && !fits && !needs.is_empty() && !starts && !seeded {
+            let detail = format!("{needs:?} wait, {room} is left, and the margin is plain");
+            return violation(self, "the_band_follows_the_waiters", detail);
+        }
+        self.seen.bands += usize::from(remembered.short && !needs.is_empty());
+        self.seen.released += usize::from(was_short && !remembered.short && starts);
         Ok(())
     }
 
@@ -2060,6 +2126,42 @@ async fn shrink(mut steps: Vec<Step>, found: Violation) -> (Vec<Step>, Violation
     (steps, last)
 }
 
+/// What a case in four starts from: under measured admission a light runner runs and a heavy job waits for a host no
+/// margin fits; the host then has room between the margins, so the band lets the job go and the next plan starts it.
+const BAND_RELEASED: [Step; 10] = [
+    Step::Reload(Change::Policy),
+    Step::Queue {
+        second: false,
+        labels: Labels::Light,
+    },
+    Step::Sample {
+        percent: 10,
+        available: 20,
+        stalled: false,
+    },
+    Step::Tick,
+    Step::Queue {
+        second: false,
+        labels: Labels::Heavy,
+    },
+    Step::Sample {
+        percent: 10,
+        available: 3,
+        stalled: false,
+    },
+    Step::Tick,
+    Step::Sample {
+        percent: 10,
+        available: 9,
+        stalled: false,
+    },
+    Step::Tick,
+    Step::Tick,
+];
+
+/// How many of `BAND_RELEASED`'s steps leave the larger margin standing, for the steps after them to work on.
+const BAND_STANDS: usize = 7;
+
 /// What every other case starts from: under measured admission, a job of `o/r` and one of `o/s` past their first minute
 /// and using a tenth of what they reserve, so the steps after it find a credit to take back. A tick takes what the
 /// captures found, as a job's first minute starts there, before it can go by.
@@ -2111,11 +2213,24 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
             if seed % 2 == 1 {
                 steps.splice(0..0, TWO_JOBS_SETTLED);
             }
+            match seed % 8 {
+                2 => drop(steps.splice(0..0, BAND_RELEASED[..BAND_STANDS].iter().copied())),
+                6 => drop(steps.splice(0..0, BAND_RELEASED)),
+                _ => {}
+            }
             (seed, attempt(&steps).await, steps)
         });
         for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
             if let Ok(case) = &outcome {
                 seen.barriers += case.barriers;
+                assert!(
+                    seed % 8 != 2 || case.bands > 0,
+                    "seed {seed} starts from a job no margin fits, so the larger margin stands"
+                );
+                assert!(
+                    seed % 8 != 6 || case.released > 0,
+                    "seed {seed} starts from a job between the margins, so the band lets it go"
+                );
                 assert!(
                     seed % 2 == 0 || case.credits > 0,
                     "seed {seed} starts from two settled jobs, so it reaches a credit"

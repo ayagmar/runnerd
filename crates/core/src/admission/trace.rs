@@ -251,6 +251,8 @@ pub struct Hazard {
     pub under_throttling: u64,
     /// How long it stood under `OOMD_UNDER`.
     pub under_oomd: u64,
+    /// How long the host's larger margin stood, in ms.
+    pub in_band: u64,
     /// How long a runner ran, in ms: what those two are shares of.
     pub active: u64,
     /// The least the host had available with a runner running, in bytes.

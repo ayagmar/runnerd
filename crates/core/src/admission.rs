@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use crate::api::Spread;
 use crate::api::{Basis, HostMemory, JobPeak};
 use crate::config::{self, Config};
-use crate::scheduler::priority::{Around, Backfill, Candidate, Caps, Older, Runner, Short};
+use crate::scheduler::priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner, Short};
 use crate::scheduler::{Barrier, Drained, Left, Pool, Scarce, Waits};
 use crate::sizing::{GRANULE, History, Measure, Ran, spread};
 use crate::time;
@@ -409,6 +409,17 @@ pub struct Replaying<'known> {
     pub host_hold: u64,
     /// Whether `Backfill` expects what the credit may still give, as the daemon does.
     pub credit_room: CreditRoom,
+    /// What holds the host's larger margin up.
+    pub band: Band,
+}
+
+/// What holds up the host's larger margin in a replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// As the daemon does: jobs wait for the host and none fits the plain margin (`host::short`).
+    NoWaiterFits,
+    /// To show what that gives (ADR 0102): any job that waits for the host.
+    AnyWaiter,
 }
 
 /// Whether a replay's `Backfill` reads `Budget::credit_room`.
@@ -430,6 +441,7 @@ impl From<Barriers> for Replaying<'_> {
             most_credit: 0,
             host_hold: u64::MAX,
             credit_room: CreditRoom::Counted,
+            band: Band::NoWaiterFits,
         }
     }
 }
@@ -590,6 +602,7 @@ pub fn simulate<'known>(
         most_credit,
         host_hold,
         credit_room,
+        band,
     } = how.into();
     let mirror = config.mirror_memory();
     let budget = memory_max.map(|max| max.saturating_sub(mirror));
@@ -657,6 +670,8 @@ pub fn simulate<'known>(
         needs: RefCell::new(BTreeMap::new()),
         held_for_slice: 0,
         held_for_host: 0,
+        host_needs: Vec::new(),
+        band,
         slice_waited: 0,
         host_waited: 0,
         hazard: Hazard::default(),
@@ -847,7 +862,7 @@ struct Replayer<'run> {
     most_credit: u64,
     host_hold: u64,
     expects_credit: CreditRoom,
-    /// Whether the last plan left a job waiting for the host's memory, so the larger margin stands.
+    /// Whether the larger margin stands for the next plan (`band_stands`).
     short: bool,
     /// When the next plan with no arrival or end is, in ms.
     next_plan: u64,
@@ -857,6 +872,9 @@ struct Replayer<'run> {
     held_for_slice: u64,
     /// How many it left waiting for the host's memory alone.
     held_for_host: u64,
+    /// What each of those needs of the host.
+    host_needs: Vec<u64>,
+    band: Band,
     slice_waited: u64,
     host_waited: u64,
     hazard: Hazard,
@@ -999,6 +1017,7 @@ impl<'run> Replayer<'run> {
                 .saturating_sub(host_slice);
             hazard.under_throttling += span * u64::from(available < THROTTLES_UNDER);
             hazard.under_oomd += span * u64::from(available < OOMD_UNDER);
+            hazard.in_band += span * u64::from(self.short);
             hazard.lowest_available = Some(
                 hazard
                     .lowest_available
@@ -1169,6 +1188,7 @@ impl<'run> Replayer<'run> {
         self.needs.borrow_mut().clear();
         self.held_for_slice = 0;
         self.held_for_host = 0;
+        self.host_needs.clear();
         let listed = waiting.clone();
         let mut index = 0;
         while let Some(queued) = waiting.get(index).copied() {
@@ -1199,6 +1219,10 @@ impl<'run> Replayer<'run> {
                 }
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
+                    // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
+                    if self.barrier.is_none() {
+                        self.host_needs.push(short.memory);
+                    }
                     let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
                     if first && self.barrier.is_some() {
@@ -1215,8 +1239,19 @@ impl<'run> Replayer<'run> {
                 }
             }
         }
-        self.short = self.held_for_host > 0;
+        self.short = self.band_stands();
         self.settle_waits(waiting);
+    }
+
+    /// Whether the larger margin stands for the next pass.
+    fn band_stands(&self) -> bool {
+        match self.band {
+            Band::AnyWaiter => self.held_for_host > 0,
+            Band::NoWaiterFits => self.host_memory().is_some_and(|memory| {
+                let reserved = self.hosted(self.count());
+                host::short(&memory, reserved, false, self.host_needs.iter().copied())
+            }),
+        }
     }
 
     /// What the engine does after a plan: a pool with nothing `waiting` loses its served mark, and one with nothing left
@@ -1306,8 +1341,11 @@ impl<'run> Replayer<'run> {
             memory: self.budget.map(signed),
             cpu: self.cpu_budget.map(signed),
             host: self.host_memory().map(|memory| {
-                let limit = host::limit(&memory, self.short && !self.running.is_empty());
+                let limit = host::limit(&memory, !self.running.is_empty());
                 signed(limit).saturating_sub(signed(self.mirror))
+            }),
+            host_plain: self.host_memory().map(|memory| {
+                signed(host::limit(&memory, false)).saturating_sub(signed(self.mirror))
             }),
         }
     }
@@ -1578,30 +1616,31 @@ impl<'run> Replayer<'run> {
             return Err(Refused::Slot);
         }
         let starting = self.starting(queued, waiting, now);
-        let short = |scarce| Short {
+        let short = |scarce, held| Short {
             job: queued.job,
             scarce,
+            held,
             memory: starting.memory,
             cpu: starting.cpu,
         };
         if let Some(budget) = self.budget {
             if self.taken() + starting.memory > budget {
-                return Err(Refused::Budget(short(Scarce::Memory)));
+                return Err(Refused::Budget(short(Scarce::Memory, Held::ByBudget)));
             }
             if self.at_high_water() {
-                return Err(Refused::HighWater(short(Scarce::Memory)));
+                return Err(Refused::HighWater(short(Scarce::Memory, Held::ByBudget)));
             }
         }
         if self
             .host_left()
             .is_some_and(|left| left < signed(starting.memory))
         {
-            return Err(Refused::Host(short(Scarce::Memory)));
+            return Err(Refused::Host(short(Scarce::Memory, Held::ByHost)));
         }
         if let Some(cpu_budget) = self.cpu_budget {
             let taken: u64 = self.running.iter().map(|running| running.cpu).sum();
             if taken + starting.cpu > cpu_budget {
-                return Err(Refused::Budget(short(Scarce::Cpu)));
+                return Err(Refused::Budget(short(Scarce::Cpu, Held::ByBudget)));
             }
         }
         Ok(Admitted {
