@@ -366,7 +366,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             _ => self.note_host(&admitting, &BTreeMap::new()),
         }
-        self.follow_running(described).await;
+        // A stop asked during the starts reads the jobs in its own tick, or leaves them to the next start's: its
+        // idle runners are removed first (ADR 0091).
+        if self.stopping() == mode {
+            self.follow_running(described).await;
+        }
         self.idle_caches(mode, began).await;
         if self.records.listed {
             self.expire_records().await;
