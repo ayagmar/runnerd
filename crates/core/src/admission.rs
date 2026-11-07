@@ -1219,7 +1219,10 @@ impl<'run> Replayer<'run> {
                 }
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
-                    self.host_needs.push(short.memory);
+                    // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
+                    if self.barrier.is_none() {
+                        self.host_needs.push(short.memory);
+                    }
                     let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
                     if first && self.barrier.is_some() {

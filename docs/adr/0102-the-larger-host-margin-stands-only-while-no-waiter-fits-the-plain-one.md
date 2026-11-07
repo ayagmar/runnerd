@@ -28,8 +28,8 @@ were waiting. A replay of the host's readings put 222 minutes in that band, and 
 - **What stays.** `MARGIN_SHARE` and `MARGIN_MIN`, the stall rule, the empty slice's first runner at the plain margin,
   seeds and reseeds at the plain margin (0063), the doctor. No reading, as before, leaves no larger margin. Nothing
   that runs is ever stopped.
-- **`simulate --causal` shows the band.** It replays this rule through the same `host::short`, `--any-waiter-band`
-  replays the old one, and the hazards table gains the time at the larger margin. The first table gains `WAIT H`, all
+- **`simulate --causal` shows the band.** It replays this rule through the same `host::short`, with what the daemon
+  gives it: a job behind a barrier is no waiter there, its owner is. `--any-waiter-band` replays the old rule, and the hazards table gains the time at the larger margin. The first table gains `WAIT H`, all
   the job-hours jobs waited.
 
 ## Evidence
@@ -39,13 +39,16 @@ were waiting. A replay of the host's readings put 222 minutes in that band, and 
 
 | Window | All wait, job-hours | Host wait, job-hours | In the band | Lowest `MemAvailable` | Under 20G | Under 6.2G |
 | ------ | ------------------- | -------------------- | ----------- | --------------------- | --------- | ---------- |
-| 6h     | 80.0 → 76.1         | 27.1 → 25.0          | 2h21 → 1h39 | 7.38G → 11.59G        | 14m33 → 12m56 | 0 → 0  |
-| 12h    | 111.4 → 89.3        | 44.6 → 31.3          | 3h35 → 2h28 | 12.31G → 8.7G         | 29m52 → 31m28 | 0 → 0  |
-| 24h    | 111.6 → 88.5        | 44.6 → 31.3          | 3h35 → 2h28 | 12.31G → 8.7G         | 29m52 → 31m28 | 0 → 0  |
-| 72h    | 126.6 → 103.2       | 59.6 → 43.7          | 6h12 → 4h37 | 12.17G → 8.66G        | 34m25 → 37m29 | 0 → 0  |
+| 6h     | 80.6 → 76.7         | 27.1 → 25.0          | 2h21 → 1h39 | 7.38G → 11.59G        | 14m33 → 12m56 | 0 → 0  |
+| 12h    | 111.6 → 92.4        | 44.6 → 33.0          | 3h35 → 2h27 | 12.31G → 9.69G        | 29m52 → 32m21 | 0 → 0  |
+| 24h    | 111.6 → 92.4        | 44.6 → 33.0          | 3h35 → 2h27 | 12.31G → 9.69G        | 29m52 → 32m21 | 0 → 0  |
+| 72h    | 126.6 → 105.8       | 59.6 → 46.3          | 6h12 → 4h38 | 12.17G → 6.56G        | 34m25 → 36m00 | 0 → 0  |
 
-Over three days that is 18% less waiting and 27% less waiting for the host. The 12h and 24h windows hold the same
-heavy night. No window reaches 6.2G or passes 90% of the slice.
+The 12h and 24h windows hold the same heavy night. No window reaches 6.2G or passes 90% of the slice.
+
+The saving depends on when the queue meets the host's other programs. Over 28 alignments of the 72h window (`--shift`,
+none to 13h) this rule waits between 18% less and 6% more, 7% less at the median and 16% less as recorded; host wait
+falls by a median of 21%. It waits more at one alignment, `--shift 40m`, 112.8 to 119.1 job-hours.
 
 ## Consequences
 
