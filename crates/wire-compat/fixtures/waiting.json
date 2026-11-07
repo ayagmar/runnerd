@@ -8,6 +8,10 @@
     "job": 41,
     "kind": "behind-cpu"
   },
+  "behind-memory": {
+    "job": 41,
+    "kind": "behind-memory"
+  },
   "behind-start": {
     "job": 41,
     "kind": "behind-start"

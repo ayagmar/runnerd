@@ -19,6 +19,11 @@
     "kind": "flaky",
     "total": 20
   },
+  "host-held": {
+    "jobs": 3,
+    "kind": "host-held",
+    "waited": 2530
+  },
   "near-cap": {
     "auto": "raises",
     "cap": 8589934592,
