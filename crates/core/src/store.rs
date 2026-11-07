@@ -680,8 +680,8 @@ impl Store {
         lock(&self.latest_host_memory).clone()
     }
 
-    /// Keeps which `jobs` the plan at `at` (ms) had waiting for the host's memory, for insights to read with the
-    /// reading; it is not stored. A plan that finds none replaces the last one's.
+    /// Keeps which `jobs` the plan at `at` (ms) had waiting for memory the host lacks (ADR 0103), for insights to read
+    /// with the reading; it is not stored. A plan that finds none replaces the last one's.
     pub fn host_waiting(&self, jobs: BTreeSet<u64>, at: u64) {
         *lock(&self.host_waiting) = (jobs, at);
     }

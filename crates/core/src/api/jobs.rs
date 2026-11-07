@@ -611,7 +611,28 @@ impl Swap {
     }
 }
 
+/// The margin kept free at least: 2G.
+const MARGIN_MIN: u64 = 2 << 30;
+
+/// The margin as a share of the host's memory, as a divisor: a sixteenth, 4G of 64G.
+const MARGIN_SHARE: u64 = 16;
+
+/// The plain margin `MemAvailable` keeps beside the runners on a host with `total` memory: the larger of `MARGIN_MIN`
+/// and `total / MARGIN_SHARE` (ADR 0055).
+pub fn host_margin(total: u64) -> u64 {
+    MARGIN_MIN.max(total / MARGIN_SHARE)
+}
+
 impl HostMemory {
+    /// What the host has for a new runner this moment, in bytes: `MemAvailable` and what it can still grow by, less
+    /// the plain margin. Unlike `HostBudget::spare` it does not count what runners reserve past what they hold, which
+    /// is memory they may yet take, not memory taken.
+    pub fn room(&self) -> u64 {
+        self.available
+            .saturating_add(self.growable())
+            .saturating_sub(host_margin(self.grown()))
+    }
+
     /// The host's memory as admission counts it, in bytes: `MemTotal`, or the ceiling when that is more (ADR 0084).
     pub fn grown(&self) -> u64 {
         self.ceiling

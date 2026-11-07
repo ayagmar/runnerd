@@ -56,6 +56,20 @@ pub(super) struct Measured {
     pub(super) raised: Vec<String>,
     /// The job the last plan let no younger job start before, so the change is logged once.
     barrier: Option<u64>,
+    /// What the host's limit held at the last plan, so the change is logged once.
+    host_holds: HostHolds,
+}
+
+/// What the host's limit holds back at a plan.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum HostHolds {
+    /// Nothing that keeps the larger margin up.
+    #[default]
+    Nothing,
+    /// What runs reaches the limit, while the host has the room (`HostBudget::short_of`).
+    Counted,
+    /// The host stalls, or lacks what a job needs.
+    Short,
 }
 
 /// What one plan admits by.
@@ -336,7 +350,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Remembers what this plan saw of the host for the next: whether it stalled, whether the larger margin stands
     /// (`host::short`), and which jobs `waiting` wait for the host's memory. Adds the time since the last plan to the
-    /// waits of those that waited then, and logs when the host becomes short and when it has room again.
+    /// waits of those that waited then, tells insights which of them the host lacks room for (ADR 0103), and logs what
+    /// holds them when that changes.
     pub(super) fn note_host(
         &mut self,
         admitting: &Admitting,
@@ -355,39 +370,70 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let was_short = self.measured.host.short;
         self.measured.host = host::Remembered { short, stalled };
         let now = time::now_ms();
-        let waiting_now: BTreeSet<u64> = waiting
+        let waiting_now: BTreeMap<u64, u64> = waiting
             .iter()
-            .filter(|(_, reason)| matches!(reason, api::Waiting::HostMemory { .. }))
-            .map(|(job, _)| *job)
+            .filter_map(|(job, reason)| match reason {
+                api::Waiting::HostMemory { needs, .. } => Some((*job, *needs)),
+                _ => None,
+            })
             .collect();
         let none_waiting = waiting_now.is_empty();
-        self.store.host_waiting(waiting_now.clone(), now);
-        let (waited, since) =
-            std::mem::replace(&mut self.measured.host_waiting, (waiting_now, now));
+        // Insights tell the owner to close programs, so they hear only of the jobs the host itself lacks room for.
+        // Every job the limit held still adds to `host_waited`: sizing takes that off the wait it reads as one for
+        // the budget.
+        let lacking: BTreeSet<u64> = admitting
+            .host
+            .iter()
+            .flat_map(|host| {
+                waiting_now
+                    .iter()
+                    .filter(|(_, needs)| host.short_of(**needs))
+                    .map(|(job, _)| *job)
+            })
+            .collect();
+        let holds = match (short, stalled || !lacking.is_empty()) {
+            (false, _) => HostHolds::Nothing,
+            (true, false) => HostHolds::Counted,
+            (true, true) => HostHolds::Short,
+        };
+        let held = std::mem::replace(&mut self.measured.host_holds, holds);
+        self.store.host_waiting(lacking, now);
+        let (waited, since) = std::mem::replace(
+            &mut self.measured.host_waiting,
+            (waiting_now.into_keys().collect(), now),
+        );
         if !waited.is_empty() {
             self.store
                 .host_waited(waited.into_iter().collect(), now.saturating_sub(since));
         }
-        match (short, was_short) {
-            (true, false) => {
-                if let Some(host) = &admitting.host {
-                    info!(
-                        "the host is short of memory ({} available{}): no runner starts that does not fit {} \
-                         beside what runs",
-                        crate::config::ByteSize(host.memory.available),
-                        if stalled {
-                            ", its tasks stall for it"
-                        } else {
-                            ""
-                        },
-                        crate::config::ByteSize(host.limit)
-                    );
-                }
+        let size = crate::config::ByteSize;
+        match (holds, admitting.host.as_ref()) {
+            (HostHolds::Short, Some(host)) if held != HostHolds::Short => {
+                info!(
+                    "the host is short of memory ({} available{}): no runner starts that does not fit {} beside what \
+                     runs",
+                    size(host.memory.available),
+                    if stalled {
+                        ", its tasks stall for it"
+                    } else {
+                        ""
+                    },
+                    size(host.limit)
+                );
             }
-            (false, true) if none_waiting => {
-                info!("the host has memory to spare again: runners start as the budget allows");
+            (HostHolds::Counted, Some(host)) if held != HostHolds::Counted => {
+                info!(
+                    "what runs reserves {} of the {} the host leaves the slice, with {} available: no runner starts \
+                     that does not fit beside it",
+                    size(reserved),
+                    size(host.limit),
+                    size(host.memory.available)
+                );
             }
-            (false, true) => {
+            (HostHolds::Nothing, _) if was_short && none_waiting => {
+                info!("no job waits for the host's memory now: runners start as the budget allows");
+            }
+            (HostHolds::Nothing, _) if was_short => {
                 info!(
                     "a job waiting for the host's memory fits its plain margin: the next plan goes by that margin"
                 );

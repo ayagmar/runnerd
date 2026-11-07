@@ -31,7 +31,13 @@ Without a recent reading only `MemoryMax` bounds starts. A waiting job says why,
 The host is short of memory: needs 6G; the host has 2G to spare; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
 ```
 
-A job that has waited 30 minutes or more for the host's memory, while one waits now, is also an [insight](../insights/) and a notification, with the same programs named. They are the ones to close; the figure also counts the kernel and compressed swap, so closing them frees only part of it.
+What runs can reach that limit while it holds far less than it reserves. The job then waits with the host's memory free, says so, and names no programs:
+
+```text
+The host has 42G of 62G available, but what runs may still grow into it: needs 7G; 3.4G of the 49.4G it leaves the slice is free
+```
+
+A job that has waited 30 minutes or more for the host's memory, while the host lacks room for one that waits now, is also an [insight](../insights/) and a notification, with the same programs named. They are the ones to close; the figure also counts the kernel and compressed swap, so closing them frees only part of it.
 
 The status line, the TUI and the dashboard show the host beside the budget (`host: 31G of 64G available, swap 12G of 15.5G used; leaves the slice 40G`; the swap clause only on a host with swap, and admission counts none of it), and `runnerd doctor` warns when it has less to spare than the smallest `memory`.
 

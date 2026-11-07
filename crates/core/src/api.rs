@@ -83,7 +83,7 @@ pub use jobs::{
     JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource, Limits,
     LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
-    Swap, Timeline, Total, job_title,
+    Swap, Timeline, Total, host_margin, job_title,
 };
 pub use labels::{Column, View};
 pub use records::{
@@ -211,6 +211,47 @@ pub struct HostBudget {
     pub spare: u64,
     /// Whether the host's tasks stall for memory (`full` pressure), so no runner starts until they stop.
     pub stalled: bool,
+}
+
+impl HostBudget {
+    /// Whether the host itself lacks `needs` bytes for a new runner: its tasks stall, `HostMemory::room` is less, or
+    /// that room is under one more margin, so `MemAvailable` is under twice the plain margin, the line `host::stalls`
+    /// reads. There a small job fits only by what the host is about to run out of, and what closing programs frees is
+    /// what starts it. Otherwise a job the host limit holds waits for what runs, whose reservations reach the limit
+    /// (ADR 0103).
+    pub fn short_of(&self, needs: u64) -> bool {
+        let room = self.memory.room();
+        self.stalled || needs > room || room < host_margin(self.memory.grown())
+    }
+}
+
+/// Why a job waits for the host's limit, needing `needs` bytes with `free` left of it, by the latest reading: for what
+/// runs, or for a host that lacks the room, whose programs it names.
+fn host_reason(needs: u64, free: u64, host: Option<&HostBudget>) -> String {
+    let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
+    if let Some(host) = host.filter(|host| !host.short_of(needs)) {
+        return format!(
+            "The host has {}, but what runs may still grow into it: needs {}; {} of the {} it leaves the slice is free",
+            host.memory.available_line(),
+            size(needs),
+            size(free),
+            size(host.limit)
+        );
+    }
+    let reason = if host.is_some_and(|host| host.stalled) {
+        "The host is short of memory: its programs stall waiting for it, so nothing starts"
+            .to_owned()
+    } else {
+        format!(
+            "The host is short of memory: needs {}; the host has {} to spare",
+            size(needs),
+            size(free)
+        )
+    };
+    match host {
+        Some(host) => format!("{reason}; {}", host.memory.outside_line()),
+        None => reason,
+    }
 }
 
 /// Hundredths of a percent as a percentage: `1.5%`, `12%`.
@@ -636,21 +677,7 @@ impl Waiting {
                 size(*free)
             ),
             Waiting::HostMemory { needs, free } => {
-                let host = status.budget.host.as_ref();
-                let reason = if host.is_some_and(|host| host.stalled) {
-                    "The host is short of memory: its programs stall waiting for it, so nothing starts"
-                        .to_owned()
-                } else {
-                    format!(
-                        "The host is short of memory: needs {}; the host has {} to spare",
-                        size(*needs),
-                        size(*free)
-                    )
-                };
-                match host {
-                    Some(host) => format!("{reason}; {}", host.memory.outside_line()),
-                    None => reason,
-                }
+                host_reason(*needs, *free, status.budget.host.as_ref())
             }
             Waiting::Cpu { needs, free } => {
                 format!(

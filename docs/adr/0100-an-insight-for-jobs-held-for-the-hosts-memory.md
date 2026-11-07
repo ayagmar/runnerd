@@ -1,7 +1,8 @@
 # 0100. An insight for jobs held for the host's memory
 
-Status: **Accepted** (2026-11-06). Extends [0051](0051-insights-and-notifications.md); amends
-[0057](0057-name-what-holds-the-hosts-memory.md), whose names it sends to the owner unasked.
+Status: **Accepted** (2026-11-06), amended by [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md).
+Extends [0051](0051-insights-and-notifications.md); amends [0057](0057-name-what-holds-the-hosts-memory.md), whose names it
+sends to the owner unasked.
 
 ## Context
 
