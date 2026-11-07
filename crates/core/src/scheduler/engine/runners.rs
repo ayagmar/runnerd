@@ -31,7 +31,8 @@ pub(super) const SPEC: &str = "runnerd.spec";
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
 
-/// The most of a runner's last line a warning shows.
+/// How many of a runner's last lines a warning shows, and how much of them.
+const LAST_SAID_LINES: usize = 3;
 const LAST_SAID_CHARS: usize = 300;
 
 /// What a release's first step found of a runner that ended.
@@ -63,13 +64,23 @@ fn container_labels(
     ])
 }
 
-/// The last line a runner logged, for a warning about one that took no job: its log goes with its container, so this
-/// is what is left to say why. A runner that took no job logged no job's output.
+/// The last lines a runner logged, on one line, for a warning about one that took no job: its log goes with its
+/// container, so this is what is left to say why. Three reach the listener's reason past the two lines `run.sh` ends
+/// on. A runner that took no job logged no job's output.
 fn last_said(logs: Option<&str>) -> String {
-    logs.and_then(|logs| logs.lines().rev().find(|line| !line.trim().is_empty()))
-        .map_or("nothing".to_owned(), |line| {
-            line.trim().chars().take(LAST_SAID_CHARS).collect()
-        })
+    let mut said: Vec<&str> = logs
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev()
+        .take(LAST_SAID_LINES)
+        .collect();
+    if said.is_empty() {
+        return "nothing".to_owned();
+    }
+    said.reverse();
+    said.join(" / ").chars().take(LAST_SAID_CHARS).collect()
 }
 
 /// Where the next backoff of a repository whose runners keep failing ends.
@@ -783,10 +794,15 @@ mod tests {
     use super::last_said;
 
     #[test]
-    fn a_warning_shows_the_last_line_a_runner_wrote_cut_on_a_character() {
+    fn a_warning_reaches_the_reason_past_the_lines_a_runner_ends_on() {
+        let tail = "Connected to GitHub\n\
+            An error occurred: session conflict\n\
+            Runner listener exit with terminated error, stop the service, no retry needed.\n\
+            Exiting runner...\n\n";
         assert_eq!(
-            last_said(Some("Connected to GitHub\nRunner removed\n\n")),
-            "Runner removed"
+            last_said(Some(tail)),
+            "An error occurred: session conflict / Runner listener exit with terminated error, \
+             stop the service, no retry needed. / Exiting runner..."
         );
         assert_eq!(last_said(Some(&"é".repeat(400))).chars().count(), 300);
         assert_eq!(last_said(Some("\n")), "nothing");
