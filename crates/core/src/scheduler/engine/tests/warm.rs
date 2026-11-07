@@ -751,6 +751,31 @@ async fn runners_a_cancelled_run_took_with_it_hold_nothing_but_the_next_ones_lea
 }
 
 #[tokio::test]
+async fn a_cancelled_run_starts_no_runner_for_its_jobs_from_the_listing_that_showed_them() {
+    // Catches each cancelled job getting a second runner, which then waits out `IDLE_TIMEOUT` holding its reservation:
+    // a pass starts runners from the last listing, which still shows the jobs, and no hold keeps it from them.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+
+    runners_connect_and_leave(&mut engine, &github, &docker, 2).await;
+    engine.exits.any();
+    engine.turnover().await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "no runner for a job the runner that left may have been given"
+    );
+    assert_eq!(engine.occupied().count(), 0, "both slots are free");
+
+    // The next listing settles it: a job still queued gets its runner one poll late at most.
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3);
+}
+
+#[tokio::test]
 async fn a_runner_that_never_connected_still_holds_its_pool_on_its_first_exit() {
     // Catches the rule for runners that connected reaching runners that could not.
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());

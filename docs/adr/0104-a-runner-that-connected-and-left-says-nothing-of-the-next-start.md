@@ -25,6 +25,9 @@ The sandbox also showed two such exits 0.4 s apart, in one pool. A cancelled run
   counts as connected too.
 - **A runner that connected and left brings no hold on its own.** The pool's waits and served mark stay, and its next runner
   starts at the next plan. It takes the path 0050 gave a warm runner that went once.
+- **It spends a listed job.** Its job may be the one cancelled under it, and the listing a pass starts from still shows that job.
+  The hold used to keep a pass off it; now `spend` does, until the next listing settles it. A job really still queued waits one
+  poll at most.
 - **The second in a row is a fault, and holds the pool as `HoldCause::IdleExits`.** A runner that starts, connects and leaves
   again and again would otherwise cost a registration every few seconds. A runner that takes a job ends the streak.
 - **Runners already up when the last one left count with it.** `PoolHold::left_beside` names the pool's other runners at that
@@ -34,7 +37,7 @@ The sandbox also showed two such exits 0.4 s apart, in one pool. A cancelled run
 
 ## Consequences
 
-- A cancelled job costs its pool nothing past the one runner.
+- A cancelled job costs its pool nothing past the one runner, and at most one poll for a job behind it.
 - Two jobs cancelled one after the other, with no job taken between, still hold the pool, as the second runner started after
   the first left. That reads the same as the fault, and costs 30 s.
 - A pool that connects and leaves backs off one generation later than one that fails to start.

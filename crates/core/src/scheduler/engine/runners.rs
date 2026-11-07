@@ -293,16 +293,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.forget(occupant);
         // Unread logs: it may have run one.
         let ran = occupant.busy || job.is_some() || took_job != Some(false);
-        // A job the last poll listed queued may be the one it ran.
-        if job.is_none() && took_job != Some(false) {
-            self.spend(&occupant.repository, &slot.profile);
-        }
         // Its logs say it connected. One that waited `IDLE_TIMEOUT` did too, unless they no longer show it.
         let connected = logs.is_some_and(|logs| logs.contains(CONNECTED))
             || occupant
                 .started_at
                 .elapsed()
                 .is_ok_and(|waited| waited >= IDLE_TIMEOUT);
+        // A job the last poll listed queued may be the one it ran, or if it connected and took none, the one cancelled
+        // under it: with no hold, a pass would start a runner for that job from the listing (ADR 0104).
+        if job.is_none() && (took_job != Some(false) || connected) {
+            self.spend(&occupant.repository, &slot.profile);
+        }
         let beside: BTreeSet<String> = self
             .occupied()
             .filter(|(other, runner)| {
