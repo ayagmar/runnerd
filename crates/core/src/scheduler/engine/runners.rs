@@ -31,6 +31,9 @@ pub(super) const SPEC: &str = "runnerd.spec";
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
 
+/// The most of a runner's last line a warning shows.
+const LAST_SAID_CHARS: usize = 300;
+
 /// What a release's first step found of a runner that ended.
 #[derive(Debug, Default)]
 pub(super) struct Collected {
@@ -58,6 +61,15 @@ fn container_labels(
         (IMAGE.to_owned(), image.to_owned()),
         (SPEC.to_owned(), THIS_SPEC.to_owned()),
     ])
+}
+
+/// The last line a runner logged, for a warning about one that took no job: its log goes with its container, so this
+/// is what is left to say why. A runner that took no job logged no job's output.
+fn last_said(logs: Option<&str>) -> String {
+    logs.and_then(|logs| logs.lines().rev().find(|line| !line.trim().is_empty()))
+        .map_or("nothing".to_owned(), |line| {
+            line.trim().chars().take(LAST_SAID_CHARS).collect()
+        })
 }
 
 /// Where the next backoff of a repository whose runners keep failing ends.
@@ -297,8 +309,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         state.failures = 0;
                     }
                     warn!(
-                        "{}: {} ended without a job after waiting for one",
-                        occupant.repository, occupant.runner_name
+                        "{}: {} ended without a job after waiting for one; it last said: {}",
+                        occupant.repository,
+                        occupant.runner_name,
+                        last_said(logs)
                     );
                     if state.idle_exits >= 2 {
                         self.hold(
@@ -311,8 +325,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 Some(false) => {
                     warn!(
-                        "{}: {} ended without taking a job",
-                        occupant.repository, occupant.runner_name
+                        "{}: {} ended without taking a job; it last said: {}",
+                        occupant.repository,
+                        occupant.runner_name,
+                        last_said(logs)
                     );
                     self.hold(
                         &occupant.repository,
@@ -759,5 +775,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.hold(repository, &slot.profile, HoldCause::Start, failure);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::last_said;
+
+    #[test]
+    fn a_warning_shows_the_last_line_a_runner_wrote_cut_on_a_character() {
+        assert_eq!(
+            last_said(Some("Connected to GitHub\nRunner removed\n\n")),
+            "Runner removed"
+        );
+        assert_eq!(last_said(Some(&"é".repeat(400))).chars().count(), 300);
+        assert_eq!(last_said(Some("\n")), "nothing");
+        assert_eq!(last_said(None), "nothing");
     }
 }
