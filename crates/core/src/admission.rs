@@ -1338,7 +1338,7 @@ impl<'run> Replayer<'run> {
             memory: self.budget.map(signed),
             cpu: self.cpu_budget.map(signed),
             host: self.host_memory().map(|memory| {
-                let limit = host::limit(&memory, self.short && !self.running.is_empty());
+                let limit = host::limit(&memory, !self.running.is_empty());
                 signed(limit).saturating_sub(signed(self.mirror))
             }),
         }

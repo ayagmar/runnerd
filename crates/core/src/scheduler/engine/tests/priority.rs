@@ -496,6 +496,62 @@ warm = 1
     );
 }
 
+/// A runner that fits a drain only by the plain margin puts up no barrier while a runner runs, whichever margin stands:
+/// the larger one comes and goes with who waits (ADR 0102), and a barrier that followed it would take the younger job
+/// out of the waiters that let it go, so the two would swap at every tick and that job would never start.
+#[tokio::test]
+async fn on_a_steady_reading_a_job_between_the_margins_starts_and_the_margin_and_barrier_stay_put()
+{
+    let config = big_and_small().replace("memory = \"1G\"", "memory = \"512M\"");
+    let mut fixture = Fixture::with(&config, 24 * G).await;
+    // 8.5G by the plain margin and 7.5G while short, with the 8G runner between.
+    fixture.host(21 * G / 2);
+    fixture.queue(vec![big(9)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    // Listed busy for the first time, the runner took job 9.
+    fixture.all_busy();
+    fixture.queue(Vec::new());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(fixture.engine.measured.host.short, "job 10 fits no margin");
+    fixture.age();
+    fixture.queue(vec![big(10), small(11)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(
+        !fixture.engine.measured.host.short,
+        "job 11 fits the plain margin, so the larger one goes"
+    );
+    assert_eq!(
+        fixture.runners_of("o/small"),
+        0,
+        "this plan had the larger one"
+    );
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 1, "the next plan has job 11");
+    fixture.queue(vec![big(10), small(11), small(12)]);
+    for tick in 0..6 {
+        fixture.engine.tick(Shutdown::No).await;
+        assert!(
+            fixture.engine.measured.host.short,
+            "tick {tick}: job 10 fits no margin, so the larger one stands"
+        );
+        assert!(
+            matches!(fixture.reason(10), Some(api::Waiting::HostMemory { .. })),
+            "tick {tick}: {:?}",
+            fixture.reason(10)
+        );
+        assert!(
+            matches!(fixture.reason(12), Some(api::Waiting::HostMemory { .. })),
+            "tick {tick}: no barrier stands: {:?}",
+            fixture.reason(12)
+        );
+    }
+    assert!(fixture.wait().is_some(), "job 10 keeps its place");
+    assert_eq!(fixture.runners_of("o/small"), 1, "nothing else fits");
+}
+
 /// Programs outside the slice hold the memory: no runner's end gives it back.
 #[tokio::test]
 async fn a_host_too_short_for_the_runner_after_a_full_drain_erects_no_barrier() {

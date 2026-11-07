@@ -1,6 +1,7 @@
 # 0102. The larger host margin stands only while no waiter fits the plain one
 
-Status: **Accepted** (2026-11-07). Amends [0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-11-07). Amends [0055](0055-admission-follows-the-hosts-memory.md) and
+[0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md).
 
 ## Context
 
@@ -19,6 +20,11 @@ were waiting. A replay of the host's readings put 222 minutes in that band, and 
 - **A waiter between the margins starts at the next plan.** The plan that sees it holds it, the note gives the band
   up, and the next plan has it. The band comes back once no job left waiting fits the plain margin, so it changes
   only after a start or a new reading: starts and holds do not alternate on a steady reading.
+- **A barrier reads the larger margin whenever a runner runs.** 0096's drained host limit was the margin in force,
+  which was safe while the plain margin came back only to an empty slice. Now it comes back with runners running, and
+  jobs behind a barrier are not waiters, so a barrier that followed the margin would take away the waiter that let it
+  go: the two would swap at every tick and the younger job would never start. A drain's room no longer depends on the
+  band. A barrier can still always end: the empty slice's plain margin is the larger room.
 - **What stays.** `MARGIN_SHARE` and `MARGIN_MIN`, the stall rule, the empty slice's first runner at the plain margin,
   seeds and reseeds at the plain margin (0063), the doctor. No reading, as before, leaves no larger margin. Nothing
   that runs is ever stopped.

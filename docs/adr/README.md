@@ -103,7 +103,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Accepted |
 | [0094](0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md) | A profile's upkeep stops its runners only for a reseed that will replace the snapshot | Accepted |
 | [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096 |
-| [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099 |
+| [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099, 0102 |
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099 |
 | [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099 |
 | [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Accepted |
