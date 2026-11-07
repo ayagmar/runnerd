@@ -308,10 +308,19 @@ fn a_host_limit_past_memory_max_is_not_said_to_leave_the_slice_more_than_it_has(
              free"
         )
     );
-    let free = status.budget_parts().free.expect("what the host leaves");
+    let parts = status.budget_parts();
+    let free = parts.free.expect("what the host leaves");
     assert_eq!(
         free.reading.line(),
         "1G free; the host leaves the slice 13G for the 12G reserved there, and pooling adds 4G"
+    );
+    // With 20G available, the host's programs are not what holds this back.
+    let held = parts.closed.expect("what the plain count holds back");
+    assert_eq!(held.kind, ClosedKind::Host);
+    assert_eq!(
+        held.reading.line(),
+        "3G held back by what runs reserves: the host leaves the slice 13G for the 12G reserved \
+         there"
     );
 }
 

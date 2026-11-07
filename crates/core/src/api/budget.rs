@@ -319,11 +319,19 @@ impl Budget {
             kind: ClosedKind::Host,
             reading: Reading {
                 figure: ByteSize(memory).to_string(),
-                text: format!(
-                    "{} for its other programs and page cache, which leave the slice {}",
-                    ClosedKind::Host.name(),
-                    ByteSize(host_limit)
-                ),
+                // Past `MemoryMax` the plain count holds this back, not the host's programs (`Budget::host_share`).
+                text: if host_limit > max {
+                    format!(
+                        "held back by what runs reserves: the host leaves the slice {}",
+                        self.host_share(host_limit, max)
+                    )
+                } else {
+                    format!(
+                        "{} for its other programs and page cache, which leave the slice {}",
+                        ClosedKind::Host.name(),
+                        ByteSize(host_limit)
+                    )
+                },
             },
         });
         (free, host)
@@ -426,7 +434,8 @@ pub struct ClosedPart {
     /// What closes it.
     pub kind: ClosedKind,
     /// Its figure and what it means, such as `20.73G` `held by the host for its other programs and page cache,
-    /// which leave the slice 25.27G`.
+    /// which leave the slice 25.27G`, or past `MemoryMax` `1.5G` `held back by what runs reserves: the host leaves the
+    /// slice 24.5G for the 22G reserved there`.
     pub reading: Reading,
 }
 
