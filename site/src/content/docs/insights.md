@@ -17,7 +17,7 @@ A job is its repository, workflow and job name. Notifications send warnings, not
 | `cold-cache` | At least 3 of a job's last 5 runs that could write to the [build cache](../running/#build-cache) looked up 10 or more entries and found 10% or less. A notice. |
 | `throttled` | The kernel throttled the downloads (`sock_throttled`) of 2 or more of a repository's jobs. A warning. |
 | `cpu-held` | At least 3 of a job's last 10 successful runs were throttled by the CPU quota in 15% of their run or more. A notice while auto sizing raises `cpus`, else a warning. |
-| `host-held` | A queued job has waited 30 minutes or more for the [host's memory](../admission/#the-hosts-memory) while a job waits for it now. A warning, with the longest wait and the programs outside CI that hold the most memory; closing them frees only part of that figure. Sent at most once in each 6-hour window. |
+| `host-held` | A queued job has waited 30 minutes or more for the [host's memory](../admission/#the-hosts-memory) while the host lacks room for a job that waits now. A warning, with the longest wait and the programs outside CI that hold the most memory; closing them frees only part of that figure. Sent at most once in each 6-hour window. |
 | `waits` | A repository's p95 wait this week is half again and a minute more than last week's. A notice ([how a wait is counted](../admission/#how-a-wait-is-counted)). |
 
 ```console wrap=false

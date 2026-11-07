@@ -8,7 +8,7 @@
 //! and what it remembers of the last plan.
 
 use super::pooled;
-use crate::api::{HostBudget, HostMemory};
+use crate::api::{HostBudget, HostMemory, host_margin};
 
 /// Starts stop once every runnable task of the host waits for memory this share of the last 10 s, in hundredths of
 /// a percent: 5%, while the host is short of memory (`stalls`).
@@ -16,12 +16,6 @@ pub const STALL_ENTER: u32 = 500;
 
 /// Once stopped, starts resume when that share falls under this: 1%.
 pub const STALL_LEAVE: u32 = 100;
-
-/// The margin kept free at least: 2G.
-const MARGIN_MIN: u64 = 2 << 30;
-
-/// The margin as a share of the host's memory, as a divisor: a sixteenth, 4G of 64G.
-const MARGIN_SHARE: u64 = 16;
 
 /// What admission remembers of the host from the last plan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,10 +28,10 @@ pub struct Remembered {
     pub stalled: bool,
 }
 
-/// The margin `MemAvailable` keeps beside the runners' predicted peaks for a host with `total` memory: the larger of
-/// `MARGIN_MIN` and `total / MARGIN_SHARE`, half again as much while the host is `short`.
+/// The margin `MemAvailable` keeps beside the runners' predicted peaks for a host with `total` memory: `host_margin`,
+/// half again as much while the host is `short`.
 pub fn margin(total: u64, short: bool) -> u64 {
-    let margin = MARGIN_MIN.max(total / MARGIN_SHARE);
+    let margin = host_margin(total);
     if short {
         margin.saturating_add(margin / 2)
     } else {

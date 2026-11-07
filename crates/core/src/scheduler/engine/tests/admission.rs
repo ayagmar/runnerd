@@ -1245,6 +1245,9 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     host_at(&handle.store, 0, 4 * G + 2 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2);
+    // The two take what they reserved, which leaves the host no room past its margin.
+    host_at(&handle.store, 2 * 1280 * M, 4 * G + 100 * M, 0);
+    engine.tick(Shutdown::No).await;
     engine.publish();
     // Once short with runners running, the host keeps half the margin more free: nothing is to spare until 6G.
     let short = Some(api::Waiting::HostMemory {
@@ -1950,6 +1953,119 @@ fn small(id: u64) -> QueuedJob {
         name: "lint".to_owned(),
         ..job(id)
     }
+}
+
+/// A 16G host with `available` of it, the slice's runners holding 1G: it keeps a 2G margin, so at 8G it leaves the
+/// slice 7G and a credit can stand.
+fn small_host_at(store: &Store, available: u64) {
+    store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000,
+        total: 16 * G,
+        available,
+        slice: G,
+        some: Some(api::Pressure::default()),
+        full: Some(api::Pressure::default()),
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    });
+}
+
+/// What the only queued job's wait says, as every client shows it.
+fn only_reason(handle: &Handle) -> String {
+    let status = handle.status.borrow();
+    let job = &status.queued[0];
+    job.waiting.as_ref().unwrap().reason(job, &status, 0)
+}
+
+/// The kinds of insight the history gives now.
+async fn host_held_insights(engine: &Engine<FakeGithub, FakeDocker>, handle: &Handle) -> usize {
+    handle.store.flush().await;
+    let history = handle.store.insights(0).await.unwrap();
+    crate::insights::insights(&history, &engine.config, 7, time::now_ms())
+        .insights
+        .iter()
+        .filter(|insight| matches!(insight.kind, api::InsightKind::HostHeld { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_job_the_host_limit_holds_with_room_free_asks_nobody_to_close_programs() {
+    // Catches the owner being told to close programs while the host has the room, because what runs reserves more
+    // than it holds and the credit opened the slice to one more job than the host limit lets in.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    github.0.lock().unwrap().queued = vec![small(3)];
+    runners_use(&github, &handle.store, 512 * M);
+    slice_at(&handle.store, G);
+    small_host_at(&handle.store, 8 * G);
+    engine.tick(Shutdown::No).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    runners_use(&github, &handle.store, 512 * M);
+    slice_at(&handle.store, G);
+    small_host_at(&handle.store, 8 * G);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+
+    assert!(
+        handle.status.borrow().budget.pooled.is_some(),
+        "a credit opens the slice"
+    );
+    assert_eq!(
+        waits(&handle),
+        [Some(api::Waiting::HostMemory {
+            needs: 1280 * M,
+            free: 0
+        })],
+        "the host limit reads the plain count, so it holds the job"
+    );
+    assert_eq!(
+        only_reason(&handle),
+        "The host has 8G of 16G available, but what runs may still grow into it: needs 1.25G; 0B of the 6G it leaves \
+         the slice is free"
+    );
+    // Sizing takes this wait off the one it reads as a wait for the budget, so it has to be counted.
+    handle.store.flush().await;
+    assert!(
+        waited(&dir, "host_waited")[2] >= 20,
+        "the job waited for the host's limit"
+    );
+    handle.store.host_waited(vec![3], 60 * 60_000);
+    assert_eq!(
+        host_held_insights(&engine, &handle).await,
+        0,
+        "6G of room past the margin, and the job needs 1.25G"
+    );
+
+    // Programs take the room: the same job now waits for a host that lacks it. That takes the credit back, and a job
+    // short of both budgets reads the slice's, so the slice gets room of its own.
+    engine.memory_max = Some(9 * G);
+    runners_use(&github, &handle.store, 512 * M);
+    slice_at(&handle.store, G);
+    small_host_at(&handle.store, 3 * G);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(
+        only_reason(&handle).starts_with("The host is short of memory: needs 1.25G"),
+        "{}",
+        only_reason(&handle)
+    );
+    assert_eq!(
+        host_held_insights(&engine, &handle).await,
+        1,
+        "1G past the margin, and the job needs 1.25G"
+    );
+
+    // Room comes back: the next plan takes the job off what the owner is told.
+    runners_use(&github, &handle.store, 512 * M);
+    slice_at(&handle.store, G);
+    small_host_at(&handle.store, 8 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(host_held_insights(&engine, &handle).await, 0);
 }
 
 #[tokio::test]

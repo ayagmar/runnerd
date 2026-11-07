@@ -65,8 +65,9 @@ flowchart TB
   disk (`Handle::disk`) allows ([ADR 0090](docs/adr/0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md)); `insights` reads the history for jobs that got slower, are flaky or near their cap,
   and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)), and for jobs their CPU cap
   holds back by the rule sizing reads, `sizing::Throttling::held` ([ADR 0087](docs/adr/0087-an-insight-for-jobs-their-cpu-cap-holds-back.md)), and
-  for jobs held for the host's memory, from the store's reading of now (`Store::host_waiting`, which `note_host` sets)
-  beside the history ([ADR 0100](docs/adr/0100-an-insight-for-jobs-held-for-the-hosts-memory.md)). All three are pure:
+  for jobs the host lacks memory for, from the store's reading of now (`Store::host_waiting`, which `note_host` sets)
+  beside the history ([ADR 0100](docs/adr/0100-an-insight-for-jobs-held-for-the-hosts-memory.md),
+  [ADR 0103](docs/adr/0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md)). All three are pure:
   the engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.

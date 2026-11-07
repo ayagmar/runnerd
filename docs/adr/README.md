@@ -107,6 +107,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099 |
 | [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099 |
 | [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Accepted |
-| [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Accepted |
+| [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Amended by 0103 |
 | [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md) | The host's reading includes its swap, and admission ignores it | Accepted |
 | [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Accepted |
+| [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Accepted |
