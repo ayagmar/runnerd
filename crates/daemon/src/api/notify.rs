@@ -525,10 +525,15 @@ async fn step(
     // Read once for every target that wants them.
     let wants = |event| targets.values().any(|target| target.wants(event));
     let runs = if looking && (wants(NotifyEvent::Insights) || wants(NotifyEvent::Digest)) {
-        insight_runs_of(store, runnerd_core::api::INSIGHT_DAYS, now_ms)
-            .await
-            .map_err(|store_error| warn!("notify: cannot read the history: {store_error}"))
-            .ok()
+        match insight_runs_of(store, runnerd_core::api::INSIGHT_DAYS, now_ms).await {
+            Ok(runs) => Some(runs),
+            // The runtime cancelled the read as the daemon exits: nothing went wrong, and nothing is left to send.
+            Err(store_error) if store_error.is_shutdown() => return,
+            Err(store_error) => {
+                warn!("notify: cannot read the history: {store_error}");
+                None
+            }
+        }
     } else {
         None
     };
