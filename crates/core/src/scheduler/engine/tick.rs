@@ -890,9 +890,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             host: admitting
                 .host
                 .as_ref()
-                .map(|host| host::left(host.limit, count.plain, host.stalled)),
+                .map(|host| host::left(host.limit, count.hosted(), host.stalled)),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
             credit_room: self.most_credit().saturating_sub(count.credit),
+            host_credit_room: count.host_credit_room,
             drained: Drained {
                 memory: self
                     .memory_max
@@ -1079,7 +1080,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The aggregate count of what runs (ADR 0099), the host going by the margin `remembered` asks for.
+    /// Whether the host's limit may take its credit (ADR 0108): under measured admission with `[host] pooled_host`.
+    fn host_reserve(&self) -> bool {
+        self.config.host.admission == Admission::Measured && self.config.host.pooled_host
+    }
+
+    /// The aggregate count of what runs (ADR 0099, 0108), the host going by the margin `remembered` asks for.
     pub(super) fn count(&self, remembered: host::Remembered) -> pooled::Count {
         let now = SystemTime::now();
         let runners: Vec<pooled::Runner<'_>> = self
@@ -1104,10 +1110,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .store
             .latest_host_sample()
             .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
-            .zip(self.memory_max)
-            .map(|(sample, memory_max)| pooled::Slice {
+            .map(|sample| pooled::Slice {
                 memory: sample.memory,
-                memory_max,
+                memory_max: self.memory_max,
             });
         let host = self
             .host_memory()
@@ -1118,6 +1123,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice,
             host,
             most: self.most_credit(),
+            host_reserve: self.host_reserve(),
         })
     }
 

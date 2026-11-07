@@ -2,7 +2,8 @@
 //! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, repositories whose
 //! downloads memory pressure throttled, jobs their CPU cap held back by the rule auto sizing reads (ADR 0087), jobs
 //! held for the host's memory by programs outside CI (ADR 0100), and how long each repository's jobs wait, this week against the last when the history holds all of last week; and the
-//! daily digest. Pure: the daemon reads the history, the config and the clock and passes them in. It sends nothing
+//! daily digest. What the host's memory came to while CI ran, and the warning when it ran low on a host credit
+//! (ADR 0108), are `host`'s. Pure: the daemon reads the history, the config and the clock and passes them in. It sends nothing
 //! and changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,8 @@ use crate::api::{
 use crate::config::{Admission, ByteSize, Config};
 use crate::sizing::auto::{CpuRun, RAISE_RUNS, cpu_step, unhelped_raise};
 use crate::sizing::{HELD, Throttling, spread};
+
+mod host;
 
 const SECOND: u64 = 1000;
 const DAY: u64 = 24 * 3600 * SECOND;
@@ -187,6 +190,23 @@ pub struct HeldJob {
     pub waited: u64,
 }
 
+/// A reading of the host's memory as a `budget.changed` event stored it (ADR 0108).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostReading {
+    /// When it was stored, in ms.
+    pub at: u64,
+    /// The host's `MemTotal`, in bytes.
+    pub total: u64,
+    /// Its `MemAvailable`.
+    pub available: u64,
+    /// Its `SwapFree`, on a host with swap.
+    pub swap_free: Option<u64>,
+    /// What the host's limit took off the plain count then: 0 for no credit, as before 0.0.30.
+    pub credit: u64,
+    /// Whether a runner ran: the budget counted more than the mirror.
+    pub running: bool,
+}
+
 /// What insights read from the job history.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
@@ -197,6 +217,8 @@ pub struct History {
     pub kept_since: u64,
     /// The jobs held for the host's memory now; `None` when none is, or the daemon has no reading of it.
     pub host: Option<HostHold>,
+    /// The host's readings the budget's events stored, oldest first.
+    pub readings: Vec<HostReading>,
 }
 
 /// A job as insights tell jobs apart: repository, workflow and name.
@@ -240,6 +262,8 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
             .as_ref()
             .and_then(|hold| host_held(hold, config, now)),
     );
+    let host_days = host::days(&history.readings, since, now);
+    found.extend(host::low(&host_days));
     let waits = waits(history, now);
     found.extend(waits.iter().filter_map(waits_insight));
     found.sort_by(|a, b| {
@@ -256,6 +280,7 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         until: now / SECOND,
         insights: found,
         waits,
+        host: host_days,
     }
 }
 
@@ -305,6 +330,7 @@ pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
             })
             .collect(),
         savings: None,
+        host: host::hazard(&history.readings, since, now),
     }
 }
 

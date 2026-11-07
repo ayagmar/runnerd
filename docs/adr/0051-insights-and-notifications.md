@@ -1,6 +1,6 @@
 # 0051. Insights from the history, and notifications the daemon sends
 
-Status: **Accepted** (2026-10-24), amended by [0064](0064-each-notify-kind-is-a-sender.md). Builds on [0034](0034-desktop-framework.md).
+Status: **Accepted** (2026-10-24), amended by [0064](0064-each-notify-kind-is-a-sender.md), [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md). Builds on [0034](0034-desktop-framework.md).
 
 ## Context
 

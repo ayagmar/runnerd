@@ -582,6 +582,7 @@ async fn get_insights() -> axum::Json<Insights> {
         until: 1_792_000_000,
         insights: Vec::new(),
         waits: Vec::new(),
+        host: Vec::new(),
     })
 }
 

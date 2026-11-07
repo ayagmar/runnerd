@@ -124,6 +124,18 @@ fn a_host_limit_past_memory_max_reads_as_core_says_it() {
 }
 
 #[test]
+fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_them() {
+    let daemon = runnerd_fixtures::host_credit();
+    let facts = facts(&daemon);
+    let (rows, _) = frame(&app(&daemon));
+    let all = rows.join("\n");
+    assert!(shows(&rows, &facts.host), "{}: {all}", facts.host);
+    for wait in &facts.waits {
+        assert!(shows(&rows, &wait.reason), "{}: {all}", wait.reason);
+    }
+}
+
+#[test]
 fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_does() {
     let (daemon, facts) = fixtures();
     let (rows, buffer) = frame(&app(&daemon));

@@ -90,6 +90,8 @@ struct Shape {
     second_repository: bool,
     /// `[host] pooled_count`.
     pooled_count: bool,
+    /// `[host] pooled_host`.
+    pooled_host: bool,
     /// The `heavy` profile's memory, in gigabytes.
     heavy_memory: u64,
 }
@@ -110,6 +112,7 @@ impl Shape {
         light_pool: true,
         second_repository: true,
         pooled_count: true,
+        pooled_host: true,
         heavy_memory: 4,
     };
 
@@ -146,6 +149,9 @@ impl Shape {
         }
         if !self.pooled_count {
             host.push_str("pooled_count = false\n");
+        }
+        if !self.pooled_host {
+            host.push_str("pooled_host = false\n");
         }
         let mut config = format!(
             r#"
@@ -263,6 +269,7 @@ enum Change {
     Policy,
     CpuOvercommit,
     PooledCount,
+    PooledHost,
     HeavyMemory,
 }
 
@@ -344,6 +351,9 @@ enum Step {
     Settle,
     /// Each repository's `build` has runs behind it in the heavy pool, so its prediction goes by them.
     PastRuns,
+    /// Each repository's `build` has runs behind it in the heavy pool peaking at 3G, and `o/r`'s `lint` in the light
+    /// pool at 768M: reservations near their caps, whose headroom can pass what the host keeps for growth.
+    PastLargeRuns,
     Tick,
     /// Docker says runners stopped, and a pass between ticks frees their slots and starts runners from the last
     /// tick's listings (ADR 0095).
@@ -381,7 +391,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 available: [3, 6, 8, 9, 20, 50][rng.index() % 6],
                 stalled: rng.below(5) == 0,
             },
-            55..=62 => Step::Reload(match rng.below(9) {
+            55..=62 => Step::Reload(match rng.below(10) {
                 0 => Change::HeavySlots(1 + u32::try_from(rng.below(3)).unwrap()),
                 1 => Change::LightSlots(1 + u32::try_from(rng.below(3)).unwrap()),
                 2 => Change::LightPool,
@@ -390,6 +400,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 5 => Change::Policy,
                 6 => Change::PooledCount,
                 7 => Change::HeavyMemory,
+                8 => Change::PooledHost,
                 _ => Change::CpuOvercommit,
             }),
             63..=65 => Step::Restart,
@@ -466,6 +477,9 @@ enum Phase {
 #[derive(Debug, Clone)]
 struct JobModel {
     repository: &'static str,
+    /// `lint` for a light job, `build` for any other: a third job beside each repository's `build`, so the host's
+    /// credit, which keeps the two largest jobs' headroom, can stand (ADR 0108).
+    name: &'static str,
     labels: Vec<String>,
     phase: Phase,
     /// The profile and repository of the runner that took it.
@@ -508,6 +522,8 @@ struct Violation {
 struct Seen {
     barriers: usize,
     credits: usize,
+    /// Checks that found the host's credit standing (ADR 0108).
+    host_credits: usize,
     /// Ticks that left the larger margin standing with waiters, none fitting the plain one.
     bands: usize,
     /// Ticks that gave it up for a job that fits the plain one, which the next plan starts.
@@ -681,12 +697,17 @@ impl Case {
                 let repository = if second { "o/s" } else { "o/r" };
                 let id = self.next_job;
                 self.next_job += 1;
+                let name = if matches!(labels, Labels::Light) {
+                    "lint"
+                } else {
+                    "build"
+                };
                 let labels = labels.of(repository);
                 let mut github = self.github.0.lock().unwrap();
                 github.queued.push(QueuedJob {
                     id,
                     run_id: id,
-                    name: "build".to_owned(),
+                    name: name.to_owned(),
                     labels: labels.clone(),
                     created_at: time::now_ms(),
                     ..QueuedJob::default()
@@ -696,6 +717,7 @@ impl Case {
                     id,
                     JobModel {
                         repository,
+                        name,
                         labels,
                         phase: Phase::Queued,
                         taken_by: None,
@@ -716,10 +738,11 @@ impl Case {
                     {
                         job.phase = Phase::Done { ran: None };
                     }
+                    let name = self.jobs[&id].name;
                     let mut docker = self.docker.0.lock().unwrap();
                     docker
                         .container_logs
-                        .insert(container.clone(), "Running job: build\n".to_owned());
+                        .insert(container.clone(), format!("Running job: {name}\n"));
                     set_running(&mut docker, &container, false);
                 }
             }
@@ -806,20 +829,34 @@ impl Case {
             Step::Restart => {
                 self.restart().await?;
                 self.tick().await?;
+                self.a_restart_takes_the_host_credit_back()?;
             }
             Step::Stop { docker_gone } => {
                 self.stop(docker_gone).await?;
                 self.restart().await?;
                 self.tick().await?;
+                self.a_restart_takes_the_host_credit_back()?;
             }
             Step::RestartInspectFails(pick) => {
                 self.inspect_fails(pick);
                 self.restart().await?;
                 self.tick().await?;
+                self.a_restart_takes_the_host_credit_back()?;
             }
             Step::Elapse => self.elapse(),
             Step::Settle => self.settle(),
-            Step::PastRuns => self.past_runs().await,
+            Step::PastRuns => {
+                self.past_runs(&[("o/r", "build", "heavy", G), ("o/s", "build", "heavy", G)])
+                    .await;
+            }
+            Step::PastLargeRuns => {
+                let runs = [
+                    ("o/r", "build", "heavy", 3 * G),
+                    ("o/s", "build", "heavy", 3 * G),
+                    ("o/r", "lint", "light", 768 * M),
+                ];
+                self.past_runs(&runs).await;
+            }
             Step::Tick => self.tick().await?,
             Step::Pass => self.pass().await?,
         }
@@ -942,6 +979,7 @@ impl Case {
             }
             let mut running = details(id, "in_progress", None);
             running.run_id = id;
+            running.name = self.jobs[&id].name.to_owned();
             running.runner_name = Some(container.name.clone());
             running.labels = self.jobs[&id].labels.clone();
             github.jobs.insert(id, running);
@@ -999,6 +1037,7 @@ impl Case {
             .and_then(|details| details.runner_name.clone());
         let mut completed = details(id, "completed", Some(conclusion));
         completed.run_id = id;
+        completed.name = job.name.to_owned();
         completed.runner_name = name.clone();
         github.jobs.insert(id, completed);
         // GitHub lists a job queued a few seconds after a runner took it, never once it completed.
@@ -1208,6 +1247,7 @@ impl Case {
             }
             Change::CpuOvercommit => shape.cpu_overcommit = !shape.cpu_overcommit,
             Change::PooledCount => shape.pooled_count = !shape.pooled_count,
+            Change::PooledHost => shape.pooled_host = !shape.pooled_host,
             // Down and back: a restart whose inspect fails must still count a runner at the cap it started with.
             Change::HeavyMemory => shape.heavy_memory = if shape.heavy_memory == 4 { 2 } else { 4 },
         }
@@ -1342,11 +1382,12 @@ impl Case {
         }
     }
 
-    /// Ten finished runs of each repository's `build`, peaking at 1G, with IDs no generated job takes.
-    async fn past_runs(&mut self) {
+    /// Ten finished runs of each repository's job in a profile, peaking as given, with IDs no generated job takes.
+    async fn past_runs(&mut self, runs: &[(&str, &str, &str, u64)]) {
         let at = time::now_ms() - 3600 * 1000;
         let store = &self.handle.store;
-        for (first, repository) in [(1_000_000, "o/r"), (2_000_000, "o/s")] {
+        for (first, (repository, name, profile, peak)) in (1_u64..).map(|n| n * 1_000_000).zip(runs)
+        {
             for id in first..first + 10 {
                 let runner = format!("earlier-{id}");
                 store.queued(
@@ -1354,7 +1395,7 @@ impl Case {
                     &QueuedJob {
                         id,
                         run_id: id,
-                        name: "build".to_owned(),
+                        name: (*name).to_owned(),
                         created_at: at,
                         ..QueuedJob::default()
                     },
@@ -1363,12 +1404,12 @@ impl Case {
                 store.runner_started(RunnerRecord {
                     purpose: None,
                     name: runner.clone(),
-                    repository: repository.to_owned(),
-                    profile: "heavy".to_owned(),
+                    repository: (*repository).to_owned(),
+                    profile: (*profile).to_owned(),
                     slot: 1,
                     container: format!("c-{id}"),
                     started_at: at,
-                    memory_cap: Some(4 * G),
+                    memory_cap: Some(if *profile == "heavy" { 4 * G } else { G }),
                     cpu_cap: Some(2000),
                     admission: None,
                 });
@@ -1378,7 +1419,7 @@ impl Case {
                     at: at + 2000,
                     cpu: 0,
                     cpu_usage: 0,
-                    memory: G,
+                    memory: *peak,
                     network_received: 0,
                     network_sent: 0,
                     cpu_held: crate::observe::metrics::CpuHeld::default(),
@@ -1386,6 +1427,7 @@ impl Case {
                 }]);
                 let mut ran = details(id, "completed", Some("success"));
                 ran.run_id = id;
+                ran.name = (*name).to_owned();
                 ran.runner_name = Some(runner.clone());
                 ran.steps = Vec::new();
                 store.details(ran);
@@ -1727,7 +1769,7 @@ impl Case {
                 .saturating_sub(HOST_MARGIN);
             // The seed containers that run, at their caps; not the room a waiting one holds.
             let seeds: u64 = self.engine.reseed_memory.values().sum();
-            let credit = budget.pooled.map_or(0, |pooled| pooled.credit);
+            let credit = host_credit(budget);
             let reserved = runners_of(status)
                 .map(|(_, runner)| runner.reserved)
                 .fold(seeds, u64::saturating_add)
@@ -1753,70 +1795,89 @@ impl Case {
         Ok(())
     }
 
-    /// Invariant 11 (ADR 0099): the credit stays in its bounds through restarts, reloads, stale readings and lost
-    /// runners. What the status shows is what a plan goes by, and the count never reads under what eligible runners use
-    /// with all the rest in full.
+    /// Invariant 11 (ADR 0099, 0108): both credits stay in their bounds through restarts, reloads, stale readings,
+    /// stalls and lost runners. What the status shows is what a plan goes by; neither count reads under what eligible
+    /// runners use with all the rest in full, and the host's keeps at least the 6G floor of their headroom, or all of it;
+    /// the host's credit stands only with `pooled_host`, a fresh reading of the slice and the host, and no stall; and
+    /// what a drain leaves reads neither credit.
     fn the_count_keeps_its_bounds(&mut self, status: &api::Status) -> Result<(), Violation> {
         let budget = &status.budget;
         let credit = budget.pooled.map_or(0, |pooled| pooled.credit);
+        let host_credit = host_credit(budget);
         let measured = self.shape.admission == Admission::Measured;
         if credit > pooled::MOST_CREDIT || (credit > 0 && !(measured && self.shape.pooled_count)) {
             let detail = format!("{budget:?} under {:?}", self.shape);
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
-        let admitting = self.engine.admitting(&mut [], None);
-        let plan = self.engine.plan_budget(&admitting);
-        let left = budget
-            .memory_max
-            .map(|max| crate::scheduler::left(max, budget.counted()));
-        if !admitting.held && plan.memory != left {
-            let detail = format!("a plan reads {:?}, the status {left:?}", plan.memory);
+        if host_credit > 0 && !(measured && self.shape.pooled_host) {
+            let detail = format!("a host credit of {host_credit} under {:?}", self.shape);
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
-        // The host's limit reads the plain count, credit or none: the overcount is its margin.
-        let host = admitting
-            .host
-            .as_ref()
-            .map(|host| host::left(host.limit, budget.memory_in_use, host.stalled));
-        if !admitting.held && plan.host != host {
-            let detail = format!(
-                "a plan's host reads {:?}, the plain count {host:?}",
-                plan.host
-            );
-            return violation(self, "the_count_keeps_its_bounds", detail);
-        }
-        if credit == 0 {
+        self.plans_read_the_count(budget, host_credit)?;
+        let committed = self.engine.committed_memory();
+        let hosted = budget.memory_in_use - host_credit;
+        if credit == 0 && host_credit == 0 {
             return Ok(());
         }
-        self.seen.credits += 1;
         let now = SystemTime::now();
         let fresh_after = self
             .clock
             .now_ms()
             .saturating_sub(3000 * api::SAMPLE_INTERVAL);
-        let floor: u64 = self
-            .engine
-            .occupied()
-            .map(|(_, occupant)| {
-                let sample = self.handle.store.latest_sample(&occupant.runner_name);
-                let settled = occupant
-                    .job_started
-                    .and_then(|started| now.duration_since(started).ok())
-                    .is_some_and(|ran| ran >= POOL_AFTER);
-                let predicted = occupant.admission.is_some_and(|admission| {
-                    matches!(
-                        admission.basis,
-                        Basis::Job { .. } | Basis::Profile { .. } | Basis::ProfileMax { .. }
-                    )
-                });
-                let known = occupant.key.is_some() && occupant.purpose.is_some();
-                match sample.filter(|sample| sample.at >= fresh_after) {
-                    Some(sample) if settled && predicted && known => sample.memory,
-                    _ => self.engine.takes(occupant),
+        let mut floor = committed;
+        let mut headroom = 0;
+        for (_, occupant) in self.engine.occupied() {
+            let sample = self.handle.store.latest_sample(&occupant.runner_name);
+            let settled = occupant
+                .job_started
+                .and_then(|started| now.duration_since(started).ok())
+                .is_some_and(|ran| ran >= POOL_AFTER);
+            let predicted = occupant.admission.is_some_and(|admission| {
+                matches!(
+                    admission.basis,
+                    Basis::Job { .. } | Basis::Profile { .. } | Basis::ProfileMax { .. }
+                )
+            });
+            let known = occupant.key.is_some() && occupant.purpose.is_some();
+            let takes = self.engine.takes(occupant);
+            match sample.filter(|sample| sample.at >= fresh_after) {
+                Some(sample) if settled && predicted && known => {
+                    floor += sample.memory;
+                    headroom += takes.saturating_sub(sample.memory);
                 }
-            })
-            .sum();
-        let floor = floor + self.engine.committed_memory();
+                _ => floor += takes,
+            }
+        }
+        let slice = self
+            .handle
+            .store
+            .latest_host_sample()
+            .filter(|sample| sample.at * 1000 >= fresh_after)
+            .map(|sample| sample.memory);
+        if host_credit > 0 {
+            self.seen.host_credits += 1;
+            let kept = headroom.min(pooled::HOST_RESERVE_FLOOR);
+            if hosted < floor + kept {
+                let detail =
+                    format!("{budget:?} counts {hosted} for the host, under {floor} and {kept}");
+                return violation(self, "the_count_keeps_its_bounds", detail);
+            }
+            let read = self
+                .host
+                .filter(|reading| reading.fresh(self.clock.now_ms()));
+            let stalls = budget.host.as_ref().is_none_or(|host| host.stalled);
+            if read.is_none() || slice.is_none() || stalls {
+                let detail = format!(
+                    "a host credit of {host_credit} beside the reading {read:?}, the slice's {slice:?} and {:?}",
+                    budget.host
+                );
+                return violation(self, "the_count_keeps_its_bounds", detail);
+            }
+        }
+        if credit == 0 {
+            return Ok(());
+        }
+        self.seen.credits += 1;
         if budget.counted() < floor {
             let detail = format!("{budget:?} counts under {floor}");
             return violation(self, "the_count_keeps_its_bounds", detail);
@@ -1827,11 +1888,6 @@ impl Case {
             let detail = format!("{credit} of credit beside the host's {host:?}");
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
-        let slice = self
-            .handle
-            .store
-            .latest_host_sample()
-            .map(|sample| sample.memory);
         let room = slice.map(|slice| {
             (MEMORY_MAX * 90 / 100)
                 .saturating_sub(slice)
@@ -1840,6 +1896,60 @@ impl Case {
         if room.is_none_or(|room| credit > room) {
             let detail = format!("{credit} of credit beside the slice's {slice:?}");
             return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        Ok(())
+    }
+
+    /// Part of invariant 11: a plan reads the counts the status shows, the host's limit the plain count less the
+    /// host's credit, and a drain neither credit.
+    fn plans_read_the_count(
+        &mut self,
+        budget: &api::Budget,
+        host_credit: u64,
+    ) -> Result<(), Violation> {
+        let admitting = self.engine.admitting(&mut [], None);
+        let plan = self.engine.plan_budget(&admitting);
+        let left = budget
+            .memory_max
+            .map(|max| crate::scheduler::left(max, budget.counted()));
+        if !admitting.held && plan.memory != left {
+            let detail = format!("a plan reads {:?}, the status {left:?}", plan.memory);
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        // The host's limit reads the plain count less the host's credit.
+        let hosted = budget.memory_in_use - host_credit;
+        let host = admitting
+            .host
+            .as_ref()
+            .map(|host| host::left(host.limit, hosted, host.stalled));
+        if !admitting.held && plan.host != host {
+            let detail = format!(
+                "a plan's host reads {:?}, the host's count {host:?}",
+                plan.host
+            );
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        let running = self.engine.occupied().next().is_some();
+        let committed = self.engine.committed_memory();
+        let drained = admitting.host.as_ref().map(|host| {
+            let limit = host::limit(&host.memory, running || host.stalled);
+            crate::scheduler::left(limit, committed)
+        });
+        if plan.drained.host != drained {
+            let detail = format!("a drain leaves {:?}, not {drained:?}", plan.drained.host);
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        Ok(())
+    }
+
+    /// Invariant 11a (ADR 0108, challenge finding 6): a restarted daemon saw none of the runners it adopted start, so
+    /// none counts at its use: the host's credit is gone at its first tick, and nothing starts on it until the plain
+    /// count fits, which `starts_fit_the_budget` reads.
+    fn a_restart_takes_the_host_credit_back(&mut self) -> Result<(), Violation> {
+        let status = self.status();
+        if host_credit(&status.budget) > 0 {
+            let detail = format!("{:?} after a restart", status.budget.host);
+            return violation(self, "a_restart_takes_the_host_credit_back", detail);
         }
         Ok(())
     }
@@ -2238,6 +2348,15 @@ fn set_running(docker: &mut DockerState, container: &str, running: bool) {
     }
 }
 
+/// What the host's limit takes off the plain count in `budget` (ADR 0108).
+fn host_credit(budget: &api::Budget) -> u64 {
+    budget
+        .host
+        .as_ref()
+        .and_then(|host| host.credit)
+        .map_or(0, |credit| credit.bytes)
+}
+
 /// Every runner in the status, with its profile.
 fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerStatus)> {
     status.profiles.iter().flat_map(|profile| {
@@ -2366,6 +2485,46 @@ const TWO_JOBS_SETTLED: [Step; 11] = [
     Step::Tick,
 ];
 
+/// What a case in eight starts from: under measured admission, `o/r`'s and `o/s`'s `build` and `o/r`'s `lint`,
+/// predicted near their caps, past their first minute and using a tenth of their caps: their headroom passes what the
+/// two largest keep, so the host's credit stands for the steps after it to work on (ADR 0108).
+const THREE_JOBS_SETTLED: [Step; 17] = [
+    Step::PastLargeRuns,
+    Step::Reload(Change::Policy),
+    Step::Queue {
+        second: false,
+        labels: Labels::Heavy,
+    },
+    Step::Queue {
+        second: true,
+        labels: Labels::Heavy,
+    },
+    Step::Tick,
+    Step::Assign(0),
+    Step::Assign(0),
+    Step::Tick,
+    Step::Settle,
+    Step::Sample {
+        percent: 10,
+        available: 50,
+        stalled: false,
+    },
+    Step::Queue {
+        second: false,
+        labels: Labels::Light,
+    },
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::Settle,
+    Step::Sample {
+        percent: 10,
+        available: 50,
+        stalled: false,
+    },
+    Step::Tick,
+];
+
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()
@@ -2392,6 +2551,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
             }
             match seed % 8 {
                 2 => drop(steps.splice(0..0, BAND_RELEASED[..BAND_STANDS].iter().copied())),
+                4 => drop(steps.splice(0..0, THREE_JOBS_SETTLED)),
                 6 => drop(steps.splice(0..0, BAND_RELEASED)),
                 _ => {}
             }
@@ -2412,6 +2572,10 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
                 assert!(
                     seed % 2 == 0 || case.credits > 0,
                     "seed {seed} starts from two settled jobs, so it reaches a credit"
+                );
+                assert!(
+                    seed % 8 != 4 || case.host_credits > 0,
+                    "seed {seed} starts from three settled jobs, so it reaches a host credit"
                 );
             }
             if let Err(found) = outcome {

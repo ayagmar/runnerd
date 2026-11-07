@@ -76,7 +76,9 @@ impl Budget {
     /// of its 46G, so 6.5G is free`, or past `MemoryMax` (`Budget::host_share`) `…; leaves the slice 47.5G for the 44.3G
     /// reserved there, so 3.2G is free`, and without `MemoryMax`, where the host alone bounds it, `…; leaves the slice
     /// 25G, so 6.5G is free`; while it stalls, `…; stalling, so no runner starts`. While the slice is held
-    /// (`Budget::held`), nothing is free, so it says no figure of it. With programs outside the slice large enough to
+    /// (`Budget::held`), nothing is free, so it says no figure of it. While the host's limit takes a credit (ADR 0108),
+    /// what it counts follows: `…; what runs counts 23G: it uses 14G and keeps 9G for growth`
+    /// (`HostBudget::growth_clause`). With programs outside the slice large enough to
     /// name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`). `None` without a recent
     /// reading of the host.
     pub fn host_line(&self) -> Option<String> {
@@ -111,6 +113,12 @@ impl Budget {
                 None => format!("{line}; leaves the slice {limit}, so {free} is free"),
             }
         };
+        if let Some(growth) = host.growth_clause(self.memory_in_use) {
+            line = format!(
+                "{line}; what runs counts {}: {growth}",
+                ByteSize(host.counts(self.memory_in_use))
+            );
+        }
         if !host.memory.holders.is_empty() {
             line = format!("{line}; {}", host.memory.outside_line());
         }
@@ -118,14 +126,20 @@ impl Budget {
     }
 
     /// What the host's `limit` leaves the slice of `max`, its `MemoryMax`: `25G of its 46G`. A limit past `max` holds
-    /// back room only under a credit, which `max` reads and the limit does not (ADR 0099). Nothing leaves a slice more
-    /// than it has, so it says what the limit goes by: `47.5G for the 44.3G reserved there`.
+    /// back room only where `max` reads a larger credit than the limit (ADR 0099, 0108). Nothing leaves a slice more
+    /// than it has, so it says what the limit goes by: `47.5G for the 44.3G reserved there`, or while the host's limit
+    /// takes a credit, `47.5G for the 40G counted there`.
     fn host_share(&self, limit: u64, max: u64) -> String {
         if limit > max {
+            let host = self.host.as_ref();
+            let (counts, verb) = match host.filter(|host| host.credit.is_some()) {
+                Some(host) => (host.counts(self.memory_in_use), "counted"),
+                None => (self.memory_in_use, "reserved"),
+            };
             format!(
-                "{} for the {} reserved there",
+                "{} for the {} {verb} there",
                 ByteSize(limit),
-                ByteSize(self.memory_in_use)
+                ByteSize(counts)
             )
         } else {
             format!("{} of its {}", ByteSize(limit), ByteSize(max))

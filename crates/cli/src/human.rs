@@ -810,8 +810,8 @@ fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
     counts.activity().map(|activity| activity.line())
 }
 
-/// `runnerctl insights`: one line per insight, warnings first, then each repository's waits this week against the
-/// last.
+/// `runnerctl insights`: one line per insight, warnings first, then the host's memory on each day CI ran, then each
+/// repository's waits this week against the last.
 pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     let mut out = String::new();
     if insights.insights.is_empty() {
@@ -828,6 +828,12 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
             insight.kind.word(),
             insight.sentence
         );
+    }
+    if !insights.host.is_empty() {
+        let _ = writeln!(out, "\nhost memory while CI ran:");
+    }
+    for day in &insights.host {
+        let _ = writeln!(out, "  {}", day.dated_line());
     }
     if insights.waits.is_empty() {
         return out;
@@ -888,6 +894,9 @@ pub(crate) fn digest(digest: &Digest) -> String {
     }
     for wait in &digest.waits {
         let _ = writeln!(out, "  {}", wait.line());
+    }
+    if let Some(host) = digest.host_line() {
+        let _ = writeln!(out, "{host}");
     }
     if let Some(savings) = &digest.savings {
         let _ = writeln!(out, "{}", savings.headline());

@@ -40,6 +40,7 @@ fn a_warning_reads_the_same_whatever_its_kind() {
         until: 30 * 86_400,
         insights: vec![throttled, notice, flaky],
         waits: vec![],
+        host: vec![],
     };
     assert_eq!(insights.warning_count(), 2);
     assert_eq!(insights.window_line(), "from the last 30 days");
@@ -74,6 +75,7 @@ fn the_digest_names_each_long_wait_with_its_workflow_and_a_readable_time() {
             url: None,
         }],
         savings: None,
+        host: None,
     };
     assert_eq!(digest.summary_line(), "12 jobs finished, 2 failed");
     assert_eq!(

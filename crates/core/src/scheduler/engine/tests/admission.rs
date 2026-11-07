@@ -2109,7 +2109,7 @@ async fn settled_jobs_of_two_kinds_make_room_a_start_goes_by_and_every_reader_ag
     assert_eq!(
         budget.host.map(|host| host.spare),
         Some(G + 40 * G - 4 * G - budget.memory_in_use),
-        "the host's limit reads the plain count: the overcount is its margin"
+        "two jobs keep all their headroom for growth: the host's limit reads the plain count"
     );
     assert_eq!(
         plan.host,
@@ -2430,4 +2430,234 @@ async fn a_host_that_stalls_or_runs_short_takes_the_credit_back_and_holds_the_st
     github.0.lock().unwrap().queued = vec![small(3)];
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2, "lint waits again");
+}
+
+/// A 32G slice running `build`, `e2e` and `it`, each predicted at 3.5G and using 512M: 9G of headroom, of which the
+/// host keeps the two largest, 6G, so its limit counts 3G less than the 10.5G reserved (ADR 0108).
+async fn three_settled_jobs(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let (mut engine, handle) = engine_with(github, docker, dir, config);
+    engine.memory_max = Some(32 * G);
+    history_of(&handle.store, "build", 1000, 3 * G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    history_of(&handle.store, "it", 3000, 3 * G, 0).await;
+    history_of(&handle.store, "lint", 4000, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = ["build", "e2e", "it"]
+        .into_iter()
+        .zip(1..)
+        .map(|(name, id)| QueuedJob {
+            name: name.to_owned(),
+            ..job(id)
+        })
+        .collect();
+    for slot in 1..=3 {
+        let capture = format!("@@job {slot} {slot}\n");
+        docker.0.lock().unwrap().slot_captures.insert(slot, capture);
+    }
+    roomy_readings(github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3);
+    for id in 1..=3 {
+        until_state(&handle, id, JobState::Running).await;
+    }
+    github.0.lock().unwrap().queued = Vec::new();
+    roomy_readings(github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(github, &handle.store, 512 * M);
+    (engine, handle)
+}
+
+/// The host reading `available` of 64G beside a slice holding 1G: it leaves the slice `available` less 3G.
+fn tight_host(github: &FakeGithub, store: &Store, available: u64) {
+    runners_use(github, store, 512 * M);
+    slice_at(store, G);
+    host_at(store, G, available, 0);
+}
+
+#[tokio::test]
+async fn a_host_credit_starts_what_only_it_fits_and_a_restart_or_pooled_host_off_holds_it() {
+    // Catches the host's limit reading the plain count where ADR 0108 has it read the host's credit, the credit
+    // surviving `pooled_host = false`, and a restart counting runners it adopted at their use: then nothing may start
+    // until the plain count fits (challenge finding 6).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = three_settled_jobs(&github, &docker, &dir, &measured()).await;
+    // 12G available leaves the slice 9G: 1.5G past the 7.5G counted, 1.5G short of the 10.5G reserved.
+    tight_host(&github, &handle.store, 12 * G);
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    let host = budget.host.clone().expect("a fresh reading");
+    assert_eq!(budget.memory_in_use, 10 * G + 512 * M);
+    assert_eq!(
+        host.credit,
+        Some(api::HostCredit {
+            bytes: 3 * G,
+            used: G + 512 * M,
+        })
+    );
+    assert_eq!(host.spare, G + 512 * M);
+    assert!(
+        budget
+            .host_line()
+            .unwrap()
+            .contains("; what runs counts 7.5G: it uses 1.5G and keeps 6G for growth"),
+        "{}",
+        budget.host_line().unwrap()
+    );
+    let plan = engine.plan_budget(&engine.admitting(&mut [], None));
+    assert_eq!(
+        plan.host,
+        Some(crate::scheduler::left(9 * G, 7 * G + 512 * M))
+    );
+    assert_eq!(
+        plan.drained.host,
+        Some(crate::scheduler::left(G + 12 * G - 6 * G, 0)),
+        "a drain reads the larger margin, nothing of what runs and none of the credit"
+    );
+
+    github.0.lock().unwrap().queued = vec![small(4)];
+    tight_host(&github, &handle.store, 12 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        4,
+        "lint starts on the host's credit"
+    );
+
+    // With `pooled_host = false` the same jobs leave lint waiting for the host.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let off = measured().replace(
+        "admission = \"measured\"",
+        "admission = \"measured\"\npooled_host = false",
+    );
+    let (mut engine, handle) = three_settled_jobs(&github, &docker, &dir, &off).await;
+    github.0.lock().unwrap().queued = vec![small(4)];
+    tight_host(&github, &handle.store, 12 * G);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(registered(&github.calls()).len(), 3, "off, lint waits");
+    assert_eq!(
+        handle.status.borrow().budget.host.as_ref().unwrap().credit,
+        None
+    );
+
+    // A restart adopts the three: none is known to have started as predicted, so the credit is gone and lint waits
+    // until the plain count fits, though no runner of its own reached a minute.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (engine, handle) = three_settled_jobs(&github, &docker, &dir, &measured()).await;
+    handle.store.flush().await;
+    drop((engine, handle));
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(32 * G);
+    engine.recover().await.unwrap();
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    github.0.lock().unwrap().queued = vec![small(4)];
+    tight_host(&github, &handle.store, 12 * G);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        registered(&github.calls()).len(),
+        3,
+        "after a restart, lint waits"
+    );
+    assert_eq!(
+        handle.status.borrow().budget.host.as_ref().unwrap().credit,
+        None
+    );
+    // 16G leaves 13G by the plain margin: lint fits beside the 10.5G reserved, and the next plan starts it (ADR 0102).
+    for _ in 0..2 {
+        tight_host(&github, &handle.store, 16 * G);
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        registered(&github.calls()).len(),
+        4,
+        "once the plain count fits"
+    );
+}
+
+#[tokio::test]
+async fn a_requested_reseed_starts_in_the_host_room_plans_see_under_a_host_credit() {
+    // Catches a reseed reading the host against the plain count while plans read the host's credit: plans spend the
+    // room the seed waits for, and the seed and its profile's jobs wait for as long as a credit stands.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = format!(
+        "{}{}",
+        measured(),
+        r#"
+[profiles.seedy]
+image_stage = "seedy"
+cpus = 1
+memory = "1G"
+slots = 1
+
+[[repositories]]
+name = "o/s"
+profile = "seedy"
+labels = ["self-hosted", "seedy"]
+warm = 0
+"#
+    );
+    let (mut engine, handle) = three_settled_jobs(&github, &docker, &dir, &config).await;
+    // 12G available leaves the slice 9G: 1.5G past the 7.5G counted, 1.5G short of the 10.5G reserved.
+    tight_host(&github, &handle.store, 12 * G);
+    let plan = engine.plan_budget(&engine.admitting(&mut [], None));
+    assert_eq!(
+        plan.host,
+        Some(crate::scheduler::left(9 * G, 7 * G + 512 * M)),
+        "plans see 1.5G"
+    );
+    engine.request_reseed("seedy").unwrap();
+    tight_host(&github, &handle.store, 12 * G);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.reseeds.contains_key("seedy"),
+        "the 1G seed starts in the room plans see"
+    );
+}
+
+#[tokio::test]
+async fn a_job_held_with_a_host_credit_waits_for_the_growth_it_keeps() {
+    // Catches the wait of a job the host's limit holds with room free saying reservations where ADR 0108 counts use
+    // and kept growth.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = three_settled_jobs(&github, &docker, &dir, &measured()).await;
+    github.0.lock().unwrap().queued = vec![small(4)];
+    // 10G available leaves the slice 7G, 0.5G short of the 7.5G counted.
+    tight_host(&github, &handle.store, 10 * G);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(registered(&github.calls()).len(), 3);
+    assert_eq!(
+        only_reason(&handle),
+        "The host has 10G of 64G available, but what runs may still grow into it: it uses 1.5G and keeps 6G for \
+         growth; needs 1.25G, 0B is free"
+    );
 }

@@ -299,6 +299,9 @@ pub struct Budget {
     /// How much more the pooled count could take off what runs with no runner ending (ADR 0099): room that may come at
     /// any moment, which a backfill must not outlast. 0 with pooling off.
     pub credit_room: u64,
+    /// How much more the host's credit could take off what runs with no runner ending (ADR 0108), as `credit_room`
+    /// does for `MemoryMax`'s. 0 with `[host] pooled_host` off.
+    pub host_credit_room: u64,
 }
 
 /// The workflow labels of GitHub-hosted runners, from
@@ -538,6 +541,7 @@ impl<'plan> Behind<'plan> {
         let around = Around {
             left,
             credit_room: budget.credit_room,
+            host_credit_room: budget.host_credit_room,
             drained: budget.drained,
             runners: &self.runners,
             older: &self.older,

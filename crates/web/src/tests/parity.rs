@@ -99,6 +99,17 @@ async fn a_host_limit_past_memory_max_reads_as_core_says_it() {
 }
 
 #[tokio::test]
+async fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_them() {
+    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::host_credit()).await;
+    let html = dashboard.page(&cookie, "/").await.body;
+    let shown = text(&html);
+    assert!(shown.contains(&facts.host), "{}: {shown}", facts.host);
+    for wait in &facts.waits {
+        assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
+    }
+}
+
+#[tokio::test]
 async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_does() {
     let (dashboard, cookie, _, facts) = dashboard().await;
     let html = dashboard.page(&cookie, "/").await.body;
@@ -298,6 +309,14 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
                 insight.kind.word()
             )),
             "classed by its severity and kind: {card}"
+        );
+    }
+    let shown = text(&page);
+    for day in &insights.host {
+        assert!(
+            shown.contains(&day.dated_line()),
+            "{}: {shown}",
+            day.dated_line()
         );
     }
 }

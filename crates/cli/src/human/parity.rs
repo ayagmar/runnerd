@@ -62,6 +62,23 @@ fn status_states_a_host_limit_past_memory_max_as_core_does() {
 }
 
 #[test]
+fn status_states_a_host_credit_and_the_growth_a_held_job_waits_for_as_core_does() {
+    let daemon = runnerd_fixtures::host_credit();
+    let facts = facts(&daemon);
+    assert!(
+        facts.host.contains("keeps 6.75G for growth"),
+        "the fixture's host line words its credit: {}",
+        facts.host
+    );
+    let text = status(&daemon.status, NOW, PLAIN);
+    assert!(text.contains(&facts.host), "{}: {text}", facts.host);
+    for wait in &facts.waits {
+        let row = line_of(&text, &[&wait.job.to_string()]);
+        assert!(row.ends_with(&wait.reason), "{}: {row}", wait.reason);
+    }
+}
+
+#[test]
 fn status_states_the_budget_each_slot_and_why_each_job_waits_as_core_does() {
     let (daemon, facts) = fixtures();
     let text = status(&daemon.status, NOW, PLAIN);
@@ -215,6 +232,13 @@ fn insights_state_each_insight_s_severity_kind_and_sentence_as_core_does() {
             words,
             [insight.severity.label(), insight.kind.word()],
             "{line}"
+        );
+    }
+    for day in &shown.host {
+        assert!(
+            text.contains(&day.dated_line()),
+            "{}: {text}",
+            day.dated_line()
         );
     }
 }

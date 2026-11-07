@@ -404,13 +404,22 @@ pub struct Replaying<'known> {
     pub trace: Option<&'known Trace>,
     /// The most the pooled count may take off the plain one (`pooled::Snapshot::most`); read only with a `trace`.
     pub most_credit: u64,
-    /// What of the credit the host's bound leaves out: all of it, `u64::MAX`, as the daemon's reads the plain count.
-    /// Less shows what a host bound that spent the credit would have done (ADR 0099).
-    pub host_hold: u64,
+    /// What the host's limit reads of what runs.
+    pub host_reserve: HostReserve,
     /// Whether `Backfill` expects what the credit may still give, as the daemon does.
     pub credit_room: CreditRoom,
     /// What holds the host's larger margin up.
     pub band: Band,
+}
+
+/// What the host's limit reads of what runs in a replay (ADR 0108).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostReserve {
+    /// Every runner's take: the plain count, as before 0108 and with `[host] pooled_host = false`.
+    Plain,
+    /// As the daemon does: eligible runners at their use, with room kept for the two largest growths
+    /// (`pooled::Count::hosted`).
+    Top2,
 }
 
 /// What holds up the host's larger margin in a replay.
@@ -439,7 +448,7 @@ impl From<Barriers> for Replaying<'_> {
             known: None,
             trace: None,
             most_credit: 0,
-            host_hold: u64::MAX,
+            host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
             band: Band::NoWaiterFits,
         }
@@ -600,7 +609,7 @@ pub fn simulate<'known>(
         known,
         trace,
         most_credit,
-        host_hold,
+        host_reserve,
         credit_room,
         band,
     } = how.into();
@@ -663,7 +672,7 @@ pub fn simulate<'known>(
         mirror,
         trace,
         most_credit,
-        host_hold,
+        host_reserve,
         expects_credit: credit_room,
         short: false,
         next_plan: 0,
@@ -675,7 +684,7 @@ pub fn simulate<'known>(
         slice_waited: 0,
         host_waited: 0,
         hazard: Hazard::default(),
-        last_credit: 0,
+        last: pooled::Count::default(),
         cohorts: Vec::new(),
     };
     replayer.play(&queue)
@@ -860,7 +869,7 @@ struct Replayer<'run> {
     mirror: u64,
     trace: Option<&'run Trace>,
     most_credit: u64,
-    host_hold: u64,
+    host_reserve: HostReserve,
     expects_credit: CreditRoom,
     /// Whether the larger margin stands for the next plan (`band_stands`).
     short: bool,
@@ -878,8 +887,8 @@ struct Replayer<'run> {
     slice_waited: u64,
     host_waited: u64,
     hazard: Hazard,
-    /// The credit at the last look.
-    last_credit: u64,
+    /// The count at the last look, both credits in it; the default with nothing running.
+    last: pooled::Count,
     /// The sets of runners that ran when a job started, and the count that let it, while one of them runs.
     cohorts: Vec<Cohort>,
 }
@@ -997,7 +1006,7 @@ impl<'run> Replayer<'run> {
         self.slice_waited += self.held_for_slice * span;
         self.host_waited += self.held_for_host * span;
         if self.running.is_empty() {
-            self.last_credit = 0;
+            self.last = pooled::Count::default();
             return;
         }
         let slice = self.slice();
@@ -1028,32 +1037,34 @@ impl<'run> Replayer<'run> {
         let hazard = &mut self.hazard;
         hazard.credit += u128::from(count.credit) * u128::from(span);
         hazard.most_credit = hazard.most_credit.max(count.credit);
-        if count.credit < self.last_credit {
-            hazard.credit_falls += 1;
-            let before = pooled::Count {
-                credit: self.last_credit,
-                ..count
-            };
-            self.hazard.overdrawn += u64::from(self.overdrawn(before, count));
+        hazard.host_credit += u128::from(count.host_credit) * u128::from(span);
+        let fell = count.credit < self.last.credit;
+        hazard.credit_falls += u64::from(fell);
+        if fell || count.host_credit < self.last.host_credit {
+            self.hazard.overdrawn += u64::from(self.overdrawn(self.last, count));
         }
-        self.last_credit = count.credit;
+        self.last = count;
         self.note_unfunded(span);
     }
 
-    /// Whether the fall from `before` to `now` left the count past a budget it was within: `MemoryMax` or the host's
-    /// limit, each read as it reads the count.
-    fn overdrawn(&self, before: pooled::Count, now: pooled::Count) -> bool {
+    /// Whether a credit's fall since the last look, whose count was `last`, left the count past a budget: `MemoryMax`
+    /// or the host's limit, each read as it reads the count. The fall alone must cross it, with what runs as it is
+    /// `now`, and the last look's count must have been within it: a count already past is no new overdraft, and one
+    /// that growth took past is not the credit's.
+    fn overdrawn(&self, last: pooled::Count, now: pooled::Count) -> bool {
         let max = self.memory_max.unwrap_or(u64::MAX);
         let host = self
             .host_memory()
             .map_or(u64::MAX, |memory| host::limit(&memory, self.short));
-        (now.pooled() > max && before.pooled() <= max)
-            || (self.hosted(now) > host && self.hosted(before) <= host)
-    }
-
-    /// What the host's limit reads of `count`.
-    fn hosted(&self, count: pooled::Count) -> u64 {
-        count.plain - count.credit.saturating_sub(self.host_hold)
+        let before = pooled::Count {
+            credit: last.credit,
+            host_credit: last.host_credit,
+            ..now
+        };
+        let crossed = |read: fn(pooled::Count) -> u64, budget: u64| {
+            read(now) > budget && read(before) <= budget && read(last) <= budget
+        };
+        crossed(pooled::Count::pooled, max) || crossed(pooled::Count::hosted, host)
     }
 
     /// Notes how far what any start left running uses now stands past the count that let it start.
@@ -1149,9 +1160,9 @@ impl<'run> Replayer<'run> {
         pooled::count(&pooled::Snapshot {
             runners: &held,
             committed: self.mirror,
-            slice: self.memory_max.map(|memory_max| pooled::Slice {
+            slice: Some(pooled::Slice {
                 memory: self.slice_read(),
-                memory_max,
+                memory_max: self.memory_max,
             }),
             host: host.map(|memory| {
                 host::pooling(
@@ -1167,6 +1178,9 @@ impl<'run> Replayer<'run> {
             } else {
                 0
             },
+            host_reserve: self.trace.is_some()
+                && self.policy == Policy::Measured
+                && self.host_reserve == HostReserve::Top2,
         })
     }
 
@@ -1174,7 +1188,7 @@ impl<'run> Replayer<'run> {
     fn host_left(&self) -> Option<i64> {
         let memory = self.host_memory()?;
         let limit = host::limit(&memory, self.short && !self.running.is_empty());
-        Some(host::left(limit, self.hosted(self.count()), false))
+        Some(host::left(limit, self.count().hosted(), false))
     }
 
     /// Serves `waiting` at `now`, as one `scheduler::plan` does: each job in turn starts if it fits, until a job that
@@ -1248,7 +1262,7 @@ impl<'run> Replayer<'run> {
         match self.band {
             Band::AnyWaiter => self.held_for_host > 0,
             Band::NoWaiterFits => self.host_memory().is_some_and(|memory| {
-                let reserved = self.hosted(self.count());
+                let reserved = self.count().hosted();
                 host::short(&memory, reserved, false, self.host_needs.iter().copied())
             }),
         }
@@ -1317,6 +1331,7 @@ impl<'run> Replayer<'run> {
         let around = Around {
             left: self.left(),
             credit_room: self.credit_room(),
+            host_credit_room: self.host_credit_room(),
             drained: self.drained(),
             runners: &runners,
             older: &older,
@@ -1333,6 +1348,14 @@ impl<'run> Replayer<'run> {
             return 0;
         }
         self.most_credit.saturating_sub(self.count().credit)
+    }
+
+    /// How much more the host's credit could take off what runs, as `Budget::host_credit_room`.
+    fn host_credit_room(&self) -> u64 {
+        if self.expects_credit == CreditRoom::LeftOut {
+            return 0;
+        }
+        self.count().host_credit_room
     }
 
     /// What a drain leaves.

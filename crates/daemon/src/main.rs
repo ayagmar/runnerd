@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
-use runnerd_core::admission::Band;
+use clap::{Parser, Subcommand, ValueEnum};
 use runnerd_core::admission::trace::Trace;
+use runnerd_core::admission::{Band, HostReserve};
 use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
@@ -126,10 +126,10 @@ enum Command {
         /// With --causal, the credit of a row, 0G for the plain count; repeat it for more rows [default: 0, 4G, 6G, 8G].
         #[arg(long, requires = "causal")]
         credit: Vec<ByteSize>,
-        /// With --causal, what of a credit the host's bound leaves out: 0G spends it all, 3G what stands past that
-        /// [default: all of it, as the daemon's bound reads the plain count].
-        #[arg(long, requires = "causal")]
-        host_hold: Option<ByteSize>,
+        /// With --causal, what the host's limit reads of what runs: `top2`, eligible runners at their use with room
+        /// for the two largest growths, as the daemon does; or `plain`, every runner's take.
+        #[arg(long, requires = "causal", value_enum, default_value_t = HostReserveArg::Top2)]
+        host_reserve: HostReserveArg,
         /// With --causal, hold the host's larger margin while any job waits for the host, not only while none fits the
         /// plain margin as the daemon does: what that gives.
         #[arg(long, requires = "causal")]
@@ -198,7 +198,7 @@ fn main() -> ExitCode {
             overhead,
             guard_overhead,
             credit,
-            host_hold,
+            host_reserve,
             any_waiter_band,
             shift,
             moves,
@@ -214,7 +214,10 @@ fn main() -> ExitCode {
                         overhead,
                         guard_overhead,
                         credits: credit,
-                        host_hold,
+                        host_reserve: match host_reserve {
+                            HostReserveArg::Plain => HostReserve::Plain,
+                            HostReserveArg::Top2 => HostReserve::Top2,
+                        },
                         band: if any_waiter_band {
                             Band::AnyWaiter
                         } else {
@@ -314,6 +317,15 @@ struct Limits {
     moves: Vec<simulate::Move>,
 }
 
+/// `runnerd simulate --causal --host-reserve`: what the host's limit reads of what runs (ADR 0108).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HostReserveArg {
+    /// Every runner's take.
+    Plain,
+    /// Eligible runners at their use, with room for the two largest growths.
+    Top2,
+}
+
 /// How `runnerd simulate --causal` replays.
 #[derive(Debug, Clone)]
 struct Causal {
@@ -325,8 +337,8 @@ struct Causal {
     guard_overhead: Option<ByteSize>,
     /// The credit of each row; none, the usual rows.
     credits: Vec<ByteSize>,
-    /// What of a credit the host's bound leaves out, where given.
-    host_hold: Option<ByteSize>,
+    /// What the host's limit reads of what runs.
+    host_reserve: HostReserve,
     /// What holds up the host's larger margin.
     band: Band,
     /// How much later the host's other programs run, where given.
@@ -439,7 +451,7 @@ fn run_simulation(
         };
         let counts = simulate::Counts {
             credits: &credits,
-            host_hold: causal.host_hold.map_or(u64::MAX, |hold| hold.0),
+            host_reserve: causal.host_reserve,
             band: causal.band,
             barriers: limits.priority,
         };

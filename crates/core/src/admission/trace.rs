@@ -259,8 +259,11 @@ pub struct Hazard {
     pub lowest_available: Option<u64>,
     /// How many times the credit fell.
     pub credit_falls: u64,
-    /// How many of those left the count past a budget it was within.
+    /// How many of those, and of the host's credit's falls, alone took the count past a budget it was within at the
+    /// last look.
     pub overdrawn: u64,
+    /// The host's credit over the replay, in byte-milliseconds (ADR 0108).
+    pub host_credit: u128,
     /// The credit over the replay, in byte-milliseconds.
     pub credit: u128,
     /// The most it was, in bytes.

@@ -1689,6 +1689,7 @@ async fn a_trace_reads_each_run_from_its_start_and_names_it_when_the_daemon_coul
                 limit: 0,
                 spare: 0,
                 stalled: false,
+                credit: None,
             }),
             ..api::Budget::default()
         },
@@ -1749,4 +1750,83 @@ async fn only_a_read_the_runtime_cancelled_reads_as_a_shutdown() {
     assert!(!panicked.is_shutdown(), "a panicked read is a failure");
     let failed = StoreError::Sqlite(rusqlite::Error::InvalidQuery);
     assert!(!failed.is_shutdown(), "a failed read is a failure");
+}
+
+#[tokio::test]
+async fn insights_read_the_host_s_readings_with_its_credit_from_the_budget_s_events() {
+    // Catches a query whose JSON paths miss the credit or the swap, that reads a budget without a host reading as one
+    // at 0 available, or that counts a seed or a shell holding the budget as CI running.
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let budget = |in_use: u64, credit: Option<api::HostCredit>, host: bool| api::Budget {
+        memory_in_use: in_use,
+        mirror_memory: 512 << 20,
+        host: host.then(|| api::HostBudget {
+            memory: api::HostMemory {
+                at: 1,
+                total: 64 << 30,
+                available: 20 << 30,
+                slice: 4 << 30,
+                some: None,
+                full: None,
+                holders: Vec::new(),
+                ceiling: None,
+                swap: Some(api::Swap {
+                    total: 16 << 30,
+                    free: 9 << 30,
+                }),
+            },
+            limit: 30 << 30,
+            spare: 2 << 30,
+            stalled: false,
+            credit,
+        }),
+        ..api::Budget::default()
+    };
+    let credit = api::HostCredit {
+        bytes: 3 << 30,
+        used: 5 << 30,
+    };
+    let mut seeded = budget((512 << 20) + (5 << 30), None, true);
+    seeded.seed_memory = vec![api::SeedMemory {
+        profile: "app".to_owned(),
+        memory: 4 << 30,
+    }];
+    seeded.shell_memory = vec![api::ShellMemory {
+        job: 7,
+        memory: 1 << 30,
+    }];
+    for budget in [
+        budget(12 << 30, Some(credit), true),
+        budget(12 << 30, None, false),
+        budget(512 << 20, None, true),
+        seeded,
+    ] {
+        store.event(api::Event::BudgetChanged { budget });
+    }
+    store.flush().await;
+
+    let readings = store.insights(0).await.unwrap().readings;
+
+    let read: Vec<_> = readings
+        .iter()
+        .map(|reading| {
+            (
+                reading.total,
+                reading.available,
+                reading.swap_free,
+                reading.credit,
+                reading.running,
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            (64 << 30, 20 << 30, Some(9 << 30), 3 << 30, true),
+            (64 << 30, 20 << 30, Some(9 << 30), 0, false),
+            (64 << 30, 20 << 30, Some(9 << 30), 0, false),
+        ],
+        "the budget without a host reading is left out; the mirror alone, or with a seed and a shell, is no runner"
+    );
 }

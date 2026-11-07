@@ -8,7 +8,7 @@
 //! and what it remembers of the last plan.
 
 use super::pooled;
-use crate::api::{HostBudget, HostMemory, host_margin};
+use crate::api::{HostBudget, HostCredit, HostMemory, host_margin};
 
 /// Starts stop once every runnable task of the host waits for memory this share of the last 10 s, in hundredths of
 /// a percent: 5%, while the host is short of memory (`stalls`).
@@ -97,16 +97,20 @@ pub fn limit(memory: &HostMemory, short: bool) -> u64 {
         .saturating_sub(margin(memory.grown(), short))
 }
 
-/// What `memory` leaves runners beside the `reserved` memory of what runs in the slice, given what the last plan
-/// `remembered`.
-pub fn budget(memory: HostMemory, reserved: u64, remembered: Remembered) -> HostBudget {
+/// What `memory` leaves runners beside what runs in the slice, as the host's limit reads its `count`
+/// (`pooled::Count::hosted`, ADR 0108), given what the last plan `remembered`.
+pub fn budget(memory: HostMemory, count: pooled::Count, remembered: Remembered) -> HostBudget {
     let stalled = stalls(&memory, remembered.stalled);
     let limit = limit(&memory, remembered.short || stalled);
     HostBudget {
         memory,
         limit,
-        spare: u64::try_from(left(limit, reserved, stalled)).unwrap_or(0),
+        spare: u64::try_from(left(limit, count.hosted(), stalled)).unwrap_or(0),
         stalled,
+        credit: (count.host_credit > 0).then_some(HostCredit {
+            bytes: count.host_credit,
+            used: count.used,
+        }),
     }
 }
 

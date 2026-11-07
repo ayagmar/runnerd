@@ -297,6 +297,8 @@ pub(crate) struct Around<'plan> {
     pub(crate) left: Left,
     /// How much more memory the pooled count could leave with no runner ending (`Budget::credit_room`).
     pub(crate) credit_room: u64,
+    /// How much more the host's limit could leave with no runner ending (`Budget::host_credit_room`).
+    pub(crate) host_credit_room: u64,
     /// What a drain leaves.
     pub(crate) drained: Drained,
     /// The runners in slots, and those the plan started so far.
@@ -378,17 +380,22 @@ impl<'plan> Backfill<'plan> {
         let Around {
             left,
             credit_room,
+            host_credit_room,
             drained,
             runners,
             older,
         } = around;
-        // The room may come sooner than ends bring it: a credit can grow at any moment, and an end gives back at most
-        // what its runner counts. So the time found is the earliest the owner could start. The host's limit reads the
-        // plain count, which no credit moves.
+        // The room may come sooner than ends bring it: either credit can grow at any moment, and an end gives back at
+        // most what its runner counts. So the time found is the earliest the owner could start. A runner this plan
+        // started has no job yet, so it counts as ending now and gives back its whole take at once: what it may later
+        // add to the host's credit is its headroom, never more than that take, so `host_credit_room` need not count it.
         let mut left = left;
         left.memory = left
             .memory
             .map(|memory| memory.saturating_add(signed(credit_room)));
+        left.host = left
+            .host
+            .map(|host| host.saturating_add(signed(host_credit_room)));
         let mut ending: Vec<(Duration, Runner<'_>)> = runners
             .iter()
             .map(|runner| (runner.left_to_run(now), *runner))

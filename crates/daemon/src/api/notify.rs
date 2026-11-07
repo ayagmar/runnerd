@@ -848,6 +848,9 @@ fn insight_title(insight: &Insight) -> String {
     ) {
         return "Jobs wait for the host's memory".to_owned();
     }
+    if matches!(insight.kind, runnerd_core::api::InsightKind::HostLow { .. }) {
+        return "The host ran low on memory on a host credit".to_owned();
+    }
     let subject = match &insight.job {
         Some(job) => format!(
             "{}: {}",
@@ -865,6 +868,7 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::CpuHeld { .. } => "is held back by its CPU cap",
         runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
         runnerd_core::api::InsightKind::HostHeld { .. } => "waits for the host's memory",
+        runnerd_core::api::InsightKind::HostLow { .. } => "ran the host low on memory",
         runnerd_core::api::InsightKind::Unknown => "has an insight",
     };
     format!("{subject} {what}")
@@ -880,6 +884,7 @@ fn digest_message(digest: Digest) -> Notification {
         body.push("Longest waits:".to_owned());
         body.extend(digest.waits.iter().map(runnerd_core::api::LongWait::line));
     }
+    body.extend(digest.host_line());
     if let Some(savings) = &digest.savings {
         body.push(format!("{}.", savings.headline()));
     }

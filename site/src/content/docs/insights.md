@@ -18,6 +18,7 @@ A job is its repository, workflow and job name. Notifications send warnings, not
 | `throttled` | The kernel throttled the downloads (`sock_throttled`) of 2 or more of a repository's jobs. A warning. |
 | `cpu-held` | At least 3 of a job's last 10 successful runs were throttled by the CPU quota in 15% of their run or more. A notice while auto sizing raises `cpus`, else a warning. |
 | `host-held` | A queued job has waited 30 minutes or more for the [host's memory](../admission/#the-hosts-memory) while the host lacks room for a job that waits now. A warning, with the longest wait and the programs outside CI that hold the most memory; closing them frees only part of that figure. Sent at most once in each 6-hour window. |
+| `host-low` | On a day CI ran, the host had under a tenth of its memory available while a [host credit](../admission/#the-host-credit) stood. A warning, at most once a day, naming `pooled_host = false` as the way back. |
 | `waits` | A repository's p95 wait this week is half again and a minute more than last week's. A notice ([how a wait is counted](../admission/#how-a-wait-is-counted)). |
 
 ```console wrap=false
@@ -32,6 +33,17 @@ notice  waits     halyard/storefront: 1 job in 20 waits 4m 10s or more for a run
 ```
 
 `--days N` sets the window (default 14, at most 90); `--digest` shows the last 24 hours.
+
+### The host's memory while CI ran
+
+Below the insights, `runnerctl insights` and the dashboard list each UTC day a runner ran, and the digest gives its 24 hours, from the readings runnerd stored:
+
+```text
+host memory while CI ran:
+  Nov 6: CI ran 9h 12m, 6h 10m of it on a host credit; under 19.4G available for 1h 04m (41m on a credit); under 6.2G available for 34s (34s on a credit); lowest 4.1G (4.5G on a credit); swap free at least 8.2G
+```
+
+The lines are the host's margin plus a quarter of its memory, and a tenth of its memory: 19.4G and 6.2G on a 62G host. Each reading counts until the next for a minute at most, so time runnerd was down is not counted.
 
 ## What the minutes would have cost
 
@@ -61,8 +73,8 @@ Reload or restart runnerd, then `runnerctl notify test` sends every target a tes
 | `failed` | a job failed or timed out | on |
 | `lost` | a job's runner vanished before the job completed | on |
 | `runner` | a runner could not start | on |
-| `insights` | a new warning insight, told again only after runnerd saw it gone for a day; `host-held` once in each 6-hour window | on |
-| `digest` | daily at `digest_at` (default `09:00`): the day's jobs, new insights, longest waits | off |
+| `insights` | a new warning insight, told again only after runnerd saw it gone for a day; `host-held` once in each 6-hour window, `host-low` once a day | on |
+| `digest` | daily at `digest_at` (default `09:00`): the day's jobs, new insights, longest waits, the host's memory while CI ran | off |
 
 A burst is one message: runnerd waits 10 seconds after the first event and sends to a target at most once a minute, so twenty failures arrive as one. A failed delivery is retried with backoff, 5 seconds to 10 minutes.
 

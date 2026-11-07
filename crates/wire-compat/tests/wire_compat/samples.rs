@@ -14,18 +14,19 @@ use runnerd_core::api::{
     Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind,
     CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, CpuAdmission,
     CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event, EventEnvelope,
-    EventQuery, HoldCause, Holder, HostBudget, HostMemory, HostSample, HostSampleQuery,
-    HostSamples, Insight, InsightKind, Insights, InsightsQuery, Job, JobMetrics, JobPage, JobPeak,
-    JobQuery, JobRunner, JobSizing, JobState, JobSummary, LogQuery, LogSummary, LongWait,
-    MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing,
-    PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled, Pressure,
-    PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits,
-    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery,
-    RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink, RunnerFailure, RunnerStatus,
-    RunningJob, Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory,
-    ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery,
-    SizingRefused, SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats, StatsQuery,
-    StatsRow, Status, Step, Stopping, Swap, Timeline, Usd, WaitSpread, Waiting, WeekWaits,
+    EventQuery, HoldCause, Holder, HostBudget, HostCredit, HostHazard, HostMemory, HostSample,
+    HostSampleQuery, HostSamples, HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job,
+    JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState, JobSummary, LogQuery,
+    LogSummary, LongWait, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest,
+    NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period,
+    PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob,
+    Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
+    ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink, RunnerFailure,
+    RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity,
+    ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold,
+    SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats,
+    StatsQuery, StatsRow, Status, Step, Stopping, Swap, Timeline, Usd, WaitSpread, Waiting,
+    WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -83,6 +84,10 @@ fn budget() -> Budget {
             limit: 40 << 30,
             spare: 12 << 30,
             stalled: false,
+            credit: Some(HostCredit {
+                bytes: 3 << 30,
+                used: 4 << 30,
+            }),
         }),
         cpu: Some(CpuBudget {
             cpus: 16_000,
@@ -956,7 +961,12 @@ fn run_link() -> RunLink {
 fn insights_of_every_kind() -> Vec<Insight> {
     insight_kind()
         .into_iter()
-        .filter(|kind| !matches!(kind, InsightKind::HostHeld { .. }))
+        .filter(|kind| {
+            !matches!(
+                kind,
+                InsightKind::HostHeld { .. } | InsightKind::HostLow { .. }
+            )
+        })
         .map(|kind| Insight {
             key: "tidewater/halyard:ci:build".to_owned(),
             severity: Severity::Warning,
@@ -1013,6 +1023,11 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             jobs: 3,
             waited: 2530,
         },
+        InsightKind::HostLow {
+            day: 1_761_350_400,
+            seconds: 94,
+            lowest: 3 << 30,
+        },
     ];
     for kind in &every {
         match kind {
@@ -1024,6 +1039,7 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::Waits { .. }
             | InsightKind::CpuHeld { .. }
             | InsightKind::HostHeld { .. }
+            | InsightKind::HostLow { .. }
             // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
             | InsightKind::Unknown => {}
         }
@@ -1074,6 +1090,29 @@ pub(crate) fn insights() -> Insights {
             now: week_waits(),
             before: week_waits(),
         }],
+        host: vec![host_hazard()],
+    }
+}
+
+fn host_hazard() -> HostHazard {
+    HostHazard {
+        since: 1_761_350_400,
+        until: 1_761_400_000,
+        running: 30_000,
+        credited: 12_000,
+        low_line: 19 << 30,
+        critical_line: 6 << 30,
+        low: HostSpan {
+            seconds: 3_600,
+            credited: 1_200,
+        },
+        critical: HostSpan {
+            seconds: 94,
+            credited: 94,
+        },
+        lowest: 3 << 30,
+        lowest_credited: Some(3 << 30),
+        lowest_swap_free: Some(8 << 30),
     }
 }
 
@@ -1093,6 +1132,7 @@ pub(crate) fn digest() -> Digest {
             url: Some("https://github.com/tidewater/halyard/actions/runs/900".to_owned()),
         }],
         savings: Some(saved_window(Period::Month)),
+        host: Some(host_hazard()),
     }
 }
 

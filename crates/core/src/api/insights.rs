@@ -34,6 +34,50 @@ pub struct Insights {
     /// Each repository's waits this week and the week before, by repository. Always the last 14 days, whatever the
     /// window.
     pub waits: Vec<RepositoryWaits>,
+    /// What the host's memory came to on each UTC day of the window that CI ran, newest first (ADR 0108); absent from
+    /// a daemon before 0.0.30.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host: Vec<HostHazard>,
+}
+
+/// What the host's memory came to while CI ran over a window, from the readings the budget's events stored (ADR 0108):
+/// how long `MemAvailable` stood under each line, the least it and `SwapFree` fell to, and how much of that came while
+/// the host's limit took a credit. Times are seconds, sizes bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostHazard {
+    /// The start of the window: a UTC day's, or the digest's 24 hours'.
+    pub since: u64,
+    /// Its end.
+    pub until: u64,
+    /// How long a runner ran with a reading of the host.
+    pub running: u64,
+    /// Of that, how long a host credit stood.
+    pub credited: u64,
+    /// The line under which sockets start to throttle: the host's margin and a quarter of its memory (ADR 0099).
+    pub low_line: u64,
+    /// The line under which systemd-oomd may act once swap is full too: a tenth of the host's memory.
+    pub critical_line: u64,
+    /// How long `MemAvailable` stood under `low_line`.
+    pub low: HostSpan,
+    /// How long it stood under `critical_line`.
+    pub critical: HostSpan,
+    /// The least `MemAvailable` read.
+    pub lowest: u64,
+    /// The least read while a host credit stood; `None` when none did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lowest_credited: Option<u64>,
+    /// The least `SwapFree` read; `None` on a host without swap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lowest_swap_free: Option<u64>,
+}
+
+/// How long the host stood under a line while CI ran, in seconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSpan {
+    /// In all.
+    pub seconds: u64,
+    /// Of that, while a host credit stood.
+    pub credited: u64,
 }
 
 /// How much an insight matters.
@@ -150,6 +194,16 @@ pub enum InsightKind {
         /// The longest of their waits for it, in seconds.
         waited: u64,
     },
+    /// On a UTC day, the host's `MemAvailable` fell under a tenth of its memory while a host credit let runners start
+    /// past their reservations (ADR 0108): the buffer the credit spends ran out. Told once a day at most.
+    HostLow {
+        /// The start of the day.
+        day: u64,
+        /// How long it stood there while a host credit stood, in seconds.
+        seconds: u64,
+        /// The least `MemAvailable` read while one stood, in bytes.
+        lowest: u64,
+    },
     /// A kind from a later release, which this one reads only by its sentence. The daemon never sends it.
     #[serde(other)]
     Unknown,
@@ -237,6 +291,9 @@ pub struct Digest {
     /// not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub savings: Option<super::SavedWindow>,
+    /// What the host's memory came to while CI ran (ADR 0108); `None` when no runner ran with a reading of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostHazard>,
 }
 
 /// A job that waited.

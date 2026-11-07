@@ -1,6 +1,6 @@
 # 0102. The larger host margin stands only while no waiter fits the plain one
 
-Status: **Accepted** (2026-11-07). Amends [0055](0055-admission-follows-the-hosts-memory.md) and
+Status: **Accepted** (2026-11-07), amended by [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md). Amends [0055](0055-admission-follows-the-hosts-memory.md) and
 [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md).
 
 ## Context

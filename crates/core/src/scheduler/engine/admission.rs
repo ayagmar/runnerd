@@ -331,11 +331,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// with the margin `remembered` asks for.
     pub(super) fn host_budget_by(&self, remembered: host::Remembered) -> Option<api::HostBudget> {
         let memory = self.host_memory()?;
-        Some(host::budget(
-            memory,
-            self.count(remembered).plain,
-            remembered,
-        ))
+        Some(host::budget(memory, self.count(remembered), remembered))
     }
 
     /// What the last plan saw of the host, as the next one goes by it. The larger margin keeps a start from pushing a
@@ -362,11 +358,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             api::Waiting::HostMemory { needs, .. } => Some(*needs),
             _ => None,
         });
-        let reserved = self.count(self.host_remembered()).plain;
+        let count = self.count(self.host_remembered());
         let short = admitting
             .host
             .as_ref()
-            .is_some_and(|host| host::short(&host.memory, reserved, stalled, needs));
+            .is_some_and(|host| host::short(&host.memory, count.hosted(), stalled, needs));
         let was_short = self.measured.host.short;
         self.measured.host = host::Remembered { short, stalled };
         let now = time::now_ms();
@@ -422,10 +418,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 );
             }
             (HostHolds::Counted, Some(host)) if held != HostHolds::Counted => {
+                let (verb, growth) = match host.growth_clause(count.plain) {
+                    Some(growth) => ("counts", format!(": {growth};")),
+                    None => ("reserves", ":".to_owned()),
+                };
                 info!(
-                    "what runs reserves {} of the {} the host leaves the slice, with {} available: no runner starts \
-                     that does not fit beside it",
-                    size(reserved),
+                    "what runs {verb} {} of the {} the host leaves the slice, with {} available{growth} no runner \
+                     starts that does not fit beside it",
+                    size(host.counts(count.plain)),
                     size(host.limit),
                     size(host.memory.available)
                 );
