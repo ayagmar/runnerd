@@ -325,11 +325,20 @@ fn causal_line(name: &str, replay: &Replay) -> String {
         duration(mean(&runs)),
         duration(runs.iter().copied().max().unwrap_or(0)),
         replay.never_started,
-        job_hours(1000 * replay.mean_wait * (replay.jobs - replay.never_started)),
+        job_hours(1000 * all_waits(replay)),
         job_hours(replay.host_waited),
         job_hours(replay.slice_waited),
         replay.backfilled.jobs,
     )
+}
+
+/// What every job of `replay` waited, in seconds.
+fn all_waits(replay: &Replay) -> u64 {
+    replay
+        .pools
+        .values()
+        .flat_map(|pool| &pool.waits)
+        .sum::<u64>()
 }
 
 /// The runs with a job of each profile of `slots` in `replays`, mean / worst, a column a credit.

@@ -360,6 +360,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|(_, reason)| matches!(reason, api::Waiting::HostMemory { .. }))
             .map(|(job, _)| *job)
             .collect();
+        let none_waiting = waiting_now.is_empty();
         self.store.host_waiting(waiting_now.clone(), now);
         let (waited, since) =
             std::mem::replace(&mut self.measured.host_waiting, (waiting_now, now));
@@ -383,8 +384,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                 }
             }
-            (false, true) => {
+            (false, true) if none_waiting => {
                 info!("the host has memory to spare again: runners start as the budget allows");
+            }
+            (false, true) => {
+                info!(
+                    "a job waiting for the host's memory fits its plain margin: the next plan goes by that margin"
+                );
             }
             _ => {}
         }

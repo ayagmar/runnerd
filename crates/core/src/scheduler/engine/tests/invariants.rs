@@ -1321,7 +1321,8 @@ impl Case {
             .map(|profile| format!("{profile}{SEED_START}"))
             .collect::<Vec<_>>();
         let read_during_start = self.starts_after_a_reading(&starts);
-        let noted_all = read_during_start.is_none() && seeds.is_empty();
+        let same_reading = read_during_start.is_none();
+        let seeded = !seeds.is_empty();
         if let Some(after) = read_during_start {
             started = after;
         }
@@ -1331,8 +1332,8 @@ impl Case {
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
-        if noted_all {
-            self.the_band_follows_the_waiters(was_short)?;
+        if same_reading {
+            self.the_band_follows_the_waiters(was_short, seeded)?;
         }
         self.no_removal_of_a_running_job()
     }
@@ -1669,9 +1670,14 @@ impl Case {
     /// Invariant 12 (ADR 0102), after a tick: a stall keeps the larger margin, and no reading leaves none. A plan by what
     /// the tick remembered shows a job waiting for the host only if the margin stands while it fits the plain one not
     /// at all; and with nothing to start, a host no waiter fits keeps it. The plan may start one and leave others
-    /// waiting: the tick after decides for those. A reading taken during the tick's starts and a seed started after
-    /// the tick's last plan bind the next tick, so the caller skips this then.
-    fn the_band_follows_the_waiters(&mut self, was_short: bool) -> Result<(), Violation> {
+    /// waiting: the tick after decides for those. A reading taken during the tick's starts binds the next tick, so the
+    /// caller skips this then. A seed started after the tick's last plan only raises the count, which can leave a host no
+    /// waiter fits at the plain margin for one tick (`seeded`): that plan starts nothing, and the next tick decides.
+    fn the_band_follows_the_waiters(
+        &mut self,
+        was_short: bool,
+        seeded: bool,
+    ) -> Result<(), Violation> {
         let remembered = self.engine.measured.host;
         let (plan, admitting) = self.engine.plan();
         let Some(host) = admitting.host.as_ref() else {
@@ -1707,7 +1713,7 @@ impl Case {
             let detail = format!("{needs:?} wait, {room} is left by the plain margin");
             return violation(self, "the_band_follows_the_waiters", detail);
         }
-        if !remembered.short && !fits && !needs.is_empty() && !starts {
+        if !remembered.short && !fits && !needs.is_empty() && !starts && !seeded {
             let detail = format!("{needs:?} wait, {room} is left, and the margin is plain");
             return violation(self, "the_band_follows_the_waiters", detail);
         }

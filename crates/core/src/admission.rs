@@ -862,7 +862,7 @@ struct Replayer<'run> {
     most_credit: u64,
     host_hold: u64,
     expects_credit: CreditRoom,
-    /// Whether the last plan left a job waiting for the host's memory, so the larger margin stands.
+    /// Whether the larger margin stands for the next plan (`band_stands`).
     short: bool,
     /// When the next plan with no arrival or end is, in ms.
     next_plan: u64,
