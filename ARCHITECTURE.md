@@ -377,7 +377,8 @@ always returns, so the daemon closes and flushes the history.
   ends where `/v1/status` is ([ADR 0029](docs/adr/0029-profile-events-and-what-a-restart-announces.md)).
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.
 - A slot is free only once Docker confirmed its container's removal, also after a start that failed
-  ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md)).
+  ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md)), or that a stopped container is being
+  removed already ([ADR 0105](docs/adr/0105-a-removal-under-way-frees-a-stopped-runners-slot.md)).
 - A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
 - A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repositories.

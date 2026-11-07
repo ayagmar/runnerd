@@ -285,6 +285,9 @@ enum Step {
     Cancel(usize),
     /// A running job's container vanishes, as when someone removes it.
     Lose(usize),
+    /// Someone removes a running job's container, and Docker takes until after the next tick or pass: it refuses its
+    /// log and a second removal meanwhile.
+    Removing(usize),
     /// The next runner fails to start in Docker.
     StartFails,
     /// The next runner fails to start after Docker made and started its container, which GitHub may give a job
@@ -366,6 +369,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             30..=37 => Step::Finish(rng.index()),
             38..=39 => Step::Cancel(rng.index()),
             40 => Step::Lose(rng.index()),
+            96 => Step::Removing(rng.index()),
             41..=42 => Step::StartFails,
             43 => Step::ExitsAtOnce(rng.index()),
             44 => Step::ExitsIdle(rng.index()),
@@ -735,6 +739,7 @@ impl Case {
                 }
             }
             Step::Lose(pick) => self.lose(pick),
+            Step::Removing(pick) => self.removing(pick),
             Step::StartFails => self.docker.0.lock().unwrap().fail_starts += 1,
             Step::StartFailsLate {
                 takes_job,
@@ -823,16 +828,7 @@ impl Case {
 
     /// A running job's container vanishes, as when someone removes it.
     fn lose(&mut self, pick: usize) {
-        let running = self.running();
-        if let Some((id, container)) = pick_from(&running, pick).cloned() {
-            self.end_job(id, &container, "failure");
-            // Gone before Docker answered any inspect of it: nothing read its log, so nothing can name
-            // the runner that ran the job.
-            if (self.unobserved(&container) || self.capture_unread(id, &container))
-                && let Some(job) = self.jobs.get_mut(&id)
-            {
-                job.phase = Phase::Done { ran: None };
-            }
+        if let Some(container) = self.end_running(pick) {
             self.docker
                 .0
                 .lock()
@@ -840,6 +836,39 @@ impl Case {
                 .containers
                 .retain(|candidate| candidate.id != container);
         }
+    }
+
+    /// Someone starts removing a running job's container.
+    fn removing(&mut self, pick: usize) {
+        if let Some(container) = self.end_running(pick) {
+            let mut docker = self.docker.0.lock().unwrap();
+            set_running(&mut docker, &container, false);
+            docker.being_removed.insert(container);
+        }
+    }
+
+    /// Docker finishes the removals someone began.
+    fn removals_finish(&mut self) {
+        let mut docker = self.docker.0.lock().unwrap();
+        let removed = std::mem::take(&mut docker.being_removed);
+        docker
+            .containers
+            .retain(|candidate| !removed.contains(&candidate.id));
+    }
+
+    /// Ends a running job whose container goes without a word from it, and says which container that is.
+    fn end_running(&mut self, pick: usize) -> Option<String> {
+        let running = self.running();
+        let (id, container) = pick_from(&running, pick).cloned()?;
+        self.end_job(id, &container, "failure");
+        // Gone before Docker answered any inspect of it: nothing read its log, so nothing can name
+        // the runner that ran the job.
+        if (self.unobserved(&container) || self.capture_unread(id, &container))
+            && let Some(job) = self.jobs.get_mut(&id)
+        {
+            job.phase = Phase::Done { ran: None };
+        }
+        Some(container)
     }
 
     fn inspect_fails(&mut self, pick: usize) {
@@ -1432,6 +1461,7 @@ impl Case {
         self.cancelled_since_tick.clear();
         self.note_busy();
         self.engine.tick(Shutdown::No).await;
+        self.removals_finish();
         self.failed_late();
         self.exits_hold_only_what_failed_to_start()?;
         let after = self.status();
@@ -1501,6 +1531,7 @@ impl Case {
         self.engine.exits.any();
         self.note_busy();
         self.engine.turnover().await;
+        self.removals_finish();
         self.failed_late();
         self.exits_hold_only_what_failed_to_start()?;
         let after = self.status();

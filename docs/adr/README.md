@@ -83,7 +83,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 | Amended by 0081 |
 | [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before | Accepted |
 | [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) | `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them | Amended by 0079 |
-| [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again | Amended by 0092, 0095 |
+| [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again | Amended by 0092, 0095, 0105 |
 | [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md) | Credentials in the cache layer, closed slots' layers, and what the build cache counts | Accepted |
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets | Accepted |
 | [0079](0079-cpu-weights-and-throttling-as-evidence.md) | Runners share the slice's CPUs by their `cpus`, and throttling, not peaks, says the cap held a run back | Accepted |
@@ -112,3 +112,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Accepted |
 | [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Accepted |
 | [0104](0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md) | A runner that connected and left says nothing of the next start | Accepted |
+| [0105](0105-a-removal-under-way-frees-a-stopped-runners-slot.md) | A removal under way frees a stopped runner's slot | Accepted |

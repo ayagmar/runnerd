@@ -487,6 +487,8 @@ struct DockerState {
     fail_started_inspects: u32,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
+    /// Containers someone else is removing: Docker refuses their logs and a second removal, in its own words.
+    being_removed: BTreeSet<String>,
     /// `Outage::Refused`: every `remove` fails to connect, as when the Engine goes away while it answers inspects
     /// still.
     remove_outage: Outage,
@@ -937,6 +939,12 @@ impl DockerApi for FakeDocker {
                 message: "the Engine is busy".to_owned(),
             });
         }
+        if state.being_removed.contains(container) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 409,
+                message: format!("removal of container {container} is already in progress"),
+            });
+        }
         if container.starts_with("container-") {
             let late = std::mem::take(&mut state.mirror_log_on_remove);
             state.mirror_log.push_str(&late);
@@ -1004,6 +1012,13 @@ impl DockerApi for FakeDocker {
                 .measured
                 .clone()
                 .unwrap_or_else(|| format!("slot 1 changed {} bytes\n", 4u64 << 30)));
+        }
+        if state.being_removed.contains(container) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 409,
+                message: "can not get logs from container which is dead or marked for removal"
+                    .to_owned(),
+            });
         }
         Ok(state
             .container_logs
@@ -2769,6 +2784,114 @@ async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fa
     engine.publish();
     assert_eq!(runner_in(&handle, 1), None);
     assert_eq!(docker.0.lock().unwrap().containers.len(), 0);
+}
+
+#[tokio::test]
+async fn a_runner_someone_removes_frees_its_slot_in_the_tick_that_saw_it_stop() {
+    // Catches Docker's refusal of a removal already under way keeping the slot a tick longer, which logged the runner's
+    // end twice and warned of a fault that is none (ADR 0076 keeps the slot only for a removal that failed).
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    {
+        let mut state = docker.0.lock().unwrap();
+        let container = state.containers[0].id.clone();
+        state.being_removed.insert(container);
+        state.containers[0].running = false;
+    }
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None, "its slot is free");
+    let hold = engine.repositories["o/r"].holds.get("app");
+    assert!(
+        hold.is_none_or(|hold| hold.held.is_none()),
+        "unread logs say nothing of a failure: {hold:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_removal_that_fails_after_docker_said_it_was_under_way_is_taken_up() {
+    // Catches a container left in Docker until the next daemon start, a slot volume with it: Docker's 409 says a removal
+    // runs, not that it will succeed, and our own timed-out removal gets the same answer.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    let container = {
+        let mut state = docker.0.lock().unwrap();
+        let container = state.containers[0].id.clone();
+        state.being_removed.insert(container.clone());
+        state.containers[0].running = false;
+        container
+    };
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None, "its slot is free");
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.leftover.contains_key(&container),
+        "a removal under way stays followed"
+    );
+
+    // That removal fails, and the next one Docker refuses for a reason of its own.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.being_removed.clear();
+        state.fail_removes = 1;
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.leftover.contains_key(&container),
+        "it is tried again"
+    );
+    engine.tick(Shutdown::No).await;
+    assert!(engine.leftover.is_empty(), "Docker removed it");
+    let containers = docker.0.lock().unwrap().containers.clone();
+    assert!(
+        containers.iter().all(|left| left.id != container),
+        "it is gone from Docker: {containers:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_runner_being_removed_that_still_runs_keeps_its_slot_until_it_stopped() {
+    // Catches a removal under way reading as gone while the container still runs, which would put a second runner on
+    // its volumes. Docker marks a container for removal before it kills it.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(super::control::CANCEL_GRACE).await;
+    let container = {
+        let mut state = docker.0.lock().unwrap();
+        let container = state.containers[0].id.clone();
+        state.being_removed.insert(container.clone());
+        container
+    };
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        runner_in(&handle, 1).as_deref(),
+        Some("o/r"),
+        "it still runs"
+    );
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.being_removed.remove(&container);
+        state.containers.clear();
+    }
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None, "Docker says it is gone");
 }
 
 /// Ticks until Docker was asked `call`, as background cache upkeep finishes.

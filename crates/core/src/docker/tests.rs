@@ -4,7 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use super::{DockerApi, FILES_LIMIT, JitConfig, RunnerSpec, connect_to, create_body, files_in};
+use super::{
+    DockerApi, Error, FILES_LIMIT, JitConfig, RunnerSpec, connect_to, create_body, files_in,
+    is_being_removed, is_log_gone,
+};
 use crate::isolation::Sysbox;
 
 const SECRET: &str = "sentinel-jit-config-c2VjcmV0";
@@ -342,4 +345,32 @@ fn a_directory_read_that_breaks_off_is_not_complete() {
         files_in(&tar[..], "Worker_").complete,
         "the whole archive is"
     );
+}
+
+#[test]
+fn only_a_removal_under_way_reads_as_a_container_on_its_way_out() {
+    // Catches a 409 that says the container stays reading as gone: its slot would go to a second runner.
+    let answer = |status_code: u16, message: &str| Error::DockerResponseServerError {
+        status_code,
+        message: message.to_owned(),
+    };
+    // Docker's words, from a daemon log of a `docker rm -f`.
+    for said in [
+        "can not get logs from container which is dead or marked for removal",
+        "removal of container 0483ff83a7f0 is already in progress",
+    ] {
+        assert!(is_being_removed(&answer(409, said)), "{said}");
+        assert!(is_log_gone(&answer(409, said)), "{said}");
+    }
+    assert!(is_log_gone(&answer(404, "No such container: 0483ff83a7f0")));
+    for said in [
+        "cannot remove container \"/r\": container is running: stop the container before removing or force remove",
+        "remove v: volume is in use",
+    ] {
+        assert!(!is_log_gone(&answer(409, said)), "{said}");
+    }
+    assert!(!is_log_gone(&answer(
+        500,
+        "removal of container r is already in progress"
+    )));
 }

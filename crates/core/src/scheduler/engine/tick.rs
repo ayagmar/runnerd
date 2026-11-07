@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
 use super::history::CAPTURE_DRAIN;
-use super::runners::Collected;
+use super::runners::{Collected, Removal};
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::{host, pooled};
 use crate::api::{AdmissionPolicy, Basis};
@@ -65,7 +65,7 @@ enum Step {
     /// Its log read, and its capture ended.
     Drained(Collected),
     /// Its container removed and its registration deleted, or why Docker did not remove it.
-    Removed(Result<(), docker::Error>),
+    Removed(Result<Removal, docker::Error>),
 }
 
 /// What carrying out one plan did.
