@@ -319,11 +319,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let took_job = logs.map(|logs| logs.contains("Running job: "));
         // Its capture may have named its job by now.
         let job = self.occupant(slot).and_then(|now| now.job).or(occupant.job);
-        // GitHub may hold its registration busy a while yet: the next listings delete it then, without a warning.
-        if occupant.busy || job.is_some() {
-            self.ended_busy
-                .insert(occupant.runner_id, occupant.repository.clone());
-        }
+        // GitHub may hold its registration busy a while yet, also for a job no poll or capture saw it take: the next
+        // listings delete it then, without a warning.
+        self.ended_busy
+            .insert(occupant.runner_id, occupant.repository.clone());
         self.forget(occupant);
         // Unread logs: it may have run one.
         let ran = occupant.busy || job.is_some() || took_job != Some(false);
@@ -497,10 +496,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .await
         {
             // GitHub refuses until it notices the job is gone, minutes later, even if the run is cancelled.
-            Ok(Deleted::Busy) => warn!(
-                "{}: GitHub keeps {} until it notices its job is gone; the next runnerd start deletes it",
-                occupant.repository, occupant.runner_name
-            ),
+            Ok(Deleted::Busy) => {
+                info!(
+                    "{}: GitHub keeps {} until it notices its job is gone; a later listing deletes it",
+                    occupant.repository, occupant.runner_name
+                );
+                self.ended_busy
+                    .insert(occupant.runner_id, occupant.repository.clone());
+            }
             Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }

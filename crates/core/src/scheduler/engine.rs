@@ -455,8 +455,8 @@ pub struct Engine<G = Github, D = Docker> {
     rate_limit_logged: bool,
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
-    /// Runners this engine released while they ran a job, by ID, with their repository, until a listing of that
-    /// repository no longer has them: GitHub holding one busy then is no orphan to warn of.
+    /// Runners this engine released or killed, by ID, with their repository, until a listing of that repository no
+    /// longer has them: GitHub holding one busy then is no orphan to warn of.
     ended_busy: BTreeMap<u64, String>,
     status: watch::Sender<api::Status>,
     /// The profiles as the last run announced them, until the first publish compares the profiles with them. Their
