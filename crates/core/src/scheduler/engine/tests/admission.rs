@@ -2239,6 +2239,8 @@ async fn a_waiting_runner_a_restart_adopts_counts_in_full_once_it_takes_a_job() 
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2);
     handle.store.flush().await;
+    // The last capture started may not have run yet, and would read the job as this daemon's.
+    until_captures_end(&engine).await;
     drop((engine, handle));
 
     // Each takes its job while no daemon runs.
