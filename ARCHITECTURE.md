@@ -192,8 +192,9 @@ queued → slot → container → removed
    against what runs and was sampled since the plan; one that no longer fits makes the tick plan again from the same
    listings, up to three plans a tick, rather than holding back the plan's later starts until the next poll. Once a
    stop is asked for, no further start or plan runs, and a runner GitHub registered meanwhile is deleted before its
-   container starts. A tick
-   that took longer than `poll_interval` to reach its last start logs its phases. Between polls, a pass starts
+   container starts. Before its plan a tick reads from GitHub only the running jobs admission cannot name yet; it
+   reads the others after its last start ([ADR 0106](docs/adr/0106-a-tick-reads-its-running-jobs-after-its-starts.md)).
+   A tick that took longer than `poll_interval` to reach its last start logs its phases. Between polls, a pass starts
    runners for listed jobs into the room of runners that ended (step 4). A start that fails but leaves its
    container in Docker keeps it in the slot until Docker removes it
    ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md),

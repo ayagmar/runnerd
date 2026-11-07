@@ -461,6 +461,48 @@ async fn a_slot_whose_job_ended_takes_the_next_listed_job_within_seconds() {
     );
 }
 
+/// Six of eight slots run long jobs while GitHub takes 1.8 s a request, as on the owner's host, and a job queues.
+/// Its runner's container starts within a start's time of the listing that showed it. The bug it catches: the tick
+/// reading every running job's details from GitHub, a few requests at a time, before it planned, which held each
+/// start back by about half a second per running job.
+#[tokio::test(start_paused = true)]
+async fn a_job_listed_beside_running_jobs_starts_without_waiting_for_their_reads() {
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    github.0.lock().unwrap().latency = Duration::from_millis(1800);
+    let dir = TestDir::new("listed-start");
+    let config = CONFIG.replace("slots = 2", "slots = 8");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.run = Duration::from_hours(1);
+    burst.queue(6);
+    let run = tokio::spawn(engine.run());
+    // The six run and their captures named their jobs, a few ticks ago.
+    let settled = Instant::now() + Duration::from_mins(2);
+    play(&mut burst, |_, now| now >= settled).await;
+    assert_eq!(burst.running.len(), 6, "six jobs run: {:?}", burst.seen);
+
+    burst.queue(1);
+    let queued = Instant::now();
+    play(&mut burst, |burst, _| burst.seen.taken == 7).await;
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    let started = queued + burst.seen.waits[6];
+    let listed = burst
+        .listed_at
+        .iter()
+        .copied()
+        .find(|at| *at >= queued)
+        .unwrap();
+    let took = started.saturating_duration_since(listed);
+    // A start is its registration, 1.8 s, and its container's start, 1 s; the world sees a listing within 0.1 s of
+    // its answer. Reading the six jobs before the plan took two rounds of requests more.
+    assert!(
+        took <= Duration::from_secs(3),
+        "the job's runner started {took:?} after the listing that showed it"
+    );
+}
+
 /// Four slots work through a long backlog while each removal takes 5 to 25 s, so a slot's next runner ends while
 /// another's release still waits, generation after generation. Polls keep their pace and a command is answered
 /// within a pass's bound. The bug it catches: a pass taking every later exit for as long as some release waited,

@@ -99,7 +99,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0089](0089-a-slots-cache-mounts-go-last.md) | A slot's build cache follows its share, and cache mounts go last | Accepted |
 | [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md) | Under measured admission, slots follow waits for a slot alone and Docker's disk | Amended by 0096 |
 | [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s | Amended by 0092 |
-| [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) | Idle removals and deferred starts stay off the start path, and a job's wait says where it went | Amended by 0095 |
+| [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) | Idle removals and deferred starts stay off the start path, and a job's wait says where it went | Amended by 0095, 0106 |
 | [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Accepted |
 | [0094](0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md) | A profile's upkeep stops its runners only for a reseed that will replace the snapshot | Accepted |
 | [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096 |
@@ -113,3 +113,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Accepted |
 | [0104](0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md) | A runner that connected and left says nothing of the next start | Accepted |
 | [0105](0105-a-removal-under-way-frees-a-stopped-runners-slot.md) | A removal under way frees a stopped runner's slot | Accepted |
+| [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md) | A tick reads its running jobs after its starts | Accepted |
