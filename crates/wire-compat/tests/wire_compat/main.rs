@@ -22,14 +22,14 @@ use std::path::PathBuf;
 
 use runnerd_core::api;
 use runnerd_core_previous::api as previous;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.0.28";
+const PREVIOUS: &str = "v0.0.29";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,19 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[
-    Accepted {
-        reader: Reader::Previous,
-        item: "waiting/behind-memory",
-        adr: "0096",
-    },
-    // The previous release reads a `host-held` insight kind as its `Unknown` fallback, by the insight's sentence.
-    Accepted {
-        reader: Reader::Previous,
-        item: "insight-kind/host-held",
-        adr: "0100",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -353,40 +341,6 @@ fn the_previous_release_reads_what_this_one_writes() {
         }
     }
     assert_reads(Reader::Previous, &failures);
-}
-
-/// What ADR 0096 accepts: a client of the previous release shows a job behind a starved one as waiting for a reason it
-/// does not know, and goes on reading the status.
-#[test]
-fn the_previous_release_reads_a_job_behind_memory_as_a_reason_it_does_not_know() {
-    let sent = json(api::Waiting::BehindMemory { job: 41 });
-    assert_eq!(
-        previous::Waiting::deserialize(&sent).unwrap(),
-        previous::Waiting::Unknown
-    );
-}
-
-/// What ADR 0100 accepts: a client of the previous release shows a host-held insight under its `Insight` label, by its
-/// sentence, and goes on reading the insights beside it.
-#[test]
-fn the_previous_release_reads_a_host_held_insight_as_a_kind_it_does_not_know() {
-    let mut insights = samples::insights();
-    let mut held = insights.insights[0].clone();
-    held.sentence = "2 jobs wait for the host's memory".to_owned();
-    held.kind = api::InsightKind::HostHeld {
-        jobs: 2,
-        waited: 2700,
-    };
-    insights.insights.push(held);
-    let read = previous::Insights::deserialize(&json(insights)).unwrap();
-    let held = read.insights.last().unwrap();
-    assert_eq!(held.kind, previous::InsightKind::Unknown);
-    assert_eq!(held.sentence, "2 jobs wait for the host's memory");
-    assert_eq!(
-        read.insights.len(),
-        samples::insights().insights.len() + 1,
-        "the insights beside it still read"
-    );
 }
 
 #[test]

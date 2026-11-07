@@ -25,6 +25,11 @@
       "memory_in_use": 9663676416,
       "memory_max": 34359738368,
       "mirror_memory": 1073741824,
+      "pooled": {
+        "counted": 8589934592,
+        "credit": 1073741824,
+        "runners": 2
+      },
       "seed_memory": [
         {
           "memory": 2147483648,
@@ -126,6 +131,10 @@
             "avg10": 250,
             "avg60": 120
           },
+          "swap": {
+            "free": 4294967296,
+            "total": 17179869184
+          },
           "total": 68719476736
         },
         "spare": 12884901888,
@@ -134,6 +143,11 @@
       "memory_in_use": 9663676416,
       "memory_max": 34359738368,
       "mirror_memory": 1073741824,
+      "pooled": {
+        "counted": 8589934592,
+        "credit": 1073741824,
+        "runners": 2
+      },
       "seed_memory": [
         {
           "memory": 2147483648,
