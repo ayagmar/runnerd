@@ -31,7 +31,7 @@ Two rules made most of the misses:
   last take of one of its jobs by a runner, or the last finish of one of its jobs.** The usual-hours rule goes. When a
   runner that ran a job ends, its repository is noted active from then, so a push a few minutes after a long job
   finds a runner up. On a restart, and at each read of the history, the history seeds activity from each job's
-  `queued_at` and `finished_at`; notes taken since the last read are kept (`Learned::absorb`). Outside that window a
+  `queued_at`, `started_at` and `finished_at`; notes taken since the last read are kept (`Learned::absorb`). Outside that window a
   pool's configured warm runners go once they have idled `IDLE_TIMEOUT`, as before.
 - **A workflow's jobs per run for a pool is the lower median over every attempt of that workflow in the repository
   seen in `LOOKBACK`, an attempt with no job for the pool counting 0, less the run's jobs seen for the pool.** An
@@ -41,7 +41,7 @@ Two rules made most of the misses:
 - **A reload has the history read again at the next tick.** The read is due at once (its time is set back); the
   `Learned` is kept, so `absorb` keeps the notes taken since. A reload that moves labels to another pool, as the
   jvm-small split did, then moves their bursts with them, rather than keeping the old pools' for up to `REREAD`.
-- On by default. No config key, no schema or wire change: `finished_at` is an existing column. `warm = 0` still turns
+- On by default. No config key, no schema or wire change: `started_at` and `finished_at` are existing columns. `warm = 0` still turns
   both rules off.
 
 ## Consequences

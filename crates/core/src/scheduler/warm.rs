@@ -48,6 +48,8 @@ pub struct Seen {
     pub run_attempt: u32,
     /// When GitHub queued it, in milliseconds since the epoch.
     pub queued_at: u64,
+    /// When a runner took it, in milliseconds since the epoch, once one did.
+    pub started_at: Option<u64>,
     /// When it finished, in milliseconds since the epoch, once it did.
     pub finished_at: Option<u64>,
 }
@@ -92,7 +94,10 @@ impl Learned {
         {
             learned.note(
                 &job.repository,
-                job.finished_at.unwrap_or(0).max(job.queued_at),
+                job.finished_at
+                    .unwrap_or(0)
+                    .max(job.started_at.unwrap_or(0))
+                    .max(job.queued_at),
             );
             if let (Some(workflow), Some(profile)) = (&job.workflow, profile) {
                 let run = runs

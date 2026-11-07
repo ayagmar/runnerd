@@ -493,6 +493,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.end_capture(&occupant.runner_name).await;
         // Responses the mirror logged since this tick's count: on a shutdown, the mirror and its log go next.
         self.count_mirror_bytes().await;
+        // A job it ran ended now, as one a runner ends on its own does (ADR 0107).
+        if busy {
+            self.note_finished(&occupant.repository);
+        }
         self.forget(&occupant);
         match self
             .github

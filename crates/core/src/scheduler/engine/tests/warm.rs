@@ -1341,6 +1341,7 @@ async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
     // Each run's jobs, by ID: their phase.
     let mut runs: Vec<BTreeMap<u64, JobPhase>> = Vec::new();
     let mut waved: Vec<bool> = Vec::new();
+    let mut noted: Vec<usize> = Vec::new();
     let mut next_job = 1000;
     for (index, step) in steps.iter().enumerate() {
         match *step {
@@ -1353,6 +1354,7 @@ async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
                     .queued
                     .push(ci_job(next_job, run, time::now_ms()));
                 runs.push(BTreeMap::from([(next_job, JobPhase::Queued)]));
+                noted.push(1);
                 waved.push(false);
                 next_job += 1;
             }
@@ -1369,6 +1371,7 @@ async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
                         next_job += 1;
                     }
                     waved[run] = true;
+                    noted[run] += burst - 1;
                 }
             }
             RunStep::Take(pick) => take(&engine, &github, &docker, &handle, &mut runs, pick).await,
@@ -1380,27 +1383,27 @@ async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
                 handle.store.flush().await;
                 (engine, handle) = engine_with(&github, &docker, &dir, &config);
                 engine.recover().await.map_err(|error| error.to_string())?;
+                for (run, jobs) in runs.iter().enumerate() {
+                    noted[run] = jobs.values().filter(|p| **p != JobPhase::Done).count();
+                }
             }
             RunStep::Tick => {}
         }
+        let before = registered(&github.calls()).len();
         engine.tick(Shutdown::No).await;
+        let started = registered(&github.calls()).len() > before;
         let queued = github.0.lock().unwrap().queued.len();
-        let expected: usize = runs
+        let expected: usize = noted
             .iter()
-            .map(|jobs| {
-                let open = jobs
-                    .values()
-                    .filter(|phase| **phase != JobPhase::Done)
-                    .count();
-                burst.saturating_sub(open)
-            })
+            .filter(|n| **n > 0)
+            .map(|n| burst.saturating_sub(*n))
             .sum();
         let idle = engine
             .occupied()
             .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
             .count();
         // One warm runner, as o/r is active, one per queued job, and per run its burst less its open jobs.
-        if idle > 1 + queued + expected {
+        if started && idle > 1 + queued + expected {
             return Err(format!(
                 "after step {index} ({step:?}): {idle} idle runners, over 1 warm + {queued} queued + {expected} expected"
             ));

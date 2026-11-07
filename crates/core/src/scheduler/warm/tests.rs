@@ -44,6 +44,7 @@ fn seen(repository: &str, workflow: &str, run_id: u64, queued_at: u64) -> Seen {
         run_id,
         run_attempt: 1,
         queued_at,
+        started_at: None,
         finished_at: None,
     }
 }
@@ -103,6 +104,15 @@ fn a_job_that_finished_keeps_its_repository_active_past_its_end_after_a_restart(
     assert!(
         learn(&[long], now).active("o/app", now),
         "its end 5 minutes ago keeps it active"
+    );
+    // A job that waited 27 minutes for room and was taken 3 minutes ago: the take keeps it active too.
+    let taken = Seen {
+        started_at: Some(now - 3 * MINUTE),
+        ..seen("o/app", "CI", 2, now - 30 * MINUTE)
+    };
+    assert!(
+        learn(&[taken], now).active("o/app", now),
+        "its take 3 minutes ago keeps it active"
     );
 }
 
