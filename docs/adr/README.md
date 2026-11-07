@@ -57,7 +57,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0047](0047-activity-of-the-last-day.md) | The jobs started and ended in a window, by those times | Accepted |
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice | Accepted |
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling | Amended by 0068, 0071, 0090 |
-| [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued | Amended by 0058, 0094, 0096 |
+| [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued | Amended by 0058, 0094, 0096, 0104 |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends | Amended by 0064 |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch | Amended by 0053, 0077, 0082, 0083 |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache | Accepted |
@@ -105,9 +105,10 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096 |
 | [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099, 0102 |
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099 |
-| [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099 |
+| [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099, 0104 |
 | [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Accepted |
 | [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Amended by 0103 |
 | [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md) | The host's reading includes its swap, and admission ignores it | Accepted |
 | [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Accepted |
 | [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Accepted |
+| [0104](0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md) | A runner that connected and left says nothing of the next start | Accepted |

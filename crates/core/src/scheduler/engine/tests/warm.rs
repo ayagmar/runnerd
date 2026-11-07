@@ -3,6 +3,7 @@
 //! them, a quiet repository's warm runners stop for good, and a reseed still runs.
 
 use super::*;
+use crate::api::HoldCause;
 use crate::scheduler::IDLE_TIMEOUT;
 use crate::scheduler::warm::Learned;
 use crate::time;
@@ -695,6 +696,78 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
         );
     }
     assert_eq!(registered(&github.calls()).len(), 2, "no third");
+}
+
+/// A slot's worth of `count` jobs queued in `o/r`, each started, then all their runners connected and left: their
+/// jobs were cancelled before they began.
+async fn runners_connect_and_leave(
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    count: u64,
+) {
+    github.0.lock().unwrap().queued = (1..=count).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    let mut state = docker.0.lock().unwrap();
+    state.runner_log = Some(CONNECTED_LOG.to_owned());
+    for container in &mut state.containers {
+        container.running = false;
+    }
+}
+
+/// What a JIT runner logs when its job is gone before it acknowledges it: `Runner.cs` exits 0 and traces the reason.
+const CONNECTED_LOG: &str = "\u{221a} Connected to GitHub\n\
+    Current runner version: '2.338.1'\n\
+    2026-11-07 13:29:01Z: Listening for Jobs\n\
+    Runner listener exit with 0 return code, stop the service, no retry needed.\n\
+    Exiting runner...\n";
+
+#[tokio::test]
+async fn runners_a_cancelled_run_took_with_it_hold_nothing_but_the_next_ones_leaving_do() {
+    // Catches a cancelled run's second runner reading as a second fault, and a pool whose runners connect and leave
+    // restarting one every few seconds for ever.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+
+    runners_connect_and_leave(&mut engine, &github, &docker, 2).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "both started");
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.repositories["o/r"].holds["app"].held.is_none(),
+        "both were up when the first left: one event"
+    );
+
+    runners_connect_and_leave(&mut engine, &github, &docker, 2).await;
+    engine.tick(Shutdown::No).await;
+    let held = engine.repositories["o/r"].holds["app"].held;
+    assert_eq!(
+        held.map(|held| held.cause),
+        Some(HoldCause::IdleExits),
+        "these started after the first left, so it is no cancelled run: a fault"
+    );
+}
+
+#[tokio::test]
+async fn a_runner_that_never_connected_still_holds_its_pool_on_its_first_exit() {
+    // Catches the rule for runners that connected reaching runners that could not.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log =
+            Some("Failed to create a session. The runner registration has been deleted".to_owned());
+        state.containers[0].running = false;
+    }
+    engine.tick(Shutdown::No).await;
+    let held = engine.repositories["o/r"].holds["app"].held;
+    assert_eq!(held.map(|held| held.cause), Some(HoldCause::NoJob));
 }
 
 #[tokio::test]

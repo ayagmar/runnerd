@@ -492,9 +492,9 @@ impl RepositoryStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HoldCause {
-    /// Its runners ended without taking a job.
+    /// Its runners ended without connecting, so without taking a job (ADR 0104).
     NoJob,
-    /// Its runners ended without a job after waiting for one, twice in a row.
+    /// Its runners connected and ended without a job, one after the other.
     IdleExits,
     /// GitHub did not register its runner.
     Register,
