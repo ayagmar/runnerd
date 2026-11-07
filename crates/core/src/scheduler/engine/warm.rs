@@ -1,6 +1,7 @@
-//! Warm runners (ADR 0050): reads what `scheduler::warm` learns from the job history every few minutes, follows the
-//! workflow runs whose jobs it sees queued or taken, and says how many warm runners each repository wants. It must not
-//! start or stop runners: `plan` decides with what it says.
+//! Warm runners (ADR 0050, 0107): reads what `scheduler::warm` learns from the job history every few minutes and
+//! after a reload, notes each job it sees queued, taken or finished, follows the workflow runs those jobs belong to,
+//! and says how many warm runners each repository wants. It must not start or stop runners: `plan` decides with what
+//! it says.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
@@ -54,6 +55,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => warn!("cannot read the job history for warm runners: {error}"),
         }
         self.warm.runs.expire(now);
+    }
+
+    /// Reads the history again at the next tick, as a reload may have moved labels to other pools. What was noted
+    /// since the last read is kept (`Learned::absorb`).
+    pub(super) fn reread_warm(&mut self) {
+        if let Some((_, read_at)) = &mut self.warm.learned {
+            *read_at = SystemTime::UNIX_EPOCH;
+        }
+    }
+
+    /// Notes that a job of `repository` finished now: the repository stays active `warm::ACTIVE_AFTER` past it.
+    pub(super) fn note_finished(&mut self, repository: &str) {
+        if let Some((learned, _)) = &mut self.warm.learned {
+            learned.note(repository, time::now_ms());
+        }
     }
 
     /// Notes a job for `pool` queued or taken at `at` (ms), of `attempt`, with its workflow when known.

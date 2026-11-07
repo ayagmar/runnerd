@@ -326,6 +326,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.forget(occupant);
         // Unread logs: it may have run one.
         let ran = occupant.busy || job.is_some() || took_job != Some(false);
+        // Its repository stays active past its job's end, for the next push (ADR 0107).
+        if occupant.busy || job.is_some() || took_job == Some(true) {
+            self.note_finished(&occupant.repository);
+        }
         // Its logs say it connected. One that waited `IDLE_TIMEOUT` did too, unless they no longer show it.
         let connected = logs.is_some_and(|logs| logs.contains(CONNECTED))
             || occupant

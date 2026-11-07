@@ -178,9 +178,9 @@ queued → slot → container → removed
    ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md),
    [ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md)). Once every job it can start has its
    runner and none waits for room, it starts the warm runners each active repository wants
-   (`scheduler::warm`: `[[repositories]] warm` in its active hours, plus the jobs its workflow runs seen so far are
-   expected to queue still), so a job finds a runner already registered
-   ([ADR 0050](docs/adr/0050-warm-runners.md)).
+   (`scheduler::warm`: `[[repositories]] warm` within 10 minutes of its last job listed, taken or finished, plus the
+   jobs its workflow runs seen so far are expected to queue still), so a job finds a runner already registered
+   ([ADR 0050](docs/adr/0050-warm-runners.md), [ADR 0107](docs/adr/0107-a-warm-runner-waits-only-where-jobs-just-came.md)).
 3. The plan's stops go first, all at once (`Engine::remove_idle`): each idle runner is deregistered, then the
    containers are removed together, then their log captures end; a runner GitHub says just took a job stays, as
    does one whose capture names a job by then or whose registration was already gone and whose log shows a job (its job may have ended, so it
