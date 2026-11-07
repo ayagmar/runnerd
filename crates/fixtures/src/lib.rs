@@ -824,6 +824,24 @@ pub fn daemon() -> Daemon {
     }
 }
 
+/// The fixtures under a credit large enough that the host's limit, 24.5G, passes the 24G `MemoryMax` and still holds
+/// room back: it reads the plain 22G, which leaves 2.5G, where the 20G counted leave 4G.
+pub fn past_memory_max() -> Daemon {
+    let mut daemon = daemon();
+    let budget = &mut daemon.status.budget;
+    budget.pooled = Some(api::Pooled {
+        credit: 2 * GIB,
+        counted: 20 * GIB,
+        runners: 3,
+    });
+    let mut host = host();
+    host.memory.available = 10 * GIB + 512 * MIB;
+    host.limit = 24 * GIB + 512 * MIB;
+    host.spare = 2 * GIB + 512 * MIB;
+    budget.host = Some(host);
+    daemon
+}
+
 /// A job of the pricing history that ran `seconds` and ended `ago` seconds before [`NOW`].
 fn priced(repository: &str, profile: &str, seconds: u64, ago: u64) -> api::PricedRun {
     let finished = (NOW - ago) * 1000;

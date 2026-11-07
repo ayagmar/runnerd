@@ -73,7 +73,8 @@ impl Budget {
     /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
     /// slice 40G`; on a host with swap, `host: 31G of 64G available, swap 12.1G of 15.5G used, …` (ADR 0101); when that
     /// is less room than `MemoryMax` leaves (`Budget::host_withheld`), `…; leaves the slice 25G
-    /// of its 46G, so 6.5G is free`, and without `MemoryMax`, where the host alone bounds it, `…; leaves the slice
+    /// of its 46G, so 6.5G is free`, or past `MemoryMax` (`Budget::host_share`) `…; leaves the slice 47.5G for the 44.3G
+    /// reserved there, so 3.2G is free`, and without `MemoryMax`, where the host alone bounds it, `…; leaves the slice
     /// 25G, so 6.5G is free`; while it stalls, `…; stalling, so no runner starts`. While the slice is held
     /// (`Budget::held`), nothing is free, so it says no figure of it. With programs outside the slice large enough to
     /// name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`). `None` without a recent
@@ -103,8 +104,8 @@ impl Budget {
         } else {
             match self.memory_max {
                 Some(max) if self.host_withheld().is_some() => format!(
-                    "{line}; leaves the slice {limit} of its {}, so {free} is free",
-                    ByteSize(max)
+                    "{line}; leaves the slice {}, so {free} is free",
+                    self.host_share(host.limit, max)
                 ),
                 Some(_) => format!("{line}; leaves the slice {limit}"),
                 None => format!("{line}; leaves the slice {limit}, so {free} is free"),
@@ -114,6 +115,21 @@ impl Budget {
             line = format!("{line}; {}", host.memory.outside_line());
         }
         Some(line)
+    }
+
+    /// What the host's `limit` leaves the slice of `max`, its `MemoryMax`: `25G of its 46G`. A limit past `max` holds
+    /// back room only under a credit, which `max` reads and the limit does not (ADR 0099). Nothing leaves a slice more
+    /// than it has, so it says what the limit goes by: `47.5G for the 44.3G reserved there`.
+    fn host_share(&self, limit: u64, max: u64) -> String {
+        if limit > max {
+            format!(
+                "{} for the {} reserved there",
+                ByteSize(limit),
+                ByteSize(self.memory_in_use)
+            )
+        } else {
+            format!("{} of its {}", ByteSize(limit), ByteSize(max))
+        }
     }
 
     /// Whether measured admission holds the slice at its high-water mark (`Budget::held`), so no runner starts and
@@ -278,15 +294,13 @@ impl Budget {
                 ByteSize(self.remaining().unwrap_or(0))
             ),
             (0, Some(_)) => format!(
-                "free; the host leaves the slice {} of its {}",
-                ByteSize(host_limit),
-                ByteSize(max)
+                "free; the host leaves the slice {}",
+                self.host_share(host_limit, max)
             ),
             (_, Some(_)) => format!(
-                "free past every slot's cap; {} is free beside what runs, as the host leaves the slice {} of its {}",
+                "free past every slot's cap; {} is free beside what runs, as the host leaves the slice {}",
                 ByteSize(spare),
-                ByteSize(host_limit),
-                ByteSize(max)
+                self.host_share(host_limit, max)
             ),
         };
         // The blocks stay what runners reserve, so what pooling adds is said and not drawn.
@@ -400,7 +414,7 @@ pub struct FreePart {
     /// In bytes.
     pub memory: u64,
     /// Its figure and what it means, such as `8G` `of 24G free`, or while the host binds `6.52G` `free; the host
-    /// leaves the slice 25.27G of its 46G`.
+    /// leaves the slice 25.27G of its 46G` (`Budget::host_share`).
     pub reading: Reading,
 }
 

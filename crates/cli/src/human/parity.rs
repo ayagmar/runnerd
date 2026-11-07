@@ -55,6 +55,13 @@ fn status_of_a_later_daemon_stopping_in_a_way_this_client_does_not_know_still_sa
 }
 
 #[test]
+fn status_states_a_host_limit_past_memory_max_as_core_does() {
+    let daemon = runnerd_fixtures::past_memory_max();
+    let shown = status(&daemon.status, NOW, PLAIN);
+    assert!(shown.contains(&facts(&daemon).host), "{shown}");
+}
+
+#[test]
 fn status_states_the_budget_each_slot_and_why_each_job_waits_as_core_does() {
     let (daemon, facts) = fixtures();
     let text = status(&daemon.status, NOW, PLAIN);
