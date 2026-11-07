@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use super::{
     DockerApi, Error, FILES_LIMIT, JitConfig, RunnerSpec, connect_to, create_body, files_in,
-    is_being_removed, is_log_gone,
+    is_being_removed, is_log_gone, is_not_running,
 };
 use crate::isolation::Sysbox;
 
@@ -372,5 +372,29 @@ fn only_a_removal_under_way_reads_as_a_container_on_its_way_out() {
     assert!(!is_log_gone(&answer(
         500,
         "removal of container r is already in progress"
+    )));
+}
+
+#[test]
+fn only_an_exec_into_a_stopped_container_reads_as_not_running() {
+    // Catches another refusal going quiet: a capture that never starts on a running container loses its job's log.
+    let answer = |status_code: u16, message: &str| Error::DockerResponseServerError {
+        status_code,
+        message: message.to_owned(),
+    };
+    // Docker's words, from the journal of a restart that adopted a runner as it ended.
+    assert!(is_not_running(&answer(
+        409,
+        "container f7f5b92ece290de6e5c643b6362dd15d7ea9f42b1d4e9a89a12bb71c13ae225e is not running"
+    )));
+    for said in [
+        "container f7f5b92ece29 is paused, unpause the container before exec",
+        "removal of container f7f5b92ece29 is already in progress",
+    ] {
+        assert!(!is_not_running(&answer(409, said)), "{said}");
+    }
+    assert!(!is_not_running(&answer(
+        500,
+        "container f7f5b92ece29 is not running"
     )));
 }

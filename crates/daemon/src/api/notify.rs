@@ -543,14 +543,18 @@ async fn step(
         if target.retry_at.is_some_and(|at| at > Instant::now()) {
             continue;
         }
-        if !read_events(store, target).await {
-            let wait = target.back_off(&setup.timing);
-            warn!(
-                "notify {}: reading the history again in {}s",
-                target.config.name,
-                wait.as_secs()
-            );
-            continue;
+        match read_events(store, target).await {
+            EventsRead::Read => {}
+            EventsRead::Failed => {
+                let wait = target.back_off(&setup.timing);
+                warn!(
+                    "notify {}: reading the history again in {}s",
+                    target.config.name,
+                    wait.as_secs()
+                );
+                continue;
+            }
+            EventsRead::ShuttingDown => return,
         }
         if let Some(warned) = warned
             .as_ref()
@@ -583,21 +587,32 @@ async fn step(
     }
 }
 
-/// Takes in the stored events after the target's cursor; `false` when the history cannot be read.
-async fn read_events(store: &Store, target: &mut Target) -> bool {
+/// How a read of a target's stored events went.
+enum EventsRead {
+    /// It took in every event after its cursor.
+    Read,
+    /// The history could not be read; it said why.
+    Failed,
+    /// The daemon exits: the read stopped with the runtime, which is no failure.
+    ShuttingDown,
+}
+
+/// Takes in the stored events after the target's cursor.
+async fn read_events(store: &Store, target: &mut Target) -> EventsRead {
     loop {
         let batch = match store.events_after(target.cursor, 500).await {
             Ok(batch) => batch,
+            Err(store_error) if store_error.is_shutdown() => return EventsRead::ShuttingDown,
             Err(store_error) => {
                 warn!(
                     "notify {}: cannot read events: {store_error}",
                     target.config.name
                 );
-                return false;
+                return EventsRead::Failed;
             }
         };
         let Some(last) = batch.last().and_then(|envelope| envelope.id) else {
-            return true;
+            return EventsRead::Read;
         };
         for envelope in batch {
             target.take(envelope.event);

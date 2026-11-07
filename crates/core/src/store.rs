@@ -123,6 +123,14 @@ pub enum StoreError {
     Unread(PathBuf),
 }
 
+impl StoreError {
+    /// Whether a read stopped because the runtime shuts down, as when the daemon exits, rather than because the
+    /// history failed: the runtime cancels the blocking reads it has not run.
+    pub fn is_shutdown(&self) -> bool {
+        matches!(self, StoreError::Join(join) if join.is_cancelled())
+    }
+}
+
 /// A runner container as the history records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerRecord {
