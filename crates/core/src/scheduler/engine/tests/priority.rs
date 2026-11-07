@@ -552,6 +552,34 @@ async fn on_a_steady_reading_a_job_between_the_margins_starts_and_the_margin_and
     assert_eq!(fixture.runners_of("o/small"), 1, "nothing else fits");
 }
 
+/// A job the slice holds does not wait on the host's margin, so nothing swaps: a drain serves it by the plain one, and
+/// its barrier stands though the larger margin would have no room for it.
+#[tokio::test]
+async fn a_job_the_slice_holds_keeps_its_barrier_with_a_drain_between_the_host_margins() {
+    let mut fixture = Fixture::starved().await;
+    // 8.5G by the plain margin and 7.5G while short, with the 8G runner between.
+    fixture.host(21 * G / 2);
+    fixture.queue(vec![big(10), small(11)]);
+    for tick in 0..4 {
+        fixture.engine.tick(Shutdown::No).await;
+        assert!(
+            matches!(fixture.reason(10), Some(api::Waiting::Memory { .. })),
+            "tick {tick}: {:?}",
+            fixture.reason(10)
+        );
+        assert_eq!(
+            fixture.reason(11),
+            Some(api::Waiting::BehindMemory { job: 10 }),
+            "tick {tick}: the barrier stands"
+        );
+        assert!(
+            !fixture.engine.measured.host.short,
+            "tick {tick}: no job waits for the host"
+        );
+    }
+    assert_eq!(fixture.runners_of("o/small"), 2, "job 11 waits behind it");
+}
+
 /// Programs outside the slice hold the memory: no runner's end gives it back.
 #[tokio::test]
 async fn a_host_too_short_for_the_runner_after_a_full_drain_erects_no_barrier() {

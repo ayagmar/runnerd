@@ -144,18 +144,35 @@ pub struct Drained {
     pub memory: Option<i64>,
     /// The CPU budget, in millicores.
     pub cpu: Option<i64>,
-    /// What the host's memory leaves the slice, by the margin in force now (ADR 0055).
+    /// What the host's memory leaves the slice for a job the host holds: by the larger margin while a runner runs,
+    /// whichever margin is in force (ADR 0102).
     pub host: Option<i64>,
+    /// What it leaves for a job something else holds, by the plain margin: such a job's wait does not follow the margin,
+    /// so its barrier need not keep off it.
+    pub host_plain: Option<i64>,
 }
 
 impl Drained {
-    /// Whether a runner of `memory` and `cpu` fits, every known bound counted.
-    fn holds(self, memory: u64, cpu: u64) -> bool {
+    /// Whether a runner of `memory` and `cpu`, of a job `held` so, fits, every known bound counted.
+    fn holds(self, memory: u64, cpu: u64, held: Held) -> bool {
         let fits = |room: Option<i64>, needs: u64| {
             room.is_none_or(|room| room >= i64::try_from(needs).unwrap_or(i64::MAX))
         };
-        fits(self.memory, memory) && fits(self.host, memory) && fits(self.cpu, cpu)
+        let host = match held {
+            Held::ByHost => self.host,
+            Held::ByBudget => self.host_plain,
+        };
+        fits(self.memory, memory) && fits(host, memory) && fits(self.cpu, cpu)
     }
+}
+
+/// What holds a job back, which says by which margin a drain serves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// What the host's memory leaves the slice.
+    ByHost,
+    /// The slice's memory budget, its high-water mark or the CPU budget.
+    ByBudget,
 }
 
 /// A job a plan held for something scarce, with a free slot for its runner.
@@ -165,6 +182,8 @@ pub struct Short {
     pub job: u64,
     /// What it lacks first: memory before CPU, as `Waiting` says it.
     pub scarce: Scarce,
+    /// Whether the host holds it.
+    pub held: Held,
     /// What its runner takes of the memory budget.
     pub memory: u64,
     /// What its runner takes of the CPU budget, in millicores.
@@ -199,7 +218,8 @@ impl Barrier {
     ) -> Option<Barrier> {
         let drained = drained?;
         let since = waits.matured(short.job, now)?;
-        drained.holds(short.memory, short.cpu).then_some(Barrier {
+        let holds = drained.holds(short.memory, short.cpu, short.held);
+        holds.then_some(Barrier {
             job: short.job,
             scarce: short.scarce,
             memory: short.memory,

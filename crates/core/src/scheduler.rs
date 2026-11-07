@@ -13,7 +13,7 @@ pub mod engine;
 pub mod priority;
 pub mod warm;
 
-use priority::{Around, Backfill, Candidate, Caps, Older, Runner};
+use priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner};
 pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, Scarce, Wait, Waits};
 
 /// How long a started runner may wait for a job before it counts as surplus: covers the container's start and
@@ -730,6 +730,7 @@ impl Turn<'_> {
             priority::Short {
                 job: self.job,
                 scarce,
+                held: short.held(),
                 memory: self.memory,
                 cpu: self.cpu,
             },
@@ -800,6 +801,7 @@ fn unserved(repositories: &[Repository], decided: &mut Plan) {
 enum Short {
     Slot,
     Memory,
+    Host,
     Cpu,
 }
 
@@ -808,8 +810,16 @@ impl Short {
     fn scarce(self) -> Option<Scarce> {
         match self {
             Short::Slot => None,
-            Short::Memory => Some(Scarce::Memory),
+            Short::Memory | Short::Host => Some(Scarce::Memory),
             Short::Cpu => Some(Scarce::Cpu),
+        }
+    }
+
+    /// Whether the host is what holds the job.
+    fn held(self) -> Held {
+        match self {
+            Short::Host => Held::ByHost,
+            Short::Slot | Short::Memory | Short::Cpu => Held::ByBudget,
         }
     }
 }
@@ -862,7 +872,7 @@ fn why_waits(
                     free: unsigned(free),
                 },
             ),
-            Short::Memory,
+            Short::Host,
         ),
         (_, _, Some(free)) => (
             started.for_cpu(

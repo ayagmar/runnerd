@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use crate::api::Spread;
 use crate::api::{Basis, HostMemory, JobPeak};
 use crate::config::{self, Config};
-use crate::scheduler::priority::{Around, Backfill, Candidate, Caps, Older, Runner, Short};
+use crate::scheduler::priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner, Short};
 use crate::scheduler::{Barrier, Drained, Left, Pool, Scarce, Waits};
 use crate::sizing::{GRANULE, History, Measure, Ran, spread};
 use crate::time;
@@ -1344,6 +1344,9 @@ impl<'run> Replayer<'run> {
                 let limit = host::limit(&memory, !self.running.is_empty());
                 signed(limit).saturating_sub(signed(self.mirror))
             }),
+            host_plain: self.host_memory().map(|memory| {
+                signed(host::limit(&memory, false)).saturating_sub(signed(self.mirror))
+            }),
         }
     }
 
@@ -1613,30 +1616,31 @@ impl<'run> Replayer<'run> {
             return Err(Refused::Slot);
         }
         let starting = self.starting(queued, waiting, now);
-        let short = |scarce| Short {
+        let short = |scarce, held| Short {
             job: queued.job,
             scarce,
+            held,
             memory: starting.memory,
             cpu: starting.cpu,
         };
         if let Some(budget) = self.budget {
             if self.taken() + starting.memory > budget {
-                return Err(Refused::Budget(short(Scarce::Memory)));
+                return Err(Refused::Budget(short(Scarce::Memory, Held::ByBudget)));
             }
             if self.at_high_water() {
-                return Err(Refused::HighWater(short(Scarce::Memory)));
+                return Err(Refused::HighWater(short(Scarce::Memory, Held::ByBudget)));
             }
         }
         if self
             .host_left()
             .is_some_and(|left| left < signed(starting.memory))
         {
-            return Err(Refused::Host(short(Scarce::Memory)));
+            return Err(Refused::Host(short(Scarce::Memory, Held::ByHost)));
         }
         if let Some(cpu_budget) = self.cpu_budget {
             let taken: u64 = self.running.iter().map(|running| running.cpu).sum();
             if taken + starting.cpu > cpu_budget {
-                return Err(Refused::Budget(short(Scarce::Cpu)));
+                return Err(Refused::Budget(short(Scarce::Cpu, Held::ByBudget)));
             }
         }
         Ok(Admitted {

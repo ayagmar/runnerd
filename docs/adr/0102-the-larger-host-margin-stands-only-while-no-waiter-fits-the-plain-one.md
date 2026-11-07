@@ -24,7 +24,8 @@ were waiting. A replay of the host's readings put 222 minutes in that band, and 
   which was safe while the plain margin came back only to an empty slice. Now it comes back with runners running, and
   jobs behind a barrier are not waiters, so a barrier that followed the margin would take away the waiter that let it
   go: the two would swap at every tick and the younger job would never start. A drain's room no longer depends on the
-  band. A barrier can still always end: the empty slice's plain margin is the larger room.
+  band. A barrier can still always end: the empty slice's plain margin is the larger room. An owner the host does not
+  hold reads the plain margin, as its wait does not follow the band.
 - **What stays.** `MARGIN_SHARE` and `MARGIN_MIN`, the stall rule, the empty slice's first runner at the plain margin,
   seeds and reseeds at the plain margin (0063), the doctor. No reading, as before, leaves no larger margin. Nothing
   that runs is ever stopped.

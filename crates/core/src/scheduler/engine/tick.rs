@@ -844,10 +844,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The budgets a plan has beside what runs now, as `admitting` admits. `drained` keeps what no runner's end gives
-    /// back and reads none of the interlocks' zeros. The host's limit in it is the larger margin's while a runner runs,
-    /// whichever margin is in force: that one follows the jobs waiting (ADR 0102), and a barrier that followed it would
-    /// take them from the waiters that decide it. The empty slice's plain margin counts only once it is empty, as a warm
-    /// runner may keep it from ever being.
+    /// back and reads none of the interlocks' zeros. For a job the host holds, the host's limit in it is the larger
+    /// margin's while a runner runs, whichever margin is in force: that one follows the jobs waiting (ADR 0102), and a
+    /// barrier that followed it would take them from the waiters that decide it. The empty slice's plain margin counts
+    /// only once it is empty, as a warm runner may keep it from ever being. For any other job it is the plain margin's.
     pub(super) fn plan_budget(&self, admitting: &Admitting) -> Budget {
         let committed = self.committed_memory();
         let count = self.count(admitting.remembered);
@@ -883,6 +883,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 host: admitting.host.as_ref().map(|host| {
                     let limit = host::limit(&host.memory, running || host.stalled);
                     crate::scheduler::left(limit, committed)
+                }),
+                host_plain: admitting.host.as_ref().map(|host| {
+                    crate::scheduler::left(host::limit(&host.memory, false), committed)
                 }),
             },
         }
