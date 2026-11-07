@@ -462,11 +462,24 @@ async fn a_slot_whose_job_ended_takes_the_next_listed_job_within_seconds() {
 }
 
 /// Six of eight slots run long jobs while GitHub takes 1.8 s a request, as on the owner's host, and a job queues.
-/// Its runner's container starts within a start's time of the listing that showed it. The bug it catches: the tick
-/// reading every running job's details from GitHub, a few requests at a time, before it planned, which held each
-/// start back by about half a second per running job.
+/// Its runner's container starts within a start's time of the listing that showed it. Then that job's capture names
+/// it, and another job queues: it starts as fast, though the tick that lists it is the first to see the job taken.
+/// The bugs it catches: the tick reading every running job's details from GitHub, a few requests at a time, before it
+/// planned, which held each start back by about half a second per running job; and reading those of a job a runner
+/// took since the last tick, though the history's record of the listing that showed it names it.
 #[tokio::test(start_paused = true)]
 async fn a_job_listed_beside_running_jobs_starts_without_waiting_for_their_reads() {
+    /// How long after the first listing that showed it the `nth` job's runner started.
+    fn took(burst: &Burst, queued: Instant, nth: usize) -> Duration {
+        let started = queued + burst.seen.waits[nth];
+        let listed = burst
+            .listed_at
+            .iter()
+            .copied()
+            .find(|at| *at >= queued)
+            .unwrap();
+        started.saturating_duration_since(listed)
+    }
     let (github, docker) = burst_fakes(Duration::ZERO);
     github.0.lock().unwrap().latency = Duration::from_millis(1800);
     let dir = TestDir::new("listed-start");
@@ -482,25 +495,27 @@ async fn a_job_listed_beside_running_jobs_starts_without_waiting_for_their_reads
     assert_eq!(burst.running.len(), 6, "six jobs run: {:?}", burst.seen);
 
     burst.queue(1);
-    let queued = Instant::now();
+    let seventh = Instant::now();
     play(&mut burst, |burst, _| burst.seen.taken == 7).await;
+    // Its capture names it; the next tick is the first to take it.
+    let named = Instant::now() + burst.named_after;
+    play(&mut burst, |_, now| now >= named).await;
+    burst.queue(1);
+    let eighth = Instant::now();
+    play(&mut burst, |burst, _| burst.seen.taken == 8).await;
     handle.shutdown(Shutdown::Force);
     run.await.unwrap();
 
-    let started = queued + burst.seen.waits[6];
-    let listed = burst
-        .listed_at
-        .iter()
-        .copied()
-        .find(|at| *at >= queued)
-        .unwrap();
-    let took = started.saturating_duration_since(listed);
     // A start is its registration, 1.8 s, and its container's start, 1 s; the world sees a listing within 0.1 s of
-    // its answer. Reading the six jobs before the plan took two rounds of requests more.
-    assert!(
-        took <= Duration::from_secs(3),
-        "the job's runner started {took:?} after the listing that showed it"
-    );
+    // its answer. Reading the six jobs before the plan took two rounds of requests more, and the seventh one more.
+    for (nth, queued) in [(6, seventh), (7, eighth)] {
+        let took = took(&burst, queued, nth);
+        assert!(
+            took <= Duration::from_secs(3),
+            "job {}'s runner started {took:?} after the listing that showed it",
+            nth + 1
+        );
+    }
 }
 
 /// Four slots work through a long backlog while each removal takes 5 to 25 s, so a slot's next runner ends while

@@ -36,5 +36,8 @@ them for its steps in the history and its build cache writes, neither of which a
   (`tests/pacing.rs`). GitHub is asked no more: in `workload_figures`, 772 job reads an hour before and 744 after.
 - A running job's steps and its build cache decision come a tick's starts later than before, seconds at most.
 - A job a runner took from a listing is named by the history's record of that listing, so its details are read after
-  the plan from the next tick on; the listing already placed it in its run. After a restart no runner's job is named
-  yet, so the first tick reads them all before its plan, as before.
+  the plan from its first tick on; the listing already placed it in its run. Only a job no listing showed is read
+  before the plan. After a restart no runner's job is named yet, so the first tick reads them all before its plan, as
+  before.
+- A stop asked during a tick's starts skips the reads after them: the stop's own tick reads the jobs, or the next
+  start does, and its idle runners are removed sooner (ADR 0091).

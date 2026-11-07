@@ -522,8 +522,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
-        // The jobs claimed above, so their details are read with the running ones'.
+        // The jobs claimed above, so their details are read with the running ones'. A job a listing showed is named
+        // by the history's record of it; only those no listing showed need GitHub's details before the plan.
         self.take_found();
+        self.find_keys().await;
         let unnamed: Vec<(String, u64)> = self
             .occupied()
             .filter(|(_, occupant)| occupant.key.is_none())
