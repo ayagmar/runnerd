@@ -214,11 +214,14 @@ pub struct HostBudget {
 }
 
 impl HostBudget {
-    /// Whether the host itself lacks `needs` bytes for a new runner: its tasks stall, or `HostMemory::room` is less.
-    /// Otherwise a job the host limit holds waits for what runs, whose reservations reach the limit, and closing
-    /// programs is not what it asks for (ADR 0103).
+    /// Whether the host itself lacks `needs` bytes for a new runner: its tasks stall, `HostMemory::room` is less, or
+    /// that room is under one more margin, so `MemAvailable` is under twice the plain margin, the line `host::stalls`
+    /// reads. There a small job fits only by what the host is about to run out of, and what closing programs frees is
+    /// what starts it. Otherwise a job the host limit holds waits for what runs, whose reservations reach the limit
+    /// (ADR 0103).
     pub fn short_of(&self, needs: u64) -> bool {
-        self.stalled || needs > self.memory.room()
+        let room = self.memory.room();
+        self.stalled || needs > room || room < host_margin(self.memory.grown())
     }
 }
 

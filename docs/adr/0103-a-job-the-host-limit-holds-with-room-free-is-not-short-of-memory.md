@@ -15,10 +15,15 @@ says about them is wrong.
 
 ## Decision
 
-- **The host lacks room when it stalls, or when `MemAvailable`, with what it can still grow by, less the plain margin is under
-  what the job needs.** `HostMemory::room` and `HostBudget::short_of` say it, from the wire's reading, so a client words a wait
-  as the daemon logs it. The plain margin, not the one in force: a job between the margins has room, and 0102 lets it go when
-  the count allows. `host_margin` moves to `api` for this; `admission::host::margin` adds the band on top.
+- **The host lacks room when it stalls, when `MemAvailable`, with what it can still grow by, less the plain margin is under
+  what the job needs, or when that room is under one more margin.** `HostMemory::room` and `HostBudget::short_of` say it, from
+  the wire's reading, so a client words a wait as the daemon logs it. The plain margin, not the one in force: a job between the
+  margins has room, and 0102 lets it go when the count allows. `host_margin` moves to `api` for this;
+  `admission::host::margin` adds the band on top.
+- **Under twice the plain margin the host is short, however small the job.** Need alone would read a 1G job as having room on a
+  62G host down to 6G, with the slice reserving 10G past what it holds: no programs named, and `host-held` silent however long it
+  waits, though closing programs is what would start it. Twice the margin is the line `host::stalls` already reads. It counts
+  what the host can still grow by, as `room` does, so a VM that shrank while idle is not short while it can grow to its ceiling.
 - **A job held with room free says what binds.** `The host has 42.13G of 62G available, but what runs may still grow into it:
   needs 7G; 3.37G of the 49.37G it leaves the slice is free`. It names no programs, as closing them is not what it waits for.
   `Waiting::HostMemory` stays, so `WaitKind`, barriers and 0102 read it as before.
@@ -32,6 +37,8 @@ says about them is wrong.
 
 ## Consequences
 
+- Above the line a job held by the count reads as held by what runs, even where closing programs would also start it, as it raises
+  the limit. That is the trade: with twice the margin free, the host is not what is short.
 - The longest wait `host-held` quotes can include spans held with room free, as `host_waited` does not tell the two apart. A
   job can pass 30 minutes that way and fire the insight at the first plan the host really lacks room. The insight still only
   speaks while the host lacks room.

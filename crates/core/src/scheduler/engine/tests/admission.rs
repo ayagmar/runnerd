@@ -1245,9 +1245,6 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     host_at(&handle.store, 0, 4 * G + 2 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2);
-    // The two take what they reserved, which leaves the host no room past its margin.
-    host_at(&handle.store, 2 * 1280 * M, 4 * G + 100 * M, 0);
-    engine.tick(Shutdown::No).await;
     engine.publish();
     // Once short with runners running, the host keeps half the margin more free: nothing is to spare until 6G.
     let short = Some(api::Waiting::HostMemory {
@@ -2058,6 +2055,23 @@ async fn a_job_the_host_limit_holds_with_room_free_asks_nobody_to_close_programs
         host_held_insights(&engine, &handle).await,
         1,
         "1G past the margin, and the job needs 1.25G"
+    );
+
+    // The job would fit, but only by taking what the host is about to run out of: closing programs is what starts it.
+    runners_use(&github, &handle.store, 512 * M);
+    slice_at(&handle.store, G);
+    small_host_at(&handle.store, 3 * G + 512 * M);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(
+        only_reason(&handle).starts_with("The host is short of memory: needs 1.25G"),
+        "{}",
+        only_reason(&handle)
+    );
+    assert_eq!(
+        host_held_insights(&engine, &handle).await,
+        1,
+        "1.5G past the margin, under one more margin of 2G"
     );
 
     // Room comes back: the next plan takes the job off what the owner is told.

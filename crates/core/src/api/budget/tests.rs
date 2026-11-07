@@ -126,6 +126,47 @@ fn every_client_says_the_held_measured_budget_admits_no_runner() {
     );
 }
 
+#[test]
+fn a_host_near_the_edge_lacks_room_even_for_a_job_that_would_fit() {
+    // Catches `host-held` staying silent however long a small job waits on a host down to 6G, and a VM that can still
+    // grow to its ceiling reading as short because it shrank while idle.
+    let at = |total: u64, available: u64, ceiling: Option<u64>| HostBudget {
+        memory: HostMemory {
+            total,
+            available,
+            ceiling,
+            ..host(0, false).memory
+        },
+        ..host(0, false)
+    };
+    // 62G keeps a 3.875G margin, so twice that is 7.75G.
+    let edge = 7 * G + 768 * (1 << 20);
+    assert!(
+        at(62 * G, 6 * G, None).short_of(G),
+        "2.125G of room is under one margin"
+    );
+    assert!(
+        at(62 * G, edge - 1, None).short_of(G),
+        "just under the line"
+    );
+    assert!(
+        !at(62 * G, edge, None).short_of(G),
+        "on the line, and the job fits"
+    );
+    assert!(
+        at(62 * G, edge, None).short_of(4 * G),
+        "the job does not fit"
+    );
+    assert!(
+        !at(62 * G, 42 * G, None).short_of(7 * G),
+        "the sandbox's 42G"
+    );
+    assert!(
+        !at(2 * G, G + G / 2, Some(24 * G)).short_of(G),
+        "1.5G now, and 22G more to come"
+    );
+}
+
 /// A reading of a 64G host that leaves the slice `limit`, so `spare` beside the 8G running.
 fn host(limit: u64, stalled: bool) -> HostBudget {
     HostBudget {
