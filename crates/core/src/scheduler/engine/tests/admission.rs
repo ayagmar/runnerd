@@ -3,6 +3,7 @@
 //! and the decision in each runner's record.
 
 use super::*;
+use crate::admission::pooled::POOL_AFTER;
 use crate::api::{AdmissionPolicy, Basis, JobPeak};
 use crate::observe::metrics::Events;
 use crate::scheduler::PRIORITY_AFTER;
@@ -1256,6 +1257,7 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         "the two left wait for the host's memory"
     );
     // Insights are told the same two jobs, with the reading that says who holds the memory.
+    handle.store.flush().await;
     let hold = handle.store.insights(0).await.unwrap().host.unwrap();
     assert_eq!(hold.jobs.len(), 2, "the two left wait: {hold:?}");
     assert_eq!(hold.memory.holders[0].name, "java");
@@ -1866,4 +1868,422 @@ async fn waiting_runners_a_pass_raised_past_the_budget_are_stopped_by_the_next_t
         in_use <= 10 * G,
         "the runners reserve {in_use} bytes of the 10G slice"
     );
+}
+
+/// `measured()` with the pooled count off.
+fn unpooled() -> String {
+    measured().replace(
+        "admission = \"measured\"",
+        "admission = \"measured\"\npooled_count = false",
+    )
+}
+
+/// A recent sample of every runner using `used`, and of a slice and a host with room to spare.
+fn roomy_readings(github: &FakeGithub, store: &Store, used: u64) {
+    runners_use(github, store, used);
+    slice_at(store, G);
+    host_at(store, G, 40 * G, 0);
+}
+
+/// Every running job's first minute went by.
+fn first_minute_passes(engine: &mut Engine<FakeGithub, FakeDocker>) {
+    for occupant in engine.slots.values_mut().flatten().flatten() {
+        occupant.job_started = occupant.job_started.map(|at| at - POOL_AFTER);
+    }
+}
+
+/// An 8G slice running `build` and `e2e`, each predicted at 3.5G and using 512M, 1G left of the plain count: their
+/// runners' room above use is 3G each, which comes to 1.76G of credit.
+pub(super) async fn two_settled_jobs(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let (mut engine, handle) = engine_with(github, docker, dir, config);
+    engine.memory_max = Some(8 * G);
+    history_of(&handle.store, "build", 1000, 3 * G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    history_of(&handle.store, "lint", 3000, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        job(1),
+        QueuedJob {
+            name: "e2e".to_owned(),
+            ..job(2)
+        },
+    ];
+    for slot in 1..=2 {
+        let capture = format!("@@job {slot} {slot}\n");
+        docker.0.lock().unwrap().slot_captures.insert(slot, capture);
+    }
+    roomy_readings(github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    roomy_readings(github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(github, &handle.store, 512 * M);
+    (engine, handle)
+}
+
+/// A queued job of o/r predicted at 1.25G.
+fn small(id: u64) -> QueuedJob {
+    QueuedJob {
+        name: "lint".to_owned(),
+        ..job(id)
+    }
+}
+
+#[tokio::test]
+async fn settled_jobs_of_two_kinds_make_room_a_start_goes_by_and_every_reader_agrees() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    let pooled = budget.pooled.expect("two settled jobs, room above use");
+    assert_eq!(budget.memory_in_use, 7 * G, "the plain count stays a fact");
+    assert_eq!(pooled.counted, 7 * G - pooled.credit);
+    assert_eq!(pooled.runners, 2);
+    // 6G less the root of 2 × 3G².
+    assert_eq!(pooled.credit / M, 1799);
+    let remembered = engine.host_remembered();
+    assert_eq!(engine.count(remembered).pooled(), pooled.counted);
+    let plan = engine.plan_budget(&engine.admitting(&mut [], None));
+    assert_eq!(
+        plan.memory,
+        Some(crate::scheduler::left(8 * G, pooled.counted)),
+        "the plan starts from what the status shows"
+    );
+    assert_eq!(
+        budget.host.map(|host| host.spare),
+        Some(G + 40 * G - 4 * G - budget.memory_in_use),
+        "the host's limit reads the plain count: the overcount is its margin"
+    );
+    assert_eq!(
+        plan.host,
+        Some(crate::scheduler::left(
+            G + 40 * G - 4 * G,
+            budget.memory_in_use
+        )),
+        "and so does a plan's"
+    );
+
+    // 1G is left of the plain count: lint's 1.25G fits only in the pooled one.
+    github.0.lock().unwrap().queued = vec![small(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3, "lint starts");
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert_eq!(budget.memory_in_use, 8 * G + 256 * M, "past 8G, in full");
+    assert_eq!(
+        budget.pooled.map(|after| after.credit),
+        Some(pooled.credit),
+        "a runner just started changes no credit"
+    );
+
+    // The next tick does not stop the runner the last one started.
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    let stopped = github
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("delete "))
+        .count();
+    assert_eq!(stopped, 0, "what fits the pooled count stays");
+}
+
+#[tokio::test]
+async fn a_raised_waiting_runner_stops_only_once_the_pooled_count_is_past_the_budget() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    github.0.lock().unwrap().queued = vec![small(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3, "lint's runner waits");
+    github.0.lock().unwrap().queued = Vec::new();
+    let waiting = engine
+        .occupied()
+        .find(|(_, occupant)| occupant.job.is_none())
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .unwrap();
+    engine.measured.raised.push(waiting);
+
+    // 8.25G plain of the 8G budget: past it, but the count is not.
+    roomy_readings(&github, &handle.store, 512 * M);
+    assert_eq!(engine.over_budget(&[]), [], "the pooled count fits");
+
+    // The host's reading goes old, the credit with it: the same runner is now past the budget.
+    handle.store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000 - 60,
+        total: 64 * G,
+        available: 40 * G,
+        slice: G,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    });
+    assert_eq!(engine.over_budget(&[]).len(), 1, "the plain count does not");
+}
+
+#[tokio::test]
+async fn the_last_check_before_a_start_keeps_the_margin_its_plan_chose() {
+    // The runners a plan starts into an empty slice need only the first runner's margin, and the credit's host guard
+    // goes by that margin: read afresh, the larger one takes the credit back from a start the plan allowed.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    // 21G available: 1G past the 20G kept by the margin, under the 22G kept by the larger one.
+    host_at(&handle.store, G, 21 * G, 0);
+    engine.measured.host.short = true;
+    let lint = 1280 * M;
+    let mut plan = engine.admitting(&mut [], None);
+    plan.remembered.short = false;
+    assert!(
+        engine.still_fits(&plan, "app", lint, 0),
+        "1G left and 1G of credit, by the plan's margin"
+    );
+    plan.remembered.short = true;
+    assert!(
+        !engine.still_fits(&plan, "app", lint, 0),
+        "no credit by the larger margin"
+    );
+}
+
+#[tokio::test]
+async fn a_reseed_reads_the_room_a_plan_reads() {
+    // A plan fills what the pooled count leaves; a reseed reading the plain count would wait on room plans keep taking.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let second_profile = |config: String| {
+        config.replace(
+            "[[repositories]]",
+            "[profiles.spare]\nimage_stage = \"spare\"\ncpus = 2\nmemory = \"2G\"\nslots = 1\n\n\
+             [[repositories]]\nname = \"o/s\"\nprofile = \"spare\"\nlabels = [\"spare\"]\nwarm = 0\n\n\
+             [[repositories]]",
+        )
+    };
+    let (engine, _) = two_settled_jobs(&github, &docker, &dir, &second_profile(measured())).await;
+    assert!(
+        engine.fits_seed("spare"),
+        "2G of the 2.76G the count leaves"
+    );
+
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (engine, _) = two_settled_jobs(&github, &docker, &dir, &second_profile(unpooled())).await;
+    assert!(!engine.fits_seed("spare"), "1G left of the plain count");
+}
+
+#[tokio::test]
+async fn with_the_pooled_count_off_the_same_jobs_count_and_plan_as_they_add_up() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &unpooled()).await;
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert_eq!(budget.pooled, None);
+    assert_eq!(budget.memory_in_use, 7 * G);
+    let plan = engine.plan_budget(&engine.admitting(&mut [], None));
+    assert_eq!(plan.memory, Some(crate::scheduler::left(8 * G, 7 * G)));
+    assert_eq!(plan.credit_room, 0, "nothing for a barrier to expect");
+    github.0.lock().unwrap().queued = vec![small(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "lint's 1.25G waits");
+}
+
+#[tokio::test]
+async fn caps_admission_pools_nothing() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    engine.config.host.admission = crate::config::Admission::Caps;
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.pooled, None);
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 8 * G);
+}
+
+#[tokio::test]
+async fn any_stale_reading_takes_the_credit_back() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    let old = time::now_ms() - 60_000;
+    let credit = |engine: &mut Engine<FakeGithub, FakeDocker>| {
+        engine.publish();
+        let budget = handle.status.borrow().budget.clone();
+        budget.pooled.map(|pooled| pooled.credit)
+    };
+    assert!(credit(&mut engine).is_some(), "the readings are fresh");
+
+    // The host's reading stops: the sampler reads /proc separately from the slice.
+    handle.store.host_memory(api::HostMemory {
+        at: old / 1000,
+        total: 64 * G,
+        available: 40 * G,
+        slice: G,
+        some: Some(api::Pressure::default()),
+        full: Some(api::Pressure::default()),
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    });
+    assert_eq!(credit(&mut engine), None, "without a recent host reading");
+
+    // The slice's sample goes old: every runner counts at its cap too.
+    host_at(&handle.store, G, 40 * G, 0);
+    handle.store.host_sample(api::HostSample {
+        at: old / 1000,
+        cpu: 0,
+        memory: G,
+    });
+    assert_eq!(credit(&mut engine), None, "without a recent slice sample");
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 8 * G);
+
+    // A runner's own sample goes old: it counts at its cap, and the other alone pools with nothing.
+    slice_at(&handle.store, G);
+    let stale = engine
+        .occupied()
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .next()
+        .unwrap();
+    runners_use(&github, &handle.store, 512 * M);
+    handle.store.samples(vec![SampleRecord {
+        runner: stale.clone(),
+        at: old,
+        cpu: 0,
+        cpu_usage: 0,
+        memory: 512 * M,
+        network_received: 0,
+        network_sent: 0,
+        cpu_held: crate::observe::metrics::CpuHeld::default(),
+        events: Events::default(),
+    }]);
+    assert_eq!(credit(&mut engine), None, "its one job left to pool");
+}
+
+#[tokio::test]
+async fn a_runner_a_restart_adopts_counts_in_full_for_the_rest_of_its_job() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    handle.store.flush().await;
+    drop((engine, handle));
+
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    engine.recover().await.unwrap();
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert_eq!(budget.memory_in_use, 7 * G, "both keep what they reserved");
+    assert_eq!(budget.pooled, None, "this daemon did not see them start");
+}
+
+#[tokio::test]
+async fn a_waiting_runner_a_restart_adopts_counts_in_full_once_it_takes_a_job() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    history_of(&handle.store, "build", 1000, 3 * G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        job(1),
+        QueuedJob {
+            name: "e2e".to_owned(),
+            ..job(2)
+        },
+    ];
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    handle.store.flush().await;
+    // The last capture started may not have run yet, and would read the job as this daemon's.
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    // Each takes its job while no daemon runs.
+    for slot in 1..=2 {
+        let capture = format!("@@job {slot} {slot}\n");
+        docker.0.lock().unwrap().slot_captures.insert(slot, capture);
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(&github, &handle.store, 512 * M);
+    let found = engine
+        .occupied()
+        .filter(|(_, occupant)| occupant.job_started.is_some() && occupant.key.is_some())
+        .count();
+    assert_eq!(found, 2, "this daemon found both jobs");
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.pooled,
+        None,
+        "their runners are not known to have started as predicted"
+    );
+}
+
+#[tokio::test]
+async fn a_host_that_stalls_or_runs_short_takes_the_credit_back_and_holds_the_start() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    // Under the margin and a quarter of the host: 20G.
+    host_at(&handle.store, G, 19 * G, 0);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.pooled, None);
+    github.0.lock().unwrap().queued = vec![small(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "lint waits again");
 }

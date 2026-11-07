@@ -15,7 +15,7 @@ use super::admission::Admitting;
 use super::history::CAPTURE_DRAIN;
 use super::runners::Collected;
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
-use crate::admission::host;
+use crate::admission::{host, pooled};
 use crate::api::{AdmissionPolicy, Basis};
 use crate::config::Admission;
 use crate::docker::{self, DockerApi};
@@ -239,6 +239,14 @@ async fn list<G: GithubApi>(
         .collect()
         .await;
     Listings { runners, queued }
+}
+
+/// What a runner holds of the budget.
+struct Held {
+    /// What it takes of it.
+    takes: u64,
+    /// What it uses, from a recent sample.
+    used: Option<u64>,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -714,7 +722,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         let free_memory = self
             .memory_max
-            .map(|max| max.saturating_sub(self.memory_in_use()));
+            .map(|max| max.saturating_sub(self.count(self.host_remembered()).pooled()));
         let admitting = self.admitting(&mut repositories, free_memory);
         let mut plan = plan(
             &repositories,
@@ -838,15 +846,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// The budgets a plan has beside what runs now, as `admitting` admits. `drained` keeps what no runner's end gives
     /// back and reads none of the interlocks' zeros. The host's limit in it is the one in force: the plain margin
     /// comes back only with no runner in the slice, and a warm runner may keep it from ever being empty.
-    fn plan_budget(&self, admitting: &Admitting) -> Budget {
+    pub(super) fn plan_budget(&self, admitting: &Admitting) -> Budget {
         let committed = self.committed_memory();
+        let count = self.count(admitting.remembered);
         Budget {
             // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
             memory: if admitting.held {
                 Some(0)
             } else {
                 self.memory_max
-                    .map(|max| crate::scheduler::left(max, self.memory_in_use()))
+                    .map(|max| crate::scheduler::left(max, count.pooled()))
             },
             cpu: admitting
                 .cpu
@@ -856,8 +865,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             host: admitting
                 .host
                 .as_ref()
-                .map(|host| host::left(host.limit, self.memory_in_use(), host.stalled)),
+                .map(|host| host::left(host.limit, count.plain, host.stalled)),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
+            credit_room: self.most_credit().saturating_sub(count.credit),
             drained: Drained {
                 memory: self
                     .memory_max
@@ -880,9 +890,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// on, such as a runner whose stop failed. Without a recent sample of the slice, measured admission counts it at
     /// its cap, as the plan would then. The host keeps the margin the plan chose: the runners a plan starts into an
     /// empty slice all need only the first runner's.
-    fn still_fits(&self, plan: &Admitting, profile: &str, memory: u64, cpu: u64) -> bool {
+    pub(super) fn still_fits(
+        &self,
+        plan: &Admitting,
+        profile: &str,
+        memory: u64,
+        cpu: u64,
+    ) -> bool {
         let mut now = self.admitting(&mut [], None);
         now.host = self.host_budget_by(plan.remembered);
+        now.remembered = plan.remembered;
         let memory = match self.config.profiles.get(profile) {
             Some(profile) if now.policy == AdmissionPolicy::Measured && now.slice.is_none() => {
                 memory.max(profile.memory.0)
@@ -967,35 +984,37 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .is_some_and(Option::is_some)
     }
 
-    /// What the runners take (`takes`), and the memory caps of the seed containers (which run with their profile's
-    /// limits) and the room waiting ones hold (`seed_memory`), the shells and the mirror.
-    pub(super) fn memory_in_use(&self) -> u64 {
-        let runners: u64 = self
-            .occupied()
-            .map(|(_, occupant)| self.takes(occupant))
-            .sum();
-        runners + self.committed_memory()
-    }
-
-    /// The part of `memory_in_use` no runner's end gives back: the seed containers and the room waiting ones hold, the
+    /// The part of the plain count no runner's end gives back: the seed containers and the room waiting ones hold, the
     /// shells and the mirror.
-    fn committed_memory(&self) -> u64 {
+    pub(super) fn committed_memory(&self) -> u64 {
         let reseeds: u64 = self.seed_memory().values().sum();
         reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
 
     /// What a runner takes of the budget.
     pub(super) fn takes(&self, occupant: &Occupant) -> u64 {
+        self.held_by(occupant).takes
+    }
+
+    /// What a runner takes of the budget and what it is known to use.
+    fn held_by(&self, occupant: &Occupant) -> Held {
         match self.config.host.admission {
             // Whatever it reserved under measured admission before a reload.
-            Admission::Caps => occupant.memory,
+            Admission::Caps => Held {
+                takes: occupant.memory,
+                used: None,
+            },
+            // Nothing once its container's cgroup is gone: its job ended and its memory with it, though its slot waits
+            // for its log and its removal, for 20 s after a burst.
+            Admission::Measured if self.store.container_gone(&occupant.runner_name) => Held {
+                takes: 0,
+                used: None,
+            },
             // What it uses when that is more: a job past its prediction, or one in a burst of starts. Its cap when
             // that is not known: the slice's or its own last sample is older than three intervals, as when the
-            // sampler stalls or cannot read its container. Nothing once its container's cgroup is gone: its job ended
-            // and its memory with it, though its slot waits for its log and its removal, for 20 s after a burst.
-            Admission::Measured if self.store.container_gone(&occupant.runner_name) => 0,
+            // sampler stalls or cannot read its container.
             Admission::Measured => {
-                let now = time::now_ms();
+                let now = self.clock.now_ms();
                 let fresh = 3 * u64::try_from(SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX);
                 let slice_sampled = self
                     .store
@@ -1007,14 +1026,71 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .as_ref()
                     .map_or_else(|| time::ms(occupant.started_at), |sample| sample.at);
                 if !slice_sampled || sampled_at + fresh < now {
-                    occupant.memory
+                    Held {
+                        takes: occupant.memory,
+                        used: None,
+                    }
                 } else {
-                    occupant
-                        .reserved()
-                        .max(own.map_or(0, |sample| sample.memory))
+                    let used = own.map(|sample| sample.memory);
+                    Held {
+                        takes: occupant.reserved().max(used.unwrap_or(0)),
+                        used,
+                    }
                 }
             }
         }
+    }
+
+    /// The most the pooled count may take off the plain one: none under caps or with `[host] pooled_count` off.
+    fn most_credit(&self) -> u64 {
+        let measured = self.config.host.admission == Admission::Measured;
+        if measured && self.config.host.pooled_count {
+            pooled::MOST_CREDIT
+        } else {
+            0
+        }
+    }
+
+    /// The aggregate count of what runs (ADR 0099), the host going by the margin `remembered` asks for.
+    pub(super) fn count(&self, remembered: host::Remembered) -> pooled::Count {
+        let now = SystemTime::now();
+        let runners: Vec<pooled::Runner<'_>> = self
+            .occupied()
+            .map(|(_, occupant)| {
+                let held = self.held_by(occupant);
+                pooled::Runner {
+                    key: occupant.key.as_ref(),
+                    takes: held.takes,
+                    used: held.used,
+                    // An adopted runner's job started under another daemon.
+                    ran: occupant
+                        .job_started
+                        .filter(|_| occupant.purpose.is_some())
+                        .and_then(|started| now.duration_since(started).ok()),
+                    basis: occupant.admission.map(|admission| admission.basis),
+                }
+            })
+            .collect();
+        let fresh = (3 * SAMPLE_INTERVAL).as_secs();
+        let slice = self
+            .store
+            .latest_host_sample()
+            .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
+            .zip(self.memory_max)
+            .map(|(sample, memory_max)| pooled::Slice {
+                memory: sample.memory,
+                memory_max,
+            });
+        let host = self
+            .host_memory()
+            .map(|memory| host::pooling(&memory, remembered));
+        pooled::count(&pooled::Snapshot {
+            runners: &runners,
+            committed: self.committed_memory(),
+            slice,
+            host,
+            most: self.most_credit(),
+        })
     }
 
     /// The mirror's part of `memory_in_use`.

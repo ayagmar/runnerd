@@ -853,6 +853,7 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,
+            pooled: None,
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
@@ -1644,4 +1645,90 @@ async fn pruning_job_records_moves_where_the_priced_history_starts_across_a_rest
         "the window reads as cut short, not as one without jobs: {}",
         window.headline()
     );
+}
+
+#[tokio::test]
+async fn a_trace_reads_each_run_from_its_start_and_names_it_when_the_daemon_could() {
+    use crate::admission::trace::Point;
+    use crate::api::Event;
+
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    let start = crate::time::now_ms() - 100_000;
+    store.queued("o/r", &queued(1), start);
+    store.runner_started(runner("listed", start));
+    store.claimed(1, 10, "listed", start + 5000);
+    let unnamed = QueuedJob {
+        name: String::new(),
+        ..queued(2)
+    };
+    store.queued("o/r", &unnamed, start);
+    store.runner_started(runner("unlisted", start));
+    store.claimed(2, 20, "unlisted", start + 5000);
+    store.samples(vec![
+        sample("listed", start + 7000, 0, 0),
+        sample("unlisted", start + 7000, 0, 0),
+    ]);
+    store.lost(2, start + 90_000);
+    let memory = api::HostMemory {
+        at: start / 1000,
+        total: 64 << 30,
+        available: 30 << 30,
+        slice: 4 << 30,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    };
+    store.event(Event::BudgetChanged {
+        budget: api::Budget {
+            host: Some(api::HostBudget {
+                memory,
+                limit: 0,
+                spare: 0,
+                stalled: false,
+            }),
+            ..api::Budget::default()
+        },
+    });
+    store.flush().await;
+
+    let trace = super::trace_at(&path, start, 15_000, Some(3 << 30))
+        .unwrap()
+        .unwrap();
+    let listed = trace
+        .runs
+        .iter()
+        .find(|(id, _)| !id.name.is_empty())
+        .map(|(_, run)| run)
+        .unwrap();
+    assert_eq!(
+        listed.samples,
+        vec![Point {
+            at: 2000,
+            memory: 1000
+        }],
+        "from its job's start, not its runner's"
+    );
+    assert_eq!(
+        listed.named_after, 15_000,
+        "by the next poll after its start"
+    );
+    let unlisted = trace
+        .runs
+        .iter()
+        .find(|(id, _)| id.name.is_empty())
+        .map(|(_, run)| run)
+        .unwrap();
+    assert!(
+        unlisted.named_after > 15_000,
+        "only GitHub's details named it, {} ms in",
+        unlisted.named_after
+    );
+    assert_eq!(trace.total, 64 << 30);
+    assert_eq!(trace.overhead, 3 << 30, "as the caller said");
+    let outside = trace.outside.last().map(|reading| reading.memory);
+    assert_eq!(outside, Some(30 << 30), "all the host has beside the slice");
 }

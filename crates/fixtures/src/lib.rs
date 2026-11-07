@@ -193,6 +193,11 @@ fn status() -> Status {
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(24 * GIB),
             memory_in_use: 22 * GIB,
+            pooled: Some(api::Pooled {
+                credit: 256 * MIB,
+                counted: 22 * GIB - 256 * MIB,
+                runners: 3,
+            }),
             admission: AdmissionPolicy::Measured,
             held: false,
             mirror_memory: 0,
@@ -1213,8 +1218,12 @@ mod tests {
         );
         assert_eq!(
             daemon.status.budget.host_withheld(),
-            Some(3 * GIB / 2),
-            "the host holds back 1.5G of the 2G MemoryMax leaves"
+            Some(7 * GIB / 4),
+            "the host holds back 1.75G of the 2.25G MemoryMax leaves the pooled count"
+        );
+        assert_eq!(
+            facts.budget,
+            "21.75G of 24G counted in runnerd.slice by predicted peaks: 22G reserved, 256M pooled"
         );
         let words: Vec<&str> = facts.slots.iter().map(|slot| slot.word).collect();
         assert_eq!(words, ["running", "warm", "starting", "starting"]);

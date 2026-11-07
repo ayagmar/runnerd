@@ -40,7 +40,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core | Accepted |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets | Amended by 0091 |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check | Amended by 0037, 0039, 0050, 0055, 0070 |
-| [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag | Amended by 0036, 0037, 0055, 0056, 0058, 0070, 0096 |
+| [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag | Amended by 0036, 0037, 0055, 0056, 0058, 0070, 0096, 0099 |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit | Accepted |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage | Amended by 0077 |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time | Amended by 0070 |
@@ -103,8 +103,9 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Accepted |
 | [0094](0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md) | A profile's upkeep stops its runners only for a reseed that will replace the snapshot | Accepted |
 | [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096 |
-| [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098 |
-| [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098 |
-| [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Accepted |
+| [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099 |
+| [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099 |
+| [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099 |
+| [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Accepted |
 | [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Accepted |
 | [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md) | The host's reading includes its swap, and admission ignores it | Accepted |

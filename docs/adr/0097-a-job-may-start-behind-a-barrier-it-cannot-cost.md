@@ -1,7 +1,8 @@
 # 0097. A job may start behind a barrier it cannot cost
 
 Status: **Accepted** (2026-11-06), amended by [0098](0098-a-pool-waits-longer-for-its-first-barrier.md), whose limits
-move every replay figure here. Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Passes follow
+move every replay figure here, and by [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md), which counts the
+largest credit when it says when room gathers. Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Passes follow
 [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md). No wire, schema or config change.
 
 ## Context

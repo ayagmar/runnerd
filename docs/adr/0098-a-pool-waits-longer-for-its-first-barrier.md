@@ -1,6 +1,6 @@
 # 0098. A pool waits longer for its first barrier
 
-Status: **Accepted** (2026-11-06). Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) and
+Status: **Accepted** (2026-11-06), amended by [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md). Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) and
 [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md). No wire, schema or config change.
 
 ## Context

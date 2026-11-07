@@ -1104,6 +1104,7 @@ mod tests {
                 slice: "runnerd.slice".to_owned(),
                 memory_max: Some(33 << 30),
                 memory_in_use: 30 << 30,
+                pooled: None,
                 admission: AdmissionPolicy::Measured,
                 held: true,
                 ..Budget::default()

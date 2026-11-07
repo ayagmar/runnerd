@@ -692,10 +692,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ));
         }
         if let Some(max) = self.memory_max {
-            let in_use = self.memory_in_use();
+            let in_use = self.count(self.host_remembered()).pooled();
             if in_use.saturating_add(memory) > max {
                 return Err(ControlError::Conflict(format!(
-                    "the budget is full: {} of the slice's {} is held, and a shell takes {} as a slot of {} \
+                    "the budget is full: {} of the slice's {} is counted, and a shell takes {} as a slot of {} \
                      does; open it once a job finishes",
                     ByteSize(in_use),
                     ByteSize(max),

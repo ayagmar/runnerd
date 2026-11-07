@@ -709,6 +709,29 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
     assert_eq!(plan.barrier, None, "a wait from the future has not matured");
 }
 
+/// A pooled count can bring the owner's room with no runner ending: its runner shrinks, and the credit grows.
+#[test]
+fn a_credit_that_may_come_before_any_end_holds_back_what_would_outlast_it() {
+    // 12G of 16G in use: 40 minutes to the room of the 8G owner by ends alone.
+    let runners = vec![running(12 * GIB, minutes(40))];
+    let behind = |credit_room| {
+        plan(
+            &[owner(), younger(Some(minutes(30)))],
+            &slots(runners.clone()),
+            Budget {
+                credit_room,
+                ..slice(12 * GIB)
+            },
+            now(),
+        )
+    };
+    assert_passes(&behind(0));
+    // Short of the owner's room however it grows: the end still decides.
+    assert_passes(&behind(3 * GIB));
+    assert_held(&behind(4 * GIB));
+    assert_held(&behind(6 * GIB));
+}
+
 /// The planner, a model of the engine and of GitHub: jobs queue, runners take the oldest job of their pool and run as
 /// long as a run time says, and nothing but the plan decides. Run times here are the model's own.
 mod generated {
@@ -726,8 +749,20 @@ mod generated {
         cpu: u64,
     }
 
+    /// A pooled count's credit in a model: it comes and goes with no runner ending (ADR 0099).
+    #[derive(Debug, Clone, Copy)]
+    struct Credit {
+        /// The first tick it stands.
+        from: u64,
+        /// The tick it is gone by.
+        until: u64,
+        /// The most it may be; else half of what the runners older than this tick count, so a runner just started
+        /// changes nothing and one that ends takes back less than it gives.
+        most: u64,
+    }
+
     /// The limits of a model.
-    #[derive(Debug)]
+    #[derive(Debug, Clone, Copy)]
     struct Shape {
         /// How long a tick is, which says how many a job waits before it holds: `PRIORITY_AFTER`, or
         /// `SERVED_PRIORITY_AFTER` once a barrier served its pool.
@@ -741,6 +776,7 @@ mod generated {
         /// When a job that hangs has grown to its cap: late enough that the budgets gave no warning while jobs passed,
         /// which only rule 4 of ADR 0097 stands against.
         hung_jobs_grow_at: u64,
+        credit: Option<Credit>,
     }
 
     /// Long runs of many jobs: slots to spare, memory short.
@@ -774,6 +810,7 @@ mod generated {
             },
         ],
         hung_jobs_grow_at: 30,
+        credit: None,
     };
 
     /// A few jobs in two slots a pool, a job that waits a tick being starved: memory, CPU and slots each run out.
@@ -807,6 +844,7 @@ mod generated {
             },
         ],
         hung_jobs_grow_at: 6,
+        credit: None,
     };
 
     /// Two pools of one profile, its caps leaving room to pass, and two slots: a younger pool could take them both.
@@ -840,6 +878,7 @@ mod generated {
             },
         ],
         hung_jobs_grow_at: 6,
+        credit: None,
     };
 
     /// `TIGHT` with the two limits apart: a job waits two ticks, or one once a barrier served its pool, and a job can
@@ -852,6 +891,7 @@ mod generated {
         slots: 2,
         pools: TIGHT.pools,
         hung_jobs_grow_at: 6,
+        credit: None,
     };
 
     /// `SplitMix64`: the same seed gives the same sequence on every machine.
@@ -1050,14 +1090,29 @@ mod generated {
             profiles
         }
 
+        /// What the count takes off now.
+        fn credit(&self) -> u64 {
+            let Some(credit) = self.shape.credit else {
+                return 0;
+            };
+            if !(credit.from..credit.until).contains(&self.tick) {
+                return 0;
+            }
+            let settled = self.running.iter().filter(|run| run.started < self.tick);
+            let held: u64 = settled.map(|run| self.takes(run)).sum();
+            credit.most.min(held / 2)
+        }
+
         fn budget(&self) -> Budget {
             let left = crate::scheduler::left;
             let memory: u64 = self.running.iter().map(|run| self.takes(run)).sum();
+            let credit = self.credit();
             let kinds = &self.shape.pools;
             let cpu: u64 = self.running.iter().map(|run| kinds[run.job.pool].cpu).sum();
             Budget {
-                memory: Some(left(self.shape.memory, memory)),
+                memory: Some(left(self.shape.memory, memory - credit)),
                 cpu: self.shape.cpu.map(|budget| left(budget, cpu)),
+                credit_room: self.shape.credit.map_or(0, |most| most.most - credit),
                 drained: Drained {
                     memory: Some(left(self.shape.memory, 0)),
                     cpu: self.shape.cpu.map(|budget| left(budget, 0)),
@@ -1458,6 +1513,35 @@ mod generated {
             "{} kept out",
             tally.kept_out.len()
         );
+    }
+
+    /// `shape` with `credit`, for as long as the test runs.
+    fn pooled(shape: &'static Shape, credit: Credit) -> &'static Shape {
+        Box::leak(Box::new(Shape {
+            credit: Some(credit),
+            ..*shape
+        }))
+    }
+
+    /// The bounds with a credit that comes at every moment of a small world and leaves soon after or stays: nothing that
+    /// passes stands in the way of room that comes sooner than ends bring it, and the owner still fits once the rest
+    /// ended, the credit gone or not.
+    #[test]
+    fn in_every_small_world_a_credit_that_comes_and_goes_breaks_no_promise_and_a_barrier_still_ends()
+     {
+        let mut passed = 0;
+        for shape in [&TIGHT, &SHARED] {
+            for from in 1..4 {
+                for until in [from + 2, u64::MAX] {
+                    let most = 3 * GIB;
+                    let credit = Credit { from, until, most };
+                    let tally = every_world(pooled(shape, credit), 3, |count| 1 << (count - 1), 4);
+                    assert_bounds_hold(&tally);
+                    passed += tally.passed;
+                }
+            }
+        }
+        assert!(passed > 400, "jobs pass in these worlds: {passed}");
     }
 
     /// The bounds, on every small world rather than on a sample of large ones.

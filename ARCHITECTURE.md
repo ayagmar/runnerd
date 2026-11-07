@@ -54,7 +54,9 @@ flowchart TB
   `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU,
   replays the history for `runnerd simulate`, and works out what the host's memory leaves the slice
-  (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::recent` reads
+  (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
+  aggregate count of what runs, which the engine and a replay by `admission::trace` both call
+  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)); `admission::recent` reads
   each job's recent runs, the one window both admission and sizing read memory from
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)); `sizing` turns the history into advice,
   `sizing::memory` says what a raise and a lowering of `memory` read and which lowering went too far, and
@@ -169,7 +171,8 @@ queued → slot → container → removed
    ([ADR 0098](docs/adr/0098-a-pool-waits-longer-for-its-first-barrier.md)): then the first such job that draining
    what runs would make room for puts up the plan's one barrier (`scheduler::priority`), and no younger job starts until a runner of its pool
    does, but one that usually ends before the running runners' usual ends let the owner or an older waiting job
-   start, and whose cap leaves the owner its room even if it never ends. `plan` names each pool's held job and the engine keeps its wait, from the
+   start, counting the largest credit the pooled count could reach, and whose cap leaves the owner its room even if it
+   never ends. `plan` names each pool's held job and the engine keeps its wait, from the
    plans of ticks and passes only; the high-water mark and a host stall suspend the barrier
    ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md),
    [ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md)). Once every job it can start has its
@@ -428,6 +431,13 @@ always returns, so the daemon closes and flushes the history.
   once its reservation paid the host's deficit, and a seed container starts only where its cap fits the slice, the
   host with the plain margin and, under measured admission, the high-water mark; a requested reseed's cap counts in the budget once its
   profile drained ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
+- Under measured admission one aggregate count (`admission::pooled::count`, called by `Engine::count` for plans,
+  `over_budget`, reseeds, shells and the status, and by the replay) gives every runner's take and a credit of at most 6G
+  for settled runners of different jobs that will not all peak at once, within what the slice has under the high-water
+  mark less 2G and what the host has past its margin and a quarter of its memory. `MemoryMax` reads the count less the
+  credit; the host's limit reads it without, as the overcount is the host's margin. Reservations, learning and stored
+  data stay per runner; `[host] pooled_count = false` turns the credit off
+  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no

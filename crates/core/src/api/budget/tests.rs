@@ -2,7 +2,7 @@
 
 use crate::api::{
     AdmissionPolicy, Budget, ClosedKind, HostBudget, HostMemory, Job, JobMetrics, JobRunner,
-    JobState, JobSummary, LimitSource, LogSummary, ProfileStatus, RunnerStatus, SeedMemory,
+    JobState, JobSummary, LimitSource, LogSummary, Pooled, ProfileStatus, RunnerStatus, SeedMemory,
     SlotStatus, Status, Swap, Timeline,
 };
 
@@ -31,6 +31,7 @@ fn status(admission: AdmissionPolicy, memory_max: Option<u64>) -> Status {
             slice: "ci.slice".to_owned(),
             memory_max,
             memory_in_use: 8 * G,
+            pooled: None,
             admission,
             ..Budget::default()
         },
@@ -253,6 +254,34 @@ fn nothing_is_free_while_the_slice_is_held_though_the_host_leaves_room() {
     assert_eq!(
         status.budget.host_line().as_deref(),
         Some("host: 20G of 64G available; leaves the slice 13G")
+    );
+}
+
+#[test]
+fn a_pooled_budget_reads_its_count_and_says_what_was_taken_off() {
+    let mut status = status(AdmissionPolicy::Measured, Some(46 * G));
+    status.budget.memory_in_use = 42 * G;
+    status.budget.pooled = Some(Pooled {
+        credit: 6 * G,
+        counted: 36 * G,
+        runners: 9,
+    });
+    let reading = status.budget.memory_reading();
+    assert_eq!(reading.figure, "36G");
+    assert_eq!(
+        reading.text,
+        "of 46G counted in ci.slice by predicted peaks: 42G reserved, 6G pooled"
+    );
+    assert_eq!(
+        status.budget.remaining(),
+        Some(10 * G),
+        "what a runner fits in"
+    );
+    let free = status.budget_parts().free.expect("past the runner's block");
+    assert_eq!(
+        (free.memory, free.reading.text),
+        (38 * G, "of 46G free, and pooling adds 6G".to_owned()),
+        "the blocks stay what runners reserve"
     );
 }
 

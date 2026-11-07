@@ -312,7 +312,10 @@ async fn warm_runners_start_no_more_than_the_budget_holds() {
         engine.tick(Shutdown::No).await;
     }
     assert_eq!(registered(&github.calls()).len(), 2);
-    assert!(engine.memory_in_use() <= 9 << 30, "within MemoryMax");
+    assert!(
+        engine.count(engine.host_remembered()).plain <= 9 << 30,
+        "within MemoryMax"
+    );
 }
 
 #[tokio::test]
@@ -525,7 +528,10 @@ async fn a_warm_runner_that_took_a_job_before_its_stop_leaves_no_room_for_younge
         1,
         "neither o/s job starts on room the warm runner still holds"
     );
-    assert!(engine.memory_in_use() <= 4608 << 20, "within MemoryMax");
+    assert!(
+        engine.count(engine.host_remembered()).plain <= 4608 << 20,
+        "within MemoryMax"
+    );
 }
 
 #[tokio::test]

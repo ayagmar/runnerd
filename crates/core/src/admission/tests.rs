@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Arrivals, Barriers, Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, Replay,
-    Replaying, UNPREDICTABLE_FOR, simulate,
+    Arrivals, Barriers, Basis, Copies, CreditRoom, HIGH_WATER, JobPeak, Key, Policy, Predictor,
+    Replay, Replaying, UNPREDICTABLE_FOR, simulate,
 };
 use crate::config::Config;
 use crate::github::QueuedJob;
@@ -983,6 +983,7 @@ fn a_job_of_one_name_in_two_pools_is_predicted_from_its_runs_in_each() {
     );
 }
 
+mod causal;
 mod recent;
 
 fn minutes(minutes: u64) -> Duration {
@@ -1116,6 +1117,10 @@ fn after_needs(barriers: Barriers, known: Option<&History>) -> Replaying<'_> {
         barriers,
         arrivals: Arrivals::AfterNeeds,
         known,
+        trace: None,
+        most_credit: 0,
+        host_hold: u64::MAX,
+        credit_room: CreditRoom::Counted,
     }
 }
 
@@ -1283,6 +1288,10 @@ fn replay_with_light(jobs: &[Ran], known: &History, barriers: Barriers) -> Repla
         barriers,
         arrivals: Arrivals::AsQueued,
         known: Some(known),
+        trace: None,
+        most_credit: 0,
+        host_hold: u64::MAX,
+        credit_room: CreditRoom::Counted,
     };
     simulate(
         &with_light(),
@@ -1387,6 +1396,10 @@ fn a_pool_of_many_large_jobs_is_not_held_to_one_runner_per_first_limit() {
             barriers,
             arrivals: Arrivals::AsQueued,
             known: Some(&known),
+            trace: None,
+            most_credit: 0,
+            host_hold: u64::MAX,
+            credit_room: CreditRoom::Counted,
         };
         simulate(
             &config,

@@ -296,6 +296,9 @@ pub struct Budget {
     pub held: bool,
     /// What the budgets would leave with no runner: what a job may hold younger ones for.
     pub drained: Drained,
+    /// How much more the pooled count could take off what runs with no runner ending (ADR 0099): room that may come at
+    /// any moment, which a backfill must not outlast. 0 with pooling off.
+    pub credit_room: u64,
 }
 
 /// The workflow labels of GitHub-hosted runners, from
@@ -446,7 +449,7 @@ pub fn plan(
                     memory,
                     cpu,
                 };
-                behind.left_waiting(job, decided.barrier, left, budget.drained, now);
+                behind.left_waiting(job, decided.barrier, left, &budget, now);
                 continue;
             }
         };
@@ -525,7 +528,7 @@ impl<'plan> Behind<'plan> {
         job: Older<'plan>,
         barrier: Option<Barrier>,
         left: Left,
-        drained: Drained,
+        budget: &Budget,
         now: SystemTime,
     ) {
         let Some(barrier) = barrier else {
@@ -534,7 +537,8 @@ impl<'plan> Behind<'plan> {
         };
         let around = Around {
             left,
-            drained,
+            credit_room: budget.credit_room,
+            drained: budget.drained,
             runners: &self.runners,
             older: &self.older,
         };

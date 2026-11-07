@@ -15,6 +15,7 @@ use rusqlite::{Connection, OpenFlags};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 use tracing::warn;
 
+use crate::admission::trace::Trace;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
@@ -1040,6 +1041,13 @@ impl Store {
             .await
     }
 
+    /// The memory cap a runner started with, as its record kept it, for when Docker cannot tell.
+    pub async fn runner_memory_cap(&self, runner: &str) -> Result<Option<u64>, StoreError> {
+        let runner = runner.to_owned();
+        self.read(move |db| read::runner_memory_cap(db, &runner))
+            .await
+    }
+
     /// Where a job's log capture continues.
     pub async fn log_position(&self, job: u64) -> Result<LogPosition, StoreError> {
         self.read(move |db| read::log_position(db, job)).await
@@ -1057,6 +1065,24 @@ impl Store {
 /// or refuses when the `-wal` holds changes the file does not have yet.
 pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, StoreError> {
     read_only(path, |db| sizing_of(db, since))
+}
+
+/// How the jobs of the history at `path` that started from `since` (ms) ran, read as [`sizing_at`] reads, for a replay
+/// that runs them so (`admission::simulate`): their samples, when the daemon could name each, what the host's programs
+/// held. `overhead` is what the slice holds beside its runners, in bytes; `None` measures it from the history's busy
+/// moments, as `read::trace` says. `named_by` is the longest a known job waits to be read: the poll interval.
+pub fn trace_at(
+    path: &Path,
+    since: u64,
+    named_by: u64,
+    overhead: Option<u64>,
+) -> Result<Option<Trace>, StoreError> {
+    read_only(path, |db| {
+        if version(db)? == 0 {
+            return Ok(Trace::default());
+        }
+        Ok(read::trace(db, since, named_by, overhead)?)
+    })
 }
 
 /// When the last job of the history at `path` was queued, in ms, read as [`sizing_at`] reads; `None` with no job yet.
