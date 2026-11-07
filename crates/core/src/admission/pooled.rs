@@ -66,8 +66,9 @@ impl Runner<'_> {
 pub struct Slice {
     /// Its memory as the high-water mark reads it, page cache read twice included.
     pub memory: u64,
-    /// Its `MemoryMax`.
-    pub memory_max: u64,
+    /// Its `MemoryMax`; `None` where the slice has none, which leaves `MemoryMax`'s credit no room. The host's credit
+    /// needs only the sample.
+    pub memory_max: Option<u64>,
 }
 
 /// What the host has, from a recent reading.
@@ -88,7 +89,7 @@ pub struct Snapshot<'run> {
     pub runners: &'run [Runner<'run>],
     /// What no runner holds: seed containers, shells and the mirror.
     pub committed: u64,
-    /// The slice; `None` without `MemoryMax` or a recent sample, when no credit is safe.
+    /// The slice; `None` without a recent sample, when no credit is safe.
     pub slice: Option<Slice>,
     /// The host; `None` without a recent reading, when no credit is safe.
     pub host: Option<Host>,
@@ -210,7 +211,10 @@ fn kept_for_growth(mut room: Vec<u64>) -> u64 {
 
 /// What the credit may be beside `slice`: its room under the high-water mark, less `HIGH_WATER_RESERVE`.
 fn slice_room(slice: Slice) -> u64 {
-    let mark = u128::from(slice.memory_max) * u128::from(HIGH_WATER) / 100;
+    let Some(memory_max) = slice.memory_max else {
+        return 0;
+    };
+    let mark = u128::from(memory_max) * u128::from(HIGH_WATER) / 100;
     u64::try_from(mark)
         .unwrap_or(u64::MAX)
         .saturating_sub(slice.memory)

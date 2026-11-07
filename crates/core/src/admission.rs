@@ -1161,9 +1161,9 @@ impl<'run> Replayer<'run> {
         pooled::count(&pooled::Snapshot {
             runners: &held,
             committed: self.mirror,
-            slice: self.memory_max.map(|memory_max| pooled::Slice {
+            slice: Some(pooled::Slice {
                 memory: self.slice_read(),
-                memory_max,
+                memory_max: self.memory_max,
             }),
             host: host.map(|memory| {
                 host::pooling(

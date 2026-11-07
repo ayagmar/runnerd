@@ -41,7 +41,7 @@ fn roomy(runners: &[Runner<'_>]) -> Count {
         committed: 0,
         slice: Some(Slice {
             memory: 0,
-            memory_max: 100 * G,
+            memory_max: Some(100 * G),
         }),
         host: Some(Host {
             available: 100 * G,
@@ -199,7 +199,7 @@ fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
         committed: MIRROR,
         slice: Some(Slice {
             memory: memory.slice,
-            memory_max: 49_392_123_904,
+            memory_max: Some(49_392_123_904),
         }),
         host: Some(host::pooling(&memory, Remembered::default())),
         most: MOST_CREDIT,
@@ -221,7 +221,7 @@ fn every_guard_can_take_the_credit_back() {
         committed: 0,
         slice: Some(Slice {
             memory: 20 * G,
-            memory_max: 100 * G,
+            memory_max: Some(100 * G),
         }),
         host: Some(Host {
             available: 40 * G,
@@ -236,7 +236,7 @@ fn every_guard_can_take_the_credit_back() {
     let slice = |memory| {
         Some(Slice {
             memory,
-            memory_max: 100 * G,
+            memory_max: Some(100 * G),
         })
     };
     let host = |available, stalled| {
@@ -334,8 +334,9 @@ fn the_host_keeps_room_for_the_two_largest_growths_and_counts_the_rest_at_use() 
 
 #[test]
 fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
-    // Catches a host credit taken from a stale or missing reading, during a stall, with `pooled_host` off, or turned
-    // off with `pooled_count`, which is `MemoryMax`'s decision alone.
+    // Catches a host credit taken from a stale or missing reading, during a stall, with `pooled_host` off, turned off
+    // with `pooled_count`, which is `MemoryMax`'s decision alone, or lost on a slice with no `MemoryMax`, where the host
+    // binds alone.
     let (a, b, c) = (key("o/r", "a"), key("o/r", "b"), key("o/r", "c"));
     let runners = [
         settled(&a, 6 * G, G),
@@ -347,7 +348,7 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
         committed: 0,
         slice: Some(Slice {
             memory: 6 * G,
-            memory_max: 100 * G,
+            memory_max: Some(100 * G),
         }),
         host: Some(Host {
             available: 40 * G,
@@ -368,6 +369,15 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
         3 * G,
         "apart from MemoryMax's"
     );
+    // A slice with no `MemoryMax` leaves `MemoryMax`'s credit nothing, and the host's credit all it had.
+    let unlimited = count(&Snapshot {
+        slice: Some(Slice {
+            memory: 6 * G,
+            memory_max: None,
+        }),
+        ..snapshot
+    });
+    assert_eq!((unlimited.credit, unlimited.host_credit), (0, 3 * G));
     let off = Snapshot {
         host_reserve: false,
         ..snapshot
@@ -504,7 +514,7 @@ mod generated {
             committed: rng.below(2 * G),
             slice: (rng.below(8) != 0).then(|| Slice {
                 memory: rng.below(46 * G),
-                memory_max: 46 * G,
+                memory_max: Some(46 * G),
             }),
             host: (rng.below(8) != 0).then(|| Host {
                 available: rng.below(62 * G),
@@ -620,7 +630,7 @@ mod generated {
                     runners: &later,
                     slice: view.slice.or(Some(Slice {
                         memory: 0,
-                        memory_max: 46 * G,
+                        memory_max: Some(46 * G),
                     })),
                     host: Some(Host {
                         available: 62 * G,

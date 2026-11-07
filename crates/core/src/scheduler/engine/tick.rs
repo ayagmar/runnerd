@@ -1110,10 +1110,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .store
             .latest_host_sample()
             .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
-            .zip(self.memory_max)
-            .map(|(sample, memory_max)| pooled::Slice {
+            .map(|sample| pooled::Slice {
                 memory: sample.memory,
-                memory_max,
+                memory_max: self.memory_max,
             });
         let host = self
             .host_memory()

@@ -148,7 +148,7 @@ fn a_pooled_replay_starts_what_only_the_pooled_count_fits() {
         committed: 0,
         slice: Some(pooled::Slice {
             memory: 3 * USED,
-            memory_max: SLICE,
+            memory_max: Some(SLICE),
         }),
         host: Some(pooled::Host {
             available: 50 * G,
