@@ -1754,8 +1754,8 @@ async fn only_a_read_the_runtime_cancelled_reads_as_a_shutdown() {
 
 #[tokio::test]
 async fn insights_read_the_host_s_readings_with_its_credit_from_the_budget_s_events() {
-    // Catches a query whose JSON paths miss the credit or the swap, or that reads a budget without a host reading as
-    // one at 0 available.
+    // Catches a query whose JSON paths miss the credit or the swap, that reads a budget without a host reading as one
+    // at 0 available, or that counts a seed or a shell holding the budget as CI running.
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     let budget = |in_use: u64, credit: Option<api::HostCredit>, host: bool| api::Budget {
@@ -1787,10 +1787,20 @@ async fn insights_read_the_host_s_readings_with_its_credit_from_the_budget_s_eve
         bytes: 3 << 30,
         used: 5 << 30,
     };
+    let mut seeded = budget((512 << 20) + (5 << 30), None, true);
+    seeded.seed_memory = vec![api::SeedMemory {
+        profile: "app".to_owned(),
+        memory: 4 << 30,
+    }];
+    seeded.shell_memory = vec![api::ShellMemory {
+        job: 7,
+        memory: 1 << 30,
+    }];
     for budget in [
         budget(12 << 30, Some(credit), true),
         budget(12 << 30, None, false),
         budget(512 << 20, None, true),
+        seeded,
     ] {
         store.event(api::Event::BudgetChanged { budget });
     }
@@ -1815,7 +1825,8 @@ async fn insights_read_the_host_s_readings_with_its_credit_from_the_budget_s_eve
         vec![
             (64 << 30, 20 << 30, Some(9 << 30), 3 << 30, true),
             (64 << 30, 20 << 30, Some(9 << 30), 0, false),
+            (64 << 30, 20 << 30, Some(9 << 30), 0, false),
         ],
-        "the budget without a host reading is left out; the mirror alone is no runner"
+        "the budget without a host reading is left out; the mirror alone, or with a seed and a shell, is no runner"
     );
 }

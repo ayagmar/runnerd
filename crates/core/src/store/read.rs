@@ -976,7 +976,8 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
 }
 
 /// The host's readings the budget's events stored from `since` (ms), oldest first (ADR 0108). Only the figures the
-/// insights read, by SQLite's JSON: a day holds thousands of these events.
+/// insights read, by SQLite's JSON: a day holds thousands of these events. A runner ran while the budget counted more
+/// than the mirror, seed containers and shells hold.
 fn host_readings(
     db: &Connection,
     since: u64,
@@ -986,6 +987,8 @@ fn host_readings(
          json_extract(body, '$.budget.host.memory.available'), json_extract(body, '$.budget.host.memory.swap.free'), \
          coalesce(json_extract(body, '$.budget.host.credit.bytes'), 0), \
          json_extract(body, '$.budget.memory_in_use') > json_extract(body, '$.budget.mirror_memory') \
+         + (SELECT coalesce(sum(json_extract(value, '$.memory')), 0) FROM json_each(body, '$.budget.seed_memory')) \
+         + (SELECT coalesce(sum(json_extract(value, '$.memory')), 0) FROM json_each(body, '$.budget.shell_memory')) \
          FROM events WHERE at >= ?1 AND body LIKE '{\"type\":\"budget.changed\"%' \
          AND json_extract(body, '$.budget.host.memory.total') IS NOT NULL ORDER BY id",
     )?
