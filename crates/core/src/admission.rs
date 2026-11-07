@@ -684,8 +684,7 @@ pub fn simulate<'known>(
         slice_waited: 0,
         host_waited: 0,
         hazard: Hazard::default(),
-        last_credit: 0,
-        last_host_credit: 0,
+        last: pooled::Count::default(),
         cohorts: Vec::new(),
     };
     replayer.play(&queue)
@@ -888,10 +887,8 @@ struct Replayer<'run> {
     slice_waited: u64,
     host_waited: u64,
     hazard: Hazard,
-    /// The credit at the last look.
-    last_credit: u64,
-    /// The host's credit at the last look.
-    last_host_credit: u64,
+    /// The count at the last look, both credits in it; the default with nothing running.
+    last: pooled::Count,
     /// The sets of runners that ran when a job started, and the count that let it, while one of them runs.
     cohorts: Vec<Cohort>,
 }
@@ -1009,8 +1006,7 @@ impl<'run> Replayer<'run> {
         self.slice_waited += self.held_for_slice * span;
         self.host_waited += self.held_for_host * span;
         if self.running.is_empty() {
-            self.last_credit = 0;
-            self.last_host_credit = 0;
+            self.last = pooled::Count::default();
             return;
         }
         let slice = self.slice();
@@ -1042,30 +1038,33 @@ impl<'run> Replayer<'run> {
         hazard.credit += u128::from(count.credit) * u128::from(span);
         hazard.most_credit = hazard.most_credit.max(count.credit);
         hazard.host_credit += u128::from(count.host_credit) * u128::from(span);
-        let fell = count.credit < self.last_credit;
+        let fell = count.credit < self.last.credit;
         hazard.credit_falls += u64::from(fell);
-        if fell || count.host_credit < self.last_host_credit {
-            let before = pooled::Count {
-                credit: self.last_credit,
-                host_credit: self.last_host_credit,
-                ..count
-            };
-            self.hazard.overdrawn += u64::from(self.overdrawn(before, count));
+        if fell || count.host_credit < self.last.host_credit {
+            self.hazard.overdrawn += u64::from(self.overdrawn(self.last, count));
         }
-        self.last_credit = count.credit;
-        self.last_host_credit = count.host_credit;
+        self.last = count;
         self.note_unfunded(span);
     }
 
-    /// Whether the fall from `before` to `now` left the count past a budget it was within: `MemoryMax` or the host's
-    /// limit, each read as it reads the count.
-    fn overdrawn(&self, before: pooled::Count, now: pooled::Count) -> bool {
+    /// Whether a credit's fall since the last look, whose count was `last`, left the count past a budget: `MemoryMax`
+    /// or the host's limit, each read as it reads the count. The fall alone must cross it, with what runs as it is
+    /// `now`, and the last look's count must have been within it: a count already past is no new overdraft, and one
+    /// that growth took past is not the credit's.
+    fn overdrawn(&self, last: pooled::Count, now: pooled::Count) -> bool {
         let max = self.memory_max.unwrap_or(u64::MAX);
         let host = self
             .host_memory()
             .map_or(u64::MAX, |memory| host::limit(&memory, self.short));
-        (now.pooled() > max && before.pooled() <= max)
-            || (now.hosted() > host && before.hosted() <= host)
+        let before = pooled::Count {
+            credit: last.credit,
+            host_credit: last.host_credit,
+            ..now
+        };
+        let crossed = |read: fn(pooled::Count) -> u64, budget: u64| {
+            read(now) > budget && read(before) <= budget && read(last) <= budget
+        };
+        crossed(pooled::Count::pooled, max) || crossed(pooled::Count::hosted, host)
     }
 
     /// Notes how far what any start left running uses now stands past the count that let it start.

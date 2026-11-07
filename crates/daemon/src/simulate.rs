@@ -451,7 +451,8 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
         out,
         "\n<20G and <6.2G: time with the host's MemAvailable under those lines, of {} with a runner running. BAND: time at the \
          host's larger margin. FALLS: times the \
-         credit fell; OVER: those, and falls of the host's credit, that left the count past a budget. CREDIT GH and HOST \
+         credit fell; OVER: those, and falls of the host's credit, that alone took the count past a budget it was within \
+         at the last look. CREDIT GH and HOST \
          GH: each credit over the replay, in gigabyte-hours. The host's programs are as recorded and do not react \
          to a fuller slice; no pressure, no reseeds, shells, warm runners or restarts; a job's run time stays as it ran.",
         duration(active)
