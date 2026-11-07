@@ -88,8 +88,10 @@ enum Phase {
     Collecting,
     /// GitHub's runners and queued jobs listings.
     Listing,
-    /// Applying the listings, following running jobs, pulls, predictions and reservations.
+    /// Applying the listings, following the jobs the plan needs, pulls, predictions and reservations.
     Following,
+    /// The passes the tick hosted while it waited for GitHub (ADR 0095), which start runners of their own.
+    Passes,
     /// Removing idle runners.
     Removing,
     /// Starting runners.
@@ -102,6 +104,7 @@ impl Phase {
             Phase::Collecting => "collecting",
             Phase::Listing => "listing",
             Phase::Following => "following",
+            Phase::Passes => "passes",
             Phase::Removing => "removing",
             Phase::Starting => "starting",
         }
@@ -116,6 +119,8 @@ struct Pace {
     phases: Vec<(Phase, std::time::Duration)>,
     removed: usize,
     started: usize,
+    /// What the passes it hosted took, as of the last lap.
+    passes: std::time::Duration,
 }
 
 impl Pace {
@@ -127,14 +132,26 @@ impl Pace {
             phases: Vec::new(),
             removed: 0,
             started: 0,
+            passes: std::time::Duration::ZERO,
         }
     }
 
-    /// Ends `phase`, which ran since the last one ended.
-    fn lap(&mut self, phase: Phase) {
+    /// Ends `phase`, which ran since the last one ended, with the passes the tick hosted taking `passes` so far: what
+    /// they took since is theirs, not the phase's.
+    fn lap(&mut self, phase: Phase, passes: std::time::Duration) {
         let now = tokio::time::Instant::now();
-        let took = now - self.last;
+        let hosted = passes.saturating_sub(self.passes);
+        self.passes = passes;
+        let took = (now - self.last).saturating_sub(hosted);
         self.last = now;
+        self.add(phase, took);
+        if !hosted.is_zero() {
+            self.add(Phase::Passes, hosted);
+        }
+    }
+
+    /// Adds `took` to `phase`.
+    fn add(&mut self, phase: Phase, took: std::time::Duration) {
         match self
             .phases
             .iter_mut()
@@ -265,7 +282,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_finished().await;
         self.collect_shells().await;
         self.kill_cancelled().await;
-        pace.lap(Phase::Collecting);
+        pace.lap(Phase::Collecting, self.passes_in_tick);
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.
@@ -288,7 +305,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Meanwhile::Turnover,
             )
             .await;
-        pace.lap(Phase::Listing);
+        pace.lap(Phase::Listing, self.passes_in_tick);
         self.apply_runners(listings.runners).await;
         if mode == Shutdown::No {
             self.apply_queued(listings.queued, listing);
@@ -300,7 +317,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.take_found();
-        self.follow_jobs().await;
+        let described = self.follow_jobs().await;
         self.count_mirror_bytes().await;
         if mode == Shutdown::No {
             self.follow_visibility();
@@ -308,7 +325,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.refresh_predictor().await;
             self.rereserve().await;
         }
-        pace.lap(Phase::Following);
+        pace.lap(Phase::Following, self.passes_in_tick);
         let (plan, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => {
@@ -348,6 +365,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.note_host(&admitting, &after.waiting);
             }
             _ => self.note_host(&admitting, &BTreeMap::new()),
+        }
+        // A stop asked during the starts reads the jobs in its own tick, or leaves them to the next start's: its
+        // idle runners are removed first (ADR 0091).
+        if self.stopping() == mode {
+            self.follow_running(described).await;
         }
         self.idle_caches(mode, began).await;
         if self.records.listed {
@@ -554,7 +576,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.remove_idle(stops).await;
         }
         applied.acted = self.occupied().count() < before;
-        pace.lap(Phase::Removing);
+        pace.lap(Phase::Removing, self.passes_in_tick);
         for decision in decisions {
             match decision {
                 Decision::Stop { .. } => {}
@@ -571,7 +593,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
-        pace.lap(Phase::Starting);
+        pace.lap(Phase::Starting, self.passes_in_tick);
         applied
     }
 

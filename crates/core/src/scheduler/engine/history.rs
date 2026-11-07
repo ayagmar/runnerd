@@ -108,6 +108,14 @@ pub(super) struct Found {
     run_id: u64,
 }
 
+/// The jobs a tick asked GitHub about before its plan, for `follow_running`.
+pub(super) struct Described {
+    /// Those GitHub described, with their repositories.
+    details: Vec<(String, u64, JobDetails)>,
+    /// Every job asked about, answered or not: each is asked once a tick.
+    asked: BTreeSet<u64>,
+}
+
 /// Asks GitHub for jobs, `CONCURRENT_REQUESTS` at a time; the answers come in the order asked. Owns what it needs,
 /// so the engine answers commands while it runs.
 async fn read_jobs<G: GithubApi>(
@@ -454,9 +462,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Follows the queued jobs the repositories' runners may run, and closes those that left the queue for another
-    /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
-    /// runners completed.
-    pub(super) async fn follow_jobs(&mut self) {
+    /// machine's runner or were cancelled; asks GitHub for the details of the running jobs admission cannot tell
+    /// apart yet, which the plan needs. The other running jobs are read once the tick's starts are done
+    /// (`follow_running`): reading each running job, a few requests at a time, held every start back.
+    pub(super) async fn follow_jobs(&mut self) -> Described {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
@@ -513,8 +522,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
-        // The jobs claimed above, so their details are read with the running ones'.
+        // The jobs claimed above, so their details are read with the running ones'. A job a listing showed is named
+        // by the history's record of it; only those no listing showed need GitHub's details before the plan.
         self.take_found();
+        self.find_keys().await;
+        let unnamed: Vec<(String, u64)> = self
+            .occupied()
+            .filter(|(_, occupant)| occupant.key.is_none())
+            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
+            .collect();
+        self.describe(unnamed).await
+    }
+
+    /// After the tick's starts: asks GitHub for the steps of the running jobs `follow_jobs` did not read, and of
+    /// those of ended runners whose build cache uploads wait, decides their writes, and asks whether the jobs of
+    /// removed runners completed. Each running job is still read once a tick.
+    pub(super) async fn follow_running(&mut self, before: Described) {
         let ended = self
             .ended_uploads
             .values()
@@ -523,10 +546,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
             .chain(ended)
+            .filter(|(_, id)| !before.asked.contains(id))
             .collect();
+        let mut described = before.details;
+        described.extend(self.describe(running).await.details);
+        let undecided = self.undecided(&described);
+        self.decide_writes(undecided).await;
+        self.detach_ended();
+        self.follow_closing().await;
+    }
+
+    /// Asks GitHub for the details of `jobs`, running or ended: names their runners' jobs for admission, places them
+    /// in their runs and records them.
+    async fn describe(&mut self, jobs: Vec<(String, u64)>) -> Described {
+        let asked = jobs.iter().map(|(_, id)| *id).collect();
         let mut described = Vec::new();
         for (repository, id, answer) in self
-            .serving(read_jobs(self.github.clone(), running), Meanwhile::Turnover)
+            .serving(read_jobs(self.github.clone(), jobs), Meanwhile::Turnover)
             .await
         {
             match answer {
@@ -555,10 +591,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
-        let undecided = self.undecided(&described);
-        self.decide_writes(undecided).await;
-        self.detach_ended();
-        self.follow_closing().await;
+        Described {
+            details: described,
+            asked,
+        }
     }
 
     /// Asks GitHub whether the jobs of removed runners completed, and records them lost once it says nothing of them

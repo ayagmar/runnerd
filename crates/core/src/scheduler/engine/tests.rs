@@ -117,7 +117,8 @@ struct GithubState {
     failed_queued: BTreeSet<String>,
     /// Listings, job reads, registrations and deletes waiting for an answer.
     waiting: usize,
-    /// How long each listing, registration and delete takes to answer, where a test says: a workload's figures.
+    /// How long each listing, job read, registration and delete takes to answer, where a test says: a workload's
+    /// figures.
     latency: Duration,
     /// How much longer the runners and queued jobs listings take, as when GitHub lags.
     listing_latency: Duration,
@@ -385,6 +386,7 @@ impl GithubApi for FakeGithub {
 
     async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
         self.wait(|state| &state.held_jobs).await;
+        self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.job_reads += 1;
         state

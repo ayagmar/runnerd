@@ -550,7 +550,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Tells apart the jobs of the runners whose job the history now has a record of, unless that record is the
     /// unnamed one a runner's claim makes of a job no listing saw: GitHub's details name it (`follow_jobs`).
-    async fn find_keys(&mut self) {
+    pub(super) async fn find_keys(&mut self) {
         let unknown: Vec<(String, u64)> = self
             .occupied()
             .filter(|(_, occupant)| occupant.key.is_none())
