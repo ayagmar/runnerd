@@ -12,7 +12,7 @@ use super::history::{CAPTURE_DRAIN, Capture};
 use super::{DockerInStop, Engine, Occupant, Purpose, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
-use crate::docker::{self, DockerApi, RunnerSpec, is_not_found};
+use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_gone, is_not_found};
 use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
@@ -109,7 +109,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         for (id, name) in std::mem::take(&mut self.leftover) {
             match self.docker.remove(&id).await {
-                Err(error) if !is_not_found(&error) => {
+                Err(error) if !is_gone(&error) => {
                     warn!("cannot remove {name}: {error}");
                     self.leftover.insert(id, name);
                 }
@@ -206,6 +206,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // fails to start).
             let logs = match docker.logs(&container).await {
                 Ok(logs) => Some(logs),
+                // Someone removed it: nothing is wrong, and its log went with it.
+                Err(error) if is_gone(&error) => None,
                 Err(error) => {
                     warn!("cannot read the log of {runner}: {error}");
                     None
@@ -260,8 +262,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (repository, runner_id) = (occupant.repository.clone(), occupant.runner_id);
         async move {
             if !recorded {
+                // It stopped, so a removal under way frees its slot as surely as this one: nothing uses its volumes.
                 match docker.remove(&container).await {
-                    Err(error) if !is_not_found(&error) => return Err(error),
+                    Err(error) if !is_gone(&error) => return Err(error),
                     _ => {}
                 }
             }
@@ -445,6 +448,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if let Err(error) = self.docker.remove(&occupant.container).await
             && !is_not_found(&error)
         {
+            // Not known to have stopped: its slot stays its until `collect_finished` sees that (ADR 0076).
+            if is_being_removed(&error) {
+                return;
+            }
             warn!("cannot remove {}: {error}", occupant.runner_name);
             self.docker_failed(&error);
             return;
@@ -546,6 +553,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match logs {
                 Ok(logs) if logs.contains("Running job: ") => self.keep_busy(&slot),
                 Ok(_) => removing.push((slot, occupant, reason)),
+                // Someone removed it: `collect_finished` frees its slot once it stopped.
+                Err(error) if is_gone(&error) => {}
                 // It may have run a job: it stays until its logs say.
                 Err(error) => warn!("cannot read the log of {}: {error}", occupant.runner_name),
             }
@@ -561,6 +570,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut any = false;
         for (slot, occupant, reason, removed) in removed {
             match removed {
+                // Not known to have stopped: `collect_finished` frees its slot once it did.
+                Err(error) if is_being_removed(&error) => {}
                 Err(error) if !is_not_found(&error) => {
                     warn!("cannot remove {}: {error}", occupant.runner_name);
                     self.docker_failed(&error);

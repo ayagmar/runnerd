@@ -1,6 +1,7 @@
 # 0076. A slot is free once Docker removed its container
 
-Status: **Accepted** (2026-10-30), amended by 0092 and [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md).
+Status: **Accepted** (2026-10-30), amended by 0092, [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) and
+[0105](0105-a-removal-under-way-frees-a-stopped-runners-slot.md).
 
 ## Context
 

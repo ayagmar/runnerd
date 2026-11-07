@@ -308,6 +308,21 @@ pub fn is_not_found(error: &Error) -> bool {
     )
 }
 
+/// Whether Docker refused because it is removing the container already, as after a `docker rm -f`: it says so only in
+/// the words of its 409, which a running container's refusal shares. It may still be stopping.
+pub fn is_being_removed(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::DockerResponseServerError { status_code: 409, message }
+            if message.contains("is already in progress") || message.contains("marked for removal")
+    )
+}
+
+/// Whether a stopped container is gone, or as good as gone: no log to read, and nothing left to remove.
+pub fn is_gone(error: &Error) -> bool {
+    is_not_found(error) || is_being_removed(error)
+}
+
 /// The Docker Engine calls the scheduler and the caches make. `Docker` is the real one; the engine's tests use a
 /// fake.
 pub trait DockerApi: Send + Sync {
