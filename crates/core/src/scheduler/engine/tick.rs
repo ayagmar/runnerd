@@ -1014,7 +1014,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // that is not known: the slice's or its own last sample is older than three intervals, as when the
             // sampler stalls or cannot read its container.
             Admission::Measured => {
-                let now = time::now_ms();
+                let now = self.clock.now_ms();
                 let fresh = 3 * u64::try_from(SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX);
                 let slice_sampled = self
                     .store
@@ -1075,7 +1075,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let slice = self
             .store
             .latest_host_sample()
-            .filter(|sample| sample.at + fresh >= time::now_ms() / 1000)
+            .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
             .zip(self.memory_max)
             .map(|(sample, memory_max)| pooled::Slice {
                 memory: sample.memory,

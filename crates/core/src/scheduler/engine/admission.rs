@@ -238,7 +238,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         admitting.slice = self
             .store
             .latest_host_sample()
-            .filter(|sample| sample.at + fresh >= now / 1000)
+            .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
             .map(|sample| sample.memory);
         let (Some(slice), Some(memory_max)) = (admitting.slice, self.memory_max) else {
             admitting.default = Basis::Unmeasured;
@@ -301,7 +301,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let fresh = (3 * SAMPLE_INTERVAL).as_secs();
         self.store
             .latest_host_memory()
-            .filter(|memory| memory.at + fresh >= time::now_ms() / 1000)
+            .filter(|memory| memory.at + fresh >= self.clock.now_ms() / 1000)
             .map(|memory| api::HostMemory {
                 ceiling: self.config.host.memory_ceiling.map(|ceiling| ceiling.0),
                 ..memory

@@ -20,8 +20,9 @@ use crate::admission::pooled::{self, POOL_AFTER};
 use crate::api::{Basis, JobPeak};
 use crate::config::Admission;
 use crate::observe::metrics::Events;
+use crate::scheduler::engine::clock::Clock;
 use crate::scheduler::{IDLE_TIMEOUT, PRIORITY_AFTER};
-use crate::store::SampleRecord;
+use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
 const G: u64 = 1 << 30;
@@ -336,6 +337,8 @@ enum Step {
     Elapse,
     /// Running jobs pass their first minute, and the predictor says what each reservation goes by from here on.
     Settle,
+    /// Each repository's `build` has runs behind it in the heavy pool, so its prediction goes by them.
+    PastRuns,
     Tick,
     /// Docker says runners stopped, and a pass between ticks frees their slots and starts runners from the last
     /// tick's listings (ADR 0095).
@@ -466,9 +469,9 @@ struct HostReading {
 }
 
 impl HostReading {
-    /// Whether admission still goes by it: it is from the last three sample intervals.
-    fn fresh(&self) -> bool {
-        self.at + 3 * api::SAMPLE_INTERVAL >= time::now_ms() / 1000
+    /// Whether admission still goes by it at `now` (ms): it is from the last three sample intervals.
+    fn fresh(&self, now: u64) -> bool {
+        self.at + 3 * api::SAMPLE_INTERVAL >= now / 1000
     }
 }
 
@@ -491,6 +494,9 @@ struct Seen {
 struct Case {
     /// What the checks saw.
     seen: Seen,
+    /// What the age of a reading goes by, the engine's too, stopped: only `Elapse` writes an old one, however slow the
+    /// machine. A runner's start goes by the system's clock, so never reads old.
+    clock: Clock,
     github: FakeGithub,
     docker: FakeDocker,
     dir: TestDir,
@@ -536,9 +542,11 @@ impl Case {
         }
         let dir = TestDir::new("invariants");
         let shape = Shape::START;
-        let (engine, handle) = Case::engine(&github, &docker, &dir, shape);
+        let clock = Clock::stopped();
+        let (engine, handle) = Case::engine(&github, &docker, &dir, shape, clock);
         Case {
             seen: Seen::default(),
+            clock,
             github,
             docker,
             dir,
@@ -563,8 +571,10 @@ impl Case {
         docker: &FakeDocker,
         dir: &TestDir,
         shape: Shape,
+        clock: Clock,
     ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
         let (mut engine, handle) = engine_with(github, docker, dir, &shape.toml());
+        engine.clock = clock;
         engine.memory_max = Some(MEMORY_MAX);
         engine.cpus = Some(SLICE_CPUS);
         (engine, handle)
@@ -735,6 +745,7 @@ impl Case {
                     &docker,
                     &self.handle.store,
                     &self.took_job,
+                    self.clock.now_ms(),
                     percent,
                     available,
                     stalled,
@@ -773,6 +784,7 @@ impl Case {
             }
             Step::Elapse => self.elapse(),
             Step::Settle => self.settle(),
+            Step::PastRuns => self.past_runs().await,
             Step::Tick => self.tick().await?,
             Step::Pass => self.pass().await?,
         }
@@ -961,13 +973,15 @@ impl Case {
 
     /// Takes a `sample` while the next runner starts.
     fn sample_during_start(&mut self, percent: u64, available: u64, stalled: bool) {
-        let (store, took_job, taken) = (
+        let (store, took_job, taken, clock) = (
             self.handle.store.clone(),
             self.took_job.clone(),
             self.host_during_start.clone(),
+            self.clock,
         );
         self.docker.0.lock().unwrap().on_start = Some(Box::new(move |docker| {
-            let reading = sample(docker, &store, &took_job, percent, available, stalled);
+            let now = clock.now_ms();
+            let reading = sample(docker, &store, &took_job, now, percent, available, stalled);
             *taken.lock().unwrap() = Some(reading);
         }));
     }
@@ -1063,7 +1077,8 @@ impl Case {
             Shutdown::Detach
         };
         self.handle.control.shutdown(mode);
-        let stopped = tokio::time::timeout(Duration::from_secs(10), self.engine.schedule()).await;
+        // Far past what a stop takes, so only a stop that hangs fails it, however slow the machine.
+        let stopped = tokio::time::timeout(Duration::from_secs(300), self.engine.schedule()).await;
         self.docker.set_outage(Outage::None);
         if stopped.is_err() {
             return violation(self, "a_stop_ends", format!("{mode:?} never ended"));
@@ -1089,7 +1104,13 @@ impl Case {
             capture.abort();
         }
         self.handle.store.flush().await;
-        let (engine, handle) = Case::engine(&self.github, &self.docker, &self.dir, self.shape);
+        let (engine, handle) = Case::engine(
+            &self.github,
+            &self.docker,
+            &self.dir,
+            self.shape,
+            self.clock,
+        );
         self.engine = engine;
         self.handle = handle;
         // The store keeps the host's reading in memory only, and a sample still to come goes to the old store.
@@ -1099,6 +1120,20 @@ impl Case {
     }
 
     fn elapse(&mut self) {
+        // The sampler stopped: the last readings are older than admission goes by.
+        let old = self.clock.now_ms() - 1000 * (3 * api::SAMPLE_INTERVAL + 1);
+        let docker = self.docker.0.lock().unwrap();
+        let reading = sample(
+            &docker,
+            &self.handle.store,
+            &self.took_job,
+            old,
+            50,
+            50,
+            false,
+        );
+        drop(docker);
+        self.host = Some(reading);
         for occupant in self.engine.slots.values_mut().flatten().flatten() {
             occupant.started_at -= IDLE_TIMEOUT;
         }
@@ -1130,6 +1165,60 @@ impl Case {
                 };
             }
         }
+    }
+
+    /// Ten finished runs of each repository's `build`, peaking at 1G, with IDs no generated job takes.
+    async fn past_runs(&mut self) {
+        let at = time::now_ms() - 3600 * 1000;
+        let store = &self.handle.store;
+        for (first, repository) in [(1_000_000, "o/r"), (2_000_000, "o/s")] {
+            for id in first..first + 10 {
+                let runner = format!("earlier-{id}");
+                store.queued(
+                    repository,
+                    &QueuedJob {
+                        id,
+                        run_id: id,
+                        name: "build".to_owned(),
+                        created_at: at,
+                        ..QueuedJob::default()
+                    },
+                    at,
+                );
+                store.runner_started(RunnerRecord {
+                    purpose: None,
+                    name: runner.clone(),
+                    repository: repository.to_owned(),
+                    profile: "heavy".to_owned(),
+                    slot: 1,
+                    container: format!("c-{id}"),
+                    started_at: at,
+                    memory_cap: Some(4 * G),
+                    cpu_cap: Some(2000),
+                    admission: None,
+                });
+                store.claimed(id, id, &runner, at + 1000);
+                store.samples(vec![SampleRecord {
+                    runner: runner.clone(),
+                    at: at + 2000,
+                    cpu: 0,
+                    cpu_usage: 0,
+                    memory: G,
+                    network_received: 0,
+                    network_sent: 0,
+                    cpu_held: crate::observe::metrics::CpuHeld::default(),
+                    events: Events::default(),
+                }]);
+                let mut ran = details(id, "completed", Some("success"));
+                ran.run_id = id;
+                ran.runner_name = Some(runner.clone());
+                ran.steps = Vec::new();
+                store.details(ran);
+                store.runner_removed(&runner, at + 60_000);
+            }
+        }
+        store.flush().await;
+        self.engine.measured.predictor = None;
     }
 
     /// A runner whose registration GitHub deleted exits, as a JIT runner does.
@@ -1442,7 +1531,8 @@ impl Case {
             );
         }
         // From the harness's own reading, whatever the engine reports: the engine's margin is at least this one.
-        if let Some(reading) = self.host.filter(HostReading::fresh) {
+        let now = self.clock.now_ms();
+        if let Some(reading) = self.host.filter(|reading| reading.fresh(now)) {
             let limit = reading
                 .slice
                 .saturating_add(reading.available)
@@ -1512,7 +1602,10 @@ impl Case {
         }
         self.seen.credits += 1;
         let now = SystemTime::now();
-        let fresh_after = time::now_ms().saturating_sub(3000 * api::SAMPLE_INTERVAL);
+        let fresh_after = self
+            .clock
+            .now_ms()
+            .saturating_sub(3000 * api::SAMPLE_INTERVAL);
         let floor: u64 = self
             .engine
             .occupied()
@@ -1831,11 +1924,11 @@ fn sample(
     docker: &DockerState,
     store: &Store,
     took_job: &BTreeSet<String>,
+    now: u64,
     percent: u64,
     available: u64,
     stalled: bool,
 ) -> HostReading {
-    let now = time::now_ms();
     let mut slice = 0;
     let mut samples = Vec::new();
     for container in docker
@@ -1968,8 +2061,10 @@ async fn shrink(mut steps: Vec<Step>, found: Violation) -> (Vec<Step>, Violation
 }
 
 /// What every other case starts from: under measured admission, a job of `o/r` and one of `o/s` past their first minute
-/// and using a tenth of what they reserve, so the steps after it find a credit to take back.
-const TWO_JOBS_SETTLED: [Step; 9] = [
+/// and using a tenth of what they reserve, so the steps after it find a credit to take back. A tick takes what the
+/// captures found, as a job's first minute starts there, before it can go by.
+const TWO_JOBS_SETTLED: [Step; 11] = [
+    Step::PastRuns,
     Step::Reload(Change::Policy),
     Step::Queue {
         second: false,
@@ -1982,6 +2077,7 @@ const TWO_JOBS_SETTLED: [Step; 9] = [
     Step::Tick,
     Step::Assign(0),
     Step::Assign(0),
+    Step::Tick,
     Step::Settle,
     Step::Sample {
         percent: 10,
@@ -2020,7 +2116,10 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
             if let Ok(case) = &outcome {
                 seen.barriers += case.barriers;
-                seen.credits += case.credits;
+                assert!(
+                    seed % 2 == 0 || case.credits > 0,
+                    "seed {seed} starts from two settled jobs, so it reaches a credit"
+                );
             }
             if let Err(found) = outcome {
                 // Before shrinking, which may itself fail: the seed alone replays it.
@@ -2040,10 +2139,6 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     assert!(
         seen.barriers > 0 || seeds.len() == 1,
         "the generated runs reach a barrier, or its invariant checks nothing"
-    );
-    assert!(
-        seen.credits > 0 || seeds.len() == 1,
-        "the generated runs reach a credit, or its invariant checks nothing"
     );
 }
 

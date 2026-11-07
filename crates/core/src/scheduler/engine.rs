@@ -15,6 +15,7 @@
 mod admission;
 mod build_cache;
 mod caches;
+mod clock;
 mod control;
 mod exits;
 mod history;
@@ -34,6 +35,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use self::clock::Clock;
 pub use self::control::{
     Author, Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown,
     Target, same_slice,
@@ -384,6 +386,8 @@ pub struct Engine<G = Github, D = Docker> {
     isolation: &'static dyn Isolation,
     identity: HostIdentity,
     runner_prefix: String,
+    /// What a sample's or a host reading's age goes by.
+    clock: Clock,
     memory_max: Option<u64>,
     /// The CPUs the slice may use, in millicores, read at start.
     cpus: Option<u64>,
@@ -576,6 +580,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (records, records_receiver) = records::RecordState::new();
         let (docker_disk, disk_receiver) = watch::channel(None);
         let mut engine = Engine {
+            clock: Clock::default(),
             isolation: isolation::backend(config.host.isolation),
             // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
             mirror_memory: config.mirror_memory(),
