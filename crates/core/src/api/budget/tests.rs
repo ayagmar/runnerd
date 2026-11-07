@@ -327,6 +327,45 @@ fn a_pooled_budget_reads_its_count_and_says_what_was_taken_off() {
 }
 
 #[test]
+fn a_host_limit_past_memory_max_is_not_said_to_leave_the_slice_more_than_it_has() {
+    // Catches `leaves the slice 47.46G of its 46G`: a credit lets the room `MemoryMax` leaves pass what the host's
+    // limit, which reads the plain count, leaves beside what runs.
+    let mut status = status(AdmissionPolicy::Measured, Some(12 * G));
+    status.budget.memory_in_use = 12 * G;
+    status.budget.pooled = Some(Pooled {
+        credit: 4 * G,
+        counted: 8 * G,
+        runners: 2,
+    });
+    status.budget.host = Some(HostBudget {
+        spare: G,
+        ..host(13 * G, false)
+    });
+    assert_eq!(status.budget.host_withheld(), Some(3 * G));
+    assert_eq!(
+        status.budget.host_line().as_deref(),
+        Some(
+            "host: 20G of 64G available; leaves the slice 13G for the 12G reserved there, so 1G is \
+             free"
+        )
+    );
+    let parts = status.budget_parts();
+    let free = parts.free.expect("what the host leaves");
+    assert_eq!(
+        free.reading.line(),
+        "1G free; the host leaves the slice 13G for the 12G reserved there, and pooling adds 4G"
+    );
+    // With 20G available, the host's programs are not what holds this back.
+    let held = parts.closed.expect("what the plain count holds back");
+    assert_eq!(held.kind, ClosedKind::Host);
+    assert_eq!(
+        held.reading.line(),
+        "3G held back by what runs reserves: the host leaves the slice 13G for the 12G reserved \
+         there"
+    );
+}
+
+#[test]
 fn without_memory_max_the_host_line_says_what_the_host_leaves_free() {
     let mut budget = status(AdmissionPolicy::Measured, None).budget;
     budget.host = Some(host(13 * G, false));

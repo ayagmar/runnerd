@@ -13,7 +13,11 @@ use crate::views::overview::reason_class;
 
 /// The dashboard of a fake daemon answering with the fixtures, signed in, and the facts.
 async fn dashboard() -> (Dashboard, String, Daemon, Facts) {
-    let daemon = daemon();
+    dashboard_of(daemon()).await
+}
+
+/// The dashboard of a fake daemon answering with `daemon`, signed in, and its facts.
+async fn dashboard_of(daemon: Daemon) -> (Dashboard, String, Daemon, Facts) {
     let facts = facts(&daemon);
     let mut fixtures = fake::Fixtures::new(runnerd_fixtures::NOW);
     fixtures.status = daemon.status.clone();
@@ -82,6 +86,15 @@ fn assert_rows(html: &str, facts: &[JobRow], figures: bool) {
                 assert!(row.contains(&format!(">{figure}<")), "{figure}: {row}");
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn a_host_limit_past_memory_max_reads_as_core_says_it() {
+    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::past_memory_max()).await;
+    let shown = text(&dashboard.page(&cookie, "/").await.body);
+    for fact in [&facts.host, &facts.free, &facts.host_part] {
+        assert!(shown.contains(fact.as_str()), "{fact}: {shown}");
     }
 }
 

@@ -116,6 +116,14 @@ fn fixtures() -> (Daemon, Facts) {
 }
 
 #[test]
+fn a_host_limit_past_memory_max_reads_as_core_says_it() {
+    let daemon = runnerd_fixtures::past_memory_max();
+    let facts = facts(&daemon);
+    let (rows, _) = frame(&app(&daemon));
+    assert!(shows(&rows, &facts.host), "{}", rows.join("\n"));
+}
+
+#[test]
 fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_does() {
     let (daemon, facts) = fixtures();
     let (rows, buffer) = frame(&app(&daemon));
