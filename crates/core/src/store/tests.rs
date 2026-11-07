@@ -1732,3 +1732,21 @@ async fn a_trace_reads_each_run_from_its_start_and_names_it_when_the_daemon_coul
     let outside = trace.outside.last().map(|reading| reading.memory);
     assert_eq!(outside, Some(30 << 30), "all the host has beside the slice");
 }
+
+#[tokio::test]
+async fn only_a_read_the_runtime_cancelled_reads_as_a_shutdown() {
+    // Catches a failing history going quiet: a reader that took any stopped read for an exit would never warn.
+    // What the runtime does to a read it has not run as it shuts down.
+    let task = tokio::spawn(std::future::pending::<()>());
+    task.abort();
+    let cancelled = StoreError::Join(task.await.unwrap_err());
+    assert!(cancelled.is_shutdown(), "a cancelled read is the exit's");
+    let panicked = StoreError::Join(
+        tokio::task::spawn_blocking(|| panic!("a read panicked"))
+            .await
+            .unwrap_err(),
+    );
+    assert!(!panicked.is_shutdown(), "a panicked read is a failure");
+    let failed = StoreError::Sqlite(rusqlite::Error::InvalidQuery);
+    assert!(!failed.is_shutdown(), "a failed read is a failure");
+}

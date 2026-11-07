@@ -318,6 +318,15 @@ pub fn is_being_removed(error: &Error) -> bool {
     )
 }
 
+/// Whether Docker refused an exec because the container stopped, as one that ended while it was adopted: its log
+/// is read once it is released.
+pub fn is_not_running(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::DockerResponseServerError { status_code: 409, message } if message.ends_with(" is not running")
+    )
+}
+
 /// Whether a container's log is out of reach because it is gone or going. A removal under way can still fail, so this
 /// says nothing of whether the container will go.
 pub fn is_log_gone(error: &Error) -> bool {

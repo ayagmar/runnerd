@@ -9,12 +9,12 @@ use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Meanwhile, Occupant};
 use crate::admission::Key;
-use crate::docker::{DockerApi, is_declined, is_not_found};
+use crate::docker::{DockerApi, is_declined, is_log_gone, is_not_found, is_not_running};
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
@@ -655,6 +655,11 @@ async fn capture_job<D: DockerApi>(
 ) -> Capture {
     let mut output = match docker.exec(&container, capture::command(position)).await {
         Ok(output) => output,
+        // It stopped or is going since it was started or adopted: its release reads its log (`recapture`).
+        Err(error) if is_not_running(&error) || is_log_gone(&error) => {
+            debug!("{runner}: no capture, as its container stopped: {error}");
+            return Capture::Broken { resume: None };
+        }
         Err(error) => {
             warn!("{runner}: cannot capture its job and log: {error}");
             return Capture::Broken { resume: None };
