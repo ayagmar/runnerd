@@ -378,8 +378,8 @@ pub struct Repository {
     pub profile: String,
     /// The labels its runners register with; a job runs on them when every label it asks for is one of these.
     pub labels: Vec<String>,
-    /// How many idle runners it keeps registered for jobs not queued yet while it is active (ADR 0050); 0 turns warm
-    /// runners off. Default 1.
+    /// How many idle runners it keeps registered for jobs not queued yet while it is active (ADR 0050, 0107); 0 turns
+    /// warm runners and bursts off. Default 1.
     #[serde(default = "default_warm")]
     pub warm: u32,
     /// Whether its runners get the shared build cache, when `[caches.build]` is enabled. Default true.

@@ -57,7 +57,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0047](0047-activity-of-the-last-day.md) | The jobs started and ended in a window, by those times | Accepted |
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice | Accepted |
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling | Amended by 0068, 0071, 0090 |
-| [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued | Amended by 0058, 0094, 0096, 0104 |
+| [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued | Amended by 0058, 0094, 0096, 0104, 0107 |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends | Amended by 0064 |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch | Amended by 0053, 0077, 0082, 0083 |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache | Accepted |
@@ -114,3 +114,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0104](0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md) | A runner that connected and left says nothing of the next start | Accepted |
 | [0105](0105-a-removal-under-way-frees-a-stopped-runners-slot.md) | A removal under way frees a stopped runner's slot | Accepted |
 | [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md) | A tick reads its running jobs after its starts | Accepted |
+| [0107](0107-a-warm-runner-waits-only-where-jobs-just-came.md) | A warm runner waits only where jobs just came | Accepted |
