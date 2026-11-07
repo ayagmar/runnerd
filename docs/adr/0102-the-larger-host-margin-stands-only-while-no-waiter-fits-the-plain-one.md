@@ -29,8 +29,8 @@ were waiting. A replay of the host's readings put 222 minutes in that band, and 
   seeds and reseeds at the plain margin (0063), the doctor. No reading, as before, leaves no larger margin. Nothing
   that runs is ever stopped.
 - **`simulate --causal` shows the band.** It replays this rule through the same `host::short`, with what the daemon
-  gives it: a job behind a barrier is no waiter there, its owner is. `--any-waiter-band` replays the old rule, and the hazards table gains the time at the larger margin. The first table gains `WAIT H`, all
-  the job-hours jobs waited.
+  gives it: a job behind a barrier is no waiter there, its owner is. `--any-waiter-band` replays the old rule, the
+  hazards table gains the time at the larger margin, and the first table gains `WAIT H`, all the job-hours jobs waited.
 
 ## Evidence
 
@@ -52,11 +52,15 @@ falls by a median of 21%. It waits more at one alignment, `--shift 40m`, 112.8 t
 
 ## Consequences
 
-- The host keeps up to 1.94G less room for the desktop while jobs queue: half the margin of its 62G. The owner
-  accepted that.
-- The lowest `MemAvailable` moved by more than that in the replay: 3.5G to 3.6G down in three windows, 4.2G up in the
-  other. A changed schedule meets the host's other programs at other moments, so the lowest reading follows the
-  schedule as much as the margin, and the replay cannot say what the desktop would have done with less room.
+- **A start between the margins can cost one job's use at a later burst.** 1.94G, half the margin of a 62G host, bounds
+  what a start is checked against, not what `MemAvailable` loses afterwards. The job brings its whole size, and the
+  host's other programs can burst on top of it. The rule lets the job in; the schedule decides whether the burst comes.
+  The owner accepted 1.94G, and the worst moment as recorded is larger: over 72h the lowest reading falls 5.6G, to
+  6.56G, 0.36G above the 6.2G line.
+- Over the 28 alignments the lowest reading changes by a median of -0.04G (mean -0.41G, from -5.61G to +4.07G): lower in
+  15, higher in 10, equal in 3. Each rule goes under 6.2G in 2 of the 28: this one for 6 s at 2.89G and 18 s at 5.31G,
+  the old one for 2 s at 6.09G and 16 s at 5.62G. Neither passes 90% of the slice.
+- Time under 20G is the steady cost: longer in 20 of the 28, by a median of 1m57, 88 minutes in all.
 - The band still stands for three quarters of the time it did: then no waiter fits.
 - The doctor's plain margin now agrees with admission more often: admission keeps the larger one only while nothing
   waiting fits the plain one, or the host stalls.
