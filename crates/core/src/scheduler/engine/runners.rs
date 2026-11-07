@@ -77,14 +77,18 @@ fn container_labels(
 }
 
 /// The last lines a runner logged, on one line, for a warning about one that took no job: its log goes with its
-/// container, so this is what is left to say why. Three reach the listener's reason past the two lines `run.sh` ends
-/// on. A runner that took no job logged no job's output.
+/// container, so this is what is left to say why. The lines `run.sh` and its helper print on every exit say nothing
+/// of why, so they are left out. A runner that took no job logged no job's output.
 fn last_said(logs: Option<&str>) -> String {
     let mut said: Vec<&str> = logs
         .unwrap_or_default()
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("Runner listener exit with")
+                && *line != "Exiting runner..."
+        })
         .rev()
         .take(LAST_SAID_LINES)
         .collect();
@@ -315,6 +319,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let took_job = logs.map(|logs| logs.contains("Running job: "));
         // Its capture may have named its job by now.
         let job = self.occupant(slot).and_then(|now| now.job).or(occupant.job);
+        // GitHub may hold its registration busy a while yet, also for a job no poll or capture saw it take: the next
+        // listings delete it then, without a warning.
+        self.ended_busy
+            .insert(occupant.runner_id, occupant.repository.clone());
         self.forget(occupant);
         // Unread logs: it may have run one.
         let ran = occupant.busy || job.is_some() || took_job != Some(false);
@@ -488,10 +496,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .await
         {
             // GitHub refuses until it notices the job is gone, minutes later, even if the run is cancelled.
-            Ok(Deleted::Busy) => warn!(
-                "{}: GitHub keeps {} until it notices its job is gone; the next runnerd start deletes it",
-                occupant.repository, occupant.runner_name
-            ),
+            Ok(Deleted::Busy) => {
+                info!(
+                    "{}: GitHub keeps {} until it notices its job is gone; a later listing deletes it",
+                    occupant.repository, occupant.runner_name
+                );
+                self.ended_busy
+                    .insert(occupant.runner_id, occupant.repository.clone());
+            }
             Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
@@ -851,13 +863,15 @@ mod tests {
     #[test]
     fn a_warning_reaches_the_reason_past_the_lines_a_runner_ends_on() {
         let tail = "Connected to GitHub\n\
-            An error occurred: session conflict\n\
-            Runner listener exit with terminated error, stop the service, no retry needed.\n\
+            Listening for Jobs\n\
+            The runner no longer exists on the server\n\
+            [RUNNER 2026-11-07 16:42:43Z INFO Listener] Runner execution has finished with return code 0\n\
+            Runner listener exit with 0 return code, stop the service, no retry needed.\n\
             Exiting runner...\n\n";
         assert_eq!(
             last_said(Some(tail)),
-            "An error occurred: session conflict / Runner listener exit with terminated error, \
-             stop the service, no retry needed. / Exiting runner..."
+            "Listening for Jobs / The runner no longer exists on the server / \
+             [RUNNER 2026-11-07 16:42:43Z INFO Listener] Runner execution has finished with return code 0"
         );
         assert_eq!(last_said(Some(&"é".repeat(400))).chars().count(), 300);
         assert_eq!(last_said(Some("\n")), "nothing");

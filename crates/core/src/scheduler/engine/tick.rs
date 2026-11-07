@@ -1195,6 +1195,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     continue;
                 }
             };
+            let listed: BTreeSet<u64> = runners.iter().map(|runner| runner.id).collect();
             for runner in runners {
                 let held = self
                     .slots
@@ -1220,7 +1221,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         Ok(Deleted::NotFound) => {}
                         Ok(Deleted::Busy) => {
                             left = true;
-                            if self.busy_orphans.insert(runner.id) {
+                            if self.busy_orphans.insert(runner.id)
+                                && !self.ended_busy.contains_key(&runner.id)
+                            {
                                 warn!(
                                     "{repository}: {} has no container, but GitHub says it runs a job; \
                                      deleting it once GitHub lets go",
@@ -1235,6 +1238,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     },
                 }
             }
+            self.ended_busy
+                .retain(|id, of| *of != repository || listed.contains(id));
             if left || !self.draining.contains(&repository) {
                 self.drained_once.remove(&repository);
             } else if !self.drained_once.insert(repository.clone()) {

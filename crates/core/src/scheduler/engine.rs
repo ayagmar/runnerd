@@ -455,6 +455,9 @@ pub struct Engine<G = Github, D = Docker> {
     rate_limit_logged: bool,
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
+    /// Runners this engine released or killed, by ID, with their repository, until a listing of that repository no
+    /// longer has them: GitHub holding one busy then is no orphan to warn of.
+    ended_busy: BTreeMap<u64, String>,
     status: watch::Sender<api::Status>,
     /// The profiles as the last run announced them, until the first publish compares the profiles with them. Their
     /// slots are older than the `slot.changed` events clients have, so that publish announces every slot instead.
@@ -624,6 +627,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             docker_in_stop: DockerInStop::Answers,
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
+            ended_busy: BTreeMap::new(),
             status,
             announced_profiles: Some(announced.profiles),
             control: control.clone(),
