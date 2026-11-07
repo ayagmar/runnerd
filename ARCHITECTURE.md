@@ -423,8 +423,9 @@ always returns, so the daemon closes and flushes the history.
 - Under either policy, what the running containers reserve, a new runner's reservation with them, also fits what
   the host's memory leaves the slice, from a reading of the last three intervals: the slice's memory without page
   cache or reclaimable slab plus `MemAvailable`, less a margin of the larger of 2G and a sixteenth of the host's
-  memory, half again as much while a job waits for it and a runner runs; and nothing starts while the host has under
-  twice the margin available and `full` memory pressure over 10 s is at 5%, until it is under 1%. No runner is
+  memory, half again as much while a runner runs and the host stalls or jobs wait for it, none fitting the plain
+  margin ([ADR 0102](docs/adr/0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md)); and
+  nothing starts while the host has under twice the margin available and `full` memory pressure over 10 s is at 5%, until it is under 1%. No runner is
   stopped for the host. Each job's record adds up how long it waited for it, and sizing takes that out of its wait.
   Sizing never advises a cap under the largest peak plus 1G
   ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)). A job takes a stopped warm runner's room only

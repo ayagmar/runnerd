@@ -409,6 +409,17 @@ pub struct Replaying<'known> {
     pub host_hold: u64,
     /// Whether `Backfill` expects what the credit may still give, as the daemon does.
     pub credit_room: CreditRoom,
+    /// What holds the host's larger margin up.
+    pub band: Band,
+}
+
+/// What holds up the host's larger margin in a replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// As the daemon does: jobs wait for the host and none fits the plain margin (`host::short`).
+    NoWaiterFits,
+    /// To show what that gives (ADR 0102): any job that waits for the host.
+    AnyWaiter,
 }
 
 /// Whether a replay's `Backfill` reads `Budget::credit_room`.
@@ -430,6 +441,7 @@ impl From<Barriers> for Replaying<'_> {
             most_credit: 0,
             host_hold: u64::MAX,
             credit_room: CreditRoom::Counted,
+            band: Band::NoWaiterFits,
         }
     }
 }
@@ -590,6 +602,7 @@ pub fn simulate<'known>(
         most_credit,
         host_hold,
         credit_room,
+        band,
     } = how.into();
     let mirror = config.mirror_memory();
     let budget = memory_max.map(|max| max.saturating_sub(mirror));
@@ -657,6 +670,8 @@ pub fn simulate<'known>(
         needs: RefCell::new(BTreeMap::new()),
         held_for_slice: 0,
         held_for_host: 0,
+        host_needs: Vec::new(),
+        band,
         slice_waited: 0,
         host_waited: 0,
         hazard: Hazard::default(),
@@ -857,6 +872,9 @@ struct Replayer<'run> {
     held_for_slice: u64,
     /// How many it left waiting for the host's memory alone.
     held_for_host: u64,
+    /// What each of those needs of the host.
+    host_needs: Vec<u64>,
+    band: Band,
     slice_waited: u64,
     host_waited: u64,
     hazard: Hazard,
@@ -999,6 +1017,7 @@ impl<'run> Replayer<'run> {
                 .saturating_sub(host_slice);
             hazard.under_throttling += span * u64::from(available < THROTTLES_UNDER);
             hazard.under_oomd += span * u64::from(available < OOMD_UNDER);
+            hazard.in_band += span * u64::from(self.short);
             hazard.lowest_available = Some(
                 hazard
                     .lowest_available
@@ -1169,6 +1188,7 @@ impl<'run> Replayer<'run> {
         self.needs.borrow_mut().clear();
         self.held_for_slice = 0;
         self.held_for_host = 0;
+        self.host_needs.clear();
         let listed = waiting.clone();
         let mut index = 0;
         while let Some(queued) = waiting.get(index).copied() {
@@ -1199,6 +1219,7 @@ impl<'run> Replayer<'run> {
                 }
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
+                    self.host_needs.push(short.memory);
                     let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
                     if first && self.barrier.is_some() {
@@ -1215,8 +1236,19 @@ impl<'run> Replayer<'run> {
                 }
             }
         }
-        self.short = self.held_for_host > 0;
+        self.short = self.band_stands();
         self.settle_waits(waiting);
+    }
+
+    /// Whether the larger margin stands for the next pass.
+    fn band_stands(&self) -> bool {
+        match self.band {
+            Band::AnyWaiter => self.held_for_host > 0,
+            Band::NoWaiterFits => self.host_memory().is_some_and(|memory| {
+                let reserved = self.hosted(self.count());
+                host::short(&memory, reserved, false, self.host_needs.iter().copied())
+            }),
+        }
     }
 
     /// What the engine does after a plan: a pool with nothing `waiting` loses its served mark, and one with nothing left

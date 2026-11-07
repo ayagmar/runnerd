@@ -1,7 +1,8 @@
 //! What the host's memory leaves runners beside its other programs (ADR 0055): the slice's runners may hold what
 //! they hold now without page cache plus the host's `MemAvailable`, less a margin kept for the host's page cache, so
-//! reclaim stays cheap; and nothing starts while the host, short of memory, stalls for it. Each bound has
-//! hysteresis, so a host at the edge does not start and hold runners by turns. A host whose memory can grow to a
+//! reclaim stays cheap; and nothing starts while the host, short of memory, stalls for it. The stall bound has
+//! hysteresis, and the margin grows by half only while no waiter fits the plain one (ADR 0102), so a host at the edge
+//! does not start and hold runners by turns. A host whose memory can grow to a
 //! ceiling, `[host] memory_ceiling` (ADR 0084), counts what it can still grow by as available and keeps the margin of
 //! its ceiling; the stall rule reads the memory the host has now. Pure: the engine passes in the reading, with the ceiling,
 //! and what it remembers of the last plan.
@@ -25,8 +26,9 @@ const MARGIN_SHARE: u64 = 16;
 /// What admission remembers of the host from the last plan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Remembered {
-    /// A job waited for the host's memory, or the host stalled: the margin grows by half until one fits again with
-    /// it. The engine clears it while no runner runs, so the first runner into an empty slice needs only the margin.
+    /// The host stalled, or jobs waited for its memory and none fitted even the plain margin (`short`): the margin
+    /// grows by half. The engine clears it while no runner runs, so the first runner into an empty slice needs only the
+    /// margin.
     pub short: bool,
     /// The host stalled: starts resume only under `STALL_LEAVE`.
     pub stalled: bool,
@@ -41,6 +43,25 @@ pub fn margin(total: u64, short: bool) -> u64 {
     } else {
         margin
     }
+}
+
+/// Whether the larger margin stands for the next plan, by what `memory` leaves beside the `reserved` memory of what runs
+/// and the memory each job waiting for the host `needs` (ADR 0102): while the host stalls, or while jobs wait and none
+/// fits the plain margin. One that does fits at the next plan, so a queue does not hold the margin up by waiting in it.
+/// A deficit stays negative here, so it never reads as a fit.
+pub fn short(
+    memory: &HostMemory,
+    reserved: u64,
+    stalled: bool,
+    needs: impl IntoIterator<Item = u64>,
+) -> bool {
+    if stalled {
+        return true;
+    }
+    let room = left(limit(memory, false), reserved, false);
+    let mut needs = needs.into_iter().peekable();
+    needs.peek().is_some()
+        && needs.all(|needs| i64::try_from(needs).ok().is_none_or(|needs| needs > room))
 }
 
 /// What the host keeps past the margin before a credit stands, as a divisor of its memory: a quarter. A credit lets the

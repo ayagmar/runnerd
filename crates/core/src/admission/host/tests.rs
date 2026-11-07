@@ -1,7 +1,7 @@
 //! The host's bound on a host whose memory is fixed, and on one that can grow to `[host] memory_ceiling`
 //! (ADR 0084): what the slice may hold, the margin it keeps and the stall rule, which a ceiling leaves alone.
 
-use super::{Remembered, budget, first_runner, limit, margin, stalls};
+use super::{Remembered, budget, first_runner, left, limit, margin, short, stalls};
 use crate::api::{HostMemory, Pressure, Swap};
 
 const G: u64 = 1 << 30;
@@ -183,4 +183,146 @@ fn a_running_runner_counts_against_the_grown_limit() {
     assert_eq!(host.limit, 7 * G + 4 * G + (11 * G + 224 * M) - 2 * G);
     assert_eq!(host.spare, host.limit - 8 * G);
     assert!(host.spare < 16 * G, "a second 8G runner does not fit");
+}
+
+#[test]
+fn a_deficit_never_reads_as_a_fit_and_no_waiter_lets_the_margin_go() {
+    let memory = host(64 * G, 10 * G);
+    // 6G by the plain margin, less the 7G that runs: 1G past it.
+    assert!(short(&memory, 7 * G, false, [G]), "a deficit fits nothing");
+    assert!(
+        short(&memory, 7 * G, false, [0]),
+        "not even a job that needs none"
+    );
+    assert!(
+        !short(&memory, 7 * G, false, []),
+        "no job waits for the host"
+    );
+    assert!(
+        !short(&memory, 5 * G, false, [3 * G, G]),
+        "one of the two fits"
+    );
+    assert!(short(&memory, 5 * G, true, [G]), "a stall keeps it");
+    assert!(short(&memory, 5 * G, true, []), "with no waiter too");
+}
+
+mod generated {
+    use super::*;
+
+    const CASES: u64 = 4000;
+
+    /// `SplitMix64`: the same seed gives the same sequence on every machine.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// A steady reading of a 64G host, with no pressure figures, a stall or a ceiling now and then.
+    fn reading(rng: &mut Rng) -> HostMemory {
+        let memory = HostMemory {
+            slice: rng.below(20) * G,
+            ..host(64 * G, rng.below(16 * 4) * G / 4)
+        };
+        match rng.below(5) {
+            0 => HostMemory {
+                full: None,
+                ..memory
+            },
+            1 => stalled(memory, 600),
+            2 => HostMemory {
+                ceiling: Some(96 * G),
+                ..memory
+            },
+            _ => memory,
+        }
+    }
+
+    /// One plan by what the last remembered: starts the jobs of `queue` that fit, in turn, and remembers the rest.
+    /// Returns how many started.
+    fn plan(
+        memory: &HostMemory,
+        remembered: &mut Remembered,
+        reserved: &mut u64,
+        queue: &mut Vec<u64>,
+    ) -> usize {
+        let stalled = stalls(memory, remembered.stalled);
+        let limit = limit(memory, remembered.short || stalled);
+        let queued = queue.len();
+        queue.retain(|needs| {
+            let fits = left(limit, *reserved, stalled) >= i64::try_from(*needs).unwrap();
+            if fits {
+                *reserved += needs;
+            }
+            !fits
+        });
+        *remembered = Remembered {
+            short: short(memory, *reserved, stalled, queue.iter().copied()),
+            stalled,
+        };
+        queued - queue.len()
+    }
+
+    #[test]
+    fn on_a_steady_reading_the_band_follows_the_waiters_and_starts_never_alternate_with_holds() {
+        for seed in 0..CASES {
+            let mut rng = Rng(seed);
+            let memory = reading(&mut rng);
+            let mut reserved = rng.below(30) * G;
+            let mut queue: Vec<u64> = (0..rng.below(9))
+                .map(|_| 256 * (1 + rng.below(32)) * M)
+                .collect();
+            let mut remembered = Remembered {
+                short: rng.below(2) == 0,
+                stalled: false,
+            };
+            let mut resumed = 0;
+            let mut held = false;
+            for _ in 0..12 {
+                let fitting = !stalls(&memory, remembered.stalled)
+                    && !remembered.short
+                    && queue.iter().any(|needs| {
+                        left(limit(&memory, false), reserved, false)
+                            >= i64::try_from(*needs).unwrap()
+                    });
+                let started = plan(&memory, &mut remembered, &mut reserved, &mut queue);
+                assert!(
+                    !fitting || started > 0,
+                    "seed {seed}: the plan after a waiter fitted the plain margin has it"
+                );
+                let room = left(limit(&memory, false), reserved, false);
+                let fits = queue
+                    .iter()
+                    .any(|needs| room >= i64::try_from(*needs).unwrap());
+                if remembered.stalled {
+                    assert!(
+                        remembered.short,
+                        "seed {seed}: a stall keeps the larger margin"
+                    );
+                } else {
+                    assert_eq!(
+                        remembered.short,
+                        !queue.is_empty() && !fits,
+                        "seed {seed}: the larger margin stands while no waiter fits the plain one"
+                    );
+                }
+                resumed += usize::from(held && started > 0);
+                held = started == 0;
+            }
+            assert!(
+                resumed <= 1,
+                "seed {seed}: starts and holds alternate {resumed} times"
+            );
+        }
+    }
 }

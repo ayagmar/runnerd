@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use runnerd_core::admission::Band;
 use runnerd_core::admission::trace::Trace;
 use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
@@ -129,6 +130,10 @@ enum Command {
         /// [default: all of it, as the daemon's bound reads the plain count].
         #[arg(long, requires = "causal")]
         host_hold: Option<ByteSize>,
+        /// With --causal, hold the host's larger margin while any job waits for the host, not only while none fits the
+        /// plain margin as the daemon does: what that gives.
+        #[arg(long, requires = "causal")]
+        any_waiter_band: bool,
         /// With --causal, move the host's other programs this much later, round the window (such as 90m): a desktop's
         /// burst meeting other jobs than it met.
         #[arg(long, requires = "causal", value_parser = parse_age)]
@@ -194,6 +199,7 @@ fn main() -> ExitCode {
             guard_overhead,
             credit,
             host_hold,
+            any_waiter_band,
             shift,
             moves,
         }) => config_or_default(config).and_then(|path| {
@@ -209,6 +215,11 @@ fn main() -> ExitCode {
                         guard_overhead,
                         credits: credit,
                         host_hold,
+                        band: if any_waiter_band {
+                            Band::AnyWaiter
+                        } else {
+                            Band::NoWaiterFits
+                        },
                         shift,
                     }),
                     priority: if priority {
@@ -316,6 +327,8 @@ struct Causal {
     credits: Vec<ByteSize>,
     /// What of a credit the host's bound leaves out, where given.
     host_hold: Option<ByteSize>,
+    /// What holds up the host's larger margin.
+    band: Band,
     /// How much later the host's other programs run, where given.
     shift: Option<Duration>,
 }
@@ -427,6 +440,7 @@ fn run_simulation(
         let counts = simulate::Counts {
             credits: &credits,
             host_hold: causal.host_hold.map_or(u64::MAX, |hold| hold.0),
+            band: causal.band,
             barriers: limits.priority,
         };
         output::line(simulate::causal(&config, &comparison, &trace, &counts));

@@ -1,6 +1,6 @@
 # 0055. Admission follows the host's memory, and caps keep room for page cache
 
-Status: **Accepted** (2026-10-24), amended by [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md), [0070](0070-predictions-follow-recent-runs.md), [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md), [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md), [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md), [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md). Amends [0033](0033-measured-admission.md), [0032](0032-sizing-advice-from-sampled-peaks.md), [0039](0039-auto-sizing.md).
+Status: **Accepted** (2026-10-24), amended by [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md), [0070](0070-predictions-follow-recent-runs.md), [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md), [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md), [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md), [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md), [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md). Amends [0033](0033-measured-admission.md), [0032](0032-sizing-advice-from-sampled-peaks.md), [0039](0039-auto-sizing.md).
 
 ## Context
 

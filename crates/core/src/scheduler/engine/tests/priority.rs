@@ -490,6 +490,10 @@ warm = 1
     );
     assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
     assert_eq!(fixture.runners_of("o/warm"), 1, "its room would not do");
+    assert!(
+        fixture.engine.measured.host.short,
+        "beside the warm runner it fits no margin, so the larger one stands"
+    );
 }
 
 /// Programs outside the slice hold the memory: no runner's end gives it back.

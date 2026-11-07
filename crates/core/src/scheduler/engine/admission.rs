@@ -334,19 +334,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Remembers what this plan saw of the host for the next: whether it stalled, and which jobs `waiting` wait for
-    /// the host's memory. Adds the time since the last plan to the waits of those that waited then, and logs when
-    /// the host becomes short and when it has room again.
+    /// Remembers what this plan saw of the host for the next: whether it stalled, whether the larger margin stands
+    /// (`host::short`), and which jobs `waiting` wait for the host's memory. Adds the time since the last plan to the
+    /// waits of those that waited then, and logs when the host becomes short and when it has room again.
     pub(super) fn note_host(
         &mut self,
         admitting: &Admitting,
         waiting: &BTreeMap<u64, api::Waiting>,
     ) {
         let stalled = admitting.host.as_ref().is_some_and(|host| host.stalled);
-        let short = stalled
-            || waiting
-                .values()
-                .any(|reason| matches!(reason, api::Waiting::HostMemory { .. }));
+        let needs = waiting.values().filter_map(|reason| match reason {
+            api::Waiting::HostMemory { needs, .. } => Some(*needs),
+            _ => None,
+        });
+        let reserved = self.count(self.host_remembered()).plain;
+        let short = admitting
+            .host
+            .as_ref()
+            .is_some_and(|host| host::short(&host.memory, reserved, stalled, needs));
         let was_short = self.measured.host.short;
         self.measured.host = host::Remembered { short, stalled };
         let now = time::now_ms();
