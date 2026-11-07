@@ -49,7 +49,14 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[];
+const ACCEPTED: &[Accepted] = &[
+    // The previous release reads a `host-low` insight kind as its `Unknown` fallback, by the insight's sentence.
+    Accepted {
+        reader: Reader::Previous,
+        item: "insight-kind/host-low",
+        adr: "0108",
+    },
+];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;

@@ -176,6 +176,7 @@ fn host() -> HostBudget {
         limit: 22 * GIB + 512 * MIB,
         spare: 512 * MIB,
         stalled: false,
+        credit: None,
     }
 }
 
@@ -714,11 +715,74 @@ fn held_host(at: u64) -> HostMemory {
     }
 }
 
+/// The warning for today's 34 s under a tenth of the host on a host credit, as core makes it (`insights::insights`).
+fn host_low(at: u64) -> api::Insight {
+    let today = at / 86_400 * 86_400;
+    let lowest = 4 * GIB + 102 * MIB;
+    api::Insight {
+        key: format!("host-low:{}", today / 86_400),
+        severity: api::Severity::Warning,
+        repository: String::new(),
+        workflow: None,
+        job: None,
+        sentence: api::Insight::host_low_sentence(today, 34, lowest, 6 * GIB + 410 * MIB),
+        kind: api::InsightKind::HostLow {
+            day: today,
+            seconds: 34,
+            lowest,
+        },
+        runs: Vec::new(),
+    }
+}
+
+/// What the host's memory came to on the two days [`insights`] lists: today on a host credit, under a tenth of the
+/// host for 34 s; yesterday on none.
+fn host_days(at: u64) -> Vec<api::HostHazard> {
+    let today = at / 86_400 * 86_400;
+    vec![
+        // Today so far: CI ran on a host credit, and the host fell under a tenth of its memory for 34 s of it.
+        api::HostHazard {
+            since: today,
+            until: at,
+            running: 33_120,
+            credited: 22_200,
+            low_line: 20 * GIB,
+            critical_line: 6 * GIB + 410 * MIB,
+            low: api::HostSpan {
+                seconds: 3840,
+                credited: 2460,
+            },
+            critical: api::HostSpan {
+                seconds: 34,
+                credited: 34,
+            },
+            lowest: 4 * GIB + 102 * MIB,
+            lowest_credited: Some(4 * GIB + 102 * MIB),
+            lowest_swap_free: Some(8 * GIB + 205 * MIB),
+        },
+        // Yesterday, no credit stood and the host kept above both lines.
+        api::HostHazard {
+            since: today - 86_400,
+            until: today,
+            running: 7200,
+            credited: 0,
+            low_line: 20 * GIB,
+            critical_line: 6 * GIB + 410 * MIB,
+            low: api::HostSpan::default(),
+            critical: api::HostSpan::default(),
+            lowest: 31 * GIB,
+            lowest_credited: None,
+            lowest_swap_free: None,
+        },
+    ]
+}
+
 /// `GET /v1/insights` at `at` (s) under measured admission and auto sizing: ledger's tests held back by jvm's CPU cap
 /// after a raise that did not help them, a warning; storefront's held back by node's, which auto sizing raises, a
 /// notice; memory pressure that slowed storefront's downloads; and jobs held 42 minutes for the host's memory by
-/// java and claude. The sentences are core's (`insights::insights`); the host-held one is worded by core's own
-/// function from its figures.
+/// java and claude; and today, the host under a tenth of its memory for 34 s while a host credit stood, with what its
+/// memory came to today and yesterday. The sentences are core's (`insights::insights`); the host-held and host-low ones
+/// are worded by core's own functions from their figures.
 pub fn insights(at: u64) -> api::Insights {
     let link = |job: u64, back: u64| api::RunLink {
         job,
@@ -744,7 +808,9 @@ pub fn insights(at: u64) -> api::Insights {
     api::Insights {
         since: at - 14 * 86_400,
         until: at,
+        host: host_days(at),
         insights: vec![
+            host_low(at),
             insight(
                 "host-held:2987",
                 api::Severity::Warning,
@@ -839,6 +905,27 @@ pub fn past_memory_max() -> Daemon {
     host.limit = 24 * GIB + 512 * MIB;
     host.spare = 2 * GIB + 512 * MIB;
     budget.host = Some(host);
+    daemon
+}
+
+/// The fixtures with a host credit standing (ADR 0108): of the 22G the runners reserve, the host counts 21.75G, the
+/// 15G they use and 6.75G kept for growth, which leaves 768M of the 22.5G limit; the job [`HOST_SHORT`] still waits
+/// for 1G.
+pub fn host_credit() -> Daemon {
+    let mut daemon = daemon();
+    let status = &mut daemon.status;
+    let mut host = host();
+    host.credit = Some(api::HostCredit {
+        bytes: 256 * MIB,
+        used: 15 * GIB,
+    });
+    host.spare = 768 * MIB;
+    status.budget.host = Some(host);
+    for queued in &mut status.queued {
+        if let Some(Waiting::HostMemory { free, .. }) = &mut queued.waiting {
+            *free = 768 * MIB;
+        }
+    }
     daemon
 }
 

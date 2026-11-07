@@ -44,6 +44,9 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             p.muted {
                 "Last 24 hours: " (day.summary_line()) "."
             }
+            @if let Some(host) = day.host_line() {
+                p.muted { (host) }
+            }
         }
         @if insights.insights.is_empty() {
             p.empty { (format::sentence(&insights.empty_line())) "." }
@@ -51,6 +54,19 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             ul.insight-list aria-label=(View::Insights.title()) {
                 @for insight in &insights.insights {
                     (card(insight, view.now))
+                }
+            }
+        }
+        @if !insights.host.is_empty() {
+            section aria-labelledby="host-title" {
+                div.section-head {
+                    h2 #host-title { "Host memory while CI ran" }
+                    span.muted { "Each UTC day, and how much of it ran on a host credit." }
+                }
+                ul.host-days {
+                    @for host in &insights.host {
+                        li { (host.dated_line()) }
+                    }
                 }
             }
         }

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Arrivals, Band, Barriers, Basis, Copies, CreditRoom, HIGH_WATER, JobPeak, Key, Policy,
-    Predictor, Replay, Replaying, UNPREDICTABLE_FOR, simulate,
+    Arrivals, Band, Barriers, Basis, Copies, CreditRoom, HIGH_WATER, HostReserve, JobPeak, Key,
+    Policy, Predictor, Replay, Replaying, UNPREDICTABLE_FOR, simulate,
 };
 use crate::config::Config;
 use crate::github::QueuedJob;
@@ -1119,7 +1119,7 @@ fn after_needs(barriers: Barriers, known: Option<&History>) -> Replaying<'_> {
         known,
         trace: None,
         most_credit: 0,
-        host_hold: u64::MAX,
+        host_reserve: HostReserve::Top2,
         credit_room: CreditRoom::Counted,
         band: Band::NoWaiterFits,
     }
@@ -1291,7 +1291,7 @@ fn replay_with_light(jobs: &[Ran], known: &History, barriers: Barriers) -> Repla
         known: Some(known),
         trace: None,
         most_credit: 0,
-        host_hold: u64::MAX,
+        host_reserve: HostReserve::Top2,
         credit_room: CreditRoom::Counted,
         band: Band::NoWaiterFits,
     };
@@ -1400,7 +1400,7 @@ fn a_pool_of_many_large_jobs_is_not_held_to_one_runner_per_first_limit() {
             known: Some(&known),
             trace: None,
             most_credit: 0,
-            host_hold: u64::MAX,
+            host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
             band: Band::NoWaiterFits,
         };

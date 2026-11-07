@@ -1,7 +1,8 @@
 //! `runnerd simulate`: the job history replayed through admission by caps and by measured peaks, with and without
 //! a CPU budget (`admission::simulate`), as a table; and with `--priority`, with no barrier for a starved job, a strict
 //! one (ADR 0096) and the daemon's (ADR 0097), pool by pool and run by run; and with `--causal`, by each job's own samples
-//! under the plain and the pooled count, with what each risks (ADR 0099). Reads the history database read-only, as
+//! under the plain and the pooled count, with what each risks (ADR 0099), the host's limit reading its own credit or
+//! the plain count (ADR 0108). Reads the history database read-only, as
 //! `runnerd doctor` does; changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +10,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::admission::trace::{Episodes, Trace};
 use runnerd_core::admission::{
-    Arrivals, Band, Barriers, CreditRoom, Policy, PoolReplay, Replay, Replaying, pooled, simulate,
+    Arrivals, Band, Barriers, CreditRoom, HostReserve, Policy, PoolReplay, Replay, Replaying,
+    pooled, simulate,
 };
 use runnerd_core::api;
 use runnerd_core::config::{self, Admission, ByteSize, Config};
@@ -142,7 +144,7 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
                 known: Some(comparison.known),
                 trace: None,
                 most_credit: 0,
-                host_hold: u64::MAX,
+                host_reserve: HostReserve::Top2,
                 credit_room: CreditRoom::Counted,
                 band: Band::NoWaiterFits,
             },
@@ -202,12 +204,12 @@ pub(crate) fn priority(config: &Config, comparison: &Comparison<'_>) -> String {
     out
 }
 
-/// How `causal` counts: the credits it replays, a row each, and what of each the host's bound leaves out, all of it as
-/// the daemon's does at `u64::MAX`.
+/// How `causal` counts: the credits it replays, a row each, and what the host's limit reads.
 pub(crate) struct Counts<'credits> {
     /// The most credit of each row, in bytes: 0 is the plain count.
     pub(crate) credits: &'credits [u64],
-    pub(crate) host_hold: u64,
+    /// What the host's limit reads of what runs in every row.
+    pub(crate) host_reserve: HostReserve,
     /// What holds up the host's larger margin.
     pub(crate) band: Band,
     /// Whether to also compare what a barrier may do beside `pooled::MOST_CREDIT`.
@@ -255,7 +257,7 @@ pub(crate) fn causal(
                 known: Some(comparison.known),
                 trace: Some(trace),
                 most_credit,
-                host_hold: counts.host_hold,
+                host_reserve: counts.host_reserve,
                 credit_room,
                 band: counts.band,
             },
@@ -279,10 +281,14 @@ pub(crate) fn causal(
     let _ = writeln!(
         out,
         "\n\nAs the jobs really ran: {sampled} of {} with samples, the slice holding {} beside its runners and read at {} \
-         by the guards. A credit of 0B is the plain count.\n",
+         by the guards. A credit of 0B is the plain count for MemoryMax. The host's limit reads {}.\n",
         comparison.jobs.len(),
         ByteSize(trace.overhead),
-        ByteSize(trace.guard_overhead)
+        ByteSize(trace.guard_overhead),
+        match counts.host_reserve {
+            HostReserve::Plain => "the plain count",
+            HostReserve::Top2 => "what runs uses and room for its two largest growths (ADR 0108)",
+        }
     );
     let _ = writeln!(
         out,
@@ -399,7 +405,7 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "\nHazards (episodes, time, worst):\n\n{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>7} {:>6} {:>9}",
+        "\nHazards (episodes, time, worst):\n\n{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>7} {:>6} {:>9} {:>9}",
         "CREDIT",
         "SLICE MAX",
         "PAST 90%",
@@ -411,14 +417,18 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
         "LOWEST",
         "FALLS",
         "OVER",
-        "CREDIT GH"
+        "CREDIT GH",
+        "HOST GH"
     );
     for (credit, replay) in credits.iter().zip(replays) {
         let hazard = &replay.hazard;
-        let tenths = hazard.credit / (u128::from(1_u32 << 30) * 360_000);
+        let tenths = |credit: u128| {
+            let tenths = credit / (u128::from(1_u32 << 30) * 360_000);
+            format!("{}.{}", tenths / 10, tenths % 10)
+        };
         let _ = writeln!(
             out,
-            "{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>7} {:>6} {:>9}",
+            "{:<6} {:>9} {:>20} {:>20} {:>20} {:>9} {:>9} {:>9} {:>7} {:>7} {:>6} {:>9} {:>9}",
             ByteSize(*credit).to_string(),
             ByteSize(hazard.slice_peak).to_string(),
             episodes(hazard.over_mark),
@@ -432,7 +442,8 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
                 .map_or_else(|| "-".to_owned(), |lowest| ByteSize(lowest).to_string()),
             hazard.credit_falls,
             hazard.overdrawn,
-            format!("{}.{}", tenths / 10, tenths % 10),
+            tenths(hazard.credit),
+            tenths(hazard.host_credit),
         );
     }
     let active = replays.first().map_or(0, |replay| replay.hazard.active) / 1000;
@@ -440,7 +451,8 @@ fn causal_hazards(credits: &[u64], replays: &[Replay]) -> String {
         out,
         "\n<20G and <6.2G: time with the host's MemAvailable under those lines, of {} with a runner running. BAND: time at the \
          host's larger margin. FALLS: times the \
-         credit fell; OVER: those that left the count past a budget. The host's programs are as recorded and do not react \
+         credit fell; OVER: those, and falls of the host's credit, that left the count past a budget. CREDIT GH and HOST \
+         GH: each credit over the replay, in gigabyte-hours. The host's programs are as recorded and do not react \
          to a fuller slice; no pressure, no reseeds, shells, warm runners or restarts; a job's run time stays as it ran.",
         duration(active)
     );

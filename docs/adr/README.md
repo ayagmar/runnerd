@@ -58,11 +58,11 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice | Accepted |
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling | Amended by 0068, 0071, 0090 |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued | Amended by 0058, 0094, 0096, 0104, 0107 |
-| [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends | Amended by 0064 |
+| [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends | Amended by 0064, 0108 |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch | Amended by 0053, 0077, 0082, 0083 |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache | Accepted |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk | Amended by 0089, 0090 |
-| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache | Amended by 0063, 0070, 0078, 0084, 0096, 0101, 0102 |
+| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache | Amended by 0063, 0070, 0078, 0084, 0096, 0101, 0102, 0108 |
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved | Amended by 0096 |
 | [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only | Amended by 0100 |
 | [0058](0058-a-repository-served-by-several-profiles.md) | A repository served by several profiles, each with its own labels | Amended by 0096 |
@@ -106,12 +106,13 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099, 0102 |
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099 |
 | [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099, 0104 |
-| [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Accepted |
+| [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Amended by 0108 |
 | [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Amended by 0103 |
 | [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md) | The host's reading includes its swap, and admission ignores it | Accepted |
-| [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Accepted |
-| [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Accepted |
+| [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Amended by 0108 |
+| [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Amended by 0108 |
 | [0104](0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md) | A runner that connected and left says nothing of the next start | Accepted |
 | [0105](0105-a-removal-under-way-frees-a-stopped-runners-slot.md) | A removal under way frees a stopped runner's slot | Accepted |
 | [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md) | A tick reads its running jobs after its starts | Accepted |
 | [0107](0107-a-warm-runner-waits-only-where-jobs-just-came.md) | A warm runner waits only where jobs just came | Accepted |
+| [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed |

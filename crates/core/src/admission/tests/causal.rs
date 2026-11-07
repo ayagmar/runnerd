@@ -106,7 +106,7 @@ fn replay(jobs: &[Ran], trace: &Trace, most_credit: u64) -> Replay {
             known: Some(&known),
             trace: Some(trace),
             most_credit,
-            host_hold: u64::MAX,
+            host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
             band: Band::NoWaiterFits,
         },
@@ -156,6 +156,7 @@ fn a_pooled_replay_starts_what_only_the_pooled_count_fits() {
             stalled: false,
         }),
         most: MOST_CREDIT,
+        host_reserve: true,
     });
     assert_eq!(
         pooled.hazard.most_credit, direct.credit,

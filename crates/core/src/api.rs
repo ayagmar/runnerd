@@ -72,9 +72,9 @@ pub use control::{
 };
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use insights::{
-    AutoNote, Delivery, Digest, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight, InsightKind, Insights,
-    InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Priority,
-    RepositoryWaits, RunLink, Severity, WaitSpread, WeekWaits,
+    AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,
+    InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest,
+    NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitSpread, WeekWaits,
 };
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
@@ -211,6 +211,20 @@ pub struct HostBudget {
     pub spare: u64,
     /// Whether the host's tasks stall for memory (`full` pressure), so no runner starts until they stop.
     pub stalled: bool,
+    /// What the host's limit takes off `Budget::memory_in_use` for runners that may not all grow at once (ADR 0108);
+    /// absent while it takes nothing, and from a daemon before 0.0.30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<HostCredit>,
+}
+
+/// What the host's limit takes off the plain count (ADR 0108): `Budget::memory_in_use` less `bytes` is what it counts,
+/// `used` of that is what the runners use, and the rest is room kept for what runs to grow into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCredit {
+    /// What it takes off, in bytes.
+    pub bytes: u64,
+    /// What the runners use, by their recent samples, in bytes.
+    pub used: u64,
 }
 
 impl HostBudget {
@@ -223,13 +237,41 @@ impl HostBudget {
         let room = self.memory.room();
         self.stalled || needs > room || room < host_margin(self.memory.grown())
     }
+
+    /// What the host's limit counts of what runs, `reserved` being `Budget::memory_in_use`: that less the credit
+    /// (ADR 0108).
+    pub fn counts(&self, reserved: u64) -> u64 {
+        reserved.saturating_sub(self.credit.map_or(0, |credit| credit.bytes))
+    }
+
+    /// What that count is made of while a credit stands, as the host's line, a job's wait and the log say it: `it uses
+    /// 14G and keeps 9G for growth`. `None` without a credit, when it counts every reservation.
+    pub fn growth_clause(&self, reserved: u64) -> Option<String> {
+        let credit = self.credit?;
+        let counts = self.counts(reserved);
+        Some(format!(
+            "it uses {} and keeps {} for growth",
+            crate::config::ByteSize(credit.used.min(counts)),
+            crate::config::ByteSize(counts.saturating_sub(credit.used))
+        ))
+    }
 }
 
 /// Why a job waits for the host's limit, needing `needs` bytes with `free` left of it, by the latest reading: for what
-/// runs, or for a host that lacks the room, whose programs it names.
-fn host_reason(needs: u64, free: u64, host: Option<&HostBudget>) -> String {
+/// runs, or for a host that lacks the room, whose programs it names. While the host's limit takes a credit, what runs
+/// is what it uses and the room it keeps for growth, not its reservations (ADR 0108); `reserved` is
+/// `Budget::memory_in_use`.
+fn host_reason(needs: u64, free: u64, host: Option<&HostBudget>, reserved: u64) -> String {
     let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
     if let Some(host) = host.filter(|host| !host.short_of(needs)) {
+        if let Some(growth) = host.growth_clause(reserved) {
+            return format!(
+                "The host has {}, but what runs may still grow into it: {growth}; needs {}, {} is free",
+                host.memory.available_line(),
+                size(needs),
+                size(free)
+            );
+        }
         return format!(
             "The host has {}, but what runs may still grow into it: needs {}; {} of the {} it leaves the slice is free",
             host.memory.available_line(),
@@ -676,9 +718,12 @@ impl Waiting {
                 size(*needs),
                 size(*free)
             ),
-            Waiting::HostMemory { needs, free } => {
-                host_reason(*needs, *free, status.budget.host.as_ref())
-            }
+            Waiting::HostMemory { needs, free } => host_reason(
+                *needs,
+                *free,
+                status.budget.host.as_ref(),
+                status.budget.memory_in_use,
+            ),
             Waiting::Cpu { needs, free } => {
                 format!(
                     "Needs {}; {} are free",

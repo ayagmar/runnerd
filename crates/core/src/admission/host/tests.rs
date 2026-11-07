@@ -1,7 +1,7 @@
 //! The host's bound on a host whose memory is fixed, and on one that can grow to `[host] memory_ceiling`
 //! (ADR 0084): what the slice may hold, the margin it keeps and the stall rule, which a ceiling leaves alone.
 
-use super::{Remembered, budget, first_runner, left, limit, margin, short, stalls};
+use super::{Remembered, budget, first_runner, left, limit, margin, pooled, short, stalls};
 use crate::api::{HostMemory, Pressure, Swap};
 
 const G: u64 = 1 << 30;
@@ -35,6 +35,14 @@ fn stalled(memory: HostMemory, avg10: u32) -> HostMemory {
     HostMemory {
         full: Some(Pressure { avg10, avg60: 0 }),
         ..memory
+    }
+}
+
+/// A count of `bytes` that takes no credit off.
+fn plain(bytes: u64) -> pooled::Count {
+    pooled::Count {
+        plain: bytes,
+        ..pooled::Count::default()
     }
 }
 
@@ -98,8 +106,8 @@ fn a_ceiling_at_or_under_mem_total_changes_nothing() {
         for short in [false, true] {
             assert_eq!(limit(&memory, short), limit(&fixed, short), "{ceiling}");
         }
-        let with = budget(memory, 4 * G, Remembered::default());
-        let without = budget(fixed.clone(), 4 * G, Remembered::default());
+        let with = budget(memory, plain(4 * G), Remembered::default());
+        let without = budget(fixed.clone(), plain(4 * G), Remembered::default());
         assert_eq!(
             (with.limit, with.spare),
             (without.limit, without.spare),
@@ -126,8 +134,8 @@ fn swap_changes_nothing_admission_counts() {
             ..Remembered::default()
         };
         let (without, with) = (
-            budget(bare.clone(), 8 * G, remembered),
-            budget(with_swap.clone(), 8 * G, remembered),
+            budget(bare.clone(), plain(8 * G), remembered),
+            budget(with_swap.clone(), plain(8 * G), remembered),
         );
         assert_eq!(
             (without.limit, without.spare, without.stalled),
@@ -145,7 +153,7 @@ fn a_ceiling_does_not_change_when_the_host_stalls() {
     for ceiling in [None, Some(24 * G)] {
         let memory = stalled(idle_vm(ceiling), 600);
         assert!(stalls(&memory, false), "stalls with ceiling {ceiling:?}");
-        let host = budget(memory, 0, Remembered::default());
+        let host = budget(memory, plain(0), Remembered::default());
         assert!(host.stalled, "stalled with ceiling {ceiling:?}");
         assert_eq!(host.spare, 0, "nothing to spare while it stalls");
     }
@@ -179,7 +187,7 @@ fn a_running_runner_counts_against_the_grown_limit() {
         swap: None,
         ..host(12 * G + 800 * M, 4 * G)
     };
-    let host = budget(memory, 8 * G, Remembered::default());
+    let host = budget(memory, plain(8 * G), Remembered::default());
     assert_eq!(host.limit, 7 * G + 4 * G + (11 * G + 224 * M) - 2 * G);
     assert_eq!(host.spare, host.limit - 8 * G);
     assert!(host.spare < 16 * G, "a second 8G runner does not fit");

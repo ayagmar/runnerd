@@ -440,9 +440,12 @@ always returns, so the daemon closes and flushes the history.
   `over_budget`, reseeds, shells and the status, and by the replay) gives every runner's take and a credit of at most 6G
   for settled runners of different jobs that will not all peak at once, within what the slice has under the high-water
   mark less 2G and what the host has past its margin and a quarter of its memory. `MemoryMax` reads the count less the
-  credit; the host's limit reads it without, as the overcount is the host's margin. Reservations, learning and stored
-  data stay per runner; `[host] pooled_count = false` turns the credit off
-  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)).
+  credit. Reservations, learning and stored data stay per runner; `[host] pooled_count = false` turns the credit off
+  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)). The same count gives the host's
+  limit its own credit, the same runners' room less the two largest jobs' and at least 6G, which `Left.host`, the last
+  check before a start and the larger margin read; `Backfill` bounds what it can still grow by every running runner's
+  take, and `Drained` reads neither credit. `[host] pooled_host = false` turns it off
+  ([ADR 0108](docs/adr/0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no

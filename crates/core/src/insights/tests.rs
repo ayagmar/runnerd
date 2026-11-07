@@ -1,6 +1,6 @@
 //! Insights from synthetic histories of fictional repositories: one `halyard/api` job run a few times a day.
 
-use super::{HeldJob, History, HostHold, Run, digest, insights};
+use super::{HeldJob, History, HostHold, HostReading, Run, digest, insights};
 use crate::api::{self, AutoNote, InsightKind, JobState, Severity};
 use crate::config::Config;
 
@@ -74,6 +74,7 @@ fn whole(runs: &[Run]) -> History {
         runs: runs.to_vec(),
         kept_since: 0,
         host: None,
+        readings: Vec::new(),
     }
 }
 
@@ -868,7 +869,7 @@ fn a_week_before_the_history_holds_every_job_is_not_compared() {
     let young = History {
         runs,
         kept_since: NOW - 8 * 24 * HOUR,
-        host: None,
+        ..History::default()
     };
     let found = insights(&young, &config(), 14, NOW);
     let api = &found.waits[0];
@@ -924,7 +925,7 @@ fn a_job_queued_before_runnerd_first_ran_waits_from_when_it_did() {
     let history = History {
         runs,
         kept_since: first,
-        host: None,
+        ..History::default()
     };
     let found = insights(&history, &config(), 14, NOW);
     assert_eq!(found.waits[0].now.all.p95, Some(60));
@@ -1178,5 +1179,147 @@ fn a_host_held_insight_without_names_says_how_much_the_host_holds_and_no_more() 
         found[0].sentence,
         "2 jobs wait for the host's memory, the longest for 1h 00m (halyard/api: CI / test); programs outside CI \
          hold 38G. Closing programs frees only part of that."
+    );
+}
+
+/// Midnight UTC of `NOW`'s day, 8 hours before it.
+const TODAY: u64 = NOW / (24 * HOUR) * (24 * HOUR);
+const SECOND: u64 = 1000;
+
+/// A reading of a 64G host, whose low line is 20G and critical line 6.4G, `at` ms with `available` and `credit`.
+fn reading(at: u64, available: u64, credit: u64, running: bool) -> HostReading {
+    HostReading {
+        at,
+        total: 64 * G,
+        available,
+        swap_free: Some(8 * G),
+        credit,
+        running,
+    }
+}
+
+/// Today: 30s with nothing short, a minute under 20G on a credit, a two-hour gap the daemon did not run, an idle
+/// reading at 1G, 20s under 6.4G on a credit, then a minute at 40G. Yesterday: a minute under 6.4G with no credit.
+fn readings() -> Vec<HostReading> {
+    vec![
+        reading(TODAY - 2 * HOUR, 2 * G, 0, true),
+        reading(TODAY - 2 * HOUR + 60 * SECOND, 30 * G, 0, false),
+        reading(TODAY + HOUR, 30 * G, 0, true),
+        reading(TODAY + HOUR + 30 * SECOND, 10 * G, 2 * G, true),
+        reading(TODAY + 3 * HOUR, G, 0, false),
+        reading(TODAY + 3 * HOUR + 20 * SECOND, 5 * G, 2 * G, true),
+        reading(TODAY + 3 * HOUR + 40 * SECOND, 40 * G, 0, true),
+    ]
+}
+
+#[test]
+fn the_host_s_day_counts_only_while_runners_ran_each_reading_for_a_minute_at_most_with_its_share_on_a_credit()
+ {
+    // Catches a reading counted across a gap the daemon did not run, an idle host's low reading counted as CI's,
+    // a day's figures leaking into the next, and a credit's share taken from the wrong readings.
+    let history = History {
+        readings: readings(),
+        ..History::default()
+    };
+    let found = insights(&history, &config(), 14, NOW);
+    let [today, yesterday] = found.host.as_slice() else {
+        panic!("two days, newest first: {:#?}", found.host);
+    };
+    assert_eq!(today.since, TODAY / SECOND);
+    assert_eq!((today.running, today.credited), (30 + 60 + 20 + 60, 80));
+    assert_eq!((today.low_line, today.critical_line), (20 * G, 64 * G / 10));
+    assert_eq!(
+        (today.low.seconds, today.low.credited),
+        (80, 80),
+        "under 20G only on the credit"
+    );
+    assert_eq!((today.critical.seconds, today.critical.credited), (20, 20));
+    assert_eq!(
+        (today.lowest, today.lowest_credited),
+        (5 * G, Some(5 * G)),
+        "the idle 1G is not CI's"
+    );
+    assert_eq!(
+        today.dated_line(),
+        "Jan 15: CI ran 2m 50s, 1m 20s of it on a host credit; under 20G available for 1m 20s (1m 20s on a \
+         credit); under 6.4G available for 20s (20s on a credit); lowest 5G (5G on a credit); swap free at least 8G"
+    );
+    assert_eq!((yesterday.running, yesterday.credited), (60, 0));
+    assert_eq!(yesterday.critical.seconds, 60);
+    assert!(
+        !yesterday.line().contains("credit"),
+        "a day without a credit says nothing of one: {}",
+        yesterday.line()
+    );
+}
+
+#[test]
+fn a_day_under_a_tenth_of_the_host_on_a_credit_warns_once_and_a_day_without_one_does_not() {
+    // Catches a warning for a low host the credit had no part in, and a key that changes within the day, which
+    // would tell the owner again on every look.
+    let history = History {
+        readings: readings(),
+        ..History::default()
+    };
+    let warning = |at: u64| {
+        let found = insights(&history, &config(), 14, at).insights;
+        let [insight] = found.as_slice() else {
+            panic!("one warning: {found:#?}");
+        };
+        insight.clone()
+    };
+    let insight = warning(NOW);
+    assert_eq!(insight.severity, Severity::Warning);
+    assert_eq!(
+        insight.kind,
+        InsightKind::HostLow {
+            day: TODAY / SECOND,
+            seconds: 20,
+            lowest: 5 * G
+        }
+    );
+    assert_eq!(insight.key, warning(NOW + 10 * HOUR).key, "the same day's");
+    assert!(
+        insight.sentence.contains(
+            "[host] pooled_host = false makes the host's limit count every reservation again"
+        ),
+        "{}",
+        insight.sentence
+    );
+
+    let mut uncredited = readings();
+    for reading in &mut uncredited {
+        reading.credit = 0;
+    }
+    let history = History {
+        readings: uncredited,
+        ..History::default()
+    };
+    let found = insights(&history, &config(), 14, NOW).insights;
+    assert!(
+        found.is_empty(),
+        "a low host with no credit is no warning: {found:#?}"
+    );
+}
+
+#[test]
+fn the_digest_reads_the_host_over_its_own_24_hours() {
+    // Catches a digest that reads the calendar day, or the whole insights window, instead of its 24 hours.
+    let history = History {
+        readings: readings(),
+        ..History::default()
+    };
+    let day = digest(&history, &config(), NOW + 15 * HOUR).host.unwrap();
+    assert_eq!(
+        (day.running, day.lowest),
+        (170, 5 * G),
+        "today's runs, not yesterday's"
+    );
+    let before = digest(&history, &config(), TODAY - HOUR).host.unwrap();
+    assert_eq!((before.running, before.lowest), (60, 2 * G));
+    assert_eq!(
+        digest(&history, &config(), TODAY + 30 * HOUR).host,
+        None,
+        "no runner ran in its 24 hours"
     );
 }

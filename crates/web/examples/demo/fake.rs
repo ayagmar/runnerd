@@ -992,6 +992,7 @@ fn insights(fixtures: &Fixtures) -> Insights {
                 },
             },
         ],
+        host: Vec::new(),
     }
 }
 
@@ -1057,6 +1058,7 @@ fn digest(fixtures: &Fixtures) -> Digest {
             url: None,
         }],
         savings: Some(savings(fixtures).month),
+        host: None,
     }
 }
 

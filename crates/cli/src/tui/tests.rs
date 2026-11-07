@@ -894,6 +894,7 @@ fn the_bar_shows_no_free_cell_when_core_says_nothing_is_free() {
         limit: 4 << 30,
         spare: 4 << 30,
         stalled: false,
+        credit: None,
     });
     assert_eq!(app.live.status.budget_parts().free, None);
     let shown = screen(&app, 80, 24, false);
@@ -1926,6 +1927,7 @@ fn the_health_line_counts_the_warning_insights_and_says_where_to_read_them() {
             insight("waits:halyard/api", Severity::Notice),
         ],
         waits: Vec::new(),
+        host: Vec::new(),
     })));
 
     let wide = screen(&app, 160, 40, false);

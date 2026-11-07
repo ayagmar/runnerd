@@ -410,5 +410,6 @@ fn busy_desktop(fake: &fake::Fake) {
         limit,
         spare: limit.saturating_sub(budget.memory_in_use),
         stalled: false,
+        credit: None,
     });
 }

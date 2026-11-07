@@ -1,6 +1,6 @@
 # 0099. The budget counts jobs that do not peak at once
 
-Status: **Accepted** (2026-11-06). Amends [0033](0033-measured-admission.md),
+Status: **Accepted** (2026-11-06), amended by [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md). Amends [0033](0033-measured-admission.md),
 [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md),
 [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) and
 [0098](0098-a-pool-waits-longer-for-its-first-barrier.md). Adds `[host] pooled_count`, on by default, and an optional

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use runnerd_core::admission::host;
+use runnerd_core::admission::{host, pooled};
 use runnerd_core::api::HostMemory;
 use runnerd_core::config::{ByteSize, Config, Image};
 
@@ -183,7 +183,10 @@ fn the_first_job_of_a_starter_config_is_admitted_on_a_small_host() {
             available: machine.memory.available - (256 << 20),
             ..machine.memory.clone()
         };
-        let reserved = config.caches.mirror.memory.0;
+        let reserved = pooled::Count {
+            plain: config.caches.mirror.memory.0,
+            ..Default::default()
+        };
         let budget = host::budget(started, reserved, host::Remembered::default());
         if runner > budget.spare {
             waiting.push(format!(

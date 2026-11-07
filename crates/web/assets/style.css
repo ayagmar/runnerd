@@ -2167,6 +2167,16 @@ dl.health-figures {
 .advice.raise { border-left-color: var(--failure-ink); background: var(--failure-bg); color: var(--failure-ink); }
 .advice.keep { border-left-color: var(--memory); }
 
+/* The host's memory on each day CI ran: one line a day. */
+.host-days {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
 /* Insights: a card each, its edge in the colour of what it says. */
 .insight-list {
   display: grid;

@@ -49,6 +49,7 @@ fn roomy(runners: &[Runner<'_>]) -> Count {
             stalled: false,
         }),
         most: MOST_CREDIT,
+        host_reserve: true,
     })
 }
 
@@ -202,6 +203,7 @@ fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
         }),
         host: Some(host::pooling(&memory, Remembered::default())),
         most: MOST_CREDIT,
+        host_reserve: true,
     });
     let thousandths = |bytes: u64| (bytes * 1000 + G / 2) / G;
     assert_eq!(count.plain, 45_902_462_976, "the status's memory_in_use");
@@ -227,6 +229,7 @@ fn every_guard_can_take_the_credit_back() {
             stalled: false,
         }),
         most: MOST_CREDIT,
+        host_reserve: true,
     };
     assert_eq!(count(&snapshot).credit, 2 * G);
     let credit = |snapshot: Snapshot<'_>| count(&snapshot).credit;
@@ -257,12 +260,11 @@ fn every_guard_can_take_the_credit_back() {
         most: 0,
         ..snapshot
     };
+    let off = count(&off);
     assert_eq!(
-        count(&off),
-        Count {
-            plain: 10 * G,
-            ..Count::default()
-        }
+        (off.plain, off.credit, off.runners),
+        (10 * G, 0, 0),
+        "with pooling off"
     );
     // 90G less 87G less the 2G left under the mark.
     let near_the_mark = Snapshot {
@@ -289,6 +291,120 @@ fn every_guard_can_take_the_credit_back() {
         ..snapshot
     };
     assert_eq!(credit(stalled), 0);
+}
+
+#[test]
+fn the_host_keeps_room_for_the_two_largest_growths_and_counts_the_rest_at_use() {
+    // Catches the host's credit going by another rule than ADR 0108's: a sum, a fixed reserve, the largest job alone,
+    // or headroom taken per runner rather than per job.
+    let (a, b, c) = (key("o/r", "a"), key("o/r", "b"), key("o/r", "c"));
+    // 5G, 4G and 3G of headroom: 12G, of which the two largest keep 9G.
+    let three = roomy(&[
+        settled(&a, 6 * G, G),
+        settled(&b, 6 * G, 2 * G),
+        settled(&c, 6 * G, 3 * G),
+    ]);
+    assert_eq!(three.host_credit, 3 * G);
+    assert_eq!(three.hosted(), 18 * G - 3 * G);
+    assert_eq!(three.used, 6 * G);
+    // Two copies of `c` grow together: one job with 6G of headroom, the largest.
+    let copies = roomy(&[
+        settled(&a, 6 * G, G),
+        settled(&b, 6 * G, 2 * G),
+        settled(&c, 6 * G, 3 * G),
+        settled(&c, 6 * G, 3 * G),
+    ]);
+    assert_eq!(copies.host_credit, 15 * G - (6 * G + 5 * G));
+    // Under the floor nothing is taken off: 2G, 2G and 1G keep 6G.
+    let small = roomy(&[
+        settled(&a, 3 * G, G),
+        settled(&b, 3 * G, G),
+        settled(&c, 2 * G, G),
+    ]);
+    assert_eq!(small.host_credit, 0, "5G of headroom is under the 6G floor");
+    assert_eq!(small.hosted(), small.plain);
+    // One job, or two, always keep all of theirs.
+    for runners in [
+        &[settled(&a, 12 * G, G)][..],
+        &[settled(&a, 12 * G, G), settled(&b, 12 * G, G)],
+    ] {
+        assert_eq!(roomy(runners).host_credit, 0, "{runners:?}");
+    }
+}
+
+#[test]
+fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
+    // Catches a host credit taken from a stale or missing reading, during a stall, with `pooled_host` off, or turned
+    // off with `pooled_count`, which is `MemoryMax`'s decision alone.
+    let (a, b, c) = (key("o/r", "a"), key("o/r", "b"), key("o/r", "c"));
+    let runners = [
+        settled(&a, 6 * G, G),
+        settled(&b, 6 * G, 2 * G),
+        settled(&c, 6 * G, 3 * G),
+    ];
+    let snapshot = Snapshot {
+        runners: &runners,
+        committed: 0,
+        slice: Some(Slice {
+            memory: 6 * G,
+            memory_max: 100 * G,
+        }),
+        host: Some(Host {
+            available: 40 * G,
+            keeps: 20 * G,
+            stalled: false,
+        }),
+        most: MOST_CREDIT,
+        host_reserve: true,
+    };
+    let host_credit = |snapshot: Snapshot<'_>| count(&snapshot).host_credit;
+    assert_eq!(host_credit(snapshot), 3 * G);
+    let pooled_count_off = Snapshot {
+        most: 0,
+        ..snapshot
+    };
+    assert_eq!(
+        host_credit(pooled_count_off),
+        3 * G,
+        "apart from MemoryMax's"
+    );
+    let off = Snapshot {
+        host_reserve: false,
+        ..snapshot
+    };
+    let no_slice = Snapshot {
+        slice: None,
+        ..snapshot
+    };
+    let no_host = Snapshot {
+        host: None,
+        ..snapshot
+    };
+    let stalled = Snapshot {
+        host: Some(Host {
+            stalled: true,
+            ..snapshot.host.unwrap()
+        }),
+        ..snapshot
+    };
+    for (gate, snapshot) in [
+        ("pooled_host off", off),
+        ("no recent slice sample", no_slice),
+        ("no recent host reading", no_host),
+        ("a stall", stalled),
+    ] {
+        assert_eq!(host_credit(snapshot), 0, "{gate}");
+    }
+    // Unlike MemoryMax's credit, the host's is not held to what the host has past a quarter of it: the owner chose
+    // to spend that buffer (ADR 0108).
+    let short = Snapshot {
+        host: Some(Host {
+            available: 21 * G,
+            ..snapshot.host.unwrap()
+        }),
+        ..snapshot
+    };
+    assert_eq!(host_credit(short), 3 * G);
 }
 
 #[test]
@@ -396,6 +512,7 @@ mod generated {
                 stalled: rng.below(8) == 0,
             }),
             most: if rng.below(8) == 0 { 0 } else { MOST_CREDIT },
+            host_reserve: rng.below(8) != 0,
         }
     }
 
@@ -415,6 +532,7 @@ mod generated {
             .map(|job| key("o/r", &format!("job-{job}")))
             .collect();
         let mut credited = 0;
+        let mut host_credited = 0;
         for seed in 0..CASES {
             let mut rng = Rng(seed);
             let runners = runners(&mut rng, &keys);
@@ -440,11 +558,83 @@ mod generated {
                 runners.iter().map(|runner| runner.takes).sum::<u64>() + snapshot.committed,
                 "seed {seed}: the plain count adds every take"
             );
+            host_credited += u64::from(counted.host_credit > 0);
+            let headroom: u64 = runners
+                .iter()
+                .filter_map(|runner| Some(runner.takes - runner.pooled()?))
+                .sum();
+            let read = snapshot.slice.is_some() && snapshot.host.is_some_and(|host| !host.stalled);
+            assert!(
+                counted.hosted() <= counted.plain,
+                "seed {seed}: {counted:?} past the plain count"
+            );
+            assert!(
+                counted.hosted() >= floor(&snapshot) + headroom.min(HOST_RESERVE_FLOOR),
+                "seed {seed}: {counted:?} under use, what counts in full and the floor of {headroom}"
+            );
+            assert!(
+                counted.hosted() >= counted.used,
+                "seed {seed}: {counted:?} keeps less than nothing for growth"
+            );
+            assert!(
+                counted.host_credit == 0 || (snapshot.host_reserve && read),
+                "seed {seed}: {counted:?} without its switch or a reading"
+            );
         }
         assert!(
             credited > CASES / 10,
             "only {credited} snapshots had a credit"
         );
+        assert!(
+            host_credited > CASES / 20,
+            "only {host_credited} snapshots had a host credit"
+        );
+    }
+
+    /// `Backfill` adds `host_credit_room` to what the host's limit leaves, so an owner's room is never found later than
+    /// it can come. With no runner starting or ending, the runners may use anything up to what they take and all grow
+    /// eligible; the host's credit then never passes what it was and its room. A room from what they use now, as the
+    /// host study first had it, fails here: a runner that shrinks raises the credit past it.
+    #[test]
+    fn the_host_credit_never_grows_past_its_room_while_the_same_runners_run() {
+        let keys: Vec<Key> = (0..5)
+            .map(|job| key("o/r", &format!("job-{job}")))
+            .collect();
+        for seed in 0..CASES {
+            let mut rng = Rng(seed);
+            let runners = runners(&mut rng, &keys);
+            let view = snapshot(&mut rng, &runners);
+            let now = count(&view);
+            for _ in 0..8 {
+                let later: Vec<Runner<'_>> = runners
+                    .iter()
+                    .map(|runner| Runner {
+                        key: runner.key.or(Some(&keys[0])),
+                        used: Some(rng.below(runner.takes + 1)),
+                        ran: Some(POOL_AFTER),
+                        basis: Some(PREDICTED),
+                        ..*runner
+                    })
+                    .collect();
+                let after = count(&Snapshot {
+                    runners: &later,
+                    slice: view.slice.or(Some(Slice {
+                        memory: 0,
+                        memory_max: 46 * G,
+                    })),
+                    host: Some(Host {
+                        available: 62 * G,
+                        keeps: 20 * G,
+                        stalled: false,
+                    }),
+                    ..view
+                });
+                assert!(
+                    after.host_credit <= now.host_credit + now.host_credit_room,
+                    "seed {seed}: {now:?} grew to {after:?}"
+                );
+            }
+        }
     }
 
     /// `Left::take` and `Left::give` work out a plan's starts and a warm runner's stop from the count at the plan.
@@ -473,6 +663,7 @@ mod generated {
             });
             assert_eq!(with.pooled(), count(&view).pooled() + takes, "seed {seed}");
             assert_eq!(with.credit, count(&view).credit, "seed {seed}");
+            assert_eq!(with.hosted(), count(&view).hosted() + takes, "seed {seed}");
         }
     }
 
@@ -507,6 +698,11 @@ mod generated {
                 assert!(
                     before.pooled() - after.pooled() <= gone.takes,
                     "seed {seed}: {gone:?} left, {before:?} to {after:?}"
+                );
+                assert!(
+                    after.hosted() <= before.hosted()
+                        && before.hosted() - after.hosted() <= gone.takes,
+                    "seed {seed}: {gone:?} left, the host's count {before:?} to {after:?}"
                 );
             }
         }

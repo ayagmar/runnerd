@@ -184,6 +184,7 @@ fn host(limit: u64, stalled: bool) -> HostBudget {
         limit,
         spare: limit.saturating_sub(8 * G),
         stalled,
+        credit: None,
     }
 }
 

@@ -971,7 +971,35 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
         runs,
         kept_since,
         host: None,
+        readings: host_readings(db, since)?,
     })
+}
+
+/// The host's readings the budget's events stored from `since` (ms), oldest first (ADR 0108). Only the figures the
+/// insights read, by SQLite's JSON: a day holds thousands of these events.
+fn host_readings(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<Vec<crate::insights::HostReading>> {
+    db.prepare_cached(
+        "SELECT at, json_extract(body, '$.budget.host.memory.total'), \
+         json_extract(body, '$.budget.host.memory.available'), json_extract(body, '$.budget.host.memory.swap.free'), \
+         coalesce(json_extract(body, '$.budget.host.credit.bytes'), 0), \
+         json_extract(body, '$.budget.memory_in_use') > json_extract(body, '$.budget.mirror_memory') \
+         FROM events WHERE at >= ?1 AND body LIKE '{\"type\":\"budget.changed\"%' \
+         AND json_extract(body, '$.budget.host.memory.total') IS NOT NULL ORDER BY id",
+    )?
+    .query_map([since], |row| {
+        Ok(crate::insights::HostReading {
+            at: row.get(0)?,
+            total: row.get(1)?,
+            available: row.get(2)?,
+            swap_free: row.get(3)?,
+            credit: row.get(4)?,
+            running: row.get(5)?,
+        })
+    })?
+    .collect()
 }
 
 /// Those of `jobs` still queued, with how long each waited for the host's memory.
