@@ -386,7 +386,9 @@ impl<'plan> Backfill<'plan> {
             older,
         } = around;
         // The room may come sooner than ends bring it: either credit can grow at any moment, and an end gives back at
-        // most what its runner counts. So the time found is the earliest the owner could start.
+        // most what its runner counts. So the time found is the earliest the owner could start. A runner this plan
+        // started has no job yet, so it counts as ending now and gives back its whole take at once: what it may later
+        // add to the host's credit is its headroom, never more than that take, so `host_credit_room` need not count it.
         let mut left = left;
         left.memory = left
             .memory

@@ -48,6 +48,7 @@ A fixed reserve is exceeded far more often than one taken from what runs, and a 
 H_job        = sum over the job's eligible runners of take - use          (as 0099)
 host_credit  = max(0, sum H - max(6G, H_1 + H_2))                          (H_1, H_2: the two largest H_job)
 hosted       = plain - host_credit
+             = ineligible takes + committed + eligible use + min(sum H, max(6G, H_1 + H_2))
 ```
 
 `admission::pooled::count` computes it beside 0099's credit, from the same eligible runners: job known, run 60 s under
@@ -56,10 +57,14 @@ this daemon, a fresh sample without page cache, basis `Job`, `Profile` or `Profi
 young, adopted, overrun and capped ones, the mirror, seeds and shells. With one or two eligible jobs the floor covers
 their headroom, so a host credit needs at least three.
 
-- **What reads it.** The host's limit, `Left.host`, the last check before a start, `host::short` (so 0102's band) and
-  `simulate --causal` read `hosted`. `MemoryMax`, `over_budget`, reseeds and shells keep reading 0099's `pooled()`.
+- **What reads it.** The host's limit, `Left.host`, the last check before a start, `host::short` (so 0102's band), a
+  requested reseed's check of the host, and `simulate --causal` read `hosted`. `MemoryMax`, `over_budget`, reseeds and
+  shells keep reading 0099's `pooled()` against `MemoryMax`. A reseed reads the host as plans do, or plans would keep
+  spending the room it waits for.
 - **When none stands.** No host credit while the host stalls, without a fresh slice sample or host reading, under
-  `caps`, or with `[host] pooled_host = false`. `pooled_count` and `pooled_host` are separate switches.
+  `caps`, or with `[host] pooled_host = false`. `pooled_count` and `pooled_host` are separate switches. A slice with no
+  `MemoryMax` gets the host credit all the same: there the host's limit is the only bound, and the slice sample is read
+  for its freshness alone. 0099's credit needs `MemoryMax` and stays 0 there.
 - **0099's `host_room` guard stays.** It lowers only the `MemoryMax` credit when the host nears its lower line; the host
   credit does not read it. The study replayed the same guard on the host credit: it kept the host's lows at today's
   level and gave back half the gain, which is the trade the owner declined.
@@ -79,7 +84,9 @@ host_credit_room = max(0, sum of the running runners' takes - 6G - host_credit n
 ```
 
 Every job's headroom is at most its take, so this bounds what the credit can still give without a runner ending, and
-0097's first promise holds as 0099 restored it. A bound by `take - use` instead would read today's use, which a
+0097's first promise holds as 0099 restored it. A runner the same plan started is not in that sum, and needs no room of
+its own: it has no job yet, so `Backfill` counts it as ending now and gives its whole take back at once, and what it may
+later add to the credit is its headroom, never more than that take. A bound by `take - use` instead would read today's use, which a
 shrinking runner beats. Replayed at 46G over 72 hours, 28 alignments, the strict room costs nothing measurable against
 none: all waiting 107.35 → 107.3 h warm and 111.85 → 113.2 h cold (the paired median change is 0.0 h and 0.1 h), host
 hours 27.75 and 27.5 either way.
@@ -147,9 +154,12 @@ reading; the study's signed figures were −2.98G and −0.16G warm, −2.28G co
 
   Paired, top-2 is lower in 75 of 256 placements warm and 53 cold, by a median of 0.00G and at worst 7.82G warm and
   6.33G cold. That worst is the idle buffer the owner agreed to spend.
-- **When the credit falls, starts wait; nothing running stops.** Growth past the reserve raises `hosted` byte for byte.
-  The replay's `OVER` column counts these falls that left the count past the host's limit: 3,808 summed over the warm
-  alignments and 5,289 cold, against 147 and 1,410 for the plain count.
+- **When the credit falls, starts wait; nothing running stops.** The reserve is the two largest jobs' headroom, not a
+  pool any growth draws from: a job outside the top two that grows 1G raises `hosted` by 1G, and as the headroom left
+  shrinks toward the floor, `hosted` rises toward `plain`. The replay's `OVER` column counts the looks where a credit's
+  fall alone took the count past a budget it was within at the previous look: 3,032 summed over the warm alignments
+  and 4,479 cold, against 146 and 1,388 for the plain count, whose falls are `MemoryMax`'s credit's alone. Nothing acts on that but waiting: `over_budget`
+  reads `MemoryMax`'s count, and `hosted ≤ plain` at every state.
 - **A restart mid-credit holds every start until the plain count fits.** Adopted runners never become eligible, so
   `Left.host` goes short by the credit that was spent, and nothing starts until enough adopted jobs end. On a heavy
   night that means waiting for the longest adopted jvm jobs. It is safe; it is not quick.
@@ -180,8 +190,10 @@ Under the sandbox lock, on a copy of the history, pools unlike the owner's, a 25
    reserves about 5.75G by `Job`. A 10G hog outside the slice holds the host limit. Run all four. Past 60 s the status
    shows a host credit of about `4 × 4.75 − 9.5 ≈ 9.5G`, and a queued 6G anchor starts on it. With
    `pooled_host = false` (second arm, same load) the anchor waits for the host.
-2. **The accounting follows growth.** As the ramps grow, the host credit falls and `hosted` rises by the growth past the
-   reserve; starts wait; no running runner stops; the hog's 25G guard stays on. (The guard decides how low the host
+2. **The accounting follows growth.** As the ramps grow, the status's `hosted` (`memory_in_use` less the host credit)
+   matches `ineligible takes + committed + eligible use + min(ΣH, max(6G, H₁ + H₂))` from the runners' samples at each
+   reading, and rises toward `plain`: with all four ramps grown 4G, ΣH is 3G and `hosted` equals `plain`. Starts wait;
+   no running runner stops; the hog's 25G guard stays on. (The guard decides how low the host
    goes, so this measures the accounting, not the hazard; the replay is the hazard evidence.)
 3. **What a runner costs outside the slice.** Start 8 idle runners with no jobs and record `total − available − slice`
    before and after. At 0.2G a runner or more, either count it in `committed` for the host or state it here as a known
