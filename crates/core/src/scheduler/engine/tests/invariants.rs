@@ -17,7 +17,7 @@ use futures_util::FutureExt as _;
 use super::*;
 use crate::admission::host;
 use crate::admission::pooled::{self, POOL_AFTER};
-use crate::api::{Basis, JobPeak};
+use crate::api::{Basis, HoldCause, JobPeak};
 use crate::config::Admission;
 use crate::observe::metrics::Events;
 use crate::scheduler::engine::clock::Clock;
@@ -301,6 +301,8 @@ enum Step {
     ExitsAtOnce(usize),
     /// An idle runner exits without a job after waiting `IDLE_TIMEOUT`.
     ExitsIdle(usize),
+    /// An idle runner connected and exits without a job, as when its job is cancelled before it begins.
+    ExitsConnected(usize),
     /// Docker fails the next inspect of a runner's container.
     InspectFails(usize),
     /// Docker fails the first inspect of the next runner container started.
@@ -367,6 +369,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             41..=42 => Step::StartFails,
             43 => Step::ExitsAtOnce(rng.index()),
             44 => Step::ExitsIdle(rng.index()),
+            95 => Step::ExitsConnected(rng.index()),
             45..=46 => Step::InspectFails(rng.index()),
             47 => Step::RemoveFails,
             48..=54 => Step::Sample {
@@ -428,6 +431,18 @@ enum Listing {
 enum Exit {
     AtOnce,
     AfterIdleTimeout,
+    Connected,
+}
+
+/// A runner the harness made exit without a job, until a tick or a pass frees its slot.
+#[derive(Debug, Clone)]
+struct ExitWatch {
+    container: String,
+    repository: String,
+    profile: String,
+    exit: Exit,
+    /// Its pool was held, or a streak of runners that left was under way, when it exited.
+    quiet_before: bool,
 }
 
 /// Where a job is, as GitHub knows it.
@@ -493,6 +508,8 @@ struct Seen {
     bands: usize,
     /// Ticks that gave it up for a job that fits the plain one, which the next plan starts.
     released: usize,
+    /// Runners that exited without a job and whose slots were freed.
+    exits_freed: usize,
 }
 
 struct Case {
@@ -523,6 +540,12 @@ struct Case {
     host_during_start: Arc<Mutex<Option<HostReading>>>,
     /// Log captures `CaptureFails` failed, by container, as of the start of the last tick.
     capture_faults: HashMap<String, u32>,
+    /// Runners that exited without a job, whose slots the engine has not freed yet. A restart forgets them, as it
+    /// forgets holds: recovery removes such a container without a verdict on its pool.
+    exits: Vec<ExitWatch>,
+    /// Each busy runner as the tick or pass began: its container, repository and profile. One that ends in it proves
+    /// its pool works and ends any hold.
+    busy_before: Vec<(String, String, String)>,
     step: usize,
 }
 
@@ -566,6 +589,8 @@ impl Case {
             host: None,
             host_during_start: Arc::default(),
             capture_faults: HashMap::new(),
+            exits: Vec::new(),
+            busy_before: Vec::new(),
             step: 0,
         }
     }
@@ -736,6 +761,7 @@ impl Case {
             }
             Step::ExitsAtOnce(pick) => self.exit_idle(pick, Exit::AtOnce),
             Step::ExitsIdle(pick) => self.exit_idle(pick, Exit::AfterIdleTimeout),
+            Step::ExitsConnected(pick) => self.exit_idle(pick, Exit::Connected),
             Step::InspectFails(pick) => self.inspect_fails(pick),
             Step::StartedInspectFails => self.docker.0.lock().unwrap().fail_started_inspects += 1,
             Step::RemoveFails => self.docker.0.lock().unwrap().fail_removes += 1,
@@ -955,7 +981,7 @@ impl Case {
         self.took_job.remove(container);
     }
 
-    /// An idle runner's container exits without a job, at once or after `IDLE_TIMEOUT`.
+    /// An idle runner's container exits without a job: at once, after `IDLE_TIMEOUT`, or having connected.
     fn exit_idle(&mut self, pick: usize, exit: Exit) {
         let idle = self.idle_containers();
         let Some(container) = pick_from(&idle, pick).cloned() else {
@@ -968,11 +994,121 @@ impl Case {
                 }
             }
         }
+        let watch = self
+            .engine
+            .occupied()
+            .find(|(_, occupant)| occupant.container == container.id)
+            .map(|(slot, occupant)| ExitWatch {
+                container: container.id.clone(),
+                repository: occupant.repository.clone(),
+                profile: slot.profile,
+                // `Elapse` aged it: the engine reads that as having waited, and so as having connected.
+                exit: match occupant.started_at.elapsed() {
+                    Ok(waited) if exit == Exit::AtOnce && waited >= IDLE_TIMEOUT => {
+                        Exit::AfterIdleTimeout
+                    }
+                    _ => exit,
+                },
+                quiet_before: false,
+            });
+        self.exits.extend(watch.map(|watch| ExitWatch {
+            quiet_before: self.pool_is_quiet(&watch.repository, &watch.profile),
+            ..watch
+        }));
+        let log = match exit {
+            Exit::Connected => "Listening for Jobs\n",
+            Exit::AtOnce | Exit::AfterIdleTimeout => "",
+        };
         let mut docker = self.docker.0.lock().unwrap();
         docker
             .container_logs
-            .insert(container.id.clone(), String::new());
+            .insert(container.id.clone(), log.to_owned());
         set_running(&mut docker, &container.id, false);
+    }
+
+    /// Notes the busy runners, as a tick or a pass begins.
+    fn note_busy(&mut self) {
+        self.busy_before = self
+            .engine
+            .occupied()
+            .filter(|(_, occupant)| {
+                occupant.busy
+                    || occupant.job.is_some()
+                    || self.took_job.contains(&occupant.container)
+            })
+            .map(|(slot, occupant)| {
+                let repository = occupant.repository.clone();
+                (occupant.container.clone(), repository, slot.profile)
+            })
+            .collect();
+    }
+
+    /// Whether a pool is neither held now nor in a streak of runners that left without a job.
+    fn pool_is_quiet(&self, repository: &str, profile: &str) -> bool {
+        self.engine
+            .repositories
+            .get(repository)
+            .and_then(|state| state.holds.get(profile))
+            .is_none_or(|hold| {
+                hold.idle_exits == 0 && hold.held.is_none_or(|held| held.until <= SystemTime::now())
+            })
+    }
+
+    /// Invariant 8 (ADR 0104), as a tick or a pass frees slots: a pool whose runner exited without connecting is held
+    /// back, so a pool whose runners keep failing to start backs off, and a runner that connected and left a quiet
+    /// pool brings no hold, as it says nothing of the next start. Another runner of the pool failing in the meantime
+    /// is a hold of its own, so that pool proves nothing.
+    fn exits_hold_only_what_failed_to_start(&mut self) -> Result<(), Violation> {
+        let in_slots: BTreeSet<String> = self
+            .engine
+            .occupied()
+            .map(|(_, occupant)| occupant.container.clone())
+            .collect();
+        let (waiting, freed): (Vec<ExitWatch>, Vec<ExitWatch>) = std::mem::take(&mut self.exits)
+            .into_iter()
+            .partition(|watch| in_slots.contains(&watch.container));
+        self.exits = waiting;
+        let now = SystemTime::now();
+        for watch in &freed {
+            let Some(hold) = self
+                .engine
+                .repositories
+                .get(&watch.repository)
+                .and_then(|state| state.holds.get(&watch.profile))
+            else {
+                continue;
+            };
+            let standing = hold.held.filter(|held| held.until > now);
+            let job_ended = self
+                .busy_before
+                .iter()
+                .any(|(container, repository, profile)| {
+                    !in_slots.contains(container)
+                        && *repository == watch.repository
+                        && *profile == watch.profile
+                });
+            match watch.exit {
+                Exit::AtOnce if standing.is_none() && !job_ended => {
+                    let detail = format!("{watch:?} failed to start and {hold:?} holds nothing");
+                    return violation(self, "exits_hold_only_what_failed_to_start", detail);
+                }
+                Exit::Connected if watch.quiet_before && standing.is_some() => {
+                    let failed = freed.iter().any(|other| {
+                        other.exit == Exit::AtOnce
+                            && other.repository == watch.repository
+                            && other.profile == watch.profile
+                    });
+                    let cause = standing.map(|held| held.cause);
+                    if !failed && matches!(cause, Some(HoldCause::NoJob | HoldCause::IdleExits)) {
+                        let detail = format!("{watch:?} connected and {hold:?} holds its pool");
+                        return violation(self, "exits_hold_only_what_failed_to_start", detail);
+                    }
+                }
+                _ => {}
+            }
+            self.seen.exits_freed += 1;
+        }
+        Ok(())
     }
 
     /// Takes a `sample` while the next runner starts.
@@ -1119,6 +1255,7 @@ impl Case {
         self.handle = handle;
         // The store keeps the host's reading in memory only, and a sample still to come goes to the old store.
         self.host = None;
+        self.exits.clear();
         self.docker.0.lock().unwrap().on_start = None;
         self.recover().await
     }
@@ -1140,6 +1277,11 @@ impl Case {
         self.host = Some(reading);
         for occupant in self.engine.slots.values_mut().flatten().flatten() {
             occupant.started_at -= IDLE_TIMEOUT;
+        }
+        for watch in &mut self.exits {
+            if watch.exit == Exit::AtOnce {
+                watch.exit = Exit::AfterIdleTimeout;
+            }
         }
         let past = SystemTime::now() - Duration::from_secs(1);
         for state in self.engine.repositories.values_mut() {
@@ -1288,8 +1430,10 @@ impl Case {
             }
         }
         self.cancelled_since_tick.clear();
+        self.note_busy();
         self.engine.tick(Shutdown::No).await;
         self.failed_late();
+        self.exits_hold_only_what_failed_to_start()?;
         let after = self.status();
         let listed = std::mem::take(&mut self.still_listed);
         self.github
@@ -1355,8 +1499,10 @@ impl Case {
         self.unregistered_runners_exit();
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         self.engine.exits.any();
+        self.note_busy();
         self.engine.turnover().await;
         self.failed_late();
+        self.exits_hold_only_what_failed_to_start()?;
         let after = self.status();
         let running: BTreeSet<String> = self
             .running_containers()
@@ -2223,6 +2369,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
             if let Ok(case) = &outcome {
                 seen.barriers += case.barriers;
+                seen.exits_freed += case.exits_freed;
                 assert!(
                     seed % 8 != 2 || case.bands > 0,
                     "seed {seed} starts from a job no margin fits, so the larger margin stands"
@@ -2254,6 +2401,10 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     assert!(
         seen.barriers > 0 || seeds.len() == 1,
         "the generated runs reach a barrier, or its invariant checks nothing"
+    );
+    assert!(
+        seen.exits_freed > 0 || seeds.len() == 1,
+        "the generated runs free a runner that left without a job, or its invariant checks nothing"
     );
 }
 

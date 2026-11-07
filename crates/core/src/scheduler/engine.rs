@@ -366,8 +366,11 @@ struct PoolHold {
     held: Option<Hold>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
-    /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.
+    /// Runners in a row that connected and ended without a job, or waited `IDLE_TIMEOUT` for one (ADR 0104). Those
+    /// `left_beside` holds count with the one before them.
     idle_exits: u32,
+    /// The pool's other runners when the last of those ended: already up, they say nothing of a later start.
+    left_beside: BTreeSet<String>,
 }
 
 /// How long a stop that detaches or is forced takes at most, from its request: what Docker and GitHub have not

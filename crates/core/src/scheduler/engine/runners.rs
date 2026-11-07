@@ -1,8 +1,8 @@
 //! A slot's runner from start to removal: registers it with a JIT config and starts its container, stops idle or
-//! forced ones, frees the slots of ended containers and holds back a repository whose runners end without taking
-//! a job. It must not decide which slots start or stop: `tick` does, through `plan`.
+//! forced ones, frees the slots of ended containers and holds back a pool whose runners fail to start or keep ending
+//! without a job (ADR 0104). It must not decide which slots start or stop: `tick` does, through `plan`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
@@ -30,6 +30,9 @@ pub(super) const SPEC: &str = "runnerd.spec";
 
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
+
+/// What a runner logs once GitHub gave it a session: it started and connected, whatever ends it after that.
+const CONNECTED: &str = "Listening for Jobs";
 
 /// How many of a runner's last lines a warning shows, and how much of them.
 const LAST_SAID_LINES: usize = 3;
@@ -177,7 +180,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes the container of a slot's runner that ended and its registration, then frees the slot. If its runner
-    /// took no job, the repository's next runners are held back for a while. A container Docker fails to remove keeps
+    /// took no job and never connected, or is the second in a row that connected and left, its pool's next runners are
+    /// held back for a while. A container Docker fails to remove keeps
     /// its slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start. In steps a pass runs
     /// for several runners at once: `drain`, `record`, `remove`, `released`.
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant) {
@@ -289,10 +293,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.forget(occupant);
         // Unread logs: it may have run one.
         let ran = occupant.busy || job.is_some() || took_job != Some(false);
-        // A job the last poll listed queued may be the one it ran.
-        if job.is_none() && took_job != Some(false) {
+        // Its logs say it connected. One that waited `IDLE_TIMEOUT` did too, unless they no longer show it.
+        let connected = logs.is_some_and(|logs| logs.contains(CONNECTED))
+            || occupant
+                .started_at
+                .elapsed()
+                .is_ok_and(|waited| waited >= IDLE_TIMEOUT);
+        // A job the last poll listed queued may be the one it ran, or if it connected and took none, the one cancelled
+        // under it: with no hold, a pass would start a runner for that job from the listing (ADR 0104).
+        if job.is_none() && (took_job != Some(false) || connected) {
             self.spend(&occupant.repository, &slot.profile);
         }
+        let beside: BTreeSet<String> = self
+            .occupied()
+            .filter(|(other, runner)| {
+                other.profile == slot.profile
+                    && runner.repository == occupant.repository
+                    && runner.runner_name != occupant.runner_name
+            })
+            .map(|(_, runner)| runner.runner_name.clone())
+            .collect();
         if let Some(state) = self
             .repositories
             .get_mut(&occupant.repository)
@@ -302,22 +322,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(true) => {
                     state.failures = 0;
                     state.idle_exits = 0;
+                    state.left_beside.clear();
                     state.held = None;
                 }
-                // One that waited `IDLE_TIMEOUT` had started and connected: a warm runner whose container went
-                // once (a restart of Docker, the runner removed on GitHub) says nothing of the next one's start. The
-                // second in a row is a fault that would restart one every few minutes.
-                Some(false)
-                    if occupant
-                        .started_at
-                        .elapsed()
-                        .is_ok_and(|waited| waited >= IDLE_TIMEOUT) =>
-                {
-                    state.idle_exits += 1;
-                    // It started and connected: a failure before it is over, and the next one is a new streak's
-                    // first, announced. Not so for the second in a row, a fault of its own.
-                    if state.idle_exits == 1 {
-                        state.failures = 0;
+                // It started and connected, so it says nothing of the next one's start: a job cancelled before it
+                // began, a warm runner whose container went once (a restart of Docker, the runner removed on GitHub).
+                // Holding the pool would clear its waits and served mark (ADR 0098) for nothing. The second in a row
+                // is a fault that would restart one every few minutes, unless it was already up when the first left:
+                // a cancelled run takes several at once (ADR 0104).
+                Some(false) if connected => {
+                    let again = !state.left_beside.remove(&occupant.runner_name);
+                    if again {
+                        state.idle_exits += 1;
+                        state.left_beside = beside;
+                        // A failure before it is over, and the next one is a new streak's first, announced. Not so
+                        // for the second in a row, a fault of its own.
+                        if state.idle_exits == 1 {
+                            state.failures = 0;
+                        }
                     }
                     warn!(
                         "{}: {} ended without a job after waiting for one; it last said: {}",
@@ -325,7 +347,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         occupant.runner_name,
                         last_said(logs)
                     );
-                    if state.idle_exits >= 2 {
+                    if again && state.idle_exits >= 2 {
                         self.hold(
                             &occupant.repository,
                             &slot.profile,

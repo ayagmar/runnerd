@@ -865,6 +865,26 @@ async fn pausing_backing_off_or_preparing_takes_the_mark() {
     .await;
 }
 
+/// A job cancelled before it began ends its runner with no job: that says nothing of the pool's next start, so its queue
+/// keeps the short limit a barrier earned. Under a backoff it would go back to 600 s (ADR 0104).
+#[tokio::test]
+async fn a_runner_that_connected_and_left_takes_no_mark() {
+    let mut fixture = Fixture::served().await;
+    {
+        let mut docker = fixture.docker.0.lock().unwrap();
+        docker.runner_log = Some("2026-11-07 13:29:01Z: Listening for Jobs\n".to_owned());
+        for container in &mut docker.containers {
+            if container.labels["runnerd.repository"] == "o/big" {
+                container.running = false;
+            }
+        }
+    }
+    fixture.engine.tick(Shutdown::No).await;
+    let hold = &fixture.engine.repositories["o/big"].holds["big"];
+    assert!(hold.held.is_none(), "no backoff: {hold:?}");
+    assert!(fixture.waits().served, "the mark stands");
+}
+
 /// A pool recreated in the profile must not inherit a stranger's mark.
 #[tokio::test]
 async fn a_reload_that_removes_the_pool_takes_the_mark() {

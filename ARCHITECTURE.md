@@ -209,8 +209,9 @@ queued → slot → container → removed
    ([ADR 0095](docs/adr/0095-dockers-events-wake-a-pass-that-refills-a-slot.md)).
    Each tick's `Engine::collect_finished` inspects every other runner too, so a runner whose event never came, or
    that stopped while the events were not followed, is released at the next poll as before; the events are followed
-   again with a backoff, and every runner is inspected once they are. A runner that took no job holds the repository
-   back for a while. If the job
+   again with a backoff, and every runner is inspected once they are. A runner that took no job and never connected holds
+   its pool back for a while, as does the second in a row that connected and left
+   ([ADR 0104](docs/adr/0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md)). If the job
    failed and its profile has `record_failures`, the engine first commits the container to a record
    (`runnerd-record:<job>`) within `[records]`' limits, then removes it
    ([ADR 0031](docs/adr/0031-records-of-failed-jobs.md)).
