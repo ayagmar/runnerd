@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use super::{
     DockerApi, Error, FILES_LIMIT, JitConfig, RunnerSpec, connect_to, create_body, files_in,
-    is_being_removed, is_gone,
+    is_being_removed, is_log_gone,
 };
 use crate::isolation::Sysbox;
 
@@ -360,16 +360,16 @@ fn only_a_removal_under_way_reads_as_a_container_on_its_way_out() {
         "removal of container 0483ff83a7f0 is already in progress",
     ] {
         assert!(is_being_removed(&answer(409, said)), "{said}");
-        assert!(is_gone(&answer(409, said)), "{said}");
+        assert!(is_log_gone(&answer(409, said)), "{said}");
     }
-    assert!(is_gone(&answer(404, "No such container: 0483ff83a7f0")));
+    assert!(is_log_gone(&answer(404, "No such container: 0483ff83a7f0")));
     for said in [
         "cannot remove container \"/r\": container is running: stop the container before removing or force remove",
         "remove v: volume is in use",
     ] {
-        assert!(!is_gone(&answer(409, said)), "{said}");
+        assert!(!is_log_gone(&answer(409, said)), "{said}");
     }
-    assert!(!is_gone(&answer(
+    assert!(!is_log_gone(&answer(
         500,
         "removal of container r is already in progress"
     )));

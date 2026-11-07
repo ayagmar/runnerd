@@ -13,7 +13,7 @@ use super::records::Undecided;
 use super::{Engine, Occupant};
 use crate::api;
 use crate::cache;
-use crate::docker::{self, DockerApi, is_gone, is_not_found};
+use crate::docker::{self, DockerApi, is_being_removed, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
 use crate::scheduler::warm::Attempt;
@@ -253,11 +253,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let container = left.container;
         info!("removing {}, left by an earlier run", container.name);
-        if let Err(error) = self.docker.remove(&container.id).await
-            && !is_gone(&error)
-        {
-            warn!("cannot remove {}: {error}", container.name);
-            self.leftover.insert(container.id, container.name);
+        match self.docker.remove(&container.id).await {
+            Err(error) if is_being_removed(&error) => {
+                self.leftover.insert(container.id, container.name);
+            }
+            Err(error) if !is_not_found(&error) => {
+                warn!("cannot remove {}: {error}", container.name);
+                self.leftover.insert(container.id, container.name);
+            }
+            _ => {}
         }
     }
 

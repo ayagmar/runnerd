@@ -318,8 +318,9 @@ pub fn is_being_removed(error: &Error) -> bool {
     )
 }
 
-/// Whether a stopped container is gone, or as good as gone: no log to read, and nothing left to remove.
-pub fn is_gone(error: &Error) -> bool {
+/// Whether a container's log is out of reach because it is gone or going. A removal under way can still fail, so this
+/// says nothing of whether the container will go.
+pub fn is_log_gone(error: &Error) -> bool {
     is_not_found(error) || is_being_removed(error)
 }
 

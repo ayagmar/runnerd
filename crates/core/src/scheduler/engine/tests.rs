@@ -2813,6 +2813,52 @@ async fn a_runner_someone_removes_frees_its_slot_in_the_tick_that_saw_it_stop() 
 }
 
 #[tokio::test]
+async fn a_removal_that_fails_after_docker_said_it_was_under_way_is_taken_up() {
+    // Catches a container left in Docker until the next daemon start, a slot volume with it: Docker's 409 says a removal
+    // runs, not that it will succeed, and our own timed-out removal gets the same answer.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    let container = {
+        let mut state = docker.0.lock().unwrap();
+        let container = state.containers[0].id.clone();
+        state.being_removed.insert(container.clone());
+        state.containers[0].running = false;
+        container
+    };
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None, "its slot is free");
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.leftover.contains_key(&container),
+        "a removal under way stays followed"
+    );
+
+    // That removal fails, and the next one Docker refuses for a reason of its own.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.being_removed.clear();
+        state.fail_removes = 1;
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.leftover.contains_key(&container),
+        "it is tried again"
+    );
+    engine.tick(Shutdown::No).await;
+    assert!(engine.leftover.is_empty(), "Docker removed it");
+    let containers = docker.0.lock().unwrap().containers.clone();
+    assert!(
+        containers.iter().all(|left| left.id != container),
+        "it is gone from Docker: {containers:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_runner_being_removed_that_still_runs_keeps_its_slot_until_it_stopped() {
     // Catches a removal under way reading as gone while the container still runs, which would put a second runner on
     // its volumes. Docker marks a container for removal before it kills it.
