@@ -2596,6 +2596,50 @@ async fn a_host_credit_starts_what_only_it_fits_and_a_restart_or_pooled_host_off
 }
 
 #[tokio::test]
+async fn a_requested_reseed_starts_in_the_host_room_plans_see_under_a_host_credit() {
+    // Catches a reseed reading the host against the plain count while plans read the host's credit: plans spend the
+    // room the seed waits for, and the seed and its profile's jobs wait for as long as a credit stands.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = format!(
+        "{}{}",
+        measured(),
+        r#"
+[profiles.seedy]
+image_stage = "seedy"
+cpus = 1
+memory = "1G"
+slots = 1
+
+[[repositories]]
+name = "o/s"
+profile = "seedy"
+labels = ["self-hosted", "seedy"]
+warm = 0
+"#
+    );
+    let (mut engine, handle) = three_settled_jobs(&github, &docker, &dir, &config).await;
+    // 12G available leaves the slice 9G: 1.5G past the 7.5G counted, 1.5G short of the 10.5G reserved.
+    tight_host(&github, &handle.store, 12 * G);
+    let plan = engine.plan_budget(&engine.admitting(&mut [], None));
+    assert_eq!(
+        plan.host,
+        Some(crate::scheduler::left(9 * G, 7 * G + 512 * M)),
+        "plans see 1.5G"
+    );
+    engine.request_reseed("seedy").unwrap();
+    tight_host(&github, &handle.store, 12 * G);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.reseeds.contains_key("seedy"),
+        "the 1G seed starts in the room plans see"
+    );
+}
+
+#[tokio::test]
 async fn a_job_held_with_a_host_credit_waits_for_the_growth_it_keeps() {
     // Catches the wait of a job the host's limit holds with room free saying reservations where ADR 0108 counts use
     // and kept growth.

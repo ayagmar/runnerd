@@ -278,13 +278,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|occupant| self.takes(occupant))
             .sum();
         let own = runners.saturating_add(self.waiting_seed(profile).unwrap_or(0));
-        // As a plan reads them: `MemoryMax` the pooled count, or plans would keep spending room a reseed waits for.
+        // As a plan reads them: `MemoryMax` the pooled count and the host what it counts (ADR 0099, 0108), or plans
+        // would keep spending room a reseed waits for.
         let count = self.count(self.host_remembered());
         let in_use = count.pooled().saturating_sub(own);
         self.memory_max
             .is_none_or(|max| max.saturating_sub(in_use) >= memory)
             && self.host_budget().is_none_or(|host| {
-                let in_use = count.plain.saturating_sub(own);
+                let in_use = count.hosted().saturating_sub(own);
                 host::left(host::limit(&host.memory, false), in_use, host.stalled)
                     >= i64::try_from(memory).unwrap_or(i64::MAX)
             })
