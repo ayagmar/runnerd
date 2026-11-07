@@ -1,11 +1,12 @@
-//! Warm runners on the fakes (ADR 0050): a registered runner waits for jobs of an active repository, a queued job
-//! takes it, it gives its room to another repository's job, a run's expected jobs get runners before GitHub queues
-//! them, a quiet repository's warm runners stop for good, and a reseed still runs.
+//! Warm runners on the fakes (ADR 0050, 0107): a registered runner waits for jobs of an active repository, a queued
+//! job takes it, it gives its room to another repository's job, a run's expected jobs get runners before GitHub queues
+//! them, a quiet repository's warm runners stop for good, a finished job keeps its repository active, a reload learns
+//! again, restarts in a run start no more than its burst, and a reseed still runs.
 
 use super::*;
 use crate::api::HoldCause;
-use crate::scheduler::IDLE_TIMEOUT;
 use crate::scheduler::warm::Learned;
+use crate::scheduler::{IDLE_TIMEOUT, Pool};
 use crate::time;
 
 const MINUTE: u64 = 60 * 1000;
@@ -15,17 +16,18 @@ fn warm_config() -> String {
     CONFIG.replace("warm = 0\n", "")
 }
 
-/// A job of `o/r`'s `CI` workflow, of run `run`, queued at `at` (ms).
+/// A job of `o/r`'s `CI` workflow, of run `run`'s first attempt, queued at `at` (ms).
 fn ci_job(id: u64, run: u64, at: u64) -> QueuedJob {
     QueuedJob {
         run_id: run,
+        run_attempt: 1,
         workflow: Some("CI".to_owned()),
         created_at: at,
         ..job(id)
     }
 }
 
-/// An engine for `config` whose history has a job of `o/r` queued ten minutes ago, so `o/r` is active.
+/// An engine for `config` whose history has a job of `o/r` queued five minutes ago, so `o/r` is active.
 async fn active(
     github: &FakeGithub,
     docker: &FakeDocker,
@@ -35,7 +37,7 @@ async fn active(
     let (engine, handle) = engine_with(github, docker, &dir, config);
     handle.store.queued(
         "o/r",
-        &ci_job(1, 1, time::now_ms() - 10 * MINUTE),
+        &ci_job(1, 1, time::now_ms() - 5 * MINUTE),
         time::now_ms(),
     );
     handle.store.flush().await;
@@ -657,6 +659,12 @@ async fn a_run_under_way_before_a_restart_counts_from_its_jobs_not_from_the_rest
     handle
         .store
         .queued("o/r", &ci_job(50, 50, queued_at), time::now_ms());
+    // A job of another workflow five minutes ago keeps o/r active.
+    let lint = QueuedJob {
+        workflow: Some("Lint".to_owned()),
+        ..ci_job(60, 60, time::now_ms() - 5 * MINUTE)
+    };
+    handle.store.queued("o/r", &lint, time::now_ms());
     handle.store.claimed(
         50,
         50,
@@ -1080,4 +1088,486 @@ warm = 0
     }
     assert!(engine.reseeds.contains_key("heavy"), "the seed starts");
     assert_eq!(registered(&github.calls()).len(), 1, "o/t's job waits");
+}
+
+/// `o/r`'s `CI` run 50's job, queued half an hour ago, runs in slot 1 on a runner a restart adopts.
+async fn a_job_runs_since_half_an_hour(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    config: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle, TestDir) {
+    let dir = TestDir::new("engine");
+    running_job(github, docker, "o/r", 1, 50);
+    let (engine, handle) = engine_with(github, docker, &dir, config);
+    let queued_at = time::now_ms() - 30 * MINUTE;
+    handle
+        .store
+        .queued("o/r", &ci_job(50, 50, queued_at), time::now_ms());
+    handle.store.claimed(
+        50,
+        50,
+        &identity("ci", ID_A).runner_name("app", 1, 1),
+        queued_at + MINUTE,
+    );
+    handle.store.flush().await;
+    (engine, handle, dir)
+}
+
+#[tokio::test]
+async fn a_job_that_finishes_keeps_its_repository_active_for_the_next_push() {
+    // Catches a repository going quiet while its long job runs and staying quiet after it: the owner's next push,
+    // minutes after the job's end, would start cold.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, _dir) =
+        a_job_runs_since_half_an_hour(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()),
+        Vec::<&String>::new(),
+        "taken 29 minutes ago: quiet"
+    );
+
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log =
+            Some("Running job: build\nJob build completed with result: Succeeded".to_owned());
+        state.containers[0].running = false;
+    }
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "its end makes o/r active: a warm runner waits"
+    );
+}
+
+#[tokio::test]
+async fn an_adopted_idle_runner_of_a_repository_quiet_for_ten_minutes_goes_once_it_waited_out_its_time()
+ {
+    // Catches a restart keeping a quiet repository's warm runner: by a window left at an hour, or by an idle time
+    // counted from the restart rather than from its container's start.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    idle_runner(&github, &docker);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .started
+        .insert("container-1".to_owned(), time::now_ms() - 6 * MINUTE);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &warm_config());
+    handle.store.queued(
+        "o/r",
+        &ci_job(1, 1, time::now_ms() - 11 * MINUTE),
+        time::now_ms(),
+    );
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [None, None], "it went");
+    assert_eq!(
+        registered(&github.calls()),
+        Vec::<&String>::new(),
+        "and none came"
+    );
+}
+
+/// `o/r` in `app` for jobs labelled `app` and, until the reload, `light`; after it, `light` jobs go to the `light`
+/// pool, listed first. Four slots each.
+fn moved_labels(light_pool: bool) -> String {
+    let light = if light_pool {
+        "[[repositories]]\nname = \"o/r\"\nprofile = \"light\"\nlabels = [\"self-hosted\", \"light\"]\n\n"
+    } else {
+        ""
+    };
+    format!(
+        "{}\n[profiles.light]\nimage_stage = \"app\"\ncpus = 1\nmemory = \"1G\"\nslots = 4\n\n{light}\
+         [[repositories]]\nname = \"o/r\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\", \"light\"]\n",
+        warm_config()
+            .replace("slots = 2", "slots = 4")
+            .split("[[repositories]]")
+            .next()
+            .unwrap()
+    )
+}
+
+#[tokio::test]
+async fn a_reload_that_moves_labels_mid_run_learns_each_pools_bursts_again_and_keeps_its_activity()
+{
+    // Catches a reload keeping the old pools' bursts until the next read (the jvm-small split), and a re-read that
+    // drops what the listings noted since the last one.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &moved_labels(false));
+    // Three runs of CI two days ago, each one `app` job and two `light` ones.
+    let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
+    let light = |id, run, at| QueuedJob {
+        labels: vec!["self-hosted".to_owned(), "light".to_owned()],
+        ..ci_job(id, run, at)
+    };
+    for run in 1..=3 {
+        let at = then + run * MINUTE;
+        handle
+            .store
+            .queued("o/r", &ci_job(run * 10, run, at), time::now_ms());
+        handle
+            .store
+            .queued("o/r", &light(run * 10 + 1, run, at), time::now_ms());
+        handle
+            .store
+            .queued("o/r", &light(run * 10 + 2, run, at), time::now_ms());
+    }
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    // Run 50's first job, a light one queued 20 minutes ago, is listed now: o/r is active from now.
+    github.0.lock().unwrap().queued = vec![light(100, 50, time::now_ms() - 20 * MINUTE)];
+    engine.tick(Shutdown::No).await;
+    let app = Pool {
+        repository: "o/r".to_owned(),
+        profile: "app".to_owned(),
+    };
+    let light_pool = Pool {
+        profile: "light".to_owned(),
+        ..app.clone()
+    };
+    assert_eq!(
+        engine.warm_targets()[&app],
+        1 + 2,
+        "one warm, and the run's two more of 3 jobs per run"
+    );
+    github.0.lock().unwrap().queued.clear();
+
+    engine.reload(Config::parse(&moved_labels(true)).unwrap(), None, None);
+    engine.tick(Shutdown::No).await;
+    let targets = engine.warm_targets();
+    assert_eq!(targets[&app], 1, "one warm; CI runs have one app job, seen");
+    // The run's light job was seen under `app`: the light pool expects one more than it will get, at most a run's
+    // burst, until the run stops counting.
+    assert_eq!(
+        targets[&light_pool],
+        1 + 2,
+        "one warm, and two light jobs per run"
+    );
+}
+
+/// A step of a run of `o/r`'s `CI` workflow, which queues 1 job, then 2 more (its wave); 3 per run, as its history.
+#[derive(Debug, Clone, Copy)]
+enum RunStep {
+    /// GitHub queues a new run's first job.
+    Start,
+    /// GitHub queues the wave of a run that has not queued it.
+    Wave(usize),
+    /// GitHub gives a queued job to an idle runner, which may be before runnerd lists it.
+    Take(usize),
+    /// A running job ends and its runner leaves.
+    Finish(usize),
+    /// The daemon restarts on the same history and Docker.
+    Restart,
+    Tick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JobPhase {
+    Queued,
+    Running,
+    Done,
+}
+
+#[tokio::test]
+async fn restarts_in_the_middle_of_runs_start_no_more_than_each_runs_burst_less_its_open_jobs() {
+    // Catches a restart counting a run's jobs again or as a new run: `Runs` comes back from the open jobs only, so a
+    // run whose first job finished expects its whole burst less the jobs still open, never more (ADR 0107).
+    const BURST: usize = 3;
+    let cases = std::env::var("RUNNERD_WARM_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(12_u64);
+    let only: Option<u64> = std::env::var("RUNNERD_WARM_SEED")
+        .ok()
+        .and_then(|seed| seed.parse().ok());
+    for seed in only.map_or(0..cases, |seed| seed..seed + 1) {
+        let mut state = 0x5eed_u64.wrapping_add(seed);
+        let mut below = |n: u64| {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            usize::try_from((z ^ (z >> 31)) % n).unwrap()
+        };
+        let steps: Vec<RunStep> = (0..24)
+            .map(|_| match below(12) {
+                0 | 1 => RunStep::Start,
+                2 | 3 => RunStep::Wave(below(4)),
+                4..=6 => RunStep::Take(below(8)),
+                7 | 8 => RunStep::Finish(below(8)),
+                9 => RunStep::Restart,
+                _ => RunStep::Tick,
+            })
+            .collect();
+        if let Err(broken) = run_steps(&steps, BURST).await {
+            panic!("seed {seed}: {broken}\n{steps:?}");
+        }
+    }
+}
+
+/// Runs `steps`, ticking after each, and checks the bound after every tick.
+async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
+    let github = FakeGithub::default();
+    // Each runner gets an ID of its own, as runners come and go at random.
+    github.0.lock().unwrap().strict = true;
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().captures_wait = Some(github.clone());
+    let dir = TestDir::new("engine");
+    let config = warm_config().replace("slots = 2", "slots = 16");
+    let (mut engine, mut handle) = engine_with(&github, &docker, &dir, &config);
+    let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
+    for run in 1..=3 {
+        for n in 0..3 {
+            handle.store.queued(
+                "o/r",
+                &ci_job(run * 10 + n, run, then + run * MINUTE),
+                time::now_ms(),
+            );
+        }
+    }
+    handle.store.flush().await;
+    engine.recover().await.map_err(|error| error.to_string())?;
+    // Each run's jobs, by ID: their phase.
+    let mut runs: Vec<BTreeMap<u64, JobPhase>> = Vec::new();
+    let mut waved: Vec<bool> = Vec::new();
+    let mut next_job = 1000;
+    for (index, step) in steps.iter().enumerate() {
+        match *step {
+            RunStep::Start => {
+                let run = 100 + runs.len() as u64;
+                github
+                    .0
+                    .lock()
+                    .unwrap()
+                    .queued
+                    .push(ci_job(next_job, run, time::now_ms()));
+                runs.push(BTreeMap::from([(next_job, JobPhase::Queued)]));
+                waved.push(false);
+                next_job += 1;
+            }
+            RunStep::Wave(pick) => {
+                let open: Vec<usize> = (0..runs.len()).filter(|run| !waved[*run]).collect();
+                if let Some(&run) = open.get(pick % open.len().max(1)) {
+                    for _ in 0..burst - 1 {
+                        github.0.lock().unwrap().queued.push(ci_job(
+                            next_job,
+                            100 + run as u64,
+                            time::now_ms(),
+                        ));
+                        runs[run].insert(next_job, JobPhase::Queued);
+                        next_job += 1;
+                    }
+                    waved[run] = true;
+                }
+            }
+            RunStep::Take(pick) => take(&engine, &github, &docker, &handle, &mut runs, pick).await,
+            RunStep::Finish(pick) => finish(&github, &docker, &mut runs, pick),
+            RunStep::Restart => {
+                for (_, capture) in std::mem::take(&mut engine.captures) {
+                    capture.abort();
+                }
+                handle.store.flush().await;
+                (engine, handle) = engine_with(&github, &docker, &dir, &config);
+                engine.recover().await.map_err(|error| error.to_string())?;
+            }
+            RunStep::Tick => {}
+        }
+        engine.tick(Shutdown::No).await;
+        let queued = github.0.lock().unwrap().queued.len();
+        let expected: usize = runs
+            .iter()
+            .map(|jobs| {
+                let open = jobs
+                    .values()
+                    .filter(|phase| **phase != JobPhase::Done)
+                    .count();
+                burst.saturating_sub(open)
+            })
+            .sum();
+        let idle = engine
+            .occupied()
+            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+            .count();
+        // One warm runner, as o/r is active, one per queued job, and per run its burst less its open jobs.
+        if idle > 1 + queued + expected {
+            return Err(format!(
+                "after step {index} ({step:?}): {idle} idle runners, over 1 warm + {queued} queued + {expected} expected"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// GitHub gives a queued job to an idle runner; its capture names the job.
+async fn take(
+    engine: &Engine<FakeGithub, FakeDocker>,
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    handle: &Handle,
+    runs: &mut [BTreeMap<u64, JobPhase>],
+    pick: usize,
+) {
+    let idle: Vec<(String, String)> = engine
+        .occupied()
+        .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+        .map(|(_, occupant)| (occupant.container.clone(), occupant.runner_name.clone()))
+        .collect();
+    let queued: Vec<(usize, u64)> = runs
+        .iter()
+        .enumerate()
+        .flat_map(|(run, jobs)| {
+            jobs.iter()
+                .filter(|(_, phase)| **phase == JobPhase::Queued)
+                .map(move |(id, _)| (run, *id))
+        })
+        .collect();
+    let (Some((container, name)), Some(&(run, id))) =
+        (idle.first(), queued.get(pick % queued.len().max(1)))
+    else {
+        return;
+    };
+    let run_id = 100 + run as u64;
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued.retain(|job| job.id != id);
+        for runner in &mut state.runners {
+            if runner.name == *name {
+                runner.busy = true;
+            }
+        }
+        let mut running = details(id, "in_progress", None);
+        running.run_id = run_id;
+        running.workflow_name = Some("CI".to_owned());
+        running.runner_name = Some(name.clone());
+        // Queued when the run queued it, not on the fake's fixed date.
+        running.created_at = None;
+        state.jobs.insert(id, running);
+    }
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .container_captures
+        .insert(container.clone(), format!("@@job {id} {run_id}\n"));
+    runs[run].insert(id, JobPhase::Running);
+    for _ in 0..100 {
+        handle.store.flush().await;
+        if handle
+            .store
+            .job(id)
+            .await
+            .unwrap()
+            .is_some_and(|job| job.summary.runner.is_some())
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// A running job ends; GitHub forgets its runner, and its container stops.
+fn finish(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    runs: &mut [BTreeMap<u64, JobPhase>],
+    pick: usize,
+) {
+    let running: Vec<(usize, u64)> = runs
+        .iter()
+        .enumerate()
+        .flat_map(|(run, jobs)| {
+            jobs.iter()
+                .filter(|(_, phase)| **phase == JobPhase::Running)
+                .map(move |(id, _)| (run, *id))
+        })
+        .collect();
+    let Some(&(run, id)) = running.get(pick % running.len().max(1)) else {
+        return;
+    };
+    let name = {
+        let mut state = github.0.lock().unwrap();
+        let name = state.jobs.get(&id).and_then(|job| job.runner_name.clone());
+        let mut completed = details(id, "completed", Some("success"));
+        completed.run_id = 100 + run as u64;
+        completed.workflow_name = Some("CI".to_owned());
+        completed.runner_name = name.clone();
+        completed.created_at = None;
+        state.jobs.insert(id, completed);
+        state
+            .runners
+            .retain(|runner| Some(&runner.name) != name.as_ref());
+        name
+    };
+    let mut state = docker.0.lock().unwrap();
+    for container in &mut state.containers {
+        if Some(&container.name) == name.as_ref() {
+            container.running = false;
+        }
+    }
+    runs[run].insert(id, JobPhase::Done);
+}
+
+#[tokio::test]
+async fn a_run_seen_in_the_tick_idle_runners_wait_out_their_time_keeps_them_for_its_jobs() {
+    // Catches expiry decided before the listing's run is noted: the quiet repository's idle runners would go in the
+    // very tick a run that wants them shows up, and new ones start for it a tick later.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    for slot in 1..=4 {
+        let id = 6 + slot as u64;
+        let name = identity("ci", ID_A).runner_name("app", slot, 1);
+        let mut state = docker.0.lock().unwrap();
+        state.containers.push(runner_container(slot, id, true));
+        state.started.insert(
+            format!("container-{slot}"),
+            time::now_ms() - 2 * u64::try_from(IDLE_TIMEOUT.as_millis()).unwrap(),
+        );
+        drop(state);
+        let mut state = github.0.lock().unwrap();
+        state.runners.push(runner(id, &name, false));
+        state.registered_on.insert(id, "o/r".to_owned());
+    }
+    let dir = TestDir::new("engine");
+    let config = warm_config().replace("slots = 2", "slots = 6");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    // Three runs of CI two days ago, three jobs each: o/r is quiet now.
+    let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
+    for run in 1..=3 {
+        for n in 0..3 {
+            handle.store.queued(
+                "o/r",
+                &ci_job(run * 10 + n, run, then + run * MINUTE),
+                time::now_ms(),
+            );
+        }
+    }
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    // A new run's first job comes in the tick the four runners have waited past IDLE_TIMEOUT.
+    github.0.lock().unwrap().queued = vec![ci_job(100, 50, time::now_ms())];
+    engine.tick(Shutdown::No).await;
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("delete ")),
+        "one for the job, one warm and two for the run's other jobs stay: {:?}",
+        github.calls()
+    );
+    assert_eq!(
+        registered(&github.calls()),
+        Vec::<&String>::new(),
+        "none starts"
+    );
 }

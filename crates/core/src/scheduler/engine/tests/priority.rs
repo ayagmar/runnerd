@@ -469,7 +469,7 @@ warm = 1
         run_id: 1,
         name: "warmed".to_owned(),
         labels: vec!["self-hosted".to_owned(), "warmed".to_owned()],
-        created_at: crate::time::now_ms() - 600_000,
+        created_at: crate::time::now_ms() - 300_000,
         ..QueuedJob::default()
     };
     fixture

@@ -943,6 +943,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.cpus = cpus;
         self.caches
             .send_replace(cache::volumes(&self.names, &self.config));
+        // Labels moved to another pool take their history with them: what each pool wants is learned again.
+        self.reread_warm();
         info!("reloaded the config");
     }
 }

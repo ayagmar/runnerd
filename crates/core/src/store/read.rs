@@ -1004,8 +1004,8 @@ pub(super) fn warm(
     since: u64,
 ) -> rusqlite::Result<Vec<crate::scheduler::warm::Seen>> {
     db.prepare_cached(
-        "SELECT repository, workflow, run_id, run_attempt, queued_at, labels FROM jobs WHERE queued_at >= ?1 \
-         ORDER BY id",
+        "SELECT repository, workflow, run_id, run_attempt, queued_at, labels, finished_at FROM jobs \
+         WHERE queued_at >= ?1 ORDER BY id",
     )?
     .query_map([since], |row| {
         let labels: String = row.get(5)?;
@@ -1016,6 +1016,7 @@ pub(super) fn warm(
             run_id: row.get(2)?,
             run_attempt: row.get(3)?,
             queued_at: row.get(4)?,
+            finished_at: row.get(6)?,
         })
     })?
     .collect()

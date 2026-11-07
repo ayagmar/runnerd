@@ -1,23 +1,21 @@
-//! How many warm runners each repository's pool wants (ADR 0050, 0058): its `warm` while the repository is active, by
-//! its jobs of the last hour and the hours of the day its jobs usually come, plus the jobs for the pool its workflow
-//! runs seen so far are expected to queue still, from the history. Pure: the engine reads the history and the clock
-//! and passes them in.
+//! How many warm runners each repository's pool wants (ADR 0050, 0058, 0107): its `warm` while the repository is
+//! active, from a job of it listed queued, taken or finished within `ACTIVE_AFTER`, plus the jobs for the pool its
+//! workflow runs seen so far are expected to queue still, from the history. Pure: the engine reads the history and the
+//! clock and passes them in.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::time::Duration;
 
 use super::{IDLE_TIMEOUT, Pool};
 
-/// How long after a repository's last job it stays active.
-pub const ACTIVE_AFTER: Duration = Duration::from_secs(3600);
+/// How long after a repository's last job was listed queued, taken or finished it stays active (ADR 0107).
+pub const ACTIVE_AFTER: Duration = Duration::from_mins(10);
 
 /// How far back the history is read, in milliseconds: 14 days.
 pub const LOOKBACK: u64 = 14 * DAY;
 
-/// An hour of the day is a repository's usual one when its jobs were queued in it on this many days of `LOOKBACK`.
-const USUAL_DAYS: usize = 3;
-
-/// A workflow's runs before its jobs per run are expected of the next.
+/// A workflow's runs with jobs for a pool before its jobs per run are expected of the next.
 const MIN_RUNS: usize = 3;
 
 /// How long a run is remembered after its first job, whether or not it still counts.
@@ -26,7 +24,7 @@ const FORGET_AFTER: Duration = Duration::from_hours(24);
 /// How long a run whose workflow is not known yet counts.
 const UNKNOWN_SPAN: Duration = Duration::from_secs(3600);
 
-const HOUR: u64 = 3600 * 1000;
+const DAY: u64 = 24 * 3600 * 1000;
 
 /// A run's jobs for one pool as the history tells them apart: repository, pool's profile, workflow, run ID and
 /// attempt.
@@ -34,7 +32,6 @@ type RunKey<'seen> = (&'seen str, &'seen str, &'seen str, u64, u32);
 
 /// A workflow's runs for one pool: repository, pool's profile and workflow.
 type WorkflowKey<'seen> = (&'seen str, &'seen str, &'seen str);
-const DAY: u64 = 24 * HOUR;
 
 /// A job the history saw queued.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,24 +48,24 @@ pub struct Seen {
     pub run_attempt: u32,
     /// When GitHub queued it, in milliseconds since the epoch.
     pub queued_at: u64,
+    /// When it finished, in milliseconds since the epoch, once it did.
+    pub finished_at: Option<u64>,
 }
 
 /// What a workflow's runs are expected to queue for one pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Burst {
-    /// The median number of jobs per run.
+    /// The lower median of the jobs for the pool per run of the workflow, a run that queued none for it counting 0.
     pub jobs: usize,
     /// The 90th percentile of the time from a run's first job queued to its last.
     pub span: Duration,
 }
 
-/// What warm runners learn from the history: when each repository's jobs come, and how many jobs its workflows'
+/// What warm runners learn from the history: when each repository's last job came, and how many jobs its workflows'
 /// runs queue.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Learned {
-    /// The hours of the day (UTC) each repository's jobs usually come in.
-    usual: BTreeMap<String, BTreeSet<u64>>,
-    /// When each repository's last job was queued, in milliseconds.
+    /// When each repository's last job was queued, taken or finished, in milliseconds.
     last: BTreeMap<String, u64>,
     /// By pool and workflow.
     bursts: BTreeMap<(Pool, String), Burst>,
@@ -80,22 +77,23 @@ impl Learned {
     pub fn new(seen: &[Seen], now: u64, profile: impl Fn(&Seen) -> Option<String>) -> Learned {
         let since = now.saturating_sub(LOOKBACK);
         let mut learned = Learned::default();
-        let mut days: BTreeMap<(&str, u64), BTreeSet<u64>> = BTreeMap::new();
         let profiles: Vec<Option<String>> = seen.iter().map(profile).collect();
         // Each run's jobs per pool, and when its first and last were queued.
         let mut runs: BTreeMap<RunKey<'_>, (usize, u64, u64)> = BTreeMap::new();
         // When each run attempt's first job was queued, in any pool: a pool's span runs from there, as a run seen
         // live counts from its first job (`Run::first`), so a pool whose jobs wait for another's still counts.
         let mut attempts: BTreeMap<(&str, u64, u32), u64> = BTreeMap::new();
+        // How many attempts of each repository's workflow the history saw, with a job for any of its pools.
+        let mut attempts_of: BTreeMap<(&str, &str), usize> = BTreeMap::new();
         for (job, profile) in seen
             .iter()
             .zip(&profiles)
             .filter(|(job, _)| job.queued_at >= since)
         {
-            learned.note(&job.repository, job.queued_at);
-            days.entry((&job.repository, job.queued_at % DAY / HOUR))
-                .or_default()
-                .insert(job.queued_at / DAY);
+            learned.note(
+                &job.repository,
+                job.finished_at.unwrap_or(0).max(job.queued_at),
+            );
             if let (Some(workflow), Some(profile)) = (&job.workflow, profile) {
                 let run = runs
                     .entry((
@@ -109,22 +107,19 @@ impl Learned {
                 run.0 += 1;
                 run.1 = run.1.min(job.queued_at);
                 run.2 = run.2.max(job.queued_at);
-                let first = attempts
-                    .entry((&job.repository, job.run_id, job.run_attempt))
-                    .or_insert(job.queued_at);
-                *first = (*first).min(job.queued_at);
+                match attempts.entry((&job.repository, job.run_id, job.run_attempt)) {
+                    Entry::Vacant(first) => {
+                        first.insert(job.queued_at);
+                        *attempts_of.entry((&job.repository, workflow)).or_default() += 1;
+                    }
+                    Entry::Occupied(mut first) => {
+                        let first = first.get_mut();
+                        *first = (*first).min(job.queued_at);
+                    }
+                }
             }
         }
-        for ((repository, hour), days) in days {
-            if days.len() >= USUAL_DAYS {
-                learned
-                    .usual
-                    .entry(repository.to_owned())
-                    .or_default()
-                    .insert(hour);
-            }
-        }
-        // By repository, pool's profile and workflow: each run's jobs and span.
+        // By repository, pool's profile and workflow: each run's jobs and span, of the runs with a job for the pool.
         let mut workflows: BTreeMap<WorkflowKey<'_>, Vec<(usize, u64)>> = BTreeMap::new();
         for ((repository, profile, workflow, run_id, run_attempt), (jobs, first, last)) in runs {
             let first = attempts
@@ -140,10 +135,21 @@ impl Learned {
             if runs.len() < MIN_RUNS {
                 continue;
             }
-            let mut jobs: Vec<usize> = runs.iter().map(|(jobs, _)| *jobs).collect();
+            // Every attempt of the workflow counts, one that queued no job for the pool as 0: a pool that most of
+            // its runs skip expects nothing of the next.
+            let all = attempts_of
+                .get(&(repository, workflow))
+                .copied()
+                .unwrap_or(runs.len());
+            let mut jobs = vec![0; all.saturating_sub(runs.len())];
+            jobs.extend(runs.iter().map(|(jobs, _)| *jobs));
             let mut spans: Vec<u64> = runs.iter().map(|(_, span)| *span).collect();
             jobs.sort_unstable();
             spans.sort_unstable();
+            let median = jobs[(jobs.len() - 1) / 2];
+            if median == 0 {
+                continue;
+            }
             let pool = Pool {
                 repository: repository.to_owned(),
                 profile: profile.to_owned(),
@@ -151,7 +157,7 @@ impl Learned {
             learned.bursts.insert(
                 (pool, workflow.to_owned()),
                 Burst {
-                    jobs: jobs[(jobs.len() - 1) / 2],
+                    jobs: median,
                     span: Duration::from_millis(spans[(spans.len() * 90).div_ceil(100) - 1]),
                 },
             );
@@ -166,26 +172,23 @@ impl Learned {
         }
     }
 
-    /// Notes a job of `repository` queued or taken at `at` (ms).
+    /// Notes a job of `repository` listed queued, taken or finished at `at` (ms).
     pub fn note(&mut self, repository: &str, at: u64) {
         let last = self.last.entry(repository.to_owned()).or_default();
         *last = (*last).max(at);
     }
 
-    /// Whether `repository` is active at `now` (ms): its last job came within `ACTIVE_AFTER`, or `now` is in an hour
-    /// of the day its jobs usually come in.
+    /// Whether `repository` is active at `now` (ms): its last job was listed queued, taken or finished within
+    /// `ACTIVE_AFTER`.
     pub fn active(&self, repository: &str, now: u64) -> bool {
         let after = u64::try_from(ACTIVE_AFTER.as_millis()).unwrap_or(u64::MAX);
         self.last
             .get(repository)
             .is_some_and(|last| now.saturating_sub(*last) < after)
-            || self
-                .usual
-                .get(repository)
-                .is_some_and(|hours| hours.contains(&(now % DAY / HOUR)))
     }
 
-    /// What runs of `workflow` are expected to queue for `pool`, once it has `MIN_RUNS` runs with jobs for it.
+    /// What runs of `workflow` are expected to queue for `pool`, once it has `MIN_RUNS` runs with jobs for it and
+    /// more than half its runs have one.
     pub fn burst(&self, pool: &Pool, workflow: &str) -> Option<Burst> {
         self.bursts
             .get(&(pool.clone(), workflow.to_owned()))
