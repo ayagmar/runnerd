@@ -118,3 +118,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed |
 | [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Accepted |
 | [0113](0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md) | A released runner's slot does not wait for its registration's delete | Accepted |
+| [0109](0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md) | A job that left the queue is followed until GitHub says it is gone | Accepted |

@@ -122,6 +122,11 @@ impl Writer<'_> {
                     self.elsewhere(&details, announced)
                 });
             }
+            Write::Unanswered { job, at } => {
+                self.change("close a job GitHub no longer answers for", |announced| {
+                    self.unanswered(job, at, announced)
+                });
+            }
             Write::Lost { job, at } => {
                 self.change("close a lost job", |announced| {
                     self.close(job, "lost", Some(at), announced)
@@ -689,6 +694,19 @@ impl Writer<'_> {
                 metrics.cpu_throttled,
                 metrics.cpu_stalled,
             ],
+        )?;
+        if closed == 1
+            && let Some(job) = read::summary(&self.db, job)?
+        {
+            announced.push(Event::JobFinished { job });
+        }
+        Ok(())
+    }
+
+    fn unanswered(&self, job: u64, at: u64, announced: &mut Announced) -> rusqlite::Result<()> {
+        let closed = self.db.execute(
+            "UPDATE jobs SET state = 'elsewhere', finished_at = ?2 WHERE id = ?1 AND state = 'queued'",
+            params![job, at],
         )?;
         if closed == 1
             && let Some(job) = read::summary(&self.db, job)?

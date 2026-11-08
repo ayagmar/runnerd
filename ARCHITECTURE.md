@@ -153,6 +153,9 @@ queued → slot → container → removed
    showed each job queued (`seen_at`), written as each listing answers, so a runner that takes the job before the
    other listings answer, or a tick that ends meanwhile, keeps it; job pages show it as "Seen by runnerd" between
    its queueing and its container's start ([ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
+   A recorded job that left the listing, or whose repository left the config, is read each tick until GitHub says
+   where it went; a 404, or 15 minutes of failed reads, closes it as run elsewhere
+   ([ADR 0109](docs/adr/0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md)).
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget, in the profile of
    the repository's pool whose labels match the job (each `[[repositories]]` entry is a pool;
    [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each
