@@ -614,8 +614,14 @@ async fn a_slow_collect_does_not_bring_the_next_listing_sooner() {
         .pause(one("o/r"), RunningJobs::Kill)
         .await
         .unwrap();
+    // The pause starts a tick at once, as every command does: pacing is measured from the listings after it.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let mut listed_at = Vec::new();
-    let mut listings = 0;
+    let mut listings = github
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("runners "))
+        .count();
     let until =
         Instant::now() + crate::scheduler::engine::control::CANCEL_GRACE + Duration::from_mins(1);
     while Instant::now() < until {
