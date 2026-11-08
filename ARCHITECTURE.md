@@ -203,11 +203,14 @@ queued → slot → container → removed
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
    dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). Docker's `die` event wakes
    the engine (`engine/exits`), between ticks or while a tick waits for GitHub, for a pass (`Engine::turnover`): an
-   event is a hint, and Docker's inspect decides. A stopped runner is released, its container removed and then its
-   registration, and its slot is free. Each runner's release goes on its own, runners that stop meanwhile join the
-   pass, and after each slot it frees the pass starts runners for the jobs the last poll listed, without asking
-   GitHub, leaving out jobs runners took since and, for each runner that may have taken a job no capture named, one
-   listed job of its pool, until a listing begun after it
+   event is a hint, and Docker's inspect decides. A stopped runner is released: once Docker removed its container its
+   slot is free. GitHub drops a runner's registration with its job, so one whose log shows its job's end is not
+   deleted; any other is deleted in the background, and the next runners listing deletes what that missed
+   ([ADR 0113](docs/adr/0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md)), a stop waiting
+   for those still in flight up to `STOP_DEADLINE`. Each runner's release goes on its own, runners that stop meanwhile
+   join the pass, and after each slot it frees the pass starts runners for the jobs the last poll listed, without
+   asking GitHub, leaving out jobs runners took since and, for each runner that may have taken a job no capture
+   named, one listed job of its pool, until a listing begun after it
    ([ADR 0095](docs/adr/0095-dockers-events-wake-a-pass-that-refills-a-slot.md)).
    Each tick's `Engine::collect_finished` inspects every other runner too, so a runner whose event never came, or
    that stopped while the events were not followed, is released at the next poll as before; the events are followed

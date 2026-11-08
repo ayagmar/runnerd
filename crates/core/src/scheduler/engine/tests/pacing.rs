@@ -6,6 +6,7 @@ use tokio::time::Instant;
 
 use super::*;
 use crate::scheduler::IDLE_TIMEOUT;
+use crate::scheduler::engine::STOP_DEADLINE;
 
 /// `o/r` with an idle runner in slot 1 that waited past `IDLE_TIMEOUT`, whose log capture ends only with its
 /// container, and a job of `o/s` queued for slot 2.
@@ -1064,6 +1065,119 @@ async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
         handle.shutdown(Shutdown::Force);
         run.await.unwrap();
     }
+}
+
+/// Two runners end while listed jobs wait and GitHub does not answer deletes. Slot 1's runner logged its job's end, so
+/// GitHub dropped its registration with the job: nothing deletes it. Slot 2's log stops before its job's end, as when
+/// the runner was killed, so its registration is deleted, but its slot takes the next job on Docker's word alone. The
+/// bugs it catches: every release waiting for GitHub's answer to a delete before freeing its slot, and a delete sent
+/// for each runner whose job ended, which GitHub answers "not found".
+#[tokio::test(start_paused = true)]
+async fn a_slot_takes_its_next_job_without_waiting_for_the_runners_delete() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    running_job(&github, &docker, "o/r", 2, 2);
+    github.0.lock().unwrap().queued = vec![job(3), job(4)];
+    docker.0.lock().unwrap().container_logs.insert(
+        "container-1".to_owned(),
+        "Running job: build\nJob build completed with result: Succeeded\n".to_owned(),
+    );
+    let dir = TestDir::new("delete-off-turnover");
+    let config = CONFIG.replace("[host]\n", "[host]\npoll_interval = \"1h\"\n");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        registered(&github.calls()).is_empty(),
+        "both slots are busy"
+    );
+    github.hold_deletes();
+    let ids: Vec<u64> = github
+        .0
+        .lock()
+        .unwrap()
+        .runners
+        .iter()
+        .map(|runner| runner.id)
+        .collect();
+    for (job, slot) in [(1, 1), (2, 2)] {
+        let name = github.0.lock().unwrap().runners[0].name.clone();
+        complete(&github, job, &name);
+        stop_container(&docker, &format!("container-{slot}"));
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let calls = github.calls();
+    assert_eq!(
+        registered(&calls).len(),
+        2,
+        "both slots took a listed job: {calls:?}"
+    );
+    assert!(
+        !calls.contains(&format!("delete {}", ids[0])),
+        "the runner whose job completed is not deleted: {calls:?}"
+    );
+    assert!(
+        calls.contains(&format!("delete {}", ids[1])),
+        "the runner whose log stops before its job's end is deleted: {calls:?}"
+    );
+    github.release_deletes();
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}
+
+/// A runner whose log stops before its job's end is released while GitHub holds deletes, and a graceful stop is asked.
+/// Returns the running engine, once the runner's delete was sent.
+async fn stop_with_a_pending_delete(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> tokio::task::JoinHandle<()> {
+    running_job(github, docker, "o/r", 1, 1);
+    let config = CONFIG.replace("[host]\n", "[host]\npoll_interval = \"1h\"\n");
+    let (engine, handle) = engine_with(github, docker, dir, &config);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    github.hold_deletes();
+    let runner = github.0.lock().unwrap().runners[0].clone();
+    complete(github, 1, &runner.name);
+    stop_container(docker, "container-1");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        github.calls().contains(&format!("delete {}", runner.id)),
+        "the released runner's delete is sent: {:?}",
+        github.calls()
+    );
+    handle.shutdown(Shutdown::Graceful);
+    run
+}
+
+/// The bug it catches: the stop returning while the delete still waits for GitHub, so the daemon's exit drops it and
+/// the registration stays on GitHub, offline, until runnerd starts again.
+#[tokio::test(start_paused = true)]
+async fn a_stop_waits_for_a_released_runners_delete() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("stop-waits-for-delete");
+    let run = stop_with_a_pending_delete(&github, &docker, &dir).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(!run.is_finished(), "the stop waits for the delete");
+    github.release_deletes();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the stop ends once GitHub answers")
+        .unwrap();
+}
+
+/// The bug it catches: a stop that never ends while GitHub does not answer a delete.
+#[tokio::test(start_paused = true)]
+async fn a_stop_waits_for_a_delete_github_does_not_answer_only_until_its_deadline() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("stop-delete-deadline");
+    let run = stop_with_a_pending_delete(&github, &docker, &dir).await;
+    tokio::time::timeout(STOP_DEADLINE + Duration::from_secs(10), run)
+        .await
+        .expect("the stop ends by its deadline")
+        .unwrap();
 }
 
 /// A runner started for job 1 takes it, and its capture names it, with the next poll an hour away. The bug it

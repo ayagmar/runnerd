@@ -413,7 +413,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         };
                         *drained = read;
                         let recorded = self.record(slot, occupant, drained).await;
-                        let removed = self.remove(occupant, recorded);
+                        let removed = self.remove(occupant, recorded, drained.logs.as_deref());
                         releases
                             .waits
                             .spawn(async move { (index, Step::Removed(removed.await)) });
@@ -1240,6 +1240,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     // Only this machine's names: other machines serve the same repositories.
                     None if !runner.name.starts_with(&self.runner_prefix) => {}
                     None => match self.github.delete_runner(&repository, runner.id).await {
+                        // One released here whose registration GitHub kept past its job: nothing went wrong.
+                        Ok(Deleted::Deleted) if self.ended_busy.contains_key(&runner.id) => {}
                         Ok(Deleted::Deleted) => {
                             info!(
                                 "{repository}: deleted {}, which had no container",

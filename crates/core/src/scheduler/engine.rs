@@ -507,6 +507,9 @@ pub struct Engine<G = Github, D = Docker> {
     visibility_due: Arc<Mutex<BTreeMap<String, SystemTime>>>,
     /// The task asking GitHub repositories' visibility, off the tick (`follow_visibility`).
     visibility_asking: Option<JoinHandle<()>>,
+    /// Released runners' registration deletes, sent in the background after their containers went (ADR 0113): each
+    /// tick reaps the finished ones, and a stop waits for the rest, up to `STOP_DEADLINE`.
+    deletes: Arc<Mutex<tokio::task::JoinSet<()>>>,
     /// The runner containers Docker said stopped since the last pass or tick took them (ADR 0095).
     exits: Arc<exits::Exits>,
     /// The task following Docker's events into `exits`, while the engine schedules.
@@ -657,6 +660,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ended_uploads: BTreeMap::new(),
             visibility_due: Arc::default(),
             visibility_asking: None,
+            deletes: Arc::default(),
             exits: Arc::default(),
             watcher: None,
             released: BTreeSet::new(),
@@ -771,6 +775,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.watcher = None;
         // A reseed that finished meanwhile says so; one still running is the next start's (`recover_reseeds`).
         self.collect_reseeds().await;
+        self.finish_deletes().await;
         if self.docker_in_stop == DockerInStop::Failed {
             info!("stopped; the next start removes or adopts what Docker did not answer for");
             return;
