@@ -461,6 +461,17 @@ async fn a_slot_whose_job_ended_takes_the_next_listed_job_within_seconds() {
     );
 }
 
+/// Waits until the history stored what the engine sent it, with the clock held: its writer is a thread of its own,
+/// which a paused clock does not wait for, so under load a tick could read the history before a write it follows.
+async fn stored(store: &Store) {
+    let store = store.clone();
+    let runtime = tokio::runtime::Handle::current();
+    // A blocking task holds a paused clock while it runs.
+    tokio::task::spawn_blocking(move || runtime.block_on(store.flush()))
+        .await
+        .unwrap();
+}
+
 /// Six of eight slots run long jobs while GitHub takes 1.8 s a request, as on the owner's host, and a job queues.
 /// Its runner's container starts within a start's time of the listing that showed it. Then that job's capture names
 /// it, and another job queues: it starts as fast, though the tick that lists it is the first to see the job taken.
@@ -500,6 +511,7 @@ async fn a_job_listed_beside_running_jobs_starts_without_waiting_for_their_reads
     // Its capture names it; the next tick is the first to take it.
     let named = Instant::now() + burst.named_after;
     play(&mut burst, |_, now| now >= named).await;
+    stored(&handle.store).await;
     burst.queue(1);
     let eighth = Instant::now();
     play(&mut burst, |burst, _| burst.seen.taken == 8).await;
@@ -516,6 +528,118 @@ async fn a_job_listed_beside_running_jobs_starts_without_waiting_for_their_reads
             nth + 1
         );
     }
+}
+
+/// Four long jobs run while GitHub takes 9 s to read a job, as a slow GitHub does: each tick ends with those reads.
+/// Listings still come every `poll_interval` (15 s), counted from each tick's start. Then reads take 20 s, longer
+/// than the interval, and listings come as each tick ends, 2 s apart. The bugs they catch: the next tick counted
+/// from the last one's end, so that every slow read pushed the next listing out by its whole time; and ticks run back
+/// to back, with no rest for GitHub, once one outlasts the interval.
+#[tokio::test(start_paused = true)]
+async fn slow_job_reads_do_not_push_the_next_listing_out() {
+    /// The gaps between the listings the world saw over `span` from now.
+    async fn gaps(burst: &mut Burst, span: Duration) -> Vec<Duration> {
+        let from = burst.listed_at.len();
+        let until = Instant::now() + span;
+        play(burst, |_, now| now >= until).await;
+        burst.listed_at[from..]
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect()
+    }
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    github.0.lock().unwrap().job_latency = Duration::from_secs(9);
+    let dir = TestDir::new("fixed-rate");
+    let config = CONFIG.replace("slots = 2", "slots = 4");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.run = Duration::from_hours(1);
+    burst.queue(4);
+    let run = tokio::spawn(engine.run());
+    let settled = Instant::now() + Duration::from_mins(2);
+    play(&mut burst, |_, now| now >= settled).await;
+    assert_eq!(burst.running.len(), 4, "four jobs run: {:?}", burst.seen);
+
+    let read = github.0.lock().unwrap().job_reads;
+    let paced = gaps(&mut burst, Duration::from_mins(3)).await;
+    assert!(
+        github.0.lock().unwrap().job_reads > read,
+        "the ticks read the running jobs"
+    );
+    // The world steps every 100 ms.
+    assert!(paced.len() >= 10, "too few listings: {paced:?}");
+    assert!(
+        paced
+            .iter()
+            .all(|gap| gap.abs_diff(Duration::from_secs(15)) <= Duration::from_millis(200)),
+        "listings left `poll_interval`'s pace: {paced:?}"
+    );
+
+    github.0.lock().unwrap().job_latency = Duration::from_secs(20);
+    let slow = gaps(&mut burst, Duration::from_mins(3)).await;
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+    // A tick reads the jobs for 20.3 s, then rests 2 s; one tick at the switch still read at 9 s.
+    assert!(slow.len() >= 5, "too few listings: {slow:?}");
+    assert!(
+        slow.iter()
+            .skip(1)
+            .all(|gap| *gap >= Duration::from_millis(22_300)),
+        "ticks ran back to back: {slow:?}"
+    );
+}
+
+/// A running job's run is cancelled and its runner does not exit, so the tick `CANCEL_GRACE` later removes it before
+/// it lists, and Docker takes 8 s to. The next listing still comes `poll_interval` after that tick's. The bug it
+/// catches: the next tick counted from the last one's start, so a slow collect before the listing and a quick one
+/// after brought two listings 7 s apart, closer than the interval.
+#[tokio::test(start_paused = true)]
+async fn a_slow_collect_does_not_bring_the_next_listing_sooner() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .slow_removes
+        .insert("container-1".to_owned(), Duration::from_secs(8));
+    let dir = TestDir::new("slow-collect");
+    let (engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    handle
+        .control
+        .pause(one("o/r"), RunningJobs::Kill)
+        .await
+        .unwrap();
+    let mut listed_at = Vec::new();
+    let mut listings = 0;
+    let until =
+        Instant::now() + crate::scheduler::engine::control::CANCEL_GRACE + Duration::from_mins(1);
+    while Instant::now() < until {
+        let now = github
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("runners "))
+            .count();
+        if now > listings {
+            listings = now;
+            listed_at.push(Instant::now());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+    let gaps: Vec<Duration> = listed_at.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert!(gaps.len() >= 8, "too few listings: {gaps:?}");
+    // The world looks every 100 ms.
+    assert!(
+        gaps.iter().all(|gap| *gap >= Duration::from_millis(14_900)),
+        "two listings came closer than `poll_interval`: {gaps:?}"
+    );
 }
 
 /// Four slots work through a long backlog while each removal takes 5 to 25 s, so a slot's next runner ends while

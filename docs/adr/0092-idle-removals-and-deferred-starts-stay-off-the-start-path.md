@@ -1,6 +1,6 @@
 # 0092. Idle removals and deferred starts stay off the start path, and a job's wait says where it went
 
-Status: **Accepted** (2026-11-01), amended by [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md), [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md). Amends [0076](0076-a-slot-is-free-once-docker-removed-its-container.md): a start
+Status: **Accepted** (2026-11-01), amended by [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md), [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md), [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md). Amends [0076](0076-a-slot-is-free-once-docker-removed-its-container.md): a start
 that no longer fits makes the tick plan again. Amends [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md):
 every idle removal uses the detach's order, not only a detach's.
 

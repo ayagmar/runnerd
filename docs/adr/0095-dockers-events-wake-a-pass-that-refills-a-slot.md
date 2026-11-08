@@ -1,6 +1,6 @@
 # 0095. Docker's events wake a pass that refills a slot whose runner ended
 
-Status: **Accepted** (2026-11-02), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Amends [0076](0076-a-slot-is-free-once-docker-removed-its-container.md): a pass
+Status: **Accepted** (2026-11-02), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md), [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md). Amends [0076](0076-a-slot-is-free-once-docker-removed-its-container.md): a pass
 releases runners too, and the tick's inspect leaves those Docker said stopped to it. Amends
 [0026](0026-commands-answered-while-a-tick-waits-for-github.md): passes run where commands are answered. Amends
 [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md): runners also start between polls, into

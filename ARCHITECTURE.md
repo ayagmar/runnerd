@@ -144,9 +144,10 @@ as the daemon read it at start, the origin `runnerctl web` opens
 
 queued → slot → container → removed
 
-1. Every `poll_interval` the engine asks GitHub for runners first, then queued jobs (`Engine::tick`; the order
-   avoids starting a second runner for a job its runner just took), every repository at once, a few requests at a
-   time. Each listing is read page by page, up to 10 pages; one repository's queued-jobs poll reads the jobs of at
+1. Every `poll_interval`, counted from when the last tick's listing started and at least 2 s after the tick's end
+   ([ADR 0111](docs/adr/0111-a-tick-is-due-an-interval-after-the-last-one-started.md)), the engine asks GitHub for
+   runners first, then queued jobs (`Engine::tick`; the order avoids starting a second runner for a job its runner
+   just took), every repository at once, a few requests at a time. Each listing is read page by page, up to 10 pages; one repository's queued-jobs poll reads the jobs of at
    most 200 runs, queued runs before those in progress and the oldest first in each. A repository a reload removed
    is polled until two listings in a row show none of this machine's runners. The history keeps when a listing first
    showed each job queued (`seen_at`), written as each listing answers, so a runner that takes the job before the
