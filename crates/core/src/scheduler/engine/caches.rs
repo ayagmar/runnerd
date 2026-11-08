@@ -30,7 +30,7 @@ pub(super) const MEASURE_EVERY: Duration = Duration::from_secs(600);
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Counts what the mirror served each runner since the last count.
     pub(super) async fn count_mirror_bytes(&mut self) {
-        if !self.config.caches.mirror.enabled || !self.mirror_up {
+        if !self.config.caches.mirror.enabled || !self.mirror.may_run() {
             return;
         }
         let log = match self
@@ -99,9 +99,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if self.occupied().next().is_some() || !self.records.shells.is_empty() {
             return;
         }
-        if self.mirror_up {
+        if self.mirror.may_run() {
             match cache::mirror_down(&*self.docker, &self.names).await {
-                Ok(()) => self.mirror_up = false,
+                Ok(()) => self.mirror.stopped(),
                 Err(error) => warn!("cannot stop the mirror: {error}"),
             }
         }
@@ -112,11 +112,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let docker = self.docker.clone();
             let names = self.names.clone();
             let caches = self.config.caches.clone();
-            let mirror = if self.mirror_up {
-                cache::Mirror::Up
-            } else {
-                cache::Mirror::Down
-            };
+            let mirror = self.mirror.storage();
             // A reseed mounts its profile's slot volumes.
             let slots: BTreeMap<String, usize> = self
                 .config

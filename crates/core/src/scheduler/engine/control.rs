@@ -818,13 +818,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.trim_due = true;
             return Ok(());
         }
-        if volume.kind == api::CacheKind::Mirror && self.mirror_up {
+        if volume.kind == api::CacheKind::Mirror && self.mirror.may_run() {
             cache::mirror_down(&*self.docker, &self.names)
                 .await
                 .map_err(|error| {
                     ControlError::Failed(format!("cannot stop the mirror: {error}"))
                 })?;
-            self.mirror_up = false;
+            self.mirror.stopped();
         }
         self.docker
             .remove_volume(name)

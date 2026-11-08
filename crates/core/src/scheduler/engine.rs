@@ -7,9 +7,9 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `build_cache` (each
-//! runner's side of the shared build cache and whether its job may write), `history` (what
-//! the store records), `warm` (how many warm runners each repository wants), `control` (the API's commands) and
+//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `mirror` (whether
+//! the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
+//! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the API's commands) and
 //! `status` (what it publishes).
 
 mod admission;
@@ -20,6 +20,7 @@ mod control;
 mod exits;
 mod history;
 mod images;
+mod mirror;
 mod records;
 mod recover;
 mod runners;
@@ -42,6 +43,7 @@ pub use self::control::{
 };
 use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
+use self::mirror::Mirror;
 pub use self::records::RecordSelection;
 use super::{Hold, SlotRef, Waits};
 use crate::admission::Key;
@@ -450,11 +452,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// When the last check of the shared caches started; the daemon's start counts as one, as the first runs then
     /// unless runners were adopted.
     checked_at: SystemTime,
-    mirror_up: bool,
+    mirror: Mirror,
     /// Whether Docker stopped answering a stop: the stop then leaves the rest to the next start, as a detach does.
     docker_in_stop: DockerInStop,
-    /// The memory cap the running mirror started with.
-    mirror_memory: u64,
     /// Until when GitHub's rate limit is used up, from the last answer that said so: no runner starts before.
     github_limited_until: Option<SystemTime>,
     /// Runners without a container that GitHub still holds busy, already logged.
@@ -596,8 +596,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut engine = Engine {
             clock: Clock::default(),
             isolation: isolation::backend(config.host.isolation),
-            // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
-            mirror_memory: config.mirror_memory(),
+            // An earlier run may have left the mirror up, so the first idle tick stops it.
+            mirror: Mirror::unknown(config.mirror_memory()),
             config,
             github: Arc::new(github),
             docker: Arc::new(docker),
@@ -630,8 +630,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             trim_due: true,
             trim: None,
             checked_at: SystemTime::now(),
-            // Unknown: an earlier run may have left it up, so the first idle tick stops it.
-            mirror_up: true,
             docker_in_stop: DockerInStop::Answers,
             github_limited_until: None,
             busy_orphans: BTreeSet::new(),

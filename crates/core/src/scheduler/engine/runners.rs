@@ -785,14 +785,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Starts the registry mirror, when enabled and down, for a runner about to start.
     async fn start_mirror(&mut self) {
         let mirror = &self.config.caches.mirror;
-        if mirror.enabled && !self.mirror_up {
+        if mirror.enabled && self.mirror.needs_start() {
             match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
                 .await
             {
-                Ok(()) => {
-                    self.mirror_up = true;
-                    self.mirror_memory = mirror.memory.0;
-                }
+                Ok(()) => self.mirror.started(mirror.memory.0),
                 // Runners pull from Docker Hub directly when the mirror does not answer.
                 Err(error) => warn!("cannot start the mirror: {error}"),
             }
