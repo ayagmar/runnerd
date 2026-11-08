@@ -1217,7 +1217,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let mut left = false;
             let runners = match answer {
                 Ok(runners) => runners,
-                Err(github::Error::RateLimited { .. }) => continue,
+                Err(github::Error::RateLimited { .. }) => {
+                    // Not listed: a drain's failure clock starts over.
+                    if let Some(drain) = self.draining.get_mut(&repository) {
+                        drain.failing_since = None;
+                    }
+                    continue;
+                }
                 Err(error) => {
                     self.drain_failed(&repository, &error);
                     continue;
@@ -1283,9 +1289,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Warns of a runners listing that failed, and stops draining its repository once GitHub refuses it, as when the
-    /// token lost it, or after `DRAIN_FAILING_FOR` of failed listings: this machine's runners still registered there
-    /// stay.
+    /// Warns of a runners listing that failed, and stops draining its repository once GitHub says it is gone, as when
+    /// the token lost it, or after `DRAIN_FAILING_FOR` of failed listings in a row: this machine's runners still
+    /// registered there stay. A 403 waits for the clock, as a secondary rate limit can answer one.
     fn drain_failed(&mut self, repository: &str, error: &github::Error) {
         let Some(drain) = self.draining.get_mut(repository) else {
             warn!("{repository}: cannot list runners: {error}");
@@ -1294,7 +1300,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let since = *drain
             .failing_since
             .get_or_insert_with(tokio::time::Instant::now);
-        if !error.is_refused() && since.elapsed() < DRAIN_FAILING_FOR {
+        if !error.is_gone() && since.elapsed() < DRAIN_FAILING_FOR {
             warn!("{repository}: cannot list runners: {error}");
             return;
         }

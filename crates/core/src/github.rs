@@ -144,19 +144,6 @@ impl Error {
             }
         )
     }
-
-    /// Whether GitHub refused the token what was asked for good: it [is gone](Error::is_gone), or the token may not
-    /// use it. A used-up rate limit is [`Error::RateLimited`], not a refusal.
-    pub fn is_refused(&self) -> bool {
-        self.is_gone()
-            || matches!(
-                self,
-                Error::Status {
-                    status: StatusCode::FORBIDDEN,
-                    ..
-                }
-            )
-    }
 }
 
 fn secs(time: SystemTime) -> u64 {

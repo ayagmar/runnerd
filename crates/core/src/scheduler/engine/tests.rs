@@ -117,6 +117,8 @@ struct GithubState {
     failed_queued: BTreeSet<String>,
     /// Repositories whose runners listings fail, with what GitHub answers.
     failed_runners: BTreeMap<String, reqwest::StatusCode>,
+    /// Repositories whose runners listings GitHub refuses until then, for its used-up rate limit.
+    limited_runners: BTreeMap<String, std::time::SystemTime>,
     /// Listings, job reads, registrations and deletes waiting for an answer.
     waiting: usize,
     /// How long each listing, job read, registration and delete takes to answer, where a test says: a workload's
@@ -321,6 +323,9 @@ impl GithubApi for FakeGithub {
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
+        if let Some(&until) = state.limited_runners.get(repository) {
+            return Err(github::Error::RateLimited { until });
+        }
         if let Some(status) = state.failed_runners.get(repository) {
             return Err(github::Error::Status {
                 method: reqwest::Method::GET,
@@ -3987,11 +3992,8 @@ fn o_s_listings(github: &FakeGithub) -> usize {
 }
 
 #[tokio::test]
-async fn a_removed_repository_github_refuses_stops_draining_at_once() {
-    for status in [
-        reqwest::StatusCode::FORBIDDEN,
-        reqwest::StatusCode::NOT_FOUND,
-    ] {
+async fn a_removed_repository_github_says_is_gone_stops_draining_at_once() {
+    for status in [reqwest::StatusCode::NOT_FOUND, reqwest::StatusCode::GONE] {
         let github = FakeGithub::default();
         let dir = TestDir::new("engine");
         let mut engine = draining_o_s(&github, &dir).await;
@@ -4011,25 +4013,40 @@ async fn a_removed_repository_github_refuses_stops_draining_at_once() {
 }
 
 #[tokio::test]
-async fn a_removed_repository_whose_listings_keep_failing_stops_draining_after_an_hour() {
+async fn a_removed_repository_stops_draining_after_an_hour_of_failed_listings_in_a_row() {
     let github = FakeGithub::default();
     let dir = TestDir::new("engine");
     let mut engine = draining_o_s(&github, &dir).await;
+    // A 403 with no rate limit headers, as a secondary rate limit answers: not a refusal.
     github
         .0
         .lock()
         .unwrap()
         .failed_runners
-        .insert("o/s".to_owned(), reqwest::StatusCode::BAD_GATEWAY);
+        .insert("o/s".to_owned(), reqwest::StatusCode::FORBIDDEN);
     tokio::time::pause();
     let before = o_s_listings(&github);
     engine.tick(Shutdown::No).await;
+    // Half an hour later the rate limit is used up for a tick: no listing, so the clock starts over.
+    tokio::time::advance(Duration::from_mins(30)).await;
+    let reset = std::time::SystemTime::now() + Duration::from_hours(1);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .limited_runners
+        .insert("o/s".to_owned(), reset);
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().limited_runners.clear();
+    tokio::time::advance(Duration::from_mins(30)).await;
+    engine.tick(Shutdown::No).await;
     tokio::time::advance(Duration::from_mins(59)).await;
     engine.tick(Shutdown::No).await;
+    assert_eq!(o_s_listings(&github) - before, 4, "o/s still drains");
     tokio::time::advance(Duration::from_mins(1)).await;
     engine.tick(Shutdown::No).await;
     engine.tick(Shutdown::No).await;
-    assert_eq!(o_s_listings(&github) - before, 3);
+    assert_eq!(o_s_listings(&github) - before, 5, "o/s stopped draining");
 }
 
 #[tokio::test]
