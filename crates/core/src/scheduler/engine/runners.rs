@@ -863,7 +863,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // Not the pool's fault: no runner starts anywhere until the limit resets.
             Err(github::Error::RateLimited { until }) => {
                 self.github_limited(until);
-                return;
+                return StartOutcome::Failed;
             }
             Err(error) => {
                 let failure = format!("cannot register a runner: {error}");
