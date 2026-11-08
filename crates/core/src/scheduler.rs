@@ -171,8 +171,8 @@ pub enum Decision {
         memory: u64,
         /// What it takes of the CPU budget, in millicores.
         cpu: u64,
-        /// Whether it starts for no queued job, as a warm runner.
-        warm: bool,
+        /// Whom it starts for: a queued job, or none as a warm runner.
+        for_: StartFor,
         /// The warm runners this plan stops to make room for it, just before: if one is still there, it took a job
         /// meanwhile and the start waits for the next plan.
         replacing: Vec<SlotRef>,
@@ -186,6 +186,15 @@ pub enum Decision {
         /// Why it stops.
         reason: StopReason,
     },
+}
+
+/// Whom a plan starts a runner for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartFor {
+    /// The queued job with this ID: its wait ends once the runner is in its slot (ADR 0110).
+    Job(u64),
+    /// No queued job: a warm runner, at its profile's caps.
+    Warm,
 }
 
 /// A pool's next job that lacks something scarce, as the plan found it: past the jobs its idle runners take, and
@@ -464,6 +473,7 @@ pub fn plan(
         behind.started(&repository.profile, profile.caps(), memory, cpu, now);
         decided.decisions.push(start(
             repository,
+            job,
             index,
             memory,
             cpu,
@@ -898,10 +908,11 @@ fn why_waits(
     }
 }
 
-/// A runner of `repository` in slot `index` of its profile for a queued job, after the warm runners it `replaces`
+/// A runner of `repository` in slot `index` of its profile for queued `job`, after the warm runners it `replaces`
 /// stop.
 fn start(
     repository: &Repository,
+    job: u64,
     index: usize,
     memory: u64,
     cpu: u64,
@@ -916,7 +927,7 @@ fn start(
         repository: repository.name.clone(),
         memory,
         cpu,
-        warm: false,
+        for_: StartFor::Job(job),
         replacing,
         behind: barrier.map(|barrier| barrier.job),
     }
@@ -977,7 +988,7 @@ fn start_warm(
                 repository: repository.name.clone(),
                 memory,
                 cpu,
-                warm: true,
+                for_: StartFor::Warm,
                 replacing: Vec::new(),
                 behind: None,
             });

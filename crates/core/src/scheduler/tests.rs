@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::{
     Budget, Decision, Demand, Hold, IDLE_TIMEOUT, PRIORITY_AFTER, Plan, Pool, Preparing, Profile,
-    Repository, RunnerSlot, Scarce, Slot, SlotRef, StopReason, Wait, Waits, plan,
+    Repository, RunnerSlot, Scarce, Slot, SlotRef, StartFor, StopReason, Wait, Waits, plan,
 };
 use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
@@ -745,7 +745,7 @@ fn warm_starts(decisions: &[Decision]) -> Vec<(usize, &str)> {
             Decision::Start {
                 slot,
                 repository,
-                warm: true,
+                for_: StartFor::Warm,
                 ..
             } => Some((slot.index, repository.as_str())),
             _ => None,
@@ -769,7 +769,7 @@ fn a_repository_wanting_a_warm_runner_starts_one_with_no_job_queued() {
             repository: "o/a".to_owned(),
             memory: 4 * GIB,
             cpu: 2000,
-            warm: true,
+            for_: StartFor::Warm,
             replacing: Vec::new(),
             behind: None,
         }]
@@ -854,7 +854,7 @@ fn a_queued_job_takes_the_slot_of_a_warm_runner_of_another_repository_in_the_sam
                 repository: "o/b".to_owned(),
                 memory: 4 * GIB,
                 cpu: 2000,
-                warm: false,
+                for_: StartFor::Job(1),
                 replacing: vec![slot(0)],
                 behind: None,
             }
@@ -908,7 +908,7 @@ fn a_queued_job_takes_the_memory_and_cpu_of_warm_runners_of_another_profile() {
                 repository: "o/a".to_owned(),
                 memory: 4 * GIB,
                 cpu: 2000,
-                warm: false,
+                for_: StartFor::Job(1),
                 replacing: vec![web(0)],
                 behind: None,
             }

@@ -534,6 +534,8 @@ struct Seen {
     released: usize,
     /// Runners that exited without a job and whose slots were freed.
     exits_freed: usize,
+    /// Jobs a runner started for that had not taken it yet.
+    runners_starting: usize,
 }
 
 struct Case {
@@ -1589,6 +1591,7 @@ impl Case {
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
+        self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
         if same_reading {
             self.the_band_follows_the_waiters(was_short, seeded)?;
@@ -1636,8 +1639,36 @@ impl Case {
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
+        self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
         self.no_removal_of_a_running_job()
+    }
+
+    /// ADR 0110: a job an idle runner will take stopped waiting for a slot and for the host's memory when that runner
+    /// started, whether a tick or a pass started it, so neither wait sizing reads goes on to the next commit.
+    fn no_job_waits_for_a_slot_or_the_host_past_its_runners_start(
+        &mut self,
+        status: &api::Status,
+    ) -> Result<(), Violation> {
+        let measured = &self.engine.measured;
+        let still: Vec<u64> = status
+            .queued
+            .iter()
+            .filter(|job| job.waiting == Some(api::Waiting::RunnerStarting))
+            .map(|job| job.id)
+            .inspect(|_| self.seen.runners_starting += 1)
+            .filter(|job| {
+                measured.slot_waiting.0.contains(job) || measured.host_waiting.0.contains(job)
+            })
+            .collect();
+        if still.is_empty() {
+            return Ok(());
+        }
+        violation(
+            self,
+            "no_job_waits_for_a_slot_or_the_host_past_its_runners_start",
+            format!("jobs {still:?} have a runner starting and still wait for a slot or the host"),
+        )
     }
 
     /// Invariant 1 for a pass: a pass that starts runners in a pool leaves it no more runners waiting for a job than
@@ -2500,6 +2531,27 @@ const BAND_RELEASED: [Step; 10] = [
 /// How many of `BAND_RELEASED`'s steps leave the larger margin standing, for the steps after them to work on.
 const BAND_STANDS: usize = 7;
 
+/// What every eighth case starts from: three light jobs for two light slots, so the third waits for a slot until the
+/// first job ends and the pass after it starts the third's runner, between ticks (ADR 0110).
+const SLOT_FREED_BETWEEN_TICKS: [Step; 7] = [
+    Step::Queue {
+        second: false,
+        labels: Labels::Light,
+    },
+    Step::Queue {
+        second: false,
+        labels: Labels::Light,
+    },
+    Step::Queue {
+        second: false,
+        labels: Labels::Light,
+    },
+    Step::Tick,
+    Step::Assign(0),
+    Step::Finish(0),
+    Step::Pass,
+];
+
 /// What every other case starts from: under measured admission, a job of `o/r` and one of `o/s` past their first minute
 /// and using a tenth of what they reserve, so the steps after it find a credit to take back. A tick takes what the
 /// captures found, as a job's first minute starts there, before it can go by.
@@ -2592,6 +2644,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
                 steps.splice(0..0, TWO_JOBS_SETTLED);
             }
             match seed % 8 {
+                0 => drop(steps.splice(0..0, SLOT_FREED_BETWEEN_TICKS)),
                 2 => drop(steps.splice(0..0, BAND_RELEASED[..BAND_STANDS].iter().copied())),
                 4 => drop(steps.splice(0..0, THREE_JOBS_SETTLED)),
                 6 => drop(steps.splice(0..0, BAND_RELEASED)),
@@ -2603,6 +2656,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
             if let Ok(case) = &outcome {
                 seen.barriers += case.barriers;
                 seen.exits_freed += case.exits_freed;
+                seen.runners_starting += case.runners_starting;
                 assert!(
                     seed % 8 != 2 || case.bands > 0,
                     "seed {seed} starts from a job no margin fits, so the larger margin stands"
@@ -2642,6 +2696,10 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     assert!(
         seen.exits_freed > 0 || seeds.len() == 1,
         "the generated runs free a runner that left without a job, or its invariant checks nothing"
+    );
+    assert!(
+        seen.runners_starting > 0 || seeds.len() == 1,
+        "the generated runs start a runner for a job before it takes it, or its invariant checks nothing"
     );
 }
 
