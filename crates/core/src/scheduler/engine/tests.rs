@@ -122,6 +122,8 @@ struct GithubState {
     latency: Duration,
     /// How much longer the runners and queued jobs listings take, as when GitHub lags.
     listing_latency: Duration,
+    /// How much longer a job read takes.
+    job_latency: Duration,
     /// How many times a job was read, which `calls` leaves out.
     job_reads: usize,
 }
@@ -386,7 +388,11 @@ impl GithubApi for FakeGithub {
 
     async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
         self.wait(|state| &state.held_jobs).await;
-        self.latency().await;
+        let latency = {
+            let state = self.0.lock().unwrap();
+            state.latency + state.job_latency
+        };
+        tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
         state.job_reads += 1;
         state

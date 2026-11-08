@@ -378,6 +378,10 @@ struct PoolHold {
 /// a single Docker request (120s) could otherwise outlast.
 pub const STOP_DEADLINE: Duration = Duration::from_secs(30);
 
+/// How long GitHub and Docker rest at least between the end of a tick and the start of the next, when a tick outlasts
+/// the interval between their starts (ADR 0111).
+const TICK_REST: Duration = Duration::from_secs(2);
+
 /// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.
 #[derive(Debug)]
 pub struct Engine<G = Github, D = Docker> {
@@ -715,7 +719,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.schedule().await;
     }
 
-    /// Schedules until a shutdown request is carried out, from a recovered engine. Between ticks, a runner whose
+    /// Schedules until a shutdown request is carried out, from a recovered engine. A tick is due `poll_interval`
+    /// after the last one started, and at least `TICK_REST` after it ended (ADR 0111). Between ticks, a runner whose
     /// container Docker says stopped is released at once, and its slot taken by a job the last poll listed
     /// (`turnover`, ADR 0095); that leaves the next tick when it was due.
     async fn schedule(&mut self) {
@@ -726,6 +731,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut shown = Shutdown::No;
         let mode = loop {
             let mode = self.stopping();
+            let began = tokio::time::Instant::now();
             // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
             // Docker: until then status would show a daemon that is not stopping.
             if mode != shown {
@@ -752,8 +758,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             } else {
                 Duration::from_secs(5)
             };
-            self.wait_for_tick(mode, tokio::time::Instant::now() + interval)
-                .await;
+            // From the tick's start, so its own length does not push the next listing out.
+            let due = (began + interval).max(tokio::time::Instant::now() + interval.min(TICK_REST));
+            self.wait_for_tick(mode, due).await;
         };
         // Nothing more is started or released: what Docker says now is the next start's.
         self.watcher = None;
