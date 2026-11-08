@@ -149,10 +149,11 @@ queued → slot → container → removed
    runners first, then queued jobs (`Engine::tick`; the order avoids starting a second runner for a job its runner
    just took), every repository at once, a few requests at a time. Each listing is read page by page, up to 10 pages; one repository's queued-jobs poll reads the jobs of at
    most 200 runs, queued runs before those in progress and the oldest first in each. A repository a reload removed
-   is polled until two listings in a row show none of this machine's runners. The history keeps when a listing first
-   showed each job queued (`seen_at`), written as each listing answers, so a runner that takes the job before the
-   other listings answer, or a tick that ends meanwhile, keeps it; job pages show it as "Seen by runnerd" between
-   its queueing and its container's start ([ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
+   is polled until two listings in a row show none of this machine's runners, GitHub says it is gone (404, 410), or
+   its listings fail for an hour in a row; then any runners left on it stay registered. The history keeps when a
+   listing first showed each job queued (`seen_at`), written as each listing answers, so a runner that takes the job
+   before the other listings answer, or a tick that ends meanwhile, keeps it; job pages show it as "Seen by runnerd"
+   between its queueing and its container's start ([ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
    A recorded job that left the listing, or whose repository left the config, is read each tick until GitHub says
    where it went; a 404, or 15 minutes of failed reads in a row, closes it as run elsewhere, and a runner here that
    later takes it takes its record back ([ADR 0109](docs/adr/0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md)).

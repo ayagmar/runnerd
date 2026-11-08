@@ -923,8 +923,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|name| !names.contains(*name))
             .cloned()
             .collect();
-        self.draining.extend(removed);
-        self.draining.retain(|name| !names.contains(name));
+        // A repository added back stops draining, and one removed again drains from the start.
+        for name in removed {
+            self.draining.entry(name).or_default();
+        }
+        self.draining.retain(|name, _| !names.contains(name));
         self.repositories.retain(|name, _| names.contains(name));
         for name in &names {
             self.repositories.entry(name.clone()).or_default();
