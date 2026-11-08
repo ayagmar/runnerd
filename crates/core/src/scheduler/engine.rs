@@ -481,8 +481,8 @@ pub struct Engine<G = Github, D = Docker> {
     leases: Leases,
     /// How far the mirror's log was counted.
     mirror_until: MirrorPosition,
-    /// Jobs recorded queued and not yet taken or closed, with their repository.
-    queued_jobs: BTreeMap<u64, String>,
+    /// Jobs recorded queued and not yet taken or closed.
+    queued_jobs: BTreeMap<u64, history::Followed>,
     /// Runners of runs a forced pause cancelled, with when they are removed if they still run.
     cancelling: BTreeMap<String, tokio::time::Instant>,
     /// Jobs whose runner is gone, waiting for GitHub to report them completed.

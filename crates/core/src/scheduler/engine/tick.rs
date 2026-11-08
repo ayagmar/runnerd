@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
-use super::history::CAPTURE_DRAIN;
+use super::history::{CAPTURE_DRAIN, Followed};
 use super::runners::{Collected, Removal};
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::{host, pooled};
@@ -1201,7 +1201,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
                     self.queued_jobs
                         .entry(job)
-                        .or_insert_with(|| repository.clone());
+                        .or_insert_with(|| Followed::new(&repository));
                 }
             }
         }

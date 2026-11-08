@@ -46,7 +46,8 @@ pub enum Event {
         /// The step as it is now.
         step: Step,
     },
-    /// The job's record is final: it completed and its runner was removed, it was lost, or it ran elsewhere.
+    /// The job's record is final: it completed and its runner was removed, it was lost, or it ran elsewhere. One closed
+    /// because GitHub stopped answering for it is taken back if a runner here then takes it (ADR 0109).
     #[serde(rename = "job.finished")]
     JobFinished {
         /// The job.

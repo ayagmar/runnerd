@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::history::Closing;
+use super::history::{Closing, Followed};
 use super::records::Undecided;
 use super::{Engine, Occupant};
 use crate::api;
@@ -444,7 +444,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         );
                     }
                     if job.state == api::JobState::Queued {
-                        self.queued_jobs.insert(job.id, job.repository);
+                        self.queued_jobs
+                            .insert(job.id, Followed::new(&job.repository));
                         continue;
                     }
                     if let Some(runner) = &job.runner {

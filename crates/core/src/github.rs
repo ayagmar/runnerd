@@ -132,6 +132,20 @@ pub enum Error {
     Token(String),
 }
 
+impl Error {
+    /// Whether GitHub answered that what was asked is not there for this token: deleted, or the token cannot see it.
+    /// Asking again gets the same answer.
+    pub fn is_gone(&self) -> bool {
+        matches!(
+            self,
+            Error::Status {
+                status: StatusCode::NOT_FOUND | StatusCode::GONE,
+                ..
+            }
+        )
+    }
+}
+
 fn secs(time: SystemTime) -> u64 {
     time.duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()

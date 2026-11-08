@@ -308,6 +308,10 @@ enum Write {
         job: u64,
         at: u64,
     },
+    Unanswered {
+        job: u64,
+        at: u64,
+    },
     Log {
         job: u64,
         lines: Vec<String>,
@@ -556,6 +560,12 @@ impl Store {
     /// none did and it has no start.
     pub fn elsewhere(&self, details: JobDetails) {
         self.send(Write::Elsewhere { details });
+    }
+
+    /// Closes a queued job that left the queue and that GitHub no longer answers for, at `at`: none of this daemon's
+    /// runners took it, so it reads as run elsewhere, with no conclusion.
+    pub fn unanswered(&self, job: u64, at: u64) {
+        self.send(Write::Unanswered { job, at });
     }
 
     /// Closes a job whose container is gone and that GitHub did not report completed in time.
