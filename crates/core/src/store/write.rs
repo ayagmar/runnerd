@@ -511,7 +511,8 @@ impl Writer<'_> {
         let updated = self.db.execute(
             "UPDATE jobs SET state = 'running', runner = ?2, started_at = coalesce(started_at, ?3), \
              finished_at = NULL WHERE id = ?1 AND (state = 'queued' \
-             OR (state = 'elsewhere' AND conclusion IS NULL AND started_at IS NULL))",
+             OR (state = 'elsewhere' AND conclusion IS NULL AND started_at IS NULL \
+             AND finished_at IS NOT NULL))",
             params![job, runner, at],
         )?;
         if (inserted == 1 || updated == 1)

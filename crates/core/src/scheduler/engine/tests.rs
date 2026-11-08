@@ -4009,6 +4009,31 @@ async fn a_job_closed_as_run_elsewhere_that_a_runner_here_then_takes_reads_as_ou
 }
 
 #[tokio::test]
+async fn a_log_cannot_take_a_job_github_answered_had_no_runner() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = a_job_that_left_the_queue(&github, &docker, &dir).await;
+    let mut pending = details(5, "pending", None);
+    pending.runner_name = None;
+    github.0.lock().unwrap().jobs.insert(5, pending);
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 5, JobState::Elsewhere).await;
+    // A job here prints job 5's ID; job logs are untrusted.
+    engine.memory_max = Some(16 << 30);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .slot_captures
+        .insert(1, "@@job 5 5\n".to_owned());
+    github.0.lock().unwrap().queued = vec![job(6)];
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(state_of(&handle, 5).await, JobState::Elsewhere);
+}
+
+#[tokio::test]
 async fn a_reload_removes_the_idle_runners_of_a_repository_it_removed_or_moved() {
     let other_repository = CONFIG.replace("name = \"o/r\"", "name = \"o/x\"");
     let other_profile = CONFIG
