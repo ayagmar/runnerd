@@ -121,3 +121,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Accepted |
 | [0112](0112-no-start-and-no-hold-while-githubs-rate-limit-is-used-up.md) | No start and no hold while GitHub's rate limit is used up | Accepted |
 | [0113](0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md) | A released runner's slot does not wait for its registration's delete | Accepted |
+| [0114](0114-a-lifecycle-is-one-value-with-one-owner.md) | A lifecycle is one value with one owner | Accepted |

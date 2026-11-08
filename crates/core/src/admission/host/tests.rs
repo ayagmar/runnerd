@@ -129,10 +129,7 @@ fn swap_changes_nothing_admission_counts() {
             }),
             ..bare.clone()
         };
-        let remembered = Remembered {
-            short,
-            ..Remembered::default()
-        };
+        let remembered = Remembered::testing(short, false);
         let (without, with) = (
             budget(bare.clone(), plain(8 * G), remembered),
             budget(with_swap.clone(), plain(8 * G), remembered),
@@ -274,10 +271,10 @@ mod generated {
             }
             !fits
         });
-        *remembered = Remembered {
-            short: short(memory, *reserved, stalled, queue.iter().copied()),
+        *remembered = Remembered::testing(
+            short(memory, *reserved, stalled, queue.iter().copied()),
             stalled,
-        };
+        );
         queued - queue.len()
     }
 
@@ -290,10 +287,7 @@ mod generated {
             let mut queue: Vec<u64> = (0..rng.below(9))
                 .map(|_| 256 * (1 + rng.below(32)) * M)
                 .collect();
-            let mut remembered = Remembered {
-                short: rng.below(2) == 0,
-                stalled: false,
-            };
+            let mut remembered = Remembered::testing(rng.below(2) == 0, false);
             let mut resumed = 0;
             let mut held = false;
             for _ in 0..12 {

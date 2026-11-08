@@ -432,13 +432,7 @@ fn a_host_short_of_memory_keeps_more_of_it() {
     };
     let plain = host::pooling(&memory, Remembered::default());
     assert_eq!(plain.keeps, 4 * G + 16 * G, "the margin and a quarter");
-    let short = host::pooling(
-        &memory,
-        Remembered {
-            short: true,
-            ..Remembered::default()
-        },
-    );
+    let short = host::pooling(&memory, Remembered::testing(true, false));
     assert_eq!(short.keeps, 6 * G + 16 * G);
     assert_eq!(short.available, 30 * G);
     let growing = host::pooling(

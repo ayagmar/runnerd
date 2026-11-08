@@ -15,13 +15,10 @@ fn minutes(minutes: u32) -> Duration {
 }
 
 fn starved(job: u64) -> Waits {
-    Waits {
-        memory: Some(Wait {
-            job,
-            since: now() - WAITED,
-        }),
-        ..Waits::default()
-    }
+    Waits::default().with_memory(Some(Wait {
+        job,
+        since: now() - WAITED,
+    }))
 }
 
 /// A pool of `name` in `profile` with runners of `memory`, usually done in `usual`.
@@ -342,13 +339,10 @@ fn the_room_gathers_when_the_cpu_has_it_too() {
         runner_cpu: Some(4000),
         ..pool("o/big", "big", GIB, None, &[1])
     };
-    let starved_of_cpu = Waits {
-        cpu: Some(Wait {
-            job: 1,
-            since: now() - WAITED,
-        }),
-        ..Waits::default()
-    };
+    let starved_of_cpu = Waits::default().with_cpu(Some(Wait {
+        job: 1,
+        since: now() - WAITED,
+    }));
     let budget = Budget {
         cpu: Some(1000),
         drained: Drained {
@@ -660,13 +654,10 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
     assert_held(&held);
     // Its whole usual run time is not what it has left: the room it gives comes now, so nothing passes.
     let matured_later = Repository {
-        waits: Waits {
-            memory: Some(Wait {
-                job: 1,
-                since: now() - WAITED,
-            }),
-            ..Waits::default()
-        },
+        waits: Waits::default().with_memory(Some(Wait {
+            job: 1,
+            since: now() - WAITED,
+        })),
         ..owner()
     };
     let in_the_past_for_the_barrier = Slot::Runner(RunnerSlot {
@@ -691,13 +682,10 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
     assert_eq!(started(&plan_of), [] as [&str; 0]);
     // Started "later" than the barrier matured, so its cap counts as well: 8G, all a drain leaves past the owner.
     let wait_from_the_future = Repository {
-        waits: Waits {
-            memory: Some(Wait {
-                job: 1,
-                since: now() + minutes(1),
-            }),
-            ..Waits::default()
-        },
+        waits: Waits::default().with_memory(Some(Wait {
+            job: 1,
+            since: now() + minutes(1),
+        })),
         ..owner()
     };
     let plan = plan(

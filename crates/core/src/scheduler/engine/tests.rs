@@ -99,6 +99,8 @@ struct GithubState {
     /// Runners registered so far, for `strict` IDs.
     registrations: u64,
     calls: Vec<String>,
+    /// `calls`, and the job reads they leave out, in order: what the invariants trace records.
+    trace: Vec<String>,
     /// How many calls there were, for tests that wait for one.
     called: tokio::sync::watch::Sender<usize>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
@@ -142,6 +144,7 @@ struct GithubState {
 
 impl GithubState {
     fn call(&mut self, call: String) {
+        self.trace.push(call.clone());
         self.calls.push(call);
         self.called.send_replace(self.calls.len());
     }
@@ -427,6 +430,7 @@ impl GithubApi for FakeGithub {
         tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
         state.job_reads += 1;
+        state.trace.push(format!("job {id}"));
         if let Some(&until) = state.limited_jobs.get(&id) {
             return Err(github::Error::RateLimited { until });
         }
@@ -655,7 +659,21 @@ struct DockerState {
     stuck_captures: BTreeSet<String>,
     /// How much longer the removal of each of these containers takes, as when Docker hangs on one.
     slow_removes: HashMap<String, Duration>,
+    /// How many reads of a container's log fail next, as when the Engine is busy.
+    fail_logs: u32,
     calls: Vec<String>,
+    /// `calls`, and the inspects and log reads they leave out, in order: what the invariants trace records.
+    trace: Vec<String>,
+    /// What the runners' log captures ran, in order. Each is a task of its own, so where it falls among the other calls
+    /// of a tick is not behaviour.
+    exec_trace: Vec<String>,
+}
+
+impl DockerState {
+    fn call(&mut self, call: String) {
+        self.trace.push(call.clone());
+        self.calls.push(call);
+    }
 }
 
 /// What a log capture that waits for its runner's job ends with, without one.
@@ -851,7 +869,7 @@ impl DockerApi for FakeDocker {
         let latency = self.0.lock().unwrap().latency.start;
         tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("start {}", spec.name));
+        state.call(format!("start {}", spec.name));
         state
             .started_on_clock
             .insert(spec.name.clone(), tokio::time::Instant::now());
@@ -927,6 +945,7 @@ impl DockerApi for FakeDocker {
     async fn inspect(&self, container: &str) -> Result<RunnerState, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
+        state.trace.push(format!("inspect {container}"));
         if let Some(failures) = state.fail_inspects.get_mut(container)
             && *failures > 0
         {
@@ -977,7 +996,7 @@ impl DockerApi for FakeDocker {
         };
         tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("remove {container}"));
+        state.call(format!("remove {container}"));
         if state.remove_outage == Outage::Refused {
             return Err(docker::Error::IOError {
                 err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
@@ -1027,7 +1046,7 @@ impl DockerApi for FakeDocker {
     async fn list(&self, label: &str) -> Result<Vec<Container>, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("list {label}"));
+        state.call(format!("list {label}"));
         if state.fail_lists {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 500,
@@ -1057,7 +1076,15 @@ impl DockerApi for FakeDocker {
 
     async fn logs(&self, container: &str) -> Result<String, docker::Error> {
         self.outage().await?;
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        state.trace.push(format!("logs {container}"));
+        if state.fail_logs > 0 {
+            state.fail_logs -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
         if container.ends_with("-measure") {
             return Ok(state
                 .measured
@@ -1091,6 +1118,7 @@ impl DockerApi for FakeDocker {
     ) -> Result<docker::Output, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
+        state.exec_trace.push(format!("exec {container}"));
         let broken = || docker::Error::DockerResponseServerError {
             status_code: 500,
             message: "exec failed".to_owned(),
@@ -1183,7 +1211,7 @@ impl DockerApi for FakeDocker {
 
     async fn pull(&self, image: &str) -> Result<(), docker::Error> {
         self.outage().await?;
-        self.0.lock().unwrap().calls.push(format!("pull {image}"));
+        self.0.lock().unwrap().call(format!("pull {image}"));
         while self.0.lock().unwrap().block_pulls {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -1226,7 +1254,7 @@ impl DockerApi for FakeDocker {
     async fn remove_volume(&self, name: &str) -> Result<(), docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("remove volume {name}"));
+        state.call(format!("remove volume {name}"));
         if state.volumes_in_use.contains(name) {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 409,
@@ -1261,7 +1289,7 @@ impl DockerApi for FakeDocker {
     ) -> Result<docker::Files, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("files {container} {directory}"));
+        state.call(format!("files {container} {directory}"));
         if state.fail_files > 0 {
             state.fail_files -= 1;
             return Err(docker::Error::DockerResponseServerError {
@@ -1293,7 +1321,7 @@ impl DockerApi for FakeDocker {
         self.outage().await?;
         let mut held = {
             let mut state = self.0.lock().unwrap();
-            state.calls.push(format!("commit {container} {reference}"));
+            state.call(format!("commit {container} {reference}"));
             state.commits_held.subscribe()
         };
         let _ = held.wait_for(|held| !held).await;
@@ -1389,7 +1417,7 @@ impl DockerApi for FakeDocker {
     ) -> Result<docker::Tty, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("shell {name}"));
+        state.call(format!("shell {name}"));
         let memory = body
             .host_config
             .as_ref()
@@ -2856,7 +2884,7 @@ async fn a_runner_someone_removes_frees_its_slot_in_the_tick_that_saw_it_stop() 
     engine.tick(Shutdown::No).await;
     engine.publish();
     assert_eq!(runner_in(&handle, 1), None, "its slot is free");
-    let hold = engine.repositories["o/r"].holds.get("app");
+    let hold = engine.pool_hold("o/r", "app");
     assert!(
         hold.is_none_or(|hold| hold.held.is_none()),
         "unread logs say nothing of a failure: {hold:?}"
@@ -2885,7 +2913,7 @@ async fn a_removal_that_fails_after_docker_said_it_was_under_way_is_taken_up() {
     assert_eq!(runner_in(&handle, 1), None, "its slot is free");
     engine.tick(Shutdown::No).await;
     assert!(
-        engine.leftover.contains_key(&container),
+        engine.is_leftover(&container),
         "a removal under way stays followed"
     );
 
@@ -2896,12 +2924,9 @@ async fn a_removal_that_fails_after_docker_said_it_was_under_way_is_taken_up() {
         state.fail_removes = 1;
     }
     engine.tick(Shutdown::No).await;
-    assert!(
-        engine.leftover.contains_key(&container),
-        "it is tried again"
-    );
+    assert!(engine.is_leftover(&container), "it is tried again");
     engine.tick(Shutdown::No).await;
-    assert!(engine.leftover.is_empty(), "Docker removed it");
+    assert!(engine.no_leftovers(), "Docker removed it");
     let containers = docker.0.lock().unwrap().containers.clone();
     assert!(
         containers.iter().all(|left| left.id != container),
@@ -3426,13 +3451,13 @@ async fn a_check_of_the_caches_that_measured_the_snapshot_before_its_reseed_does
     let seed = format!("start {}", Names::new("runnerd").seed("app"));
     until_called(&mut engine, &docker, &seed).await;
     for _ in 0..100 {
-        if engine.reseeds.is_empty() {
+        if engine.no_reseeds() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
         engine.tick(Shutdown::No).await;
     }
-    assert!(engine.reseeds.is_empty(), "the reseed finished");
+    assert!(engine.no_reseeds(), "the reseed finished");
     docker
         .0
         .lock()
@@ -3732,7 +3757,7 @@ async fn a_running_reseed_keeps_its_memory_when_a_reload_lowers_its_profiles() {
     engine.recover().await.unwrap();
     engine.request_reseed("app").unwrap();
     engine.tick(Shutdown::No).await;
-    assert!(engine.reseeds.contains_key("app"));
+    assert!(engine.reseeding("app"));
     // The seed container still runs with 8G; 8G more for `small` would not fit in 10G.
     engine.reload(
         Config::parse(&sized("0G", "1G", "8G")).unwrap(),
@@ -3756,7 +3781,7 @@ async fn a_requested_reseed_that_waits_for_room_holds_it_against_other_profiles_
     // `small` has drained, but its 4G seed container does not fit beside app's 4G runner in 6G.
     engine.request_reseed("small").unwrap();
     engine.tick(Shutdown::No).await;
-    assert!(!engine.reseeds.contains_key("small"), "the seed waits");
+    assert!(!engine.reseeding("small"), "the seed waits");
     engine.publish();
     let seeds = handle.status.borrow().budget.seed_memory.clone();
     assert_eq!(
@@ -3771,7 +3796,7 @@ async fn a_requested_reseed_that_waits_for_room_holds_it_against_other_profiles_
     docker.0.lock().unwrap().containers[0].running = false;
     github.0.lock().unwrap().queued = vec![job(3)];
     engine.tick(Shutdown::No).await;
-    assert!(engine.reseeds.contains_key("small"), "the seed starts");
+    assert!(engine.reseeding("small"), "the seed starts");
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
 }
 
@@ -3799,9 +3824,9 @@ async fn a_requested_reseed_the_host_could_never_fit_holds_no_room_against_other
     engine.request_reseed("small").unwrap();
     github.0.lock().unwrap().queued = vec![job(3)];
     engine.tick(Shutdown::No).await;
-    assert!(!engine.reseeds.contains_key("small"), "the seed waits");
+    assert!(!engine.reseeding("small"), "the seed waits");
     assert!(
-        engine.reseed_requested.contains("small"),
+        engine.reseed_is_requested("small"),
         "the reseed stays requested"
     );
     assert_eq!(registered(&github.calls()).len(), 1, "app's job starts");
@@ -3983,6 +4008,37 @@ async fn a_queued_job_github_fails_to_read_for_a_quarter_hour_closes_as_run_else
     let before = github.0.lock().unwrap().job_reads;
     engine.tick(Shutdown::No).await;
     assert_eq!(github.0.lock().unwrap().job_reads, before, "no longer read");
+}
+
+#[tokio::test]
+async fn a_job_github_never_ends_after_its_runner_went_is_lost_as_of_when_it_went() {
+    const WENT_MS: u64 = 1_792_697_000_000;
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().runners.clear();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
+
+    // What GitHub says of it meanwhile is still recorded.
+    if let Some(job) = github.0.lock().unwrap().jobs.get_mut(&1) {
+        job.name = "renamed".to_owned();
+    }
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap().summary;
+    assert_eq!(job.name, "renamed");
+
+    engine.set_closing_since(1, WENT_MS);
+    tokio::time::pause();
+    tokio::time::advance(super::history::LOST_AFTER).await;
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 1, JobState::Lost).await;
+    assert_eq!(job.summary.timeline.finished_at, Some(WENT_MS / 1000));
 }
 
 /// An engine serving `o/r` and `o/s` that a reload then left with `o/r` alone: `o/s` drains.
@@ -5923,11 +5979,7 @@ async fn a_container_a_failed_start_left_holds_its_slot_until_docker_confirms_it
         state.fail_inspects.insert(left.clone(), 2);
         state.fail_removes = 1;
     }
-    for state in engine.repositories.values_mut() {
-        for hold in state.holds.values_mut() {
-            hold.held = None;
-        }
-    }
+    engine.clear_holds();
     {
         let mut state = github.0.lock().unwrap();
         state.queued = vec![job(2)];
@@ -6042,6 +6094,51 @@ async fn a_log_capture_docker_breaks_off_starts_again_where_its_stored_log_ends(
     until_log_lines(&handle, 1, 2).await;
 }
 
+#[tokio::test]
+async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the_history_has() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 6\nhello\n");
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.fail_execs = 1;
+        state.break_captures = 1;
+    }
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_captures_end(&engine).await;
+    engine.tick(Shutdown::No).await;
+    until_log_lines(&handle, 1, 1).await;
+    until_captures_end(&engine).await;
+    engine.tick(Shutdown::No).await;
+    let last_start = || {
+        let state = docker.0.lock().unwrap();
+        let (_, page, offset) = state.captured.last().unwrap().clone();
+        (page, offset)
+    };
+    assert_eq!(last_start(), ("1".to_owned(), "0".to_owned()));
+
+    // The history has page 1 up to byte 6. The capture stored further, which the store has not written yet.
+    engine.set_recapture_resumes(crate::store::LogPosition {
+        page: 1,
+        offset: 12,
+    });
+    docker.0.lock().unwrap().break_captures = 1;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(last_start(), ("1".to_owned(), "12".to_owned()));
+
+    // Now the history is the further one.
+    until_captures_end(&engine).await;
+    engine.tick(Shutdown::No).await;
+    engine.set_recapture_resumes(crate::store::LogPosition { page: 1, offset: 0 });
+    tokio::time::advance(Duration::from_secs(60)).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(last_start(), ("1".to_owned(), "6".to_owned()));
+}
+
+mod access;
 mod admission;
 mod build_cache;
 mod invariants;

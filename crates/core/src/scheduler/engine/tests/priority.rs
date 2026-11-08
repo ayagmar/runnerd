@@ -125,16 +125,14 @@ impl Fixture {
     }
 
     fn wait(&self) -> Option<Wait> {
-        self.engine.repositories["o/big"]
-            .waits
-            .get("big")
+        self.engine
+            .waits_of("o/big", "big")
             .and_then(|waits| waits.memory)
     }
 
     /// What o/big's pool keeps.
     fn waits(&self) -> Waits {
-        let kept = self.engine.repositories["o/big"].waits.get("big");
-        kept.copied().unwrap_or_default()
+        self.engine.waits_of("o/big", "big").unwrap_or_default()
     }
 
     /// As if the wait began `PRIORITY_AFTER` earlier.
@@ -240,8 +238,7 @@ async fn reading_the_status_commits_no_wait() {
     fixture.all_busy();
     fixture.queue(vec![big(10)]);
     // Listed by a tick's listing alone, with no plan of a tick after it.
-    fixture.engine.repositories.get_mut("o/big").unwrap().queued = vec![big(10)];
-    fixture.engine.repositories.get_mut("o/big").unwrap().listed = true;
+    fixture.engine.set_listed("o/big", vec![big(10)]);
     fixture.engine.publish();
     assert_eq!(fixture.wait(), None, "a status plan started no wait");
 }
@@ -255,8 +252,7 @@ async fn a_pass_between_ticks_commits_a_wait_from_the_listing_it_plans_from() {
     fixture.all_busy();
     fixture.engine.tick(Shutdown::No).await;
     // A job of the tick's listing, with a newer listing yet to answer; one small runner ends.
-    fixture.engine.repositories.get_mut("o/big").unwrap().queued = vec![big(10)];
-    fixture.engine.repositories.get_mut("o/big").unwrap().listed = true;
+    fixture.engine.set_listed("o/big", vec![big(10)]);
     fixture.engine.listing += 1;
     fixture.docker.0.lock().unwrap().containers.remove(0);
     fixture.engine.exits.any();
@@ -410,7 +406,7 @@ async fn a_reload_that_removes_the_pool_drops_its_wait() {
         .engine
         .reload(Config::parse(&without).unwrap(), Some(9 * G), None);
     assert!(
-        fixture.engine.repositories["o/big"].waits.is_empty(),
+        fixture.engine.keeps_no_waits("o/big"),
         "the pool in `big` is gone"
     );
 }
@@ -481,7 +477,7 @@ warm = 1
     fixture.host(21 * G / 2);
     fixture.engine.tick(Shutdown::No).await;
     assert_eq!(fixture.runners_of("o/warm"), 1, "a 1G warm runner runs");
-    fixture.engine.measured.host.short = true;
+    fixture.engine.set_host_short();
     fixture.younger_job_after_a_starved_one().await;
     assert!(
         matches!(fixture.reason(10), Some(api::Waiting::HostMemory { .. })),
@@ -491,7 +487,7 @@ warm = 1
     assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
     assert_eq!(fixture.runners_of("o/warm"), 1, "its room would not do");
     assert!(
-        fixture.engine.measured.host.short,
+        fixture.engine.host_is_short(),
         "beside the warm runner it fits no margin, so the larger one stands"
     );
 }
@@ -515,12 +511,12 @@ async fn on_a_steady_reading_a_job_between_the_margins_starts_and_the_margin_and
     fixture.engine.tick(Shutdown::No).await;
     fixture.queue(vec![big(10)]);
     fixture.engine.tick(Shutdown::No).await;
-    assert!(fixture.engine.measured.host.short, "job 10 fits no margin");
+    assert!(fixture.engine.host_is_short(), "job 10 fits no margin");
     fixture.age();
     fixture.queue(vec![big(10), small(11)]);
     fixture.engine.tick(Shutdown::No).await;
     assert!(
-        !fixture.engine.measured.host.short,
+        !fixture.engine.host_is_short(),
         "job 11 fits the plain margin, so the larger one goes"
     );
     assert_eq!(
@@ -534,7 +530,7 @@ async fn on_a_steady_reading_a_job_between_the_margins_starts_and_the_margin_and
     for tick in 0..6 {
         fixture.engine.tick(Shutdown::No).await;
         assert!(
-            fixture.engine.measured.host.short,
+            fixture.engine.host_is_short(),
             "tick {tick}: job 10 fits no margin, so the larger one stands"
         );
         assert!(
@@ -573,7 +569,7 @@ async fn a_job_the_slice_holds_keeps_its_barrier_with_a_drain_between_the_host_m
             "tick {tick}: the barrier stands"
         );
         assert!(
-            !fixture.engine.measured.host.short,
+            !fixture.engine.host_is_short(),
             "tick {tick}: no job waits for the host"
         );
     }
@@ -677,9 +673,8 @@ async fn a_restart_starts_the_wait_again() {
     engine.recover().await.unwrap();
     fixture.queue(vec![big(10), small(11)]);
     engine.tick(Shutdown::No).await;
-    let wait = engine.repositories["o/big"]
-        .waits
-        .get("big")
+    let wait = engine
+        .waits_of("o/big", "big")
         .and_then(|waits| waits.memory)
         .expect("the first plan held it again");
     assert!(
@@ -808,11 +803,14 @@ async fn a_barrier_whose_job_went_elsewhere_served_nobody() {
 async fn a_start_no_barrier_came_before_serves_nobody() {
     let mut fixture = Fixture::new(9 * G).await;
     fixture.queue(vec![big(10)]);
-    let waits = fixture.engine.repositories.get_mut("o/big").unwrap();
-    waits.waits.entry("big".to_owned()).or_default().memory = Some(Wait {
-        job: 10,
-        since: std::time::SystemTime::now() - PRIORITY_AFTER,
-    });
+    fixture.engine.set_memory_wait(
+        "o/big",
+        "big",
+        Wait {
+            job: 10,
+            since: std::time::SystemTime::now() - PRIORITY_AFTER,
+        },
+    );
     fixture.engine.tick(Shutdown::No).await;
     assert_eq!(fixture.runners_of("o/big"), 1);
     assert_eq!(fixture.waits(), Waits::default());
@@ -852,15 +850,18 @@ async fn pausing_backing_off_or_preparing_takes_the_mark() {
     paused.engine.tick(Shutdown::No).await;
     assert_eq!(paused.waits(), Waits::default(), "pausing");
     stopped(|fixture| {
-        let state = fixture.engine.repositories.get_mut("o/big").unwrap();
-        state.holds.entry("big".to_owned()).or_default().held = Some(Hold {
-            until: std::time::SystemTime::now() + Duration::from_secs(60),
-            cause: HoldCause::NoJob,
-        });
+        fixture.engine.set_held(
+            "o/big",
+            "big",
+            Hold {
+                until: std::time::SystemTime::now() + Duration::from_secs(60),
+                cause: HoldCause::NoJob,
+            },
+        );
     })
     .await;
     stopped(|fixture| {
-        fixture.engine.reseed_requested.insert("big".to_owned());
+        fixture.engine.ask_reseed("big");
     })
     .await;
 }
@@ -880,7 +881,7 @@ async fn a_runner_that_connected_and_left_takes_no_mark() {
         }
     }
     fixture.engine.tick(Shutdown::No).await;
-    let hold = &fixture.engine.repositories["o/big"].holds["big"];
+    let hold = fixture.engine.pool_hold("o/big", "big").unwrap();
     assert!(hold.held.is_none(), "no backoff: {hold:?}");
     assert!(fixture.waits().served, "the mark stands");
 }
@@ -909,7 +910,7 @@ async fn a_restart_loses_the_mark() {
     engine.memory_max = Some(9 * G);
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
-    let waits = engine.repositories["o/big"].waits.get("big");
+    let waits = engine.waits_of("o/big", "big");
     assert!(!waits.is_some_and(|waits| waits.served));
 }
 
@@ -1007,14 +1008,14 @@ impl Fixture {
 
     /// The running runners run `name` of o/small, and the engine reads the history again, as it does each minute.
     fn running(&mut self, name: &str) {
-        for occupant in self.engine.slots.values_mut().flatten().flatten() {
-            occupant.key = Some(Key {
+        for occupant in self.engine.occupants_mut() {
+            occupant.set_key(Key {
                 repository: "o/small".to_owned(),
                 workflow: None,
                 name: name.to_owned(),
             });
         }
-        self.engine.measured.predictor = None;
+        self.engine.forget_predictor();
     }
 
     /// Two 1G runners that usually run 30 minutes hold back job 10's 8G; job 11 of o/small, `name`, comes after it.
@@ -1094,10 +1095,7 @@ async fn a_runner_not_named_hides(name: &str) -> Fixture {
     fixture.queue(vec![big(10), named(11, name), named(12, "quick")]);
     let unnamed = fixture
         .engine
-        .slots
-        .values_mut()
-        .flatten()
-        .flatten()
+        .occupants_mut()
         .find(|occupant| occupant.repository == "o/small")
         .unwrap();
     unnamed.job = None;
@@ -1132,10 +1130,10 @@ async fn a_pass_behind_the_barrier(name: &str) -> Fixture {
     fixture.ran("slow", 400, 3, 45).await;
     fixture.running("small");
     fixture.engine.refresh_predictor().await;
-    let listed = fixture.engine.repositories.get_mut("o/small").unwrap();
     // The runner that ended may have taken the older one, which the plan then leaves out.
-    listed.queued = vec![named(11, name), named(12, name)];
-    listed.listed = true;
+    fixture
+        .engine
+        .set_listed("o/small", vec![named(11, name), named(12, name)]);
     fixture.engine.listing += 1;
     fixture.docker.0.lock().unwrap().containers.remove(0);
     fixture.engine.exits.any();
@@ -1196,7 +1194,9 @@ async fn under_caps_a_history_changes_no_reservation() {
     for _ in 0..20 {
         predictor.learn(&run, "small", G, 60_000);
     }
-    fixture.engine.measured.predictor = Some((predictor, std::time::SystemTime::now()));
+    fixture
+        .engine
+        .set_predictor(predictor, std::time::SystemTime::now());
     fixture.queue(vec![small(1)]);
     fixture.engine.tick(Shutdown::No).await;
     let (plan, _) = fixture.engine.plan();

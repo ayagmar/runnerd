@@ -50,6 +50,22 @@ pub(super) struct Closing {
     since_ms: u64,
 }
 
+#[cfg(test)]
+impl Closing {
+    /// When its runner was found gone, for a test that needs it apart from the clock that ends the wait.
+    pub(super) fn found_gone_at(&mut self, ms: u64) {
+        self.since_ms = ms;
+    }
+}
+
+#[cfg(test)]
+impl Recapture {
+    /// Where its capture stored up to, for a test that needs it apart from what the store has.
+    pub(super) fn resume_at(&mut self, position: LogPosition) {
+        self.resume = Some(position);
+    }
+}
+
 impl Closing {
     pub(super) fn now(repository: &str) -> Closing {
         Closing {
