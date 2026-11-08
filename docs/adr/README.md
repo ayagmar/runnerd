@@ -102,7 +102,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) | Idle removals and deferred starts stay off the start path, and a job's wait says where it went | Amended by 0095, 0106, 0111 |
 | [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Accepted |
 | [0094](0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md) | A profile's upkeep stops its runners only for a reseed that will replace the snapshot | Accepted |
-| [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096, 0111 |
+| [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096, 0111, 0113 |
 | [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099, 0102 |
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099 |
 | [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099, 0104 |
@@ -117,3 +117,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0107](0107-a-warm-runner-waits-only-where-jobs-just-came.md) | A warm runner waits only where jobs just came | Accepted |
 | [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed |
 | [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Accepted |
+| [0113](0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md) | A released runner's slot does not wait for its registration's delete | Accepted |

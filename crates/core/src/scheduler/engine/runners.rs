@@ -9,13 +9,14 @@ use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::history::{CAPTURE_DRAIN, Capture};
-use super::{DockerInStop, Engine, Occupant, Purpose, Shutdown, unix_secs};
+use super::{DockerInStop, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
 use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
+use crate::sync::lock;
 
 /// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
 /// takes them, so a restart knows them.
@@ -33,6 +34,10 @@ pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
 
 /// What a runner logs once GitHub gave it a session: it started and connected, whatever ends it after that.
 const CONNECTED: &str = "Listening for Jobs";
+
+/// What a runner logs as its job ends, whatever the result. GitHub drops an ephemeral runner's registration with its
+/// job, so one that logged this needs no delete.
+const JOB_ENDED: &str = " completed with result: ";
 
 /// How many of a runner's last lines a warning shows, and how much of them.
 const LAST_SAID_LINES: usize = 3;
@@ -108,8 +113,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Frees the slots whose container stopped: the runner took its job and exited, or it never started. First
     /// removes again the containers recovery failed to remove, and keeps or removes those it could not tell about
     /// once their backoff is over. It inspects every runner but those Docker's events said stopped while runnerd runs
-    /// on, which are a pass's.
+    /// on, which are a pass's. Forgets the background deletes that finished, so they do not pile up.
     pub(super) async fn collect_finished(&mut self) {
+        while lock(&self.deletes).try_join_next().is_some() {}
         self.exits.inspecting_all();
         self.released.clear();
         let now = tokio::time::Instant::now();
@@ -204,7 +210,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant) {
         let drained = self.drain(occupant).await;
         let recorded = self.record(slot, occupant, &drained).await;
-        let removed = self.remove(occupant, recorded).await;
+        let removed = self
+            .remove(occupant, recorded, drained.logs.as_deref())
+            .await;
         self.released(slot, occupant, drained.logs.as_deref(), removed);
     }
 
@@ -267,16 +275,34 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             && self.begin_record(slot, occupant).await
     }
 
-    /// A release's third step, on its own: removes the container, unless it is `recorded`, then deletes the
-    /// runner's registration.
+    /// Waits for the background deletes of released runners' registrations, up to `STOP_DEADLINE`: the daemon's exit
+    /// would drop them, leaving each registration on GitHub, offline, until the next start's runners listing.
+    pub(super) async fn finish_deletes(&mut self) {
+        let mut deletes = std::mem::take(&mut *lock(&self.deletes));
+        let finished = async { while deletes.join_next().await.is_some() {} };
+        if tokio::time::timeout(STOP_DEADLINE, finished).await.is_err() {
+            warn!(
+                "registration deletes still unanswered after {}s: {}; the next start deletes those runners",
+                STOP_DEADLINE.as_secs(),
+                deletes.len()
+            );
+        }
+    }
+
+    /// A release's third step, on its own: removes the container, unless it is `recorded`. Then deletes the runner's
+    /// registration in the background, unless its `logs` say its job ended: the slot does not wait for GitHub, as a
+    /// registration with no container takes no job, and the next runners listing deletes one this leaves.
     pub(super) fn remove(
         &self,
         occupant: &Occupant,
         recorded: bool,
+        logs: Option<&str>,
     ) -> impl Future<Output = Result<Removal, docker::Error>> + Send + 'static {
         let (docker, github) = (self.docker.clone(), self.github.clone());
         let (container, runner) = (occupant.container.clone(), occupant.runner_name.clone());
         let (repository, runner_id) = (occupant.repository.clone(), occupant.runner_id);
+        let deletes = self.deletes.clone();
+        let job_ended = logs.is_some_and(|logs| logs.lines().any(|line| line.contains(JOB_ENDED)));
         async move {
             let mut removal = Removal::Done;
             if !recorded {
@@ -287,9 +313,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     _ => {}
                 }
             }
-            // Busy: left to the next poll's cleanup of runners without a container.
-            if let Err(error) = github.delete_runner(&repository, runner_id).await {
-                warn!("cannot delete {runner}: {error}");
+            if !job_ended {
+                // Busy: left to the next poll's cleanup of runners without a container.
+                lock(&deletes).spawn(async move {
+                    if let Err(error) = github.delete_runner(&repository, runner_id).await {
+                        warn!("cannot delete {runner}: {error}");
+                    }
+                });
             }
             Ok(removal)
         }
