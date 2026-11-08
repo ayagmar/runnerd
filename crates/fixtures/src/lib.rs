@@ -190,6 +190,7 @@ fn status() -> Status {
         // `runnerd stop` waits for the running jobs.
         shutting_down: true,
         stopping: Some(api::Stopping::WaitsForJobs),
+        github_limited_until: Some(NOW + 750),
         budget: Budget {
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(24 * GIB),
@@ -1115,6 +1116,8 @@ pub struct Facts {
     pub savings_30_days: String,
     /// How the daemon stops.
     pub stopping: &'static str,
+    /// Why no runner starts while GitHub's rate limit is used up.
+    pub github: &'static str,
 }
 
 fn row(job: &JobSummary) -> JobRow {
@@ -1166,6 +1169,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
     let build_cache_refused = build_cache.refused_line().expect("refused uploads");
     let parts = status.budget_parts();
     let stopping = status.stopping_line().expect("a stop");
+    let github = status.github_line().expect("a used-up rate limit");
     Facts {
         rows: daemon.finished().iter().map(row).collect(),
         budget: status.budget.memory_reading().line(),
@@ -1244,6 +1248,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
         savings: daemon.savings.month.headline(),
         savings_30_days: daemon.savings.last_30_days.headline(),
         stopping,
+        github,
     }
 }
 

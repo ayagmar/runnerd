@@ -29,6 +29,7 @@ fn status() -> Status {
         version: "0.0.0".to_owned(),
         shutting_down: false,
         stopping: None,
+        github_limited_until: None,
         budget: Budget::default(),
         profiles: vec![ProfileStatus {
             name: "jvm".to_owned(),

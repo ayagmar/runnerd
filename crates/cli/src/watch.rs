@@ -329,6 +329,9 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
             bytes(host.memory)
         );
     }
+    if let Some(limited) = status.github_line() {
+        let _ = write!(out, "  {}", paint.paint(Tone::Busy, limited));
+    }
     if let Some(stopping) = status.stopping_line() {
         let _ = write!(out, "  {}", paint.paint(Tone::Busy, stopping));
     }
@@ -518,6 +521,7 @@ mod tests {
                 version: "0.0.1".to_owned(),
                 shutting_down: false,
                 stopping: None,
+                github_limited_until: None,
                 budget: Budget {
                     admission: runnerd_core::api::AdmissionPolicy::Caps,
                     held: false,

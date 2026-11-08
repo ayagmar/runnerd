@@ -490,7 +490,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
     pub(super) async fn refill(&mut self) -> usize {
-        if self.stopping() != Shutdown::No {
+        if self.stopping() != Shutdown::No || self.github_limit().is_some() {
             return 0;
         }
         // The jobs captures named since: their runners are busy, and their jobs no longer queued.
@@ -601,6 +601,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Decision::Stop { .. } => {}
                 // A runner started after a stop was asked for could take a job a detaching stop leaves running.
                 Decision::Start { .. } if self.stopping() != Shutdown::No => {}
+                // GitHub registers no runner before its rate limit resets.
+                Decision::Start { .. } if self.github_limit().is_some() => {}
                 Decision::Start { .. } if applied.deferred > 0 => applied.deferred += 1,
                 start @ Decision::Start { .. } => {
                     if self.apply_start(start, admitting).await {
@@ -1180,21 +1182,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let mut listed = false;
             let queued = match answer {
                 Ok(queued) => {
-                    self.rate_limit_logged = false;
                     listed = true;
                     queued
                 }
                 Err(github::Error::RateLimited { until }) => {
-                    if !self.rate_limit_logged {
-                        warn!(
-                            "GitHub's rate limit is used up; polling again in {}s",
-                            until
-                                .duration_since(SystemTime::now())
-                                .unwrap_or_default()
-                                .as_secs()
-                        );
-                        self.rate_limit_logged = true;
-                    }
+                    self.github_limited(until);
                     Vec::new()
                 }
                 Err(error) => {
@@ -1240,7 +1232,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let mut left = false;
             let runners = match answer {
                 Ok(runners) => runners,
-                Err(github::Error::RateLimited { .. }) => {
+                Err(github::Error::RateLimited { until }) => {
+                    self.github_limited(until);
                     // Not listed: a drain's failure clock starts over.
                     if let Some(drain) = self.draining.get_mut(&repository) {
                         drain.failing_since = None;

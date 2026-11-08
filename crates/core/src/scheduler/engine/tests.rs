@@ -119,6 +119,10 @@ struct GithubState {
     failed_runners: BTreeMap<String, reqwest::StatusCode>,
     /// Repositories whose runners listings GitHub refuses until then, for its used-up rate limit.
     limited_runners: BTreeMap<String, std::time::SystemTime>,
+    /// GitHub's rate limit is used up until then: listings and registrations fail as `Github` fails them.
+    rate_limited: Option<std::time::SystemTime>,
+    /// The same, for registrations alone: the listings before them used up what was left.
+    registrations_limited: Option<std::time::SystemTime>,
     /// Listings, job reads, registrations and deletes waiting for an answer.
     waiting: usize,
     /// How long each listing, job read, registration and delete takes to answer, where a test says: a workload's
@@ -295,6 +299,9 @@ impl GithubApi for FakeGithub {
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
+        if let Some(until) = state.rate_limited {
+            return Err(github::Error::RateLimited { until });
+        }
         if state.failed_queued.contains(repository) {
             return Err(github::Error::Status {
                 method: reqwest::Method::GET,
@@ -323,6 +330,9 @@ impl GithubApi for FakeGithub {
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
+        if let Some(until) = state.rate_limited {
+            return Err(github::Error::RateLimited { until });
+        }
         if let Some(&until) = state.limited_runners.get(repository) {
             return Err(github::Error::RateLimited { until });
         }
@@ -362,6 +372,9 @@ impl GithubApi for FakeGithub {
         self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("register {name}"));
+        if let Some(until) = state.rate_limited.or(state.registrations_limited) {
+            return Err(github::Error::RateLimited { until });
+        }
         if state.register_fails {
             return Err(github::Error::Token("register fails".to_owned()));
         }

@@ -8,6 +8,7 @@ use crate::api::HoldCause;
 use crate::scheduler::warm::Learned;
 use crate::scheduler::{IDLE_TIMEOUT, Pool};
 use crate::time;
+use std::time::SystemTime;
 
 const MINUTE: u64 = 60 * 1000;
 
@@ -357,7 +358,7 @@ async fn warm_runners_stop_once_the_repository_is_quiet_and_do_not_come_back() {
     assert_eq!(registered(&github.calls()).len(), 1);
 
     // An hour and more later: no job since, and the runner waited past IDLE_TIMEOUT.
-    engine.warm.learned = Some((Learned::default(), std::time::SystemTime::now()));
+    engine.warm.learned = Some((Learned::default(), SystemTime::now()));
     for occupant in engine.slots.values_mut().flatten().flatten() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
@@ -621,7 +622,7 @@ async fn a_warm_runner_leaving_slot_1_without_a_job_needs_no_reseed() {
     let (mut engine, _handle, _dir) = active(&github, &docker, &warm_config()).await;
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
-    engine.warm.learned = Some((Learned::default(), std::time::SystemTime::now()));
+    engine.warm.learned = Some((Learned::default(), SystemTime::now()));
     for occupant in engine.slots.values_mut().flatten().flatten() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
@@ -1599,4 +1600,74 @@ async fn a_run_seen_in_the_tick_idle_runners_wait_out_their_time_keeps_them_for_
         Vec::<&String>::new(),
         "none starts"
     );
+}
+
+/// Whether `o/r`'s `app` pool is held back, and how many runner failures were announced.
+async fn held_and_announced(
+    engine: &Engine<FakeGithub, FakeDocker>,
+    handle: &Handle,
+) -> (bool, usize) {
+    handle.store.flush().await;
+    let announced = handle
+        .store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|envelope| matches!(envelope.event, api::Event::RunnerFailed { .. }))
+        .count();
+    let held = engine.repositories["o/r"]
+        .holds
+        .get("app")
+        .is_some_and(|hold| hold.held.is_some());
+    (held, announced)
+}
+
+#[tokio::test]
+async fn a_used_up_rate_limit_starts_no_warm_runner_and_holds_no_pool() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    let until = SystemTime::now() + Duration::from_mins(30);
+    github.0.lock().unwrap().rate_limited = Some(until);
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 0);
+    assert_eq!(held_and_announced(&engine, &handle).await, (false, 0));
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().github_limited_until,
+        Some(
+            until
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_registration_refused_for_the_rate_limit_holds_no_pool_and_starts_resume_once_it_resets()
+{
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    // The listings used up what was left.
+    let until = SystemTime::now() + Duration::from_millis(300);
+    github.0.lock().unwrap().registrations_limited = Some(until);
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "tried once");
+    assert_eq!(held_and_announced(&engine, &handle).await, (false, 0));
+    // The limit resets.
+    github.0.lock().unwrap().registrations_limited = None;
+    while SystemTime::now() <= until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "started again");
+    engine.publish();
+    assert_eq!(handle.status.borrow().github_limited_until, None);
 }

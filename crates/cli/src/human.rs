@@ -199,6 +199,9 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         status.version,
         status.budget.line()
     );
+    if let Some(limited) = status.github_line() {
+        let _ = write!(out, "  {}", paint.paint(Tone::Busy, limited));
+    }
     if let Some(stopping) = status.stopping_line() {
         let _ = write!(out, "  {}", paint.paint(Tone::Busy, stopping));
     }
