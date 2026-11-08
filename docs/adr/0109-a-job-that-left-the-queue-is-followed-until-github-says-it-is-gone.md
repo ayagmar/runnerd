@@ -28,7 +28,8 @@ The jobs of removed runners already had an end: `closing` records them lost afte
   of this machine's runners took it, and the job reads `elsewhere`, as core already words a job that left the queue for a
   place it cannot name.
 - **A runner here that takes such a job takes its record back.** `Store::claimed` turns a row closed this way (state
-  `elsewhere`, no conclusion, no start) into a running one, as it does a queued one. GitHub can still queue a job it
+  `elsewhere`, no conclusion, no start, a finish time) into a running one, as it does a queued one. A row GitHub answered
+  with no runner has no finish time and stays closed, since a job's log can name any ID. GitHub can still queue a job it
   refused to show: a repository whose token lost it and that is re-added with access restored keeps its jobs queued for
   up to 24 hours, and a listing can show a job again after its reads failed.
 
