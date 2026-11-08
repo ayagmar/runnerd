@@ -298,6 +298,39 @@ async fn a_job_a_pass_plans_but_leaves_to_the_tick_keeps_waiting() {
 }
 
 #[tokio::test]
+async fn a_start_that_failed_does_not_plan_the_tick_again() {
+    // Catches a failed start counting as one that went ahead: the tick planned again for the start it deferred and
+    // retried the failed one at once. Two slots, one with o/r's warm runner; o/s queues two jobs. Job 7's start
+    // fails preparing its caches, and job 8's waits, as the warm runner it would replace took a job.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let config = shared_slot().replace("slots = 1", "slots = 2");
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = [7, 8]
+            .into_iter()
+            .map(|id| QueuedJob {
+                labels: vec!["self-hosted".to_owned(), "other".to_owned()],
+                ..job(id)
+            })
+            .collect();
+        state.busy_deletes = 1;
+    }
+    docker.0.lock().unwrap().fail_volumes = 1;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "no runner for o/s until the next tick"
+    );
+}
+
+#[tokio::test]
 async fn a_runs_expected_jobs_get_runners_before_github_queues_them() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

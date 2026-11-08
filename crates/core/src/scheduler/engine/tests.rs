@@ -5224,6 +5224,45 @@ async fn after_a_slot_whose_caches_cannot_be_prepared_the_younger_job_waits_behi
 }
 
 #[tokio::test]
+async fn a_slot_whose_caches_keep_failing_is_tried_less_and_less_often() {
+    // Catches a Docker that cannot make a profile's volumes being asked again on every tick and pass.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().fail_volumes = 3;
+    let (mut engine, _handle) = one_slot(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    let left = |docker: &FakeDocker| docker.0.lock().unwrap().fail_volumes;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(left(&docker), 2, "the first failure tries");
+    engine.tick(Shutdown::No).await;
+    assert_eq!(left(&docker), 1, "one failure costs no wait");
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        left(&docker),
+        1,
+        "the second failure spaces out the next try"
+    );
+    engine.prepare_failures.get_mut("app").unwrap().retry_at = SystemTime::UNIX_EPOCH;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(left(&docker), 0, "its time come, it tries again");
+    engine.prepare_failures.get_mut("app").unwrap().retry_at = SystemTime::UNIX_EPOCH;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the caches ready, the runner starts"
+    );
+    assert!(
+        engine.prepare_failures.is_empty(),
+        "a prepared slot ends the streak"
+    );
+}
+
+#[tokio::test]
 async fn a_shutdown_leaves_every_queued_job_without_a_reason() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     github.0.lock().unwrap().queued = vec![job(1)];

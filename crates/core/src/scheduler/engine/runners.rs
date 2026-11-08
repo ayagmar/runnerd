@@ -61,6 +61,35 @@ pub(super) enum Removal {
     UnderWay,
 }
 
+/// A profile's starts that failed preparing their caches, in a row: spaced out without holding its pools back, whose
+/// wait for memory or CPU a hold would end (ADR 0096, 0098).
+#[derive(Debug)]
+pub(super) struct PrepareFailures {
+    failures: u32,
+    /// No start in the profile prepares its caches before this.
+    pub(super) retry_at: SystemTime,
+}
+
+impl Default for PrepareFailures {
+    fn default() -> PrepareFailures {
+        PrepareFailures {
+            failures: 0,
+            retry_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+}
+
+/// What a start came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub(super) enum StartOutcome {
+    /// Its runner is in its slot.
+    Started,
+    /// No runner is: its pool or profile went, a stop was asked for, or GitHub or Docker failed, which holds its pool
+    /// back unless only preparing the caches failed. A container Docker kept holds the slot until it is removed.
+    Failed,
+}
+
 /// The labels of a runner container: what a restart adopts it by.
 fn container_labels(
     name: &str,
@@ -750,23 +779,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// Registers a runner of `repository` and starts it in `slot`, and says whether it is there.
     pub(super) async fn start(
         &mut self,
         slot: &SlotRef,
         repository: &str,
         admission: Admission,
         purpose: Purpose,
-    ) {
+    ) -> StartOutcome {
         // Its pool's labels: those of the repository's entry in the slot's profile.
         let Some(labels) = self
             .config
             .pool_in(repository, &slot.profile)
             .map(|pool| pool.labels.clone())
         else {
-            return;
+            return StartOutcome::Failed;
         };
-        let number = slot.index + 1;
         let now = SystemTime::now();
+        if self
+            .prepare_failures
+            .get(&slot.profile)
+            .is_some_and(|failed| failed.retry_at > now)
+        {
+            return StartOutcome::Failed;
+        }
+        let number = slot.index + 1;
         let secs = unix_secs(now).max(self.named + 1);
         self.named = secs;
         let name = self.identity.runner_name(&slot.profile, number, secs);
@@ -776,11 +813,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 "cannot prepare the caches of {} slot {number}: {error}",
                 slot.profile
             );
-            return;
+            let failed = self
+                .prepare_failures
+                .entry(slot.profile.clone())
+                .or_default();
+            // One failure costs nothing, as it holds no pool back (ADR 0096); from the second on Docker is spared.
+            failed.retry_at = now
+                + match failed.failures {
+                    0 => Duration::ZERO,
+                    failures => backoff(failures),
+                };
+            failed.failures += 1;
+            return StartOutcome::Failed;
         }
+        self.prepare_failures.remove(&slot.profile);
         self.start_mirror().await;
         let Some(profile) = self.config.profiles.get(&slot.profile) else {
-            return;
+            return StartOutcome::Failed;
         };
         let (runner, jit_config) = match self.github.jit_config(repository, &name, &labels).await {
             Ok(registered) => registered,
@@ -788,7 +837,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 let failure = format!("cannot register a runner: {error}");
                 warn!("{repository}: {failure}");
                 self.hold(repository, &slot.profile, HoldCause::Register, failure);
-                return;
+                return StartOutcome::Failed;
             }
         };
         // A stop asked for while GitHub registered it: its runner would take a job no daemon watches.
@@ -797,7 +846,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if let Err(error) = self.github.delete_runner(repository, runner.id).await {
                 warn!("{repository}: cannot delete {name}: {error}");
             }
-            return;
+            return StartOutcome::Failed;
         }
         let image = profile.image.reference();
         let spec = RunnerSpec {
@@ -825,9 +874,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     if failed.may_have_run {
                         self.spend(repository, &slot.profile);
                     }
-                    return self
-                        .abandon(&slot.profile, repository, &runner, failure)
+                    self.abandon(&slot.profile, repository, &runner, failure)
                         .await;
+                    return StartOutcome::Failed;
                 };
                 (container, Some(failure))
             }
@@ -852,7 +901,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             observed: false,
             purpose: Some(purpose),
         };
-        self.place(slot, occupant, purpose, failure).await;
+        self.place(slot, occupant, purpose, failure).await
     }
 
     /// Puts a runner a start made in its slot and watches it, or after a start that failed, its container that
@@ -864,7 +913,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         occupant: Occupant,
         purpose: Purpose,
         failure: Option<String>,
-    ) {
+    ) -> StartOutcome {
         if let Some(entry) = self
             .slots
             .get_mut(&slot.profile)
@@ -886,6 +935,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     slot.profile
                 );
                 self.observe(slot, &occupant).await;
+                StartOutcome::Started
             }
             Some(failure) => {
                 warn!(
@@ -893,6 +943,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     slot.profile
                 );
                 self.hold(repository, &slot.profile, HoldCause::Start, failure);
+                StartOutcome::Failed
             }
         }
     }
