@@ -339,6 +339,9 @@ enum Step {
     Reload(Change),
     /// The daemon restarts: a new engine on the same history and Docker.
     Restart,
+    /// The daemon restarts and a signal stops it before its first tick, so before any listing says which of the
+    /// runners it adopted are idle; then it starts again.
+    RestartThenStop,
     /// As `Restart`, while Docker fails the first inspect of a runner's container.
     RestartInspectFails(usize),
     /// The daemon stops, then starts again: on a signal, or with `runnerd stop` once Docker is gone.
@@ -403,7 +406,8 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 8 => Change::PooledHost,
                 _ => Change::CpuOvercommit,
             }),
-            63..=65 => Step::Restart,
+            63..=64 => Step::Restart,
+            65 => Step::RestartThenStop,
             66..=67 => Step::RestartInspectFails(rng.index()),
             68..=71 => Step::Elapse,
             72..=73 => Step::Reseed {
@@ -827,6 +831,13 @@ impl Case {
                 self.tick().await?;
             }
             Step::Restart => {
+                self.restart().await?;
+                self.tick().await?;
+                self.a_restart_takes_the_host_credit_back()?;
+            }
+            Step::RestartThenStop => {
+                self.restart().await?;
+                self.stop(false).await?;
                 self.restart().await?;
                 self.tick().await?;
                 self.a_restart_takes_the_host_credit_back()?;
@@ -1305,7 +1316,38 @@ impl Case {
             let detail = format!("{mode:?} took the containers of running jobs {gone:?}");
             return violation(self, "a_stop_leaves_running_jobs", detail);
         }
+        if mode == Shutdown::Detach {
+            self.a_detach_deregisters_idle_runners()?;
+        }
         Ok(())
+    }
+
+    /// ADR 0091: a detaching stop leaves no runner that took no job registered, adopted ones too, even before a
+    /// listing said they were idle: one left would take a job with no daemon to watch it.
+    fn a_detach_deregisters_idle_runners(&self) -> Result<(), Violation> {
+        let registered: BTreeSet<String> = self
+            .github
+            .0
+            .lock()
+            .unwrap()
+            .runners
+            .iter()
+            .map(|runner| runner.name.clone())
+            .collect();
+        let idle: Vec<String> = self
+            .idle_containers()
+            .into_iter()
+            .map(|container| container.name)
+            .filter(|name| registered.contains(name))
+            .collect();
+        if idle.is_empty() {
+            return Ok(());
+        }
+        violation(
+            self,
+            "a_detach_deregisters_idle_runners",
+            format!("{idle:?} stay registered with no job"),
+        )
     }
 
     async fn restart(&mut self) -> Result<(), Violation> {

@@ -519,11 +519,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes the idle and warm runners a detaching stop leaves no work for (ADR 0091). An idle runner left
-    /// registered would take one more job with no daemon to watch it.
+    /// registered would take one more job with no daemon to watch it. Adopted runners with no job named go too:
+    /// adoption counts them busy until a listing says otherwise, and a stop may come before one. GitHub's `Busy` keeps
+    /// those that do run a job (`remove_idle`).
     pub(super) async fn remove_every_idle(&mut self) {
         let idle: Vec<(SlotRef, StopReason)> = self
             .occupied()
-            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+            .filter(|(_, occupant)| {
+                occupant.job.is_none() && (!occupant.busy || occupant.purpose.is_none())
+            })
             .map(|(slot, _)| (slot, StopReason::Shutdown))
             .collect();
         self.remove_idle(idle).await;
