@@ -5236,6 +5236,10 @@ async fn a_slot_whose_caches_keep_failing_is_tried_less_and_less_often() {
     let (mut engine, _handle) = one_slot(&github, &docker, &dir);
     engine.recover().await.unwrap();
     let left = |docker: &FakeDocker| docker.0.lock().unwrap().fail_volumes;
+    let app = |index| crate::scheduler::SlotRef {
+        profile: "app".to_owned(),
+        index,
+    };
     engine.tick(Shutdown::No).await;
     assert_eq!(left(&docker), 2, "the first failure tries");
     engine.tick(Shutdown::No).await;
@@ -5246,10 +5250,10 @@ async fn a_slot_whose_caches_keep_failing_is_tried_less_and_less_often() {
         1,
         "the second failure spaces out the next try"
     );
-    engine.prepare_failures.get_mut("app").unwrap().retry_at = std::time::UNIX_EPOCH;
+    engine.prepare_failures.get_mut(&app(0)).unwrap().retry_at = std::time::UNIX_EPOCH;
     engine.tick(Shutdown::No).await;
     assert_eq!(left(&docker), 0, "its time come, it tries again");
-    engine.prepare_failures.get_mut("app").unwrap().retry_at = std::time::UNIX_EPOCH;
+    engine.prepare_failures.get_mut(&app(0)).unwrap().retry_at = std::time::UNIX_EPOCH;
     engine.tick(Shutdown::No).await;
     assert_eq!(
         registered(&github.calls()).len(),
@@ -5259,6 +5263,51 @@ async fn a_slot_whose_caches_keep_failing_is_tried_less_and_less_often() {
     assert!(
         engine.prepare_failures.is_empty(),
         "a prepared slot ends the streak"
+    );
+}
+
+#[tokio::test]
+async fn a_slot_whose_caches_keep_failing_refuses_no_other_slot() {
+    // Catches one bad slot starving its profile: its spaced-out try refused every other slot's start, even in the same
+    // plan, so a slot that would have prepared never got to.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().fail_volumes = 1;
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = vec![job(1), job(2)];
+    docker.0.lock().unwrap().fail_volumes = 1;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the second slot starts a runner beside the first, which waits for its next try"
+    );
+    let slot = |index| crate::scheduler::SlotRef {
+        profile: "app".to_owned(),
+        index,
+    };
+    assert!(
+        engine.prepare_failures.contains_key(&slot(0)),
+        "the failed slot's streak stays when another slot prepares"
+    );
+    engine
+        .prepare_failures
+        .insert(slot(1), super::runners::PrepareFailures::default());
+    engine.reload(
+        Config::parse(&CONFIG.replace("slots = 2", "slots = 1")).unwrap(),
+        None,
+        None,
+    );
+    assert!(
+        engine.prepare_failures.contains_key(&slot(0))
+            && !engine.prepare_failures.contains_key(&slot(1)),
+        "a reload forgets the closed slot alone"
     );
 }
 

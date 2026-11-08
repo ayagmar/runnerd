@@ -946,8 +946,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.oversized.retain(|name| profiles.contains_key(name));
         self.measure_due.retain(|name| profiles.contains_key(name));
         self.reseed_due.retain(|name| profiles.contains_key(name));
-        self.prepare_failures
-            .retain(|name, _| profiles.contains_key(name));
+        self.prepare_failures.retain(|slot, _| {
+            profiles
+                .get(&slot.profile)
+                .is_some_and(|profile| slot.index < profile.slots as usize)
+        });
         self.isolation = isolation::backend(self.config.host.isolation);
         self.memory_max = memory_max;
         self.cpus = cpus;

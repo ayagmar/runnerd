@@ -61,12 +61,12 @@ pub(super) enum Removal {
     UnderWay,
 }
 
-/// A profile's starts that failed preparing their caches, in a row: spaced out without holding its pools back, whose
+/// A slot's starts that failed preparing its caches, in a row, so one slot that stays bad refuses no other: spaced out without holding its pools back, whose
 /// wait for memory or CPU a hold would end (ADR 0096, 0098).
 #[derive(Debug)]
 pub(super) struct PrepareFailures {
     failures: u32,
-    /// No start in the profile prepares its caches before this.
+    /// No start in the slot prepares its caches before this.
     pub(super) retry_at: SystemTime,
 }
 
@@ -779,12 +779,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Creates what a runner in `slot` mounts and says whether it is there. Not yet when its profile's last try failed
+    /// Creates what a runner in `slot` mounts and says whether it is there. Not yet when the slot's last try failed
     /// and the time for the next has not come.
     async fn caches_ready(&mut self, slot: &SlotRef, now: SystemTime) -> bool {
         if self
             .prepare_failures
-            .get(&slot.profile)
+            .get(slot)
             .is_some_and(|failed| failed.retry_at > now)
         {
             return false;
@@ -792,17 +792,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let number = slot.index + 1;
         let Err(error) = cache::prepare(&*self.docker, &self.names, &slot.profile, number).await
         else {
-            self.prepare_failures.remove(&slot.profile);
+            self.prepare_failures.remove(slot);
             return true;
         };
         warn!(
             "cannot prepare the caches of {} slot {number}: {error}",
             slot.profile
         );
-        let failed = self
-            .prepare_failures
-            .entry(slot.profile.clone())
-            .or_default();
+        let failed = self.prepare_failures.entry(slot.clone()).or_default();
         // One failure costs nothing, as it holds no pool back (ADR 0096); from the second on Docker is spared.
         failed.retry_at = now
             + match failed.failures {
