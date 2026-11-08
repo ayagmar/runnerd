@@ -86,8 +86,9 @@ owner's slot layers and can reseed the owner's snapshot, and smaller shared-cach
 `.github/scripts/check-state.py` fails on a lifecycle spread over several fields or written from more than one place
 (CLAUDE.md, "State"; [ADR 0114](docs/adr/0114-a-lifecycle-is-one-value-with-one-owner.md)). What it still finds is
 listed in `.github/state-debt.txt`, each group with what removes it. A change that fixes a finding deletes its lines.
-The run compares with `origin/main`, fetching it, and skips that comparison if it cannot: a line added, the limit
-raised or a new marker fails.
+The run compares with `origin/main`: a line added, the limit raised or a new marker fails, and only a line tagged
+`# may become a marker` on main may turn into a marker. A local run fetches `origin/main` and skips the comparison if it
+cannot; CI fails instead.
 
 A refactor of one of these proves it kept behaviour with the invariants' trace. Run this on the base commit and on the
 change, and compare the two directories with `diff -r`; never sort them, as call order is what they show:

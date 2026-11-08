@@ -4,9 +4,11 @@
 use std::time::{Duration, SystemTime};
 
 use super::*;
+use crate::admission::Predictor;
 use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
 use crate::scheduler::{Hold, Key, Wait, Waits};
+use crate::store::LogPosition;
 
 /// What a pool's hold holds.
 #[derive(Debug, Clone, Copy)]
@@ -184,6 +186,40 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     pub(super) fn raise(&mut self, runner: String) {
         self.measured.raised.push(runner);
+    }
+
+    pub(super) fn forget_predictor(&mut self) {
+        self.measured.predictor = None;
+    }
+
+    pub(super) fn set_predictor(&mut self, predictor: Predictor, read_at: SystemTime) {
+        self.measured.predictor = Some((predictor, read_at));
+    }
+
+    pub(super) fn no_recordings(&self) -> bool {
+        self.records.recordings.is_empty()
+    }
+
+    pub(super) fn no_shells(&self) -> bool {
+        self.records.shells.is_empty()
+    }
+
+    pub(super) fn is_closing(&self, job: u64) -> bool {
+        self.closing.contains_key(&job)
+    }
+
+    /// As if the runner of `job` was found gone at `ms` since the epoch.
+    pub(super) fn set_closing_since(&mut self, job: u64, ms: u64) {
+        if let Some(closing) = self.closing.get_mut(&job) {
+            closing.found_gone_at(ms);
+        }
+    }
+
+    /// As if every broken capture last stored up to `position`, ahead of or behind what the store has.
+    pub(super) fn set_recapture_resumes(&mut self, position: LogPosition) {
+        for recapture in self.recaptures.values_mut() {
+            recapture.resume_at(position);
+        }
     }
 
     /// The runners' names this machine registers begin with this.

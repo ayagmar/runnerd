@@ -1015,7 +1015,7 @@ impl Fixture {
                 name: name.to_owned(),
             });
         }
-        self.engine.measured.predictor = None;
+        self.engine.forget_predictor();
     }
 
     /// Two 1G runners that usually run 30 minutes hold back job 10's 8G; job 11 of o/small, `name`, comes after it.
@@ -1194,7 +1194,9 @@ async fn under_caps_a_history_changes_no_reservation() {
     for _ in 0..20 {
         predictor.learn(&run, "small", G, 60_000);
     }
-    fixture.engine.measured.predictor = Some((predictor, std::time::SystemTime::now()));
+    fixture
+        .engine
+        .set_predictor(predictor, std::time::SystemTime::now());
     fixture.queue(vec![small(1)]);
     fixture.engine.tick(Shutdown::No).await;
     let (plan, _) = fixture.engine.plan();

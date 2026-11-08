@@ -9,9 +9,9 @@
 //! it shrank to. `RUNNERD_INVARIANT_CASES` runs more cases than the default, `RUNNERD_INVARIANT_SEED` one seed.
 //!
 //! A change that must not change behaviour is checked by its trace: `RUNNERD_INVARIANT_TRACE=<directory>` makes
-//! `the_trace_of_each_seed` write what each case asked of GitHub and Docker, step by step, and its history's jobs. Run it
-//! on the base commit and on the change and compare the directories; never sort them, as the order is what it shows. See
-//! `TRACE_UNSTABLE`.
+//! `the_trace_of_each_seed` write what each case asked of GitHub and Docker and its status, step by step, and its
+//! history's jobs. Run it on the base commit and on the change and compare the directories; never sort them, as the
+//! order is what it shows. See `TRACE_UNSTABLE`.
 
 use std::fmt::Write as _;
 use std::panic::AssertUnwindSafe;
@@ -840,6 +840,7 @@ impl Case {
             return;
         }
         self.settle_background().await;
+        let status = steady(&steady_status(&self.status()).to_string());
         let github = std::mem::take(&mut self.github.0.lock().unwrap().trace);
         let (docker, execs) = {
             let mut state = self.docker.0.lock().unwrap();
@@ -850,6 +851,7 @@ impl Case {
         };
         if let Some(trace) = self.trace.as_mut() {
             trace.push(format!("-- {step}"));
+            trace.push(format!("status {status}"));
             trace.extend(github.iter().map(|call| format!("github {}", steady(call))));
             trace.extend(docker.iter().map(|call| format!("docker {}", steady(call))));
             trace.extend(execs.iter().map(|call| format!("capture {}", steady(call))));
@@ -885,13 +887,14 @@ impl Case {
         let mut rows = db
             .prepare(
                 "SELECT id, repository, state, conclusion, github_completed, runner, \
-                 started_at IS NOT NULL, finished_at IS NOT NULL FROM jobs ORDER BY id",
+                 started_at IS NOT NULL, finished_at IS NOT NULL, slot_waited > 0, host_waited > 0 \
+                 FROM jobs ORDER BY id",
             )
             .unwrap();
         let jobs = rows
             .query_map([], |row| {
                 Ok(format!(
-                    "{} {} {} {:?} {} {:?} {} {}",
+                    "{} {} {} {:?} {} {:?} {} {} slot_waited {} host_waited {}",
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
@@ -900,6 +903,8 @@ impl Case {
                     row.get::<_, Option<String>>(5)?.map(|name| steady(&name)),
                     row.get::<_, bool>(6)?,
                     row.get::<_, bool>(7)?,
+                    row.get::<_, bool>(8)?,
+                    row.get::<_, bool>(9)?,
                 ))
             })
             .unwrap();
@@ -1907,7 +1912,7 @@ impl Case {
             }
         }
         store.flush().await;
-        self.engine.measured.predictor = None;
+        self.engine.forget_predictor();
     }
 
     /// A runner whose registration GitHub deleted exits, as a JIT runner does.
@@ -2912,6 +2917,25 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
     })
 }
 
+/// The status as a trace compares it: what it says, without the figures a run's clock decides. A seed's reserve and
+/// whether a reseed still runs depend on which background task finished first, which is not what a step did.
+fn steady_status(status: &api::Status) -> serde_json::Value {
+    fn blank(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Number(_) => *value = 0.into(),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(blank),
+            serde_json::Value::Object(fields) => {
+                fields.retain(|name, _| !UNSTEADY_STATUS.contains(&name.as_str()));
+                fields.values_mut().for_each(blank);
+            }
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(status).unwrap();
+    blank(&mut value);
+    value
+}
+
 /// A runner's name without the second it was started in, which is all of a trace the machine's clock decides.
 fn steady(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
@@ -3309,6 +3333,9 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         seeds.len()
     );
 }
+
+/// Status fields a trace leaves out (`steady_status`).
+const UNSTEADY_STATUS: &[&str] = &["seed_memory", "reseeding"];
 
 /// How many rounds without a call to a fake say that a step's background work has ended.
 const QUIET_ROUNDS: u32 = 8;

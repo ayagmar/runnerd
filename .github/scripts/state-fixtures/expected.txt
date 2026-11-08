@@ -5,7 +5,13 @@ C1 fixture ThroughTuple
 C1 fixture Taken
 C1 fixture Borrowed
 C1 fixture TwoBools
+C1 fixture BuildNamed
+C1 fixture DocSaysWire
+C1 fixture Guarded
+C1 fixture Flags
+C1 fixture FullPaths
 C2 first second
 C3 busy job ||
 C5 crates/fixture/src/updates.rs
+C6 known
 engine-lifecycle-fields 2

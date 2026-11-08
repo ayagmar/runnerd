@@ -1117,6 +1117,38 @@ async fn an_actions_cache_save_made_while_github_names_no_runner_lands_once_it_d
 }
 
 #[tokio::test]
+async fn an_ended_jobs_save_outlives_github_failing_its_run_as_the_job_completes() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-run-fails");
+    let (mut engine, handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let pushes = [trigger("push", "main"), trigger("push", "main")];
+    let [(first, first_socket), (_, second_socket)] =
+        two_jobs(&github, &docker, &mut engine, pushes).await;
+    github_names_no_runner(&github, 1);
+    github_names_no_runner(&github, 2);
+    engine.tick(Shutdown::No).await;
+    assert!(save_now(&first_socket, "deps", b"deps").await);
+    assert!(save_now(&second_socket, "tools", b"tools").await);
+    jobs_end(&docker, &mut engine).await;
+    assert!(cache.undecided(&first), "GitHub has named no runner yet");
+
+    // GitHub says the job completed on this runner, on the tick it cannot say what started the run.
+    let failing = github.0.lock().unwrap().triggers.remove(&1).unwrap();
+    github_names(&github, 1, &first, "completed");
+    engine.tick(Shutdown::No).await;
+    assert!(cache.undecided(&first), "nothing decided its writes");
+    assert!(!engine.no_ended_uploads(), "its save still waits");
+    assert_eq!(uploads(&dir), 2, "and is still on disk");
+
+    github.0.lock().unwrap().triggers.insert(1, failing);
+    engine.tick(Shutdown::No).await;
+    let counts = counts_of(&handle, 1).await;
+    assert!(counts.writer, "job 1 wrote once GitHub answered");
+    assert_eq!(counts.written_bytes, 4);
+}
+
+#[tokio::test]
 async fn an_ended_jobs_actions_cache_saves_go_when_github_never_names_its_runner() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

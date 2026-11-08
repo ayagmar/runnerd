@@ -755,3 +755,43 @@ async fn a_failed_job_an_idle_runner_took_while_detached_becomes_its_record_at_t
         "the stopped runner is committed, then goes: {calls:?}"
     );
 }
+
+#[tokio::test]
+async fn a_graceful_stop_removes_only_a_runner_listed_idle_with_no_job() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let name = |slot| identity("ci", ID_A).runner_name("app", slot, 1);
+    // Listed busy with its job named; and listed idle with its job named, as a capture can name it first.
+    running_job(&github, &docker, "o/r", 1, 1);
+    running_job(&github, &docker, "o/r", 2, 2);
+    {
+        let (mut containers, mut listed) = (docker.0.lock().unwrap(), github.0.lock().unwrap());
+        // Listed busy, before any capture named its job.
+        containers.containers.push(runner_container(3, 9, true));
+        listed.runners.push(runner(9, &name(3), true));
+        // Idle.
+        containers.containers.push(runner_container(4, 10, true));
+        listed.runners.push(runner(10, &name(4), false));
+    }
+    let dir = TestDir::new("stop-idle");
+    let (mut engine, handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &CONFIG.replace("slots = 2", "slots = 4"),
+    );
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
+    // A graceful stop goes by the last listing, which it does not repeat.
+    for listed in &mut github.0.lock().unwrap().runners {
+        listed.busy = listed.busy && listed.name != name(2);
+    }
+    engine.tick(Shutdown::No).await;
+
+    engine.tick(Shutdown::Graceful).await;
+    assert_eq!(
+        removed(&docker.calls()),
+        ["remove container-4"],
+        "only the runner with no job, listed idle, goes"
+    );
+}

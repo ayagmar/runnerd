@@ -1,15 +1,18 @@
 # What check-state.py still finds on main, and what removes each line. See CLAUDE.md, State, and ADR 0114.
 #
 # Every pull request that fixes a finding deletes its lines. Lines may only leave: a new one, or a higher limit, fails
-# CI. A line may leave by becoming a marker in the script's MARKED, with its reason. The last pull request of the work
-# deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the script.
+# CI. Only a line tagged "# may become a marker" may leave by becoming a marker in the script's MARKED, with its reason;
+# a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
+# script.
 #
-# Two machines the check cannot see, as it looks at how fields are declared and written, not what values mean. Each
-# gets a change of its own:
-#   docker_in_stop: read in five places, and pairs with Control's shutdown mode (Force plus Failed reads as Detach).
-#   warm.learned: UNIX_EPOCH stands for stale.
+engine-lifecycle-fields 41
 
-engine-lifecycle-fields 40
+# Two machines the other rules cannot see, as they look at how fields are declared and written, not what values mean.
+# Each gets a change of its own.
+# docker_in_stop is read in five places, and pairs with Control's shutdown mode (Force plus Failed reads as Detach).
+C6 docker_in_stop
+# warm.learned: UNIX_EPOCH stands for stale.
+C6 warm.learned
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
@@ -73,8 +76,8 @@ C3 dropped finalized &&
 
 # Build cache runner: split, with the save. held belongs to the undecided state of writes, so it moves there; a marker
 # then covers saves and found, which are independent tables.
-C1 core crates/core/src/buildcache.rs:Runner
+C1 core crates/core/src/buildcache.rs:Runner # may become a marker
 
 # TUI prompt: split confirm, removal, resize and help into one value; a marker then covers App's other fields, each a
 # view's own data.
-C1 cli App
+C1 cli App # may become a marker

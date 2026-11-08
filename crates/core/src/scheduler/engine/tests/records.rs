@@ -46,7 +46,7 @@ async fn job_ends(
 pub(super) async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
     for _ in 0..200 {
         engine.tick(Shutdown::No).await;
-        if engine.records.recordings.is_empty() {
+        if engine.no_recordings() {
             engine.publish();
             return;
         }
@@ -234,10 +234,7 @@ async fn a_signal_waits_for_the_record_being_made() {
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
     job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
     engine.tick(Shutdown::No).await;
-    assert!(
-        !engine.records.recordings.is_empty(),
-        "job 1's record is being made"
-    );
+    assert!(!engine.no_recordings(), "job 1's record is being made");
     handle.control.shutdown(Shutdown::Detach);
     tokio::time::timeout(Duration::from_secs(10), engine.schedule())
         .await
@@ -555,10 +552,7 @@ async fn a_shell_whose_process_exited_is_removed_and_one_left_by_an_earlier_run_
         .for_each(|container| container.running = false);
     engine.tick(Shutdown::No).await;
     engine.publish();
-    assert!(
-        engine.records.shells.is_empty(),
-        "the exited shell is forgotten"
-    );
+    assert!(engine.no_shells(), "the exited shell is forgotten");
     assert!(
         docker
             .calls()
@@ -697,10 +691,7 @@ async fn shells_get_containers_of_their_own_read_only_caches_and_close_after_eig
 
     tokio::time::advance(Duration::from_hours(8) + Duration::from_secs(1)).await;
     engine.tick(Shutdown::No).await;
-    assert!(
-        engine.records.shells.is_empty(),
-        "forgotten shells are closed"
-    );
+    assert!(engine.no_shells(), "forgotten shells are closed");
     let calls = docker.calls();
     for tty in [&first, &second] {
         assert!(
@@ -768,7 +759,7 @@ async fn no_shell_opens_while_the_shared_caches_it_mounts_are_trimmed() {
         matches!(refused, ControlError::Conflict(_)),
         "a shell waits for the trim: {refused}"
     );
-    assert!(engine.records.shells.is_empty(), "no shell is open");
+    assert!(engine.no_shells(), "no shell is open");
 }
 
 #[tokio::test(start_paused = true)]

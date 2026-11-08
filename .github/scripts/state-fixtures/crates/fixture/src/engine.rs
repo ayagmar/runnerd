@@ -15,6 +15,12 @@ pub struct Engine {
     wire: Wire,
     marked: Marked,
     occupant: Occupant,
+    build_named: crate::cases::BuildNamed,
+    built_free: crate::cases::BuiltFree,
+    doc_says_wire: crate::cases::DocSaysWire,
+    guarded: crate::cases::Guarded,
+    flags: crate::cases::Flags,
+    full_paths: crate::cases::FullPaths,
 }
 
 impl Engine {

@@ -4010,6 +4010,37 @@ async fn a_queued_job_github_fails_to_read_for_a_quarter_hour_closes_as_run_else
     assert_eq!(github.0.lock().unwrap().job_reads, before, "no longer read");
 }
 
+#[tokio::test]
+async fn a_job_github_never_ends_after_its_runner_went_is_lost_as_of_when_it_went() {
+    const WENT_MS: u64 = 1_792_697_000_000;
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().runners.clear();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
+
+    // What GitHub says of it meanwhile is still recorded.
+    if let Some(job) = github.0.lock().unwrap().jobs.get_mut(&1) {
+        job.name = "renamed".to_owned();
+    }
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap().summary;
+    assert_eq!(job.name, "renamed");
+
+    engine.set_closing_since(1, WENT_MS);
+    tokio::time::pause();
+    tokio::time::advance(super::history::LOST_AFTER).await;
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 1, JobState::Lost).await;
+    assert_eq!(job.summary.timeline.finished_at, Some(WENT_MS / 1000));
+}
+
 /// An engine serving `o/r` and `o/s` that a reload then left with `o/r` alone: `o/s` drains.
 async fn draining_o_s(github: &FakeGithub, dir: &TestDir) -> Engine<FakeGithub, FakeDocker> {
     let (mut engine, _handle) =
@@ -6061,6 +6092,50 @@ async fn a_log_capture_docker_breaks_off_starts_again_where_its_stored_log_ends(
     engine.tick(Shutdown::No).await;
     assert_eq!(captured(), resumed);
     until_log_lines(&handle, 1, 2).await;
+}
+
+#[tokio::test]
+async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the_history_has() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 6\nhello\n");
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.fail_execs = 1;
+        state.break_captures = 1;
+    }
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_captures_end(&engine).await;
+    engine.tick(Shutdown::No).await;
+    until_log_lines(&handle, 1, 1).await;
+    until_captures_end(&engine).await;
+    engine.tick(Shutdown::No).await;
+    let last_start = || {
+        let state = docker.0.lock().unwrap();
+        let (_, page, offset) = state.captured.last().unwrap().clone();
+        (page, offset)
+    };
+    assert_eq!(last_start(), ("1".to_owned(), "0".to_owned()));
+
+    // The history has page 1 up to byte 6. The capture stored further, which the store has not written yet.
+    engine.set_recapture_resumes(crate::store::LogPosition {
+        page: 1,
+        offset: 12,
+    });
+    docker.0.lock().unwrap().break_captures = 1;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(last_start(), ("1".to_owned(), "12".to_owned()));
+
+    // Now the history is the further one.
+    until_captures_end(&engine).await;
+    engine.tick(Shutdown::No).await;
+    engine.set_recapture_resumes(crate::store::LogPosition { page: 1, offset: 0 });
+    tokio::time::advance(Duration::from_secs(60)).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(last_start(), ("1".to_owned(), "6".to_owned()));
 }
 
 mod access;

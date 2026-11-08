@@ -14,6 +14,7 @@ C3  The same two fields of one receiver are joined by || or && at two or more si
     method of it.
 C4  Engine has more lifecycle-typed fields than the recorded limit: new state goes in a sealed type Engine holds.
 C5  SQL updates the jobs table outside the store's writer.
+C6  A named machine no rule above can see is still there, found by a fixed pattern (KNOWN).
 
 Findings a later change removes are listed in .github/state-debt.txt. Exceptions that stay are in MARKED, with the
 reason every combination of the fields is meant. Both can only shrink: the ratchet compares them with origin/main.
@@ -35,6 +36,7 @@ REPO = SCRIPT.parents[2]
 DEBT = ".github/state-debt.txt"
 FIXTURES = SCRIPT.parent / "state-fixtures"
 LIMIT_KEY = "engine-lifecycle-fields"
+MARKABLE = "# may become a marker"
 
 # The long-lived owners a lifecycle lives in. Adding one is part of the change that adds it.
 ROOTS = (
@@ -54,13 +56,14 @@ ENGINE = "crates/core/src/scheduler/engine.rs:Engine"
 # Held by a root, but no lifecycle of the holder's: the walk does not go through them. Wire types are not walked either.
 OPAQUE = {
     "Config": "the parsed config: a value a reload replaces whole",
-    "Store": "a handle on the writer thread; what it keeps is in the database, which C5 covers",
-    "Control": "the channel commands and the shutdown mode arrive by",
+    "Store": "a handle on the writer thread, not walked into: what it writes is in the database, which C5 covers, and its own in-memory fields have their marker",
+    "Control": "the channel commands and the shutdown mode arrive by; the sets it keeps behind mutexes are not checked",
     "Status": "the published status: built whole by each publish",
 }
 
-# Exceptions that stay: finding -> why every combination is meant. A new entry fails the ratchet unless the same finding
-# was on main's debt list: otherwise seal the type instead. One that no longer matches anything fails, too.
+# Exceptions that stay: finding -> why every combination is meant. A new entry fails the ratchet unless main's debt file
+# tags that finding as one that may become a marker: otherwise seal the type instead. One that no longer matches anything
+# fails, too.
 MARKED = {
     "C1 cli History": "what the user filters by, each on its own, and the pages behind the one shown: no field says what state another is in",
     "C1 cli JobView": "the buffers of three separate reads of the daemon, each filled when its answer comes",
@@ -72,6 +75,7 @@ MARKED = {
     "C1 core Ran": "one row of the history as read: its options are NULLable columns",
     "C1 core Scopes": "three refs GitHub's answer gives, each present or not on its own, replaced whole when a runner's writes are decided",
     "C1 core State": "the build cache's tables under its one mutex: entries with their index, runners, default branches",
+    "C1 core Store": "memos other threads read instead of a query (the latest samples, the held samples, the runners gone) and one flag that stops a prune: each is written alone, and none says what state another is in",
     "C1 core Trace": "the input of one replay, built whole by store::trace_at and only read after",
     "C1 core crates/core/src/cache.rs:Trimmed": "what one trim task returns, built whole",
     "C1 core crates/core/src/scheduler.rs:Left": "three independent budgets of one plan: each is bounded or not on its own",
@@ -91,18 +95,41 @@ ENGINE_LIFECYCLE_LIMIT = None
 
 JOB_WRITERS = ("store/write.rs", "store.rs")
 
+# Machines the rules cannot see, by where and how they are written: finding -> (file, pattern on code without comments).
+KNOWN = {
+    "C6 docker_in_stop": ("crates/core/src/scheduler/engine.rs", r"\bdocker_in_stop:\s*DockerInStop\b"),
+    "C6 warm.learned": ("crates/core/src/scheduler/engine/warm.rs", r"=\s*SystemTime::UNIX_EPOCH\b"),
+}
+
 SKIP = re.compile(r"(^|/)(tests?|examples|fixtures|benches)(/|$)|(^|/)(tests|testing|testdir|parity)\.rs$|/build\.rs$")
-LIFE = re.compile(r"^(bool$|Option<|Vec<|VecDeque<|BTreeSet<|HashSet<|BTreeMap<|HashMap<)")
+LIFE = re.compile(r"^(bool$|Atomic(Bool|U\d+|I\d+|Usize|Isize)$|Option<|Vec<|VecDeque<|BTreeSet<|HashSet<|BTreeMap<|HashMap<)")
 KEYED = re.compile(r"^(BTreeSet<|HashSet<|BTreeMap<|HashMap<)")
 BUILDS = re.compile(r"^(new|default|from\w*|with_\w+|parse\w*|try_from)$")
+# What only shares or guards a value: a field's lifecycle is the type inside.
+PATHS = re.compile(r"\b(?:std|core|alloc|tokio)::(?:\w+::)*")
+WRAPPERS = re.compile(r"^(?:Arc|Rc|Mutex|RwLock|RefCell|Cell)<(.*)>$")
 MUTATORS = (
     r"take|replace|insert|remove|retain|clear|get_or_insert\w*|entry|extend|append|push\w*|pop\w*|drain|truncate"
     r"|get_mut|iter_mut|values_mut|as_mut|first_mut|last_mut|sort\w*|dedup\w*"
+    r"|store|fetch_\w+|swap|compare_exchange\w*|set"
 )
 CHAIN = r"((?:\.\w+|\[[^\]]*\])+)"
 ASSIGNED = re.compile(CHAIN + r"\s*(?:\|=|&=|\+=|-=|\*=|=(?![=>]))")
 MUTATED = re.compile(CHAIN + r"\s*\.\s*(?:" + MUTATORS + r")\s*(?:::<[^>]*>)?\(")
 BORROWED = re.compile(r"&mut\s+\*?\w+" + CHAIN)
+# Through a guard taken and used in one expression. One held in a binding is not seen (ADR 0114).
+GUARDED = re.compile(
+    CHAIN + r"\s*\.\s*(?:lock|write|borrow_mut)\(\)(?:\s*\.\s*(?:unwrap\(\)|await|expect\([^)]*\)))*"
+    r"\s*(?:\.\s*(?:" + MUTATORS + r")\s*(?:::<[^>]*>)?\(|=(?![=>]))"
+)
+
+
+def lifecycle_type(written):
+    """A field's type as the rules read it: without std's paths and what only shares or guards it."""
+    ty = PATHS.sub("", written)
+    while m := WRAPPERS.match(ty):
+        ty = m[1].strip()
+    return ty
 
 
 def scrub(text):
@@ -234,7 +261,8 @@ def parse_items(rel, s, raw):
     def wire(line):
         k, derives = line - 2, ""
         while k >= 0 and lines[k].strip().startswith(("#[", "//")):
-            derives += lines[k]
+            if "derive(" in lines[k] and lines[k].strip().startswith("#["):
+                derives += lines[k]
             k -= 1
         return "Serialize" in derives or "Deserialize" in derives
     header = re.compile(r"(?m)^[ \t]*(?:pub(?:\([a-z]+\))?\s+)?(struct|enum)\s+(\w+)\s*(?:<[^{;(]*>)?\s*(?:where[^{;(]*)?([{(;])")
@@ -264,6 +292,18 @@ def parse_items(rel, s, raw):
                 fields[str(index)] = (" ".join(f[2].split()), bool(f[1]))
         items.append(Item(name, rel, line, fields, wire(line), payload))
     return items
+
+
+def takes_self(s, after_name):
+    """Whether the function whose name ends at `after_name` has a `self` parameter."""
+    depth, i = 0, after_name
+    while i < len(s) and not (s[i] == "(" and depth == 0):
+        if s[i] == "<":
+            depth += 1
+        elif s[i] == ">" and s[i - 1] != "-":
+            depth -= 1
+        i += 1
+    return re.match(r"\(\s*(?:&\s*(?:'\w+\s+)?)?(?:mut\s+)?self\b", s[i : i + 80]) is not None
 
 
 @dataclasses.dataclass
@@ -304,11 +344,12 @@ class Source:
             (m.start(), closing(s, m.end() - 1), m[1].split("::")[-1])
             for m in re.finditer(r"(?m)^impl(?:<[^{]*?>)?\s+(?:[\w:<>, ]+\s+for\s+)?([\w:]+)(?:<[^{]*>)?\s*(?:where[^{]*)?\{", s)
         ]
-        functions = [(m.start(), m[1]) for m in re.finditer(r"\bfn\s+(\w+)", s)]
-        for pattern in (ASSIGNED, MUTATED, BORROWED):
+        functions = [(m.start(), m[1], takes_self(s, m.end())) for m in re.finditer(r"\bfn\s+(\w+)", s)]
+        for pattern in (ASSIGNED, MUTATED, BORROWED, GUARDED):
             for m in pattern.finditer(s):
-                function = next((n for a, n in reversed(functions) if a <= m.start()), None)
-                if function is None or BUILDS.match(function):
+                function, method = next(((n, h) for a, n, h in reversed(functions) if a <= m.start()), (None, False))
+                # A constructor builds a value no one else holds yet; a method with such a name writes one that exists.
+                if function is None or (BUILDS.match(function) and not method):
                     continue
                 owner = next((n for a, b, n in impls if a <= m.start() < b), None)
                 on_self = s[: m.start(1)].endswith("self")
@@ -357,7 +398,7 @@ def finding_id(source, item):
     return f"C1 {crate} {item.name}" if len(twins) == 1 else f"C1 {crate} {item.file}:{item.name}"
 
 
-def analyse(root, roots, engine, marked, opaque=()):
+def analyse(root, roots, engine, marked, opaque=(), known=()):
     """Every finding as id -> message, Engine's lifecycle field count, and problems with the check itself."""
     source, findings, problems = Source(root, opaque), {}, []
     used = set()
@@ -366,7 +407,7 @@ def analyse(root, roots, engine, marked, opaque=()):
     parents = {rel for rel, s in source.code.items() if re.search(r"(?m)^\s*(?:pub(?:\([a-z]+\))?\s+)?mod\s+\w+\s*[;{]", s)}
     for key in sorted(seen):
         item = source.items[key]
-        life = {f for f, (ty, _) in item.fields.items() if LIFE.match(ty)}
+        life = {f for f, (ty, _) in item.fields.items() if LIFE.match(lifecycle_type(ty))}
         if key == engine or item.wire or len(life) < 2:
             continue
         identifier = finding_id(source, item)
@@ -395,8 +436,8 @@ def analyse(root, roots, engine, marked, opaque=()):
     engine_item = source.items.get(engine)
     count = 0
     if engine_item:
-        count = sum(1 for ty, _ in engine_item.fields.values() if LIFE.match(ty))
-        keyed = {f for f, (ty, _) in engine_item.fields.items() if KEYED.match(ty)}
+        count = sum(1 for ty, _ in engine_item.fields.values() if LIFE.match(lifecycle_type(ty)))
+        keyed = {f for f, (ty, _) in engine_item.fields.items() if KEYED.match(lifecycle_type(ty))}
         tree = engine.split(":")[0].removesuffix(".rs")
         pattern = re.compile(r"self\.(\w+)\s*\.\s*(?:insert|remove|entry)\(\s*&?\*?([\w.]+?)(?:\.clone\(\)|\.to_owned\(\)|\.to_string\(\))?\s*[,)]")
         for rel, s in source.code.items():
@@ -431,6 +472,9 @@ def analyse(root, roots, engine, marked, opaque=()):
     for rel, raw in source.raw.items():
         if re.search(r"(?i)\bUPDATE\s+jobs\b", raw) and not rel.endswith(JOB_WRITERS):
             findings[f"C5 {rel}"] = f"{rel}: updates the jobs table outside the store's writer"
+    for identifier, (rel, pattern) in dict(known).items():
+        if re.search(pattern, source.code.get(rel, "")):
+            findings[identifier] = f"{rel}: {identifier[3:]} is still a machine no other rule sees"
     problems += [f"MARKED has {mark!r}, which no longer matches anything: remove it" for mark in sorted(set(marked) - used)]
     return findings, count, problems
 
@@ -444,7 +488,8 @@ def self_test():
     }
     root = "crates/fixture/src/engine.rs:Engine"
     marked = {"C1 fixture Marked": "a fixture of a marker"}
-    findings, count, problems = analyse(FIXTURES, (root,), root, marked)
+    known = {"C6 known": ("crates/fixture/src/updates.rs", r"\bKNOWN_MACHINE\b")}
+    findings, count, problems = analyse(FIXTURES, (root,), root, marked, known=known)
     stale = analyse(FIXTURES, (root,), root, marked | {"C1 fixture Gone": "a marker of nothing"})[2]
     if not any("C1 fixture Gone" in problem for problem in stale):
         problems.append("a marker that matches nothing is no longer caught")
@@ -457,17 +502,21 @@ def self_test():
 
 
 def read_debt(text):
-    """The findings a debt file lists, and its limit on Engine's lifecycle fields."""
-    lines, limit = set(), None
+    """The findings a debt file lists, its limit on Engine's lifecycle fields, and the findings tagged MARKABLE."""
+    lines, limit, markable = set(), None, set()
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith(LIMIT_KEY + " "):
-            limit = int(line.split()[1])
+        finding, tag, _ = line.partition(MARKABLE)
+        finding = finding.strip()
+        if finding.startswith(LIMIT_KEY + " "):
+            limit = int(finding.split()[1])
         else:
-            lines.add(line)
-    return lines, limit
+            lines.add(finding)
+            if tag:
+                markable.add(finding)
+    return lines, limit, markable
 
 
 def constants(script):
@@ -490,20 +539,21 @@ def at_base(path):
 
 
 def base_is_available():
-    """Whether FETCH_HEAD is origin/main. CI's job fetched it; a local run fetches it, or goes without the ratchet."""
+    """Whether FETCH_HEAD is origin/main. CI's job fetched it, or the ratchet cannot run; a local run fetches it."""
     if os.environ.get("CI"):
-        return True
+        return git("rev-parse", "--verify", "--quiet", "FETCH_HEAD").returncode == 0
     return git("fetch", "--quiet", "origin", "main").returncode == 0
 
 
-def compare(base, debt, limit, marked, constant):
+def compare(base, debt, limit, marked, constant, markable=frozenset()):
     """What the debt file and MARKED may not do against `base`, main's versions of them; returns the failures."""
     failures = []
     base_debt = base["debt"]
-    base_lines, base_limit = read_debt(base_debt) if base_debt is not None else (set(), None)
-    # A line of main's debt may become a marker: a later change found what remains of it is meant. The total cannot grow.
-    added_marks = sorted(set(marked) - set(base["marked"]) - base_lines)
+    base_lines, base_limit, base_markable = read_debt(base_debt) if base_debt is not None else (set(), None, set())
+    # A line main tags may become a marker: what remains of it is meant. Any other marker would empty the list unfixed.
+    added_marks = sorted(set(marked) - set(base["marked"]) - base_markable)
     failures += [f"new marker {mark!r}: seal the type instead" for mark in added_marks]
+    failures += [f"{DEBT}: {line!r} newly tagged {MARKABLE!r}" for line in sorted(set(markable) - base_markable)]
     if debt is not None and base_debt is None:
         failures.append(f"{DEBT} came back after it was removed: fix the findings instead")
     if base_debt is not None:
@@ -515,25 +565,30 @@ def compare(base, debt, limit, marked, constant):
     return failures
 
 
-def ratchet(debt, limit):
-    """Compares with origin/main; returns the failures."""
-    base_script = at_base(SCRIPT.relative_to(REPO).as_posix())
+def ratchet(debt, limit, markable, read=None):
+    """Compares with origin/main, as `read` shows a file of it; returns the failures."""
+    read = read or at_base
+    script = SCRIPT.relative_to(REPO).as_posix()
+    base_script = read(script)
     if base_script is None:
-        # This change adds the check: its own list is the starting point.
+        # Only the change that adds the check has no script on main: a debt file there means this one was moved.
+        if read(DEBT) is not None:
+            return [f"{DEBT} is on origin/main but {script} is not, so nothing can be compared: keep the script's path"]
         return []
     base_marked, base_constant = constants(base_script)
-    base = {"debt": at_base(DEBT), "marked": base_marked, "constant": base_constant}
-    return compare(base, debt, limit, MARKED, ENGINE_LIFECYCLE_LIMIT)
+    base = {"debt": read(DEBT), "marked": base_marked, "constant": base_constant}
+    return compare(base, debt, limit, MARKED, ENGINE_LIFECYCLE_LIMIT, markable)
 
 
 def ratchet_problems():
     """The cases the ratchet exists for, each named by what it would let through."""
-    base = {"debt": "C1 a\nC1 b\nengine-lifecycle-fields 5\n", "marked": {"C1 m": "kept"}, "constant": None}
+    text = f"C1 a\nC1 b {MARKABLE}\nengine-lifecycle-fields 5\n"
+    base = {"debt": text, "marked": {"C1 m": "kept"}, "constant": None}
     gone = {"debt": None, "marked": {"C1 m": "kept"}, "constant": 5}
     allowed = [
         ("a line retired", base, {"C1 a"}, 5, {"C1 m": ""}, None),
         ("the limit lowered", base, {"C1 a", "C1 b"}, 4, {"C1 m": ""}, None),
-        ("a debt line made a marker", base, {"C1 a"}, 5, {"C1 m": "", "C1 b": ""}, None),
+        ("a tagged line made a marker", base, {"C1 a"}, 5, {"C1 m": "", "C1 b": ""}, None),
         ("the debt file gone with the limit in the script", base, None, None, {"C1 m": ""}, 5),
         ("no debt file on main or here", gone, None, None, {"C1 m": ""}, 5),
     ]
@@ -541,24 +596,30 @@ def ratchet_problems():
         ("a new line", base, {"C1 a", "C1 b", "C1 c"}, 5, {"C1 m": ""}, None),
         ("a raised limit", base, {"C1 a"}, 6, {"C1 m": ""}, None),
         ("a new marker", base, {"C1 a"}, 5, {"C1 m": "", "C1 n": ""}, None),
+        ("an untagged line made a marker", base, {"C1 b"}, 5, {"C1 m": "", "C1 a": ""}, None),
+        ("a tag added here", base, {"C1 a", "C1 b"}, 5, {"C1 m": ""}, None, {"C1 a"}),
         ("the debt file back", gone, {"C1 a"}, 5, {"C1 m": ""}, 5),
         ("a raised constant", gone, None, None, {"C1 m": ""}, 6),
     ]
-    return [f"the ratchet refuses {name}" for name, *case in allowed if compare(*case)] + [
-        f"the ratchet lets through {name}" for name, *case in refused if not compare(*case)
-    ]
-
+    problems = [f"the ratchet refuses {name}" for name, *case in allowed if compare(*case)]
+    problems += [f"the ratchet lets through {name}" for name, *case in refused if not compare(*case)]
+    moved = {DEBT: text}
+    if not ratchet(None, None, set(), moved.get):
+        problems.append("the ratchet lets through a script moved away from main's debt file")
+    if ratchet(None, None, set(), {}.get):
+        problems.append("the ratchet refuses the change that adds the check")
+    return problems
 
 
 def main():
     if not self_test():
         return 1
-    findings, count, problems = analyse(REPO, ROOTS, ENGINE, MARKED, OPAQUE)
+    findings, count, problems = analyse(REPO, ROOTS, ENGINE, MARKED, OPAQUE, KNOWN)
     failures = list(problems)
     debt_path = REPO / DEBT
-    debt, limit = None, ENGINE_LIFECYCLE_LIMIT
+    debt, limit, markable = None, ENGINE_LIFECYCLE_LIMIT, set()
     if debt_path.exists():
-        debt, limit = read_debt(debt_path.read_text())
+        debt, limit, markable = read_debt(debt_path.read_text())
     else:
         # The last of the wave: nothing is left to list, and the script's limit is exact.
         if limit is None:
@@ -579,7 +640,9 @@ def main():
     else:
         failures += [f"{DEBT}: stale line {line!r}: remove it" for line in stale]
     if base_is_available():
-        failures += ratchet(debt, limit)
+        failures += ratchet(debt, limit, markable)
+    elif os.environ.get("CI"):
+        failures.append("origin/main was not fetched, so the ratchet cannot run: git fetch origin main first")
     else:
         print("check-state: origin/main cannot be fetched, so the ratchet is skipped", file=sys.stderr)
     for failure in failures:
