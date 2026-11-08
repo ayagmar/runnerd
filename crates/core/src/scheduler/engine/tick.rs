@@ -489,7 +489,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
-    async fn refill(&mut self) -> usize {
+    pub(super) async fn refill(&mut self) -> usize {
         if self.stopping() != Shutdown::No {
             return 0;
         }
@@ -499,23 +499,40 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // after a tick took its listing and before it did.
         self.rereserve().await;
         let (plan, mut admitting) = self.plan();
-        self.note_pass_waits(&plan);
         let mut started = 0;
-        for decision in plan.decisions {
-            let for_a_job = matches!(
-                &decision,
-                Decision::Start { for_: StartFor::Job(_), replacing, .. } if replacing.is_empty()
-            );
+        // The jobs the plan starts a runner for that this pass did not: they go on waiting for what they waited for.
+        let mut not_carried_out: BTreeSet<u64> = plan
+            .decisions
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Start {
+                    for_: StartFor::Job(job),
+                    ..
+                } => Some(*job),
+                _ => None,
+            })
+            .collect();
+        for decision in &plan.decisions {
+            let Decision::Start {
+                for_: StartFor::Job(job),
+                replacing,
+                ..
+            } = decision
+            else {
+                continue;
+            };
             // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-            if !for_a_job || self.stopping() != Shutdown::No {
+            if !replacing.is_empty() || self.stopping() != Shutdown::No {
                 continue;
             }
             // The plan's later starts counted on the room of one that no longer fits: the tick plans again.
-            if !self.apply_start(decision, &mut admitting).await {
+            if !self.apply_start(decision.clone(), &mut admitting).await {
                 break;
             }
+            not_carried_out.remove(job);
             started += 1;
         }
+        self.note_pass_waits(&plan, &not_carried_out);
         // A plan's waits count whichever path ran it, and only once its starts are done.
         self.note_waits(&plan.held, plan.barrier);
         started

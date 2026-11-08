@@ -125,6 +125,18 @@ pub(super) struct Found {
     run_id: u64,
 }
 
+#[cfg(test)]
+impl Found {
+    /// That `runner` took `job`, of a run with the job's ID.
+    pub(super) fn named(runner: String, job: u64) -> Found {
+        Found {
+            runner,
+            job,
+            run_id: job,
+        }
+    }
+}
+
 /// The jobs a tick asked GitHub about before its plan, for `follow_running`.
 pub(super) struct Described {
     /// Those GitHub described, with their repositories.
@@ -355,6 +367,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Notes the job a runner's capture found.
     pub(super) fn note_found(&mut self, found: &Found) {
         self.queued_jobs.remove(&found.job);
+        // GitHub picks which job a runner takes, which may not be the one the plan started it for (ADR 0110).
+        self.note_started(found.job);
         let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
             slots
                 .iter_mut()

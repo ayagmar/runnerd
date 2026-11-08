@@ -272,6 +272,32 @@ async fn a_warm_runner_that_took_a_job_before_its_stop_keeps_it_and_the_other_jo
 }
 
 #[tokio::test]
+async fn a_job_a_pass_plans_but_leaves_to_the_tick_keeps_waiting() {
+    // Catches a pass dropping the wait of a job it planned and did not start: only the tick takes a warm runner's room,
+    // and until then the job's wait went uncounted.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, _dir) = active(&github, &docker, &shared_slot()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let job_of_s = QueuedJob {
+        labels: vec!["self-hosted".to_owned(), "other".to_owned()],
+        ..job(7)
+    };
+    engine.repositories.get_mut("o/s").unwrap().queued = vec![job_of_s];
+    engine.measured.host_waiting.0.insert(7);
+    assert_eq!(
+        engine.refill().await,
+        0,
+        "only a tick takes a warm runner's room"
+    );
+    assert!(
+        engine.measured.host_waiting.0.contains(&7),
+        "job 7 goes on waiting for the host's memory"
+    );
+}
+
+#[tokio::test]
 async fn a_runs_expected_jobs_get_runners_before_github_queues_them() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

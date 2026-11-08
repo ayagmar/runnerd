@@ -1392,6 +1392,80 @@ async fn a_job_a_pass_starts_stops_waiting_for_a_slot_when_its_runner_starts() {
     );
 }
 
+/// Two slots with runners and jobs 1-3, of which job 3 waits for a slot: what the wait tests below start from.
+async fn third_job_waits_for_a_slot(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let (mut engine, handle) = engine_with(
+        github,
+        docker,
+        dir,
+        &measured().replace("slots = 4", "slots = 2"),
+    );
+    history(&handle.store, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=3).map(job).collect();
+    slice_at(&handle.store, 0);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.measured.slot_waiting.0.contains(&3),
+        "job 3 waits for a slot"
+    );
+    (engine, handle)
+}
+
+#[tokio::test]
+async fn the_job_a_runner_took_stops_waiting_when_its_capture_names_it() {
+    // Catches GitHub giving a runner another job than the plan started it for: the job it took stayed charged a wait
+    // past its start, until the next commit.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine.note_found(&crate::scheduler::engine::history::Found::named(runner, 3));
+    assert!(
+        !engine.measured.slot_waiting.0.contains(&3),
+        "job 3 no longer waits"
+    );
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let third = waited(&dir, "slot_waited")[2];
+    assert!(
+        (20..200).contains(&third),
+        "job 3 waited until it was named: {third} ms"
+    );
+}
+
+#[tokio::test]
+async fn a_job_waits_for_a_slot_or_the_hosts_memory_never_both() {
+    // Catches a job that moved from one wait to the other being charged both for the length of a tick's starts, which
+    // sizing reads as more wait than there was.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    engine.note_host_waits(BTreeSet::from([3]), time::now_ms());
+    assert!(
+        !engine.measured.slot_waiting.0.contains(&3),
+        "a job now short of the host's memory left the slot wait"
+    );
+    engine.note_slots(BTreeSet::from([3]));
+    assert!(
+        !engine.measured.host_waiting.0.contains(&3),
+        "a job now short of a slot left the host wait"
+    );
+}
+
 #[tokio::test]
 async fn the_first_runner_into_an_empty_slice_needs_only_the_margin_after_a_wait() {
     let (github, docker, dir) = (
