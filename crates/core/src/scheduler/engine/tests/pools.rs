@@ -320,6 +320,60 @@ async fn a_pool_whose_runners_fail_holds_back_only_itself() {
 }
 
 #[tokio::test]
+async fn a_reload_that_changes_a_held_pools_runners_lets_it_start_again_at_once() {
+    // Catches a backoff outliving the reload that fixed its cause: the owner fixes the light pool's image, and its job
+    // still waits out the hold. A reload that leaves its runners as they were, such as auto sizing's slots, keeps it.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let broken = pools().replacen(
+        "image_stage = \"app\"\ncpus = 1",
+        "image_stage = \"lite\"\ncpus = 1",
+        1,
+    );
+    docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:lite".to_owned()]);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &broken);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![light(1)];
+    engine.tick(Shutdown::No).await;
+    let backing_off = |engine: &mut Engine<FakeGithub, FakeDocker>, handle: &Handle| {
+        engine.publish();
+        matches!(
+            handle.status.borrow().queued[0].waiting,
+            Some(api::Waiting::Backoff { .. })
+        )
+    };
+    assert!(
+        backing_off(&mut engine, &handle),
+        "the light pool backs off"
+    );
+    let more_slots = broken.replacen(
+        "memory = \"1G\"\nslots = 2",
+        "memory = \"1G\"\nslots = 3",
+        1,
+    );
+    engine.reload(Config::parse(&more_slots).unwrap(), None, None);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        backing_off(&mut engine, &handle),
+        "more slots leave the light pool backing off"
+    );
+    engine.reload(Config::parse(&pools()).unwrap(), None, None);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        !backing_off(&mut engine, &handle),
+        "the fixed image ends the light pool's backoff"
+    );
+    let profiles: Vec<String> = runners(&mut engine, &handle, &docker)
+        .into_iter()
+        .map(|runner| runner.profile)
+        .collect();
+    assert_eq!(profiles, ["light"], "the light job's runner starts");
+}
+
+#[tokio::test]
 async fn a_repository_names_its_first_pool_for_0_0_19_clients_and_a_later_reason_reads_plainly() {
     let (github, docker, dir) = (
         FakeGithub::default(),
