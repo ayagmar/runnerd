@@ -128,6 +128,8 @@ struct GithubState {
     job_reads: usize,
     /// Jobs GitHub answers 404 for, as when their run was deleted. Another job without details fails otherwise.
     gone_jobs: BTreeSet<u64>,
+    /// Jobs whose reads GitHub refuses until then, for its used-up rate limit.
+    limited_jobs: BTreeMap<u64, std::time::SystemTime>,
 }
 
 impl GithubState {
@@ -397,6 +399,9 @@ impl GithubApi for FakeGithub {
         tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
         state.job_reads += 1;
+        if let Some(&until) = state.limited_jobs.get(&id) {
+            return Err(github::Error::RateLimited { until });
+        }
         if state.gone_jobs.contains(&id) {
             return Err(github::Error::Status {
                 method: reqwest::Method::GET,
@@ -3889,10 +3894,10 @@ async fn a_queued_job_of_a_repository_a_reload_removed_closes_once_github_says_i
 /// A job recorded queued that left the queue while no runner here could take it, and that the history keeps open.
 async fn a_job_that_left_the_queue(
     github: &FakeGithub,
+    docker: &FakeDocker,
     dir: &TestDir,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
-    let docker = FakeDocker::default();
-    let (mut engine, handle) = engine_with(github, &docker, dir, CONFIG);
+    let (mut engine, handle) = engine_with(github, docker, dir, CONFIG);
     // Too little memory for any runner: the job stays queued.
     engine.memory_max = Some(1 << 30);
     engine.recover().await.unwrap();
@@ -3912,7 +3917,8 @@ async fn state_of(handle: &Handle, job: u64) -> JobState {
 async fn a_queued_job_github_says_is_gone_closes_as_run_elsewhere_and_is_not_read_again() {
     let github = FakeGithub::default();
     let dir = TestDir::new("engine");
-    let (mut engine, handle) = a_job_that_left_the_queue(&github, &dir).await;
+    let (mut engine, handle) =
+        a_job_that_left_the_queue(&github, &FakeDocker::default(), &dir).await;
     // Its run was deleted, or the token lost its repository.
     github.0.lock().unwrap().gone_jobs.insert(5);
     let before = github.0.lock().unwrap().job_reads;
@@ -3936,7 +3942,8 @@ async fn a_queued_job_github_fails_to_read_for_a_quarter_hour_closes_as_run_else
     let github = FakeGithub::default();
     let dir = TestDir::new("engine");
     // GitHub has no details for it: every read fails.
-    let (mut engine, handle) = a_job_that_left_the_queue(&github, &dir).await;
+    let (mut engine, handle) =
+        a_job_that_left_the_queue(&github, &FakeDocker::default(), &dir).await;
     tokio::time::pause();
     engine.tick(Shutdown::No).await;
     tokio::time::advance(super::history::LOST_AFTER.saturating_sub(Duration::from_secs(60))).await;
@@ -3948,6 +3955,57 @@ async fn a_queued_job_github_fails_to_read_for_a_quarter_hour_closes_as_run_else
     let before = github.0.lock().unwrap().job_reads;
     engine.tick(Shutdown::No).await;
     assert_eq!(github.0.lock().unwrap().job_reads, before, "no longer read");
+}
+
+#[tokio::test]
+async fn a_queued_job_is_closed_only_after_a_quarter_hour_of_failed_reads_in_a_row() {
+    let github = FakeGithub::default();
+    let dir = TestDir::new("engine");
+    // GitHub has no details for it: every read fails.
+    let (mut engine, handle) =
+        a_job_that_left_the_queue(&github, &FakeDocker::default(), &dir).await;
+    tokio::time::pause();
+    engine.tick(Shutdown::No).await;
+    // Listed again for 20 minutes, so not read, then a listing misses it once more and that read fails too.
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    tokio::time::advance(Duration::from_mins(20)).await;
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(state_of(&handle, 5).await, JobState::Queued);
+    // Its reads hit the rate limit for 20 minutes, then one more fails.
+    let reset = std::time::SystemTime::now() + Duration::from_hours(1);
+    github.0.lock().unwrap().limited_jobs.insert(5, reset);
+    engine.tick(Shutdown::No).await;
+    tokio::time::advance(Duration::from_mins(20)).await;
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().limited_jobs.clear();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(state_of(&handle, 5).await, JobState::Queued);
+}
+
+#[tokio::test]
+async fn a_job_closed_as_run_elsewhere_that_a_runner_here_then_takes_reads_as_ours() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = a_job_that_left_the_queue(&github, &docker, &dir).await;
+    // The token lost the repository: GitHub refuses the job, and its record closes.
+    github.0.lock().unwrap().gone_jobs.insert(5);
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 5, JobState::Elsewhere).await;
+    // Access comes back while GitHub still queues it, and a runner here takes it.
+    github.0.lock().unwrap().gone_jobs.clear();
+    engine.memory_max = Some(16 << 30);
+    job_runs_in_slot_1(&github, &docker, &mut engine, &handle, 5).await;
+    let job = until_state(&handle, 5, JobState::Running).await.summary;
+    assert_eq!(
+        job.runner.map(|runner| runner.profile).as_deref(),
+        Some("app")
+    );
+    assert!(job.timeline.started_at.is_some(), "job 5 has a start");
+    assert!(job.timeline.finished_at.is_none(), "job 5 is not finished");
 }
 
 #[tokio::test]

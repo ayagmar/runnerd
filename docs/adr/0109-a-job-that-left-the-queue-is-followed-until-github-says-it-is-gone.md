@@ -21,14 +21,21 @@ The jobs of removed runners already had an end: `closing` records them lost afte
 
 - **A 404 or 410 for a job that left the queue ends its following at once.** GitHub says it is not there for this token,
   and asking again gets the same answer (`github::Error::is_gone`).
-- **Any other failure ends it after `LOST_AFTER` of failures in a row.** The clock starts at the first failed read and
-  stops at any answer. A used-up rate limit is no answer: it neither starts the clock nor ends the following.
+- **Any other failure ends it after `LOST_AFTER` of failed reads in a row.** The clock starts at the first failed read
+  stops at any answer, and starts over whenever a tick does not read the job: a listing showed it again, its
+  repository's listing failed, or the read hit the used-up rate limit.
 - **Its record closes as run elsewhere, with no conclusion** (`Store::unanswered`), at the time the engine gave up. None
   of this machine's runners took it, and the job reads `elsewhere`, as core already words a job that left the queue for a
   place it cannot name.
+- **A runner here that takes such a job takes its record back.** `Store::claimed` turns a row closed this way (state
+  `elsewhere`, no conclusion, no start) into a running one, as it does a queued one. GitHub can still queue a job it
+  refused to show: a repository whose token lost it and that is re-added with access restored keeps its jobs queued for
+  up to 24 hours, and a listing can show a job again after its reads failed.
 
 ## Consequences
 
 - A job GitHub refuses costs one request, a job it fails to answer at most 15 minutes of them.
 - A restart starts the 15 minutes again for a job whose reads fail without a 404; one that gets a 404 is closed before it.
-- The record keeps no reason: a job closed this way looks like one another machine ran without a start time.
+- The record keeps no reason: a job closed this way looks like one another machine ran without a start time. While
+  GitHub still queues it, the history shows it `elsewhere` until a runner takes it; one of this machine's takes the
+  record back, another machine's leaves it closed.

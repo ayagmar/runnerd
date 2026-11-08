@@ -506,9 +506,12 @@ impl Writer<'_> {
              WHERE name = ?4 ON CONFLICT (id) DO NOTHING",
             params![job, run_id, at, runner],
         )?;
+        // A runner here took a job `unanswered` closed, as one GitHub refused while its token lost the repository and
+        // queued again once it was restored: the job is this machine's (ADR 0109).
         let updated = self.db.execute(
-            "UPDATE jobs SET state = 'running', runner = ?2, started_at = coalesce(started_at, ?3) \
-             WHERE id = ?1 AND state = 'queued'",
+            "UPDATE jobs SET state = 'running', runner = ?2, started_at = coalesce(started_at, ?3), \
+             finished_at = NULL WHERE id = ?1 AND (state = 'queued' \
+             OR (state = 'elsewhere' AND conclusion IS NULL AND started_at IS NULL))",
             params![job, runner, at],
         )?;
         if (inserted == 1 || updated == 1)

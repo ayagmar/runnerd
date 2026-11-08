@@ -488,21 +488,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
         self.follow_listed(&taken);
-        let left: Vec<(String, u64)> = self
-            .queued_jobs
-            .iter()
-            .filter(|(id, followed)| {
-                // A repository a reload removed lists nothing: GitHub says what became of its jobs.
-                !taken.contains(*id)
-                    && self
-                        .repositories
-                        .get(&followed.repository)
-                        .is_none_or(|state| {
-                            state.listed && !state.queued.iter().any(|job| job.id == **id)
-                        })
-            })
-            .map(|(id, followed)| (followed.repository.clone(), *id))
-            .collect();
+        let mut left: Vec<(String, u64)> = Vec::new();
+        for (id, followed) in &mut self.queued_jobs {
+            // A repository a reload removed lists nothing: GitHub says what became of its jobs.
+            let read = !taken.contains(id)
+                && self
+                    .repositories
+                    .get(&followed.repository)
+                    .is_none_or(|state| {
+                        state.listed && !state.queued.iter().any(|job| job.id == *id)
+                    });
+            if read {
+                left.push((followed.repository.clone(), *id));
+            } else {
+                // The clock counts failed reads in a row: a job not read this tick starts it over (ADR 0109).
+                followed.unanswered_since = None;
+            }
+        }
         for (repository, id, answer) in self
             .serving(read_jobs(self.github.clone(), left), Meanwhile::Turnover)
             .await
@@ -561,18 +563,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Stops following a job that left the queue once GitHub says it is gone, as when its run or repository was deleted
     /// or the token can no longer see it, or fails every read of it for `LOST_AFTER`; a used-up rate limit is no
-    /// answer. None of this machine's runners took it, so its record closes as run elsewhere (ADR 0109).
+    /// read, and starts the clock over. None of this machine's runners took it, so its record closes as run elsewhere (ADR 0109).
     fn unanswered(&mut self, repository: &str, id: u64, error: &github::Error) {
         let Some(followed) = self.queued_jobs.get_mut(&id) else {
             return;
         };
-        let gives_up = error.is_gone()
-            || (!matches!(error, github::Error::RateLimited { .. })
-                && followed
+        let gives_up = if matches!(error, github::Error::RateLimited { .. }) {
+            // Not read: the clock starts over at the next failed read.
+            followed.unanswered_since = None;
+            false
+        } else {
+            error.is_gone()
+                || followed
                     .unanswered_since
                     .get_or_insert_with(tokio::time::Instant::now)
                     .elapsed()
-                    >= LOST_AFTER);
+                    >= LOST_AFTER
+        };
         if !gives_up {
             warn!("{repository}: cannot read job {id}: {error}");
             return;
