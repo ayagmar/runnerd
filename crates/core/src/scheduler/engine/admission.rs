@@ -28,7 +28,7 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Decision, Demand, Pool, Repository, Scarce, StopReason, Waits, matches,
+    Barrier, Decision, Demand, Plan, Pool, Repository, Scarce, StopReason, Waits, matches,
 };
 use crate::time;
 
@@ -44,9 +44,9 @@ pub(super) struct Measured {
     /// What the last plan saw of the host's memory.
     pub host: host::Remembered,
     /// The jobs the last plan had waiting for the host's memory, and when (ms): each waited since then.
-    host_waiting: (BTreeSet<u64>, u64),
+    pub(super) host_waiting: (BTreeSet<u64>, u64),
     /// The jobs the last plan had waiting only for a slot (`Plan::slot_waiting`), and when (ms): each waited since.
-    slot_waiting: (BTreeSet<u64>, u64),
+    pub(super) slot_waiting: (BTreeSet<u64>, u64),
     /// What predicts the jobs' peaks and usual run times, and when it read the history.
     pub(super) predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
@@ -394,14 +394,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let held = std::mem::replace(&mut self.measured.host_holds, holds);
         self.store.host_waiting(lacking, now);
-        let (waited, since) = std::mem::replace(
-            &mut self.measured.host_waiting,
-            (waiting_now.into_keys().collect(), now),
-        );
-        if !waited.is_empty() {
-            self.store
-                .host_waited(waited.into_iter().collect(), now.saturating_sub(since));
-        }
+        self.note_host_waits(waiting_now.into_keys().collect(), now);
         let size = crate::config::ByteSize;
         match (holds, admitting.host.as_ref()) {
             (HostHolds::Short, Some(host)) if held != HostHolds::Short => {
@@ -442,15 +435,78 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// Remembers which jobs a plan has waiting for the host's memory, and adds the time since the last commit to the
+    /// host waits of those that did then (ADR 0103).
+    pub(super) fn note_host_waits(&mut self, waiting: BTreeSet<u64>, now: u64) {
+        // It moved from a wait for a slot: a job waits for one of the two at a time.
+        self.end_slot_waits(&waiting, now);
+        let (waited, since) = std::mem::replace(&mut self.measured.host_waiting, (waiting, now));
+        if !waited.is_empty() {
+            self.store
+                .host_waited(waited.into_iter().collect(), now.saturating_sub(since));
+        }
+    }
+
     /// Remembers which jobs this plan had waiting only for a slot (`Plan::slot_waiting`), and adds the time since the
-    /// last plan to the slot waits of those that did then: what auto sizing reads to add slots (ADR 0090). A job a
+    /// last commit to the slot waits of those that did then: what auto sizing reads to add slots (ADR 0090). A job a
     /// restart left waiting counts again from the first plan after it.
     pub(super) fn note_slots(&mut self, waiting: BTreeSet<u64>) {
         let now = time::now_ms();
+        // It moved from a wait for the host's memory: a job waits for one of the two at a time.
+        self.end_host_waits(&waiting, now);
         let (waited, since) = std::mem::replace(&mut self.measured.slot_waiting, (waiting, now));
         if !waited.is_empty() {
             self.store
                 .slot_waited(waited.into_iter().collect(), now.saturating_sub(since));
+        }
+    }
+
+    /// Commits the waits of a plan a pass carries out, as a tick commits its own: the jobs it has waiting for a slot
+    /// and for the host's memory start or go on waiting now, not at the next tick (ADR 0110). The host's band and
+    /// what insights hear stay the tick's. A job in `not_carried_out`, whose planned start the pass did not make, stays
+    /// in the wait it was in.
+    pub(super) fn note_pass_waits(&mut self, plan: &Plan, not_carried_out: &BTreeSet<u64>) {
+        let still = |waiting: &BTreeSet<u64>| -> BTreeSet<u64> {
+            waiting.intersection(not_carried_out).copied().collect()
+        };
+        let mut slots = plan.slot_waiting.clone();
+        slots.extend(still(&self.measured.slot_waiting.0));
+        let mut host: BTreeSet<u64> = plan
+            .waiting
+            .iter()
+            .filter(|(_, reason)| matches!(reason, api::Waiting::HostMemory { .. }))
+            .map(|(job, _)| *job)
+            .collect();
+        host.extend(still(&self.measured.host_waiting.0));
+        self.note_slots(slots);
+        self.note_host_waits(host, time::now_ms());
+    }
+
+    /// Ends `job`'s slot and host waits, as its runner is in its slot: it waited from the last commit until now, not
+    /// until the next commit (ADR 0110).
+    pub(super) fn note_started(&mut self, job: u64) {
+        let now = time::now_ms();
+        self.end_slot_waits(&BTreeSet::from([job]), now);
+        self.end_host_waits(&BTreeSet::from([job]), now);
+    }
+
+    /// Ends the slot waits of those of `jobs` that had one, up to `now`.
+    fn end_slot_waits(&mut self, jobs: &BTreeSet<u64>, now: u64) {
+        let (waiting, since) = &mut self.measured.slot_waiting;
+        let ended: Vec<u64> = waiting.intersection(jobs).copied().collect();
+        if !ended.is_empty() {
+            waiting.retain(|job| !jobs.contains(job));
+            self.store.slot_waited(ended, now.saturating_sub(*since));
+        }
+    }
+
+    /// Ends the host waits of those of `jobs` that had one, up to `now`.
+    fn end_host_waits(&mut self, jobs: &BTreeSet<u64>, now: u64) {
+        let (waiting, since) = &mut self.measured.host_waiting;
+        let ended: Vec<u64> = waiting.intersection(jobs).copied().collect();
+        if !ended.is_empty() {
+            waiting.retain(|job| !jobs.contains(job));
+            self.store.host_waited(ended, now.saturating_sub(*since));
         }
     }
 

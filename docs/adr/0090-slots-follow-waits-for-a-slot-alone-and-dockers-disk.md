@@ -1,6 +1,6 @@
 # 0090. Under measured admission, slots follow waits for a slot alone and Docker's disk
 
-Status: **Accepted** (2026-10-31), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Amends [0039](0039-auto-sizing.md), [0049](0049-auto-sizing-without-hand-tuning.md), [0054](0054-slot-docker-stores-share-the-disk.md).
+Status: **Accepted** (2026-10-31), amended by [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md), [0110](0110-a-jobs-wait-ends-when-its-runner-starts.md). Amends [0039](0039-auto-sizing.md), [0049](0049-auto-sizing-without-hand-tuning.md), [0054](0054-slot-docker-stores-share-the-disk.md).
 
 ## Context
 

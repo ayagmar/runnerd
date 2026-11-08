@@ -1,6 +1,6 @@
 # 0103. A job the host limit holds with room free is not short of memory
 
-Status: **Accepted** (2026-11-07), amended by [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md). Amends [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md). No wire, schema or
+Status: **Accepted** (2026-11-07), amended by [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md), [0110](0110-a-jobs-wait-ends-when-its-runner-starts.md). Amends [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md). No wire, schema or
 config change.
 
 ## Context

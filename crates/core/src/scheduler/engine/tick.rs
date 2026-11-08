@@ -23,7 +23,7 @@ use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
     Barrier, Budget, Decision, Demand, Drained, Left, Plan, Pool, Preparing, Profile, Repository,
-    RunnerSlot, Slot, SlotRef, StopReason, plan,
+    RunnerSlot, Slot, SlotRef, StartFor, StopReason, plan,
 };
 use crate::store::Store;
 use crate::time;
@@ -336,7 +336,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         };
         self.note_high_water(&admitting);
-        self.note_slots(plan.slot_waiting.clone());
         let mut applied = self.apply(plan, &mut admitting, mode, &mut pace).await;
         // A start that no longer fits what runs now is decided again at once, from the same listings, rather than
         // holding back every later start of the plan until the next poll. A plan again only after one that did
@@ -490,7 +489,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
-    async fn refill(&mut self) -> usize {
+    pub(super) async fn refill(&mut self) -> usize {
         if self.stopping() != Shutdown::No {
             return 0;
         }
@@ -501,21 +500,39 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.rereserve().await;
         let (plan, mut admitting) = self.plan();
         let mut started = 0;
-        for decision in plan.decisions {
-            let for_a_job = matches!(
-                &decision,
-                Decision::Start { warm: false, replacing, .. } if replacing.is_empty()
-            );
+        // The jobs the plan starts a runner for that this pass did not: they go on waiting for what they waited for.
+        let mut not_carried_out: BTreeSet<u64> = plan
+            .decisions
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Start {
+                    for_: StartFor::Job(job),
+                    ..
+                } => Some(*job),
+                _ => None,
+            })
+            .collect();
+        for decision in &plan.decisions {
+            let Decision::Start {
+                for_: StartFor::Job(job),
+                replacing,
+                ..
+            } = decision
+            else {
+                continue;
+            };
             // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-            if !for_a_job || self.stopping() != Shutdown::No {
+            if !replacing.is_empty() || self.stopping() != Shutdown::No {
                 continue;
             }
             // The plan's later starts counted on the room of one that no longer fits: the tick plans again.
-            if !self.apply_start(decision, &mut admitting).await {
+            if !self.apply_start(decision.clone(), &mut admitting).await {
                 break;
             }
+            not_carried_out.remove(job);
             started += 1;
         }
+        self.note_pass_waits(&plan, &not_carried_out);
         // A plan's waits count whichever path ran it, and only once its starts are done.
         self.note_waits(&plan.held, plan.barrier);
         started
@@ -542,7 +559,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Carries out `plan`: its stops first and all at once (`remove_idle`), as they only give room back and the starts
     /// that take it come after them in the plan anyway, then its starts one at a time, each admitted against what runs
     /// by then. Once a start is deferred, the plan's later starts counted on its room too and wait for the next plan.
-    /// None starts once a stop is asked for, even mid-plan.
+    /// None starts once a stop is asked for, even mid-plan. Commits the plan's slot waits first, as each plan a tick
+    /// carries out has its own (ADR 0110).
     async fn apply(
         &mut self,
         plan: Plan,
@@ -550,6 +568,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         mode: Shutdown,
         pace: &mut Pace,
     ) -> Applied {
+        self.note_slots(plan.slot_waiting);
         let mut applied = Applied {
             held: plan.held,
             barrier: plan.barrier,
@@ -623,7 +642,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             repository,
             memory,
             cpu,
-            warm,
+            for_,
             replacing,
             behind,
         } = start
@@ -656,7 +675,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.refresh_free(admitting);
         let mut admission = admitting.admit(&pool, memory, cpu);
         let repository = pool.repository;
-        if warm {
+        let StartFor::Job(job) = for_ else {
             // Its profile's caps, whatever its repository's queued jobs predict.
             admission.basis = Basis::Cap;
             if let Some(cpu) = admission.cpu.as_mut() {
@@ -668,7 +687,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             });
             self.start(&slot, &repository, admission, purpose).await;
             return true;
-        }
+        };
         let held_since = self
             .repositories
             .get(&repository)
@@ -680,8 +699,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.start(&slot, &repository, admission, Purpose::Job)
             .await;
         // Only a runner in its slot ends the wait: a start that failed served nothing, even one that left a container
-        // there. Its backoff takes the wait.
-        if self.holds_runner(&slot)
+        // there. Its backoff takes the pool's wait; the job waits for neither a slot nor the host's memory since.
+        let in_slot = self.holds_runner(&slot);
+        if in_slot {
+            self.note_started(job);
+        }
+        if in_slot
             && !self.backing_off(&repository, &slot.profile, SystemTime::now())
             && let Some(waits) = self
                 .repositories

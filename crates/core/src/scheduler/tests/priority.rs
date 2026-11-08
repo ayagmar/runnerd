@@ -2,7 +2,7 @@
 //! erects one, and over generated sequences, that it neither stalls the queue nor outlives its job.
 
 use super::*;
-use crate::scheduler::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER};
+use crate::scheduler::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, StartFor};
 
 const LONG_AGO: Duration = Duration::from_mins(15);
 
@@ -867,7 +867,9 @@ mod generated {
             }
             for decision in &plan.decisions {
                 if let Decision::Start {
-                    warm: true, memory, ..
+                    for_: StartFor::Warm,
+                    memory,
+                    ..
                 } = decision
                 {
                     self.warm.push(*memory);
