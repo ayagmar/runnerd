@@ -26,14 +26,15 @@ written. Bugs in this area keep having the same shape: a call site that forgot o
   It runs its fixtures first, so it fails if it stops catching a case.
 - **Exceptions are named.** `MARKED` in the script gives the reason a finding stays. `.github/state-debt.txt` lists
   what is still to fix, with what fixes it. Against `origin/main` a debt line cannot be added, the limit cannot rise,
-  and a marker is new only if main tags that debt line `# may become a marker`. If main has the debt file but not the
-  script, or CI did not fetch main, the check fails rather than skipping the comparison. The check runs in a job of its
-  own on any change, so a pull request that edits only the debt file runs it too.
+  and a marker is new only if main tags that debt line `# may become a marker`. `OPAQUE` gains no key and `ROOTS` loses
+  no root, as what the walk does not reach is not a finding. If main has the debt file but not the script, or CI did
+  not fetch main, the check fails rather than skipping the comparison. The check runs in a job of its own on any change,
+  so a pull request that edits only the debt file runs it too.
 - **A refactor proves itself with a trace.** The invariants' harness can write, per seed, what a generated case asked
   of GitHub and Docker and its status, step by step, including job reads, inspects and log reads, and the `jobs` table
-  it left. It waits for what a step set going before it moves on, and is compared without sorting. A capture's `exec` runs in its
-  own task, so where it falls among a tick's other calls is not behaviour: execs get their own section per step, in
-  their order.
+  it left. It waits for what a step set going before it moves on, and is compared without sorting. A capture's `exec`
+  runs in its own task, so where it falls among a tick's other calls is not behaviour: execs get their own section per
+  step, in their order.
 
 ## Consequences
 

@@ -17,7 +17,8 @@ C5  SQL updates the jobs table outside the store's writer.
 C6  A named machine no rule above can see is still there, found by a fixed pattern (KNOWN).
 
 Findings a later change removes are listed in .github/state-debt.txt. Exceptions that stay are in MARKED, with the
-reason every combination of the fields is meant. Both can only shrink: the ratchet compares them with origin/main.
+reason every combination of the fields is meant. Both can only shrink: the ratchet compares them with origin/main, and
+OPAQUE and ROOTS too, as what the walk does not reach is not a finding.
 
 The script first runs against state-fixtures/ and fails if it stops catching a case there. It matches names, not
 types: see ADR 0114 for what it cannot see.
@@ -37,6 +38,7 @@ DEBT = ".github/state-debt.txt"
 FIXTURES = SCRIPT.parent / "state-fixtures"
 LIMIT_KEY = "engine-lifecycle-fields"
 MARKABLE = "# may become a marker"
+COMPARED = ("MARKED", "ENGINE_LIFECYCLE_LIMIT", "OPAQUE", "ROOTS")
 
 # The long-lived owners a lifecycle lives in. Adding one is part of the change that adds it.
 ROOTS = (
@@ -118,10 +120,16 @@ ASSIGNED = re.compile(CHAIN + r"\s*(?:\|=|&=|\+=|-=|\*=|=(?![=>]))")
 MUTATED = re.compile(CHAIN + r"\s*\.\s*(?:" + MUTATORS + r")\s*(?:::<[^>]*>)?\(")
 BORROWED = re.compile(r"&mut\s+\*?\w+" + CHAIN)
 # Through a guard taken and used in one expression. One held in a binding is not seen (ADR 0114).
+WRITES_IT = r"\s*(?:\.\s*(?:" + MUTATORS + r")\s*(?:::<[^>]*>)?\(|(?:\|=|&=|\+=|-=|\*=|=(?![=>])))"
+# What may follow the guard before the write: fields of the value it guards, written too.
+INSIDE = r"((?:\s*\.\w+|\[[^\]]*\])*)"
 GUARDED = re.compile(
-    CHAIN + r"\s*\.\s*(?:lock|write|borrow_mut)\(\)(?:\s*\.\s*(?:unwrap\(\)|await|expect\([^)]*\)))*"
-    r"\s*(?:\.\s*(?:" + MUTATORS + r")\s*(?:::<[^>]*>)?\(|=(?![=>]))"
+    CHAIN + r"\s*\.\s*(?:lock|write|borrow_mut)\(\)"
+    r"(?:\s*\.\s*(?:unwrap\(\)|await|expect\([^)]*\)|unwrap_or_else\((?:[^()]|\([^()]*\))*\)))*"
+    + INSIDE + WRITES_IT
 )
+# Through sync::lock, the way code here takes a lock: `*lock(&self.x) = ...`, `lock(&self.x).y.push(1)`.
+LOCKED = re.compile(r"\block\(&\s*\w+" + CHAIN + r"\)" + INSIDE + WRITES_IT)
 
 
 def lifecycle_type(written):
@@ -345,7 +353,7 @@ class Source:
             for m in re.finditer(r"(?m)^impl(?:<[^{]*?>)?\s+(?:[\w:<>, ]+\s+for\s+)?([\w:]+)(?:<[^{]*>)?\s*(?:where[^{]*)?\{", s)
         ]
         functions = [(m.start(), m[1], takes_self(s, m.end())) for m in re.finditer(r"\bfn\s+(\w+)", s)]
-        for pattern in (ASSIGNED, MUTATED, BORROWED, GUARDED):
+        for pattern in (ASSIGNED, MUTATED, BORROWED, GUARDED, LOCKED):
             for m in pattern.finditer(s):
                 function, method = next(((n, h) for a, n, h in reversed(functions) if a <= m.start()), (None, False))
                 # A constructor builds a value no one else holds yet; a method with such a name writes one that exists.
@@ -353,7 +361,8 @@ class Source:
                     continue
                 owner = next((n for a, b, n in impls if a <= m.start() < b), None)
                 on_self = s[: m.start(1)].endswith("self")
-                for field in re.findall(r"\.(\w+)", m[1]):
+                inside = m[2] if pattern in (GUARDED, LOCKED) else ""
+                for field in re.findall(r"\.(\w+)", m[1] + inside):
                     self.writes[field].append(Write(rel, function, owner, on_self))
 
     def resolve(self, name, holder, written):
@@ -520,12 +529,12 @@ def read_debt(text):
 
 
 def constants(script):
-    """MARKED and ENGINE_LIFECYCLE_LIMIT as a version of this script sets them."""
+    """What a version of this script sets that the ratchet compares."""
     found = {}
     for node in ast.parse(script).body:
-        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in ("MARKED", "ENGINE_LIFECYCLE_LIMIT"):
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id in COMPARED:
             found[node.targets[0].id] = ast.literal_eval(node.value)
-    return found.get("MARKED", {}), found.get("ENGINE_LIFECYCLE_LIMIT")
+    return found
 
 
 def git(*arguments):
@@ -545,7 +554,13 @@ def base_is_available():
     return git("fetch", "--quiet", "origin", "main").returncode == 0
 
 
-def compare(base, debt, limit, marked, constant, markable=frozenset()):
+def root_identity(root):
+    """A root as the ratchet follows it: its crate and name, so moving it to a leaf file within its crate is no drop."""
+    path, name = root.split(":")
+    return path.split("/")[1], name
+
+
+def compare(base, debt, limit, marked, constant, markable=frozenset(), opaque=(), roots=()):
     """What the debt file and MARKED may not do against `base`, main's versions of them; returns the failures."""
     failures = []
     base_debt = base["debt"]
@@ -554,6 +569,10 @@ def compare(base, debt, limit, marked, constant, markable=frozenset()):
     added_marks = sorted(set(marked) - set(base["marked"]) - base_markable)
     failures += [f"new marker {mark!r}: seal the type instead" for mark in added_marks]
     failures += [f"{DEBT}: {line!r} newly tagged {MARKABLE!r}" for line in sorted(set(markable) - base_markable)]
+    # What the walk does not reach is not a finding, so either of these would retire debt with nothing fixed.
+    failures += [f"new OPAQUE key {key!r}: the walk would stop finding what it holds" for key in sorted(set(opaque) - set(base.get("opaque", ())))]
+    dropped = {root_identity(root) for root in base.get("roots", ())} - {root_identity(root) for root in roots}
+    failures += [f"root {name} of {crate} dropped from ROOTS: the walk would stop finding what it holds" for crate, name in sorted(dropped)]
     if debt is not None and base_debt is None:
         failures.append(f"{DEBT} came back after it was removed: fix the findings instead")
     if base_debt is not None:
@@ -575,9 +594,15 @@ def ratchet(debt, limit, markable, read=None):
         if read(DEBT) is not None:
             return [f"{DEBT} is on origin/main but {script} is not, so nothing can be compared: keep the script's path"]
         return []
-    base_marked, base_constant = constants(base_script)
-    base = {"debt": read(DEBT), "marked": base_marked, "constant": base_constant}
-    return compare(base, debt, limit, MARKED, ENGINE_LIFECYCLE_LIMIT, markable)
+    on_main = constants(base_script)
+    base = {
+        "debt": read(DEBT),
+        "marked": on_main.get("MARKED", {}),
+        "constant": on_main.get("ENGINE_LIFECYCLE_LIMIT"),
+        "opaque": on_main.get("OPAQUE", {}),
+        "roots": on_main.get("ROOTS", ()),
+    }
+    return compare(base, debt, limit, MARKED, ENGINE_LIFECYCLE_LIMIT, markable, OPAQUE, ROOTS)
 
 
 def ratchet_problems():
@@ -600,6 +625,19 @@ def ratchet_problems():
         ("a tag added here", base, {"C1 a", "C1 b"}, 5, {"C1 m": ""}, None, {"C1 a"}),
         ("the debt file back", gone, {"C1 a"}, 5, {"C1 m": ""}, 5),
         ("a raised constant", gone, None, None, {"C1 m": ""}, 6),
+    ]
+    walked = {**base, "opaque": {"Kept": "", "Going": ""}, "roots": ("crates/a/src/x.rs:R", "crates/b/src/y.rs:R")}
+    same = (walked, {"C1 a", "C1 b"}, 5, {"C1 m": ""}, None, frozenset())
+    roots = walked["roots"]
+    allowed += [
+        ("an OPAQUE key removed", *same, {"Kept": ""}, roots),
+        ("a root added", *same, walked["opaque"], (*roots, "crates/a/src/z.rs:S")),
+        ("a root moved within its crate", *same, walked["opaque"], ("crates/a/src/x/leaf.rs:R", roots[1])),
+    ]
+    refused += [
+        ("a new OPAQUE key", *same, {**walked["opaque"], "Measured": ""}, roots),
+        ("a root dropped", *same, walked["opaque"], roots[:1]),
+        ("a root moved to another crate", *same, walked["opaque"], ("crates/c/src/x.rs:R", roots[1])),
     ]
     problems = [f"the ratchet refuses {name}" for name, *case in allowed if compare(*case)]
     problems += [f"the ratchet lets through {name}" for name, *case in refused if not compare(*case)]

@@ -21,9 +21,18 @@ pub struct Engine {
     guarded: crate::cases::Guarded,
     flags: crate::cases::Flags,
     full_paths: crate::cases::FullPaths,
+    locked_open: crate::cases::LockedOpen,
+    locked_sealed: crate::cases::LockedSealed,
+    poisoned: crate::cases::Poisoned,
+    locked_read: crate::cases::LockedRead,
 }
 
 impl Engine {
+    fn locked(&self) {
+        *lock(&self.locked_open.aa) = None;
+        lock(&self.locked_open.ab).push(1);
+    }
+
     fn pair(&mut self, key: u64) {
         self.first.insert(key, 1);
         self.second.remove(&key);

@@ -10,6 +10,9 @@ C1 fixture DocSaysWire
 C1 fixture Guarded
 C1 fixture Flags
 C1 fixture FullPaths
+C1 fixture LockedOpen
+C1 fixture LockedSealed
+C1 fixture Poisoned
 C2 first second
 C3 busy job ||
 C5 crates/fixture/src/updates.rs

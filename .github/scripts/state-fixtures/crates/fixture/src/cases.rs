@@ -92,3 +92,42 @@ pub fn path(paths: &mut FullPaths) {
     paths.y.clear();
     paths.z = None;
 }
+
+/// Written the way this repository's code is: through `sync::lock`, from outside the type, with no field written bare.
+pub struct LockedOpen {
+    pub aa: Arc<Mutex<Option<u64>>>,
+    pub ab: Mutex<Vec<u64>>,
+}
+
+/// Private in a leaf file, and a second owner in the same file writes it through `sync::lock`.
+pub struct LockedSealed {
+    ac: Mutex<Option<u64>>,
+    ad: Mutex<Vec<u64>>,
+}
+
+pub fn second_owner(sealed: &LockedSealed) {
+    *lock(&sealed.ac) = None;
+    lock(&sealed.ad).push(1);
+}
+
+/// The other way code here survives a poisoned lock, naming the function and with a closure.
+pub struct Poisoned {
+    pub ae: Mutex<Option<u64>>,
+    pub af: Mutex<Vec<u64>>,
+}
+
+pub fn recover(poisoned: &Poisoned) {
+    *poisoned.ae.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    poisoned.af.lock().unwrap_or_else(|poison| poison.into_inner()).push(1);
+}
+
+/// A guard taken only to read writes nothing: its one write is not two.
+pub struct LockedRead {
+    pub ag: Mutex<Option<u64>>,
+    pub ah: Mutex<Vec<u64>>,
+}
+
+pub fn read(locked: &LockedRead) -> usize {
+    *lock(&locked.ag) = None;
+    lock(&locked.ah).len()
+}
