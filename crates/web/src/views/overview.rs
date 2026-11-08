@@ -1081,6 +1081,9 @@ pub(crate) fn health(overview: &Overview) -> Markup {
             @if let Some(stopping) = overview.status.stopping_line() {
                 p.warning { "runnerd is " (stopping) "; it starts no new runners." }
             }
+            @if let Some(limited) = overview.status.github_line() {
+                p.warning { (limited) }
+            }
         }
     }
 }

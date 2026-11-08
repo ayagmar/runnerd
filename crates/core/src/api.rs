@@ -134,6 +134,10 @@ pub struct Status {
     /// How it stops, once it does; absent from a daemon before it said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopping: Option<Stopping>,
+    /// Until when GitHub's rate limit is used up, in seconds since the Unix epoch: no runner starts before.
+    /// [`Status::github_line`] says it. Absent while it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_limited_until: Option<u64>,
     /// The memory budget and what runners use of it.
     pub budget: Budget,
     /// Every configured profile with its slots.
@@ -845,6 +849,12 @@ impl Status {
             (None, true) => Some("shutting down"),
             (None, false) => None,
         }
+    }
+
+    /// Why no runner starts while GitHub's rate limit is used up, as every client says it; `None` while it is not.
+    pub fn github_line(&self) -> Option<&'static str> {
+        self.github_limited_until
+            .map(|_| "GitHub's rate limit is used up: no runner starts until it resets")
     }
 }
 

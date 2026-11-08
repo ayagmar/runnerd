@@ -164,6 +164,15 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             theme.wait().add_modifier(Modifier::BOLD),
         )),
     }
+    // GitHub's rate limit goes first when the tabs do not fit beside it.
+    if let Some(limited) = app.live.status.github_line() {
+        let limited = Span::styled(format!("{limited}  "), theme.wait());
+        if Line::from(spans.clone()).width() + limited.width() + Line::from(right.clone()).width()
+            <= usize::from(area.width)
+        {
+            right.insert(0, limited);
+        }
+    }
     let right = Line::from(right);
     // The version goes first when the tabs and the connection do not fit beside it.
     if Line::from(spans.clone()).width() + version.width() + right.width()

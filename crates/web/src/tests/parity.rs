@@ -125,6 +125,7 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         "{}: {shown}",
         facts.stopping
     );
+    assert!(shown.contains(facts.github), "{}: {shown}", facts.github);
     for figure in &facts.figures {
         let line = [
             Some(figure.label),

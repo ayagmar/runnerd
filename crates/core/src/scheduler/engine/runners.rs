@@ -13,7 +13,7 @@ use super::{DockerInStop, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, un
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
-use crate::github::{Deleted, GithubApi, Runner};
+use crate::github::{self, Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
 use crate::sync::lock;
@@ -723,6 +723,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// Notes that GitHub's rate limit is used up until `until`: no runner starts before.
+    pub(super) fn github_limited(&mut self, until: SystemTime) {
+        if self.github_limit().is_none() {
+            warn!(
+                "GitHub's rate limit is used up; no runner starts for {}s",
+                until
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+        }
+        self.github_limited_until = self.github_limited_until.max(Some(until));
+    }
+
+    /// Until when GitHub's rate limit is used up, while it is.
+    pub(super) fn github_limit(&self) -> Option<SystemTime> {
+        self.github_limited_until
+            .filter(|until| *until > SystemTime::now())
+    }
+
     /// After a start in `profile` that failed and left nothing in Docker, deletes its `runner`'s registration and
     /// closes its build cache, and holds back its pool.
     async fn abandon(&mut self, profile: &str, repository: &str, runner: &Runner, failure: String) {
@@ -784,6 +804,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let (runner, jit_config) = match self.github.jit_config(repository, &name, &labels).await {
             Ok(registered) => registered,
+            // Not the pool's fault: no runner starts anywhere until the limit resets.
+            Err(github::Error::RateLimited { until }) => {
+                self.github_limited(until);
+                return;
+            }
             Err(error) => {
                 let failure = format!("cannot register a runner: {error}");
                 warn!("{repository}: {failure}");

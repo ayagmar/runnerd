@@ -34,6 +34,7 @@ pub(crate) fn status() -> Status {
         version: "0.0.0".to_owned(),
         shutting_down: true,
         stopping: Some(Stopping::LeavesJobs),
+        github_limited_until: Some(1_790_000_000),
         budget: budget(),
         profiles: vec![profile_status()],
         repositories: vec![repository_status()],

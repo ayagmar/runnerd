@@ -385,6 +385,9 @@ always returns, so the daemon closes and flushes the history.
   started engine announces what differs from them and every slot, so a client resuming after the last run's events
   ends where `/v1/status` is ([ADR 0029](docs/adr/0029-profile-events-and-what-a-restart-announces.md)).
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.
+- While an answer of GitHub's says its rate limit is used up, no runner starts and no pool is held back for it: a
+  registration refused for the limit is not the pool's failure. The status says so (`Status::github_line`) until the
+  limit resets.
 - A slot is free only once Docker confirmed its container's removal, also after a start that failed
   ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md)), or that a stopped container is being
   removed already ([ADR 0105](docs/adr/0105-a-removal-under-way-frees-a-stopped-runners-slot.md)).

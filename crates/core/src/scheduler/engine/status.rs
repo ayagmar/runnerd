@@ -74,6 +74,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: mode != Shutdown::No,
             stopping: mode.stopping(),
+            github_limited_until: self.github_limit().map(unix_secs),
             budget: self.budget(),
             profiles,
             repositories,

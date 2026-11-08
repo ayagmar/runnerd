@@ -567,6 +567,7 @@ impl Fixtures {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             stopping: None,
+            github_limited_until: None,
             budget: Budget {
                 admission: runnerd_core::api::AdmissionPolicy::Caps,
                 held: false,

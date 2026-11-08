@@ -144,6 +144,7 @@ fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_doe
     assert!(shows(&rows, &facts.cpu), "{all}");
     assert!(shows(&rows, &facts.host), "{all}");
     assert!(shows(&rows, facts.stopping), "{}: {all}", facts.stopping);
+    assert!(shows(&rows, facts.github), "{}: {all}", facts.github);
     for figure in &facts.figures {
         let line = format!("{}: {}", figure.label, figure.value);
         assert!(shows(&rows, &line), "{line}: {all}");

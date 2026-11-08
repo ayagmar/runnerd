@@ -453,7 +453,8 @@ pub struct Engine<G = Github, D = Docker> {
     docker_in_stop: DockerInStop,
     /// The memory cap the running mirror started with.
     mirror_memory: u64,
-    rate_limit_logged: bool,
+    /// Until when GitHub's rate limit is used up, from the last answer that said so: no runner starts before.
+    github_limited_until: Option<SystemTime>,
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
     /// Runners this engine released or killed, by ID, with their repository, until a listing of that repository no
@@ -576,6 +577,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             stopping: None,
+            github_limited_until: None,
             budget: api::Budget {
                 slice: config.host.slice.clone(),
                 memory_max,
@@ -628,7 +630,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
             docker_in_stop: DockerInStop::Answers,
-            rate_limit_logged: false,
+            github_limited_until: None,
             busy_orphans: BTreeSet::new(),
             ended_busy: BTreeMap::new(),
             status,
