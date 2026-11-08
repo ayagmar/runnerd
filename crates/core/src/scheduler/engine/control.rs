@@ -886,6 +886,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// `cpus` are the slice's, read when the config sets `cpu_overcommit`.
     pub(super) fn reload(&mut self, config: Config, memory_max: Option<u64>, cpus: Option<u64>) {
         let mut old = std::mem::replace(&mut self.config, config);
+        // A pool gone keeps no hold a pool made there later would inherit, and one whose runners change starts again
+        // at once: what failed may be what changed.
+        for (name, state) in &mut self.repositories {
+            let new = &self.config;
+            state
+                .holds
+                .retain(|profile, _| same_runners(&old, new, name, profile));
+        }
         if let Some(cache) = &self.build_cache {
             cache.set_max_size(self.config.caches.build.max_size.0);
         }
@@ -947,4 +955,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.reread_warm();
         info!("reloaded the config");
     }
+}
+
+/// Whether `repository`'s runners in `profile` start the same under `new` as under `old`: the pool's labels, and its
+/// profile's image, memory and CPUs and the host's isolation. A pool either config lacks does not.
+fn same_runners(old: &Config, new: &Config, repository: &str, profile: &str) -> bool {
+    let labels = |pool: &crate::config::Repository| -> BTreeSet<String> {
+        pool.labels
+            .iter()
+            .map(|label| label.to_ascii_lowercase())
+            .collect()
+    };
+    let (Some(was), Some(is)) = (
+        old.pool_in(repository, profile),
+        new.pool_in(repository, profile),
+    ) else {
+        return false;
+    };
+    let (Some(was_made), Some(is_made)) = (old.profiles.get(profile), new.profiles.get(profile))
+    else {
+        return false;
+    };
+    labels(was) == labels(is)
+        && was_made.image == is_made.image
+        && was_made.memory.0 == is_made.memory.0
+        && was_made.cpus == is_made.cpus
+        && old.host.isolation == new.host.isolation
 }
