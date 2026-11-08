@@ -149,7 +149,8 @@ queued → slot → container → removed
    runners first, then queued jobs (`Engine::tick`; the order avoids starting a second runner for a job its runner
    just took), every repository at once, a few requests at a time. Each listing is read page by page, up to 10 pages; one repository's queued-jobs poll reads the jobs of at
    most 200 runs, queued runs before those in progress and the oldest first in each. A repository a reload removed
-   is polled until two listings in a row show none of this machine's runners. The history keeps when a listing first
+   is polled until two listings in a row show none of this machine's runners, GitHub refuses its listing (403, 404),
+   or its listings fail for an hour; then any runners left on it stay registered. The history keeps when a listing first
    showed each job queued (`seen_at`), written as each listing answers, so a runner that takes the job before the
    other listings answer, or a tick that ends meanwhile, keeps it; job pages show it as "Seen by runnerd" between
    its queueing and its container's start ([ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).

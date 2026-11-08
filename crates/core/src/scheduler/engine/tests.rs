@@ -115,6 +115,8 @@ struct GithubState {
     held_queued: tokio::sync::watch::Sender<BTreeSet<String>>,
     /// Repositories whose queued jobs listings fail.
     failed_queued: BTreeSet<String>,
+    /// Repositories whose runners listings fail, with what GitHub answers.
+    failed_runners: BTreeMap<String, reqwest::StatusCode>,
     /// Listings, job reads, registrations and deletes waiting for an answer.
     waiting: usize,
     /// How long each listing, job read, registration and delete takes to answer, where a test says: a workload's
@@ -319,6 +321,14 @@ impl GithubApi for FakeGithub {
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
+        if let Some(status) = state.failed_runners.get(repository) {
+            return Err(github::Error::Status {
+                method: reqwest::Method::GET,
+                path: format!("/repos/{repository}/actions/runners"),
+                status: *status,
+                message: "failed".to_owned(),
+            });
+        }
         if state.missed_listings.remove(repository) {
             return Ok(Vec::new());
         }
@@ -3955,6 +3965,87 @@ async fn a_queued_job_github_fails_to_read_for_a_quarter_hour_closes_as_run_else
     let before = github.0.lock().unwrap().job_reads;
     engine.tick(Shutdown::No).await;
     assert_eq!(github.0.lock().unwrap().job_reads, before, "no longer read");
+}
+
+/// An engine serving `o/r` and `o/s` that a reload then left with `o/r` alone: `o/s` drains.
+async fn draining_o_s(github: &FakeGithub, dir: &TestDir) -> Engine<FakeGithub, FakeDocker> {
+    let (mut engine, _handle) =
+        engine_with(github, &FakeDocker::default(), dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.reload(Config::parse(CONFIG).unwrap(), None, None);
+    engine
+}
+
+/// How many times `o/s`'s runners were listed.
+fn o_s_listings(github: &FakeGithub) -> usize {
+    github
+        .calls()
+        .iter()
+        .filter(|call| *call == "runners o/s")
+        .count()
+}
+
+#[tokio::test]
+async fn a_removed_repository_github_refuses_stops_draining_at_once() {
+    for status in [
+        reqwest::StatusCode::FORBIDDEN,
+        reqwest::StatusCode::NOT_FOUND,
+    ] {
+        let github = FakeGithub::default();
+        let dir = TestDir::new("engine");
+        let mut engine = draining_o_s(&github, &dir).await;
+        // The token lost the repository.
+        github
+            .0
+            .lock()
+            .unwrap()
+            .failed_runners
+            .insert("o/s".to_owned(), status);
+        let before = o_s_listings(&github);
+        for _ in 0..3 {
+            engine.tick(Shutdown::No).await;
+        }
+        assert_eq!(o_s_listings(&github) - before, 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_removed_repository_whose_listings_keep_failing_stops_draining_after_an_hour() {
+    let github = FakeGithub::default();
+    let dir = TestDir::new("engine");
+    let mut engine = draining_o_s(&github, &dir).await;
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_runners
+        .insert("o/s".to_owned(), reqwest::StatusCode::BAD_GATEWAY);
+    tokio::time::pause();
+    let before = o_s_listings(&github);
+    engine.tick(Shutdown::No).await;
+    tokio::time::advance(Duration::from_mins(59)).await;
+    engine.tick(Shutdown::No).await;
+    tokio::time::advance(Duration::from_mins(1)).await;
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(o_s_listings(&github) - before, 3);
+}
+
+#[tokio::test]
+async fn a_repository_removed_again_drains_until_two_clean_listings() {
+    let github = FakeGithub::default();
+    let dir = TestDir::new("engine");
+    let mut engine = draining_o_s(&github, &dir).await;
+    engine.tick(Shutdown::No).await;
+    // Added back, then removed again, both while a tick waits for GitHub: its first drain had one clean listing.
+    engine.reload(Config::parse(&two_repositories()).unwrap(), None, None);
+    engine.reload(Config::parse(CONFIG).unwrap(), None, None);
+    let before = o_s_listings(&github);
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(o_s_listings(&github) - before, 2);
 }
 
 #[tokio::test]

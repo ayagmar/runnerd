@@ -408,10 +408,7 @@ pub struct Engine<G = Github, D = Docker> {
     /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
     reseed_requested: BTreeSet<String>,
     /// Repositories a reload removed, polled until none of this machine's runners is registered on them.
-    draining: BTreeSet<String>,
-    /// Draining repositories whose last runners listing had none of this machine's runners. A runner can go unseen
-    /// in one listing whose pages shift while they are read, so a repository stops draining only after two.
-    drained_once: BTreeSet<String>,
+    draining: BTreeMap<String, tick::Drain>,
     /// The runner and shell containers an earlier run left that recovery failed to remove, by ID with their names:
     /// each tick tries again.
     leftover: BTreeMap<String, String>,
@@ -612,8 +609,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             reseed_memory: BTreeMap::new(),
             reseed_requested: BTreeSet::new(),
             retired: BTreeMap::new(),
-            draining: BTreeSet::new(),
-            drained_once: BTreeSet::new(),
+            draining: BTreeMap::new(),
             leftover: BTreeMap::new(),
             unread: Vec::new(),
             measure_due: BTreeSet::new(),

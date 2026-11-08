@@ -291,7 +291,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let runners = self
             .repositories
             .keys()
-            .chain(&self.draining)
+            .chain(self.draining.keys())
             .cloned()
             .collect();
         let queued = match mode {
@@ -1219,7 +1219,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Ok(runners) => runners,
                 Err(github::Error::RateLimited { .. }) => continue,
                 Err(error) => {
-                    warn!("{repository}: cannot list runners: {error}");
+                    self.drain_failed(&repository, &error);
                     continue;
                 }
             };
@@ -1270,12 +1270,51 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             self.ended_busy
                 .retain(|id, of| *of != repository || listed.contains(id));
-            if left || !self.draining.contains(&repository) {
-                self.drained_once.remove(&repository);
-            } else if !self.drained_once.insert(repository.clone()) {
-                self.drained_once.remove(&repository);
-                self.draining.remove(&repository);
+            if let Some(drain) = self.draining.get_mut(&repository) {
+                drain.failing_since = None;
+                if left {
+                    drain.clean_once = false;
+                } else if drain.clean_once {
+                    self.draining.remove(&repository);
+                } else {
+                    drain.clean_once = true;
+                }
             }
         }
     }
+
+    /// Warns of a runners listing that failed, and stops draining its repository once GitHub refuses it, as when the
+    /// token lost it, or after `DRAIN_FAILING_FOR` of failed listings: this machine's runners still registered there
+    /// stay.
+    fn drain_failed(&mut self, repository: &str, error: &github::Error) {
+        let Some(drain) = self.draining.get_mut(repository) else {
+            warn!("{repository}: cannot list runners: {error}");
+            return;
+        };
+        let since = *drain
+            .failing_since
+            .get_or_insert_with(tokio::time::Instant::now);
+        if !error.is_refused() && since.elapsed() < DRAIN_FAILING_FOR {
+            warn!("{repository}: cannot list runners: {error}");
+            return;
+        }
+        warn!(
+            "{repository}: stops draining, so any of this machine's runners still registered there stay: \
+             cannot list its runners: {error}"
+        );
+        self.draining.remove(repository);
+    }
+}
+
+/// How long a removed repository's runners listings may fail in a row before it stops draining.
+const DRAIN_FAILING_FOR: std::time::Duration = std::time::Duration::from_hours(1);
+
+/// A repository a reload removed, polled until two runners listings in a row have none of this machine's runners: a
+/// runner can go unseen in one listing whose pages shift while they are read.
+#[derive(Debug, Default)]
+pub(super) struct Drain {
+    /// Whether the last runners listing had none of this machine's runners.
+    clean_once: bool,
+    /// Since when its runners listings fail, on Tokio's clock; `None` once one answers.
+    failing_since: Option<tokio::time::Instant>,
 }

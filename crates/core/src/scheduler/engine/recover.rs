@@ -288,7 +288,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 });
         }
         if !self.repositories.contains_key(&occupant.repository) {
-            self.draining.insert(occupant.repository.clone());
+            self.draining
+                .entry(occupant.repository.clone())
+                .or_default();
         }
     }
 
@@ -355,7 +357,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.keep_draining(&profile, index, &occupant);
             }
             let known_repository = self.repositories.contains_key(&occupant.repository)
-                || self.draining.contains(&occupant.repository);
+                || self.draining.contains_key(&occupant.repository);
             let free = index.and_then(|index| {
                 self.slots
                     .get_mut(&profile)?
