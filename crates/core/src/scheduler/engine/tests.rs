@@ -5246,10 +5246,10 @@ async fn a_slot_whose_caches_keep_failing_is_tried_less_and_less_often() {
         1,
         "the second failure spaces out the next try"
     );
-    engine.prepare_failures.get_mut("app").unwrap().retry_at = SystemTime::UNIX_EPOCH;
+    engine.prepare_failures.get_mut("app").unwrap().retry_at = std::time::UNIX_EPOCH;
     engine.tick(Shutdown::No).await;
     assert_eq!(left(&docker), 0, "its time come, it tries again");
-    engine.prepare_failures.get_mut("app").unwrap().retry_at = SystemTime::UNIX_EPOCH;
+    engine.prepare_failures.get_mut("app").unwrap().retry_at = std::time::UNIX_EPOCH;
     engine.tick(Shutdown::No).await;
     assert_eq!(
         registered(&github.calls()).len(),

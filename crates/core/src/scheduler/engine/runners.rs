@@ -779,6 +779,40 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// Creates what a runner in `slot` mounts and says whether it is there. Not yet when its profile's last try failed
+    /// and the time for the next has not come.
+    async fn caches_ready(&mut self, slot: &SlotRef, now: SystemTime) -> bool {
+        if self
+            .prepare_failures
+            .get(&slot.profile)
+            .is_some_and(|failed| failed.retry_at > now)
+        {
+            return false;
+        }
+        let number = slot.index + 1;
+        let Err(error) = cache::prepare(&*self.docker, &self.names, &slot.profile, number).await
+        else {
+            self.prepare_failures.remove(&slot.profile);
+            return true;
+        };
+        warn!(
+            "cannot prepare the caches of {} slot {number}: {error}",
+            slot.profile
+        );
+        let failed = self
+            .prepare_failures
+            .entry(slot.profile.clone())
+            .or_default();
+        // One failure costs nothing, as it holds no pool back (ADR 0096); from the second on Docker is spared.
+        failed.retry_at = now
+            + match failed.failures {
+                0 => Duration::ZERO,
+                failures => backoff(failures),
+            };
+        failed.failures += 1;
+        false
+    }
+
     /// Registers a runner of `repository` and starts it in `slot`, and says whether it is there.
     pub(super) async fn start(
         &mut self,
@@ -796,37 +830,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return StartOutcome::Failed;
         };
         let now = SystemTime::now();
-        if self
-            .prepare_failures
-            .get(&slot.profile)
-            .is_some_and(|failed| failed.retry_at > now)
-        {
+        if !self.caches_ready(slot, now).await {
             return StartOutcome::Failed;
         }
         let number = slot.index + 1;
         let secs = unix_secs(now).max(self.named + 1);
         self.named = secs;
         let name = self.identity.runner_name(&slot.profile, number, secs);
-        if let Err(error) = cache::prepare(&*self.docker, &self.names, &slot.profile, number).await
-        {
-            warn!(
-                "cannot prepare the caches of {} slot {number}: {error}",
-                slot.profile
-            );
-            let failed = self
-                .prepare_failures
-                .entry(slot.profile.clone())
-                .or_default();
-            // One failure costs nothing, as it holds no pool back (ADR 0096); from the second on Docker is spared.
-            failed.retry_at = now
-                + match failed.failures {
-                    0 => Duration::ZERO,
-                    failures => backoff(failures),
-                };
-            failed.failures += 1;
-            return StartOutcome::Failed;
-        }
-        self.prepare_failures.remove(&slot.profile);
         self.start_mirror().await;
         let Some(profile) = self.config.profiles.get(&slot.profile) else {
             return StartOutcome::Failed;
