@@ -477,6 +477,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// A tick's care of the records: lists them until Docker answers, then removes those past `max_age`.
+    pub(super) async fn keep_records(&mut self) {
+        if self.records.listed {
+            self.expire_records().await;
+        } else {
+            self.list_records().await;
+        }
+    }
+
     /// Lists the record images Docker has; until it answers, no record is made.
     pub(super) async fn list_records(&mut self) {
         match self.docker.images(record::LABEL).await {

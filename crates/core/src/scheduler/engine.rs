@@ -720,9 +720,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Schedules until a shutdown request is carried out, from a recovered engine. A tick is due `poll_interval`
-    /// after the last one started, and at least `TICK_REST` after it ended (ADR 0111). Between ticks, a runner whose
-    /// container Docker says stopped is released at once, and its slot taken by a job the last poll listed
-    /// (`turnover`, ADR 0095); that leaves the next tick when it was due.
+    /// after the last one's listing started, and at least `TICK_REST` after it ended (ADR 0111). Between ticks, a
+    /// runner whose container Docker says stopped is released at once, and its slot taken by a job the last poll
+    /// listed (`turnover`, ADR 0095); that leaves the next tick when it was due.
     async fn schedule(&mut self) {
         self.watcher = Some(exits::Watcher::start(
             self.docker.clone(),
@@ -731,19 +731,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut shown = Shutdown::No;
         let mode = loop {
             let mode = self.stopping();
-            let began = tokio::time::Instant::now();
             // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
             // Docker: until then status would show a daemon that is not stopping.
             if mode != shown {
                 self.publish();
                 shown = mode;
             }
-            if mode == Shutdown::Detach {
+            // What the next tick's due time counts from: this one's listing, or, in a detach, which lists nothing,
+            // its start.
+            let anchor = if mode == Shutdown::Detach {
+                let began = tokio::time::Instant::now();
                 self.remove_every_idle().await;
                 self.collect_recordings().await;
+                began
             } else {
-                self.tick(mode).await;
-            }
+                self.tick(mode).await
+            };
             self.publish();
             // A stop asked for or changed meanwhile goes on at once, before this one counts as done: a second signal
             // while a detach removed idle runners kills the running jobs, and one Docker failed turns into a detach.
@@ -758,8 +761,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             } else {
                 Duration::from_secs(5)
             };
-            // From the tick's start, so its own length does not push the next listing out.
-            let due = (began + interval).max(tokio::time::Instant::now() + interval.min(TICK_REST));
+            // From the listing's start, so the tick's own length does not push the next listing out, and two listings
+            // are never closer than `interval`, however long either tick took to collect before listing.
+            let due =
+                (anchor + interval).max(tokio::time::Instant::now() + interval.min(TICK_REST));
             self.wait_for_tick(mode, due).await;
         };
         // Nothing more is started or released: what Docker says now is the next start's.

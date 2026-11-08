@@ -1934,7 +1934,7 @@ async fn a_tick_that_ends_while_listings_wait_keeps_when_runnerd_saw_a_job_queue
         "listing o/r",
     );
     tokio::select! {
-        () = engine.tick(Shutdown::No) => panic!("the tick waits for o/s's listing"),
+        _ = engine.tick(Shutdown::No) => panic!("the tick waits for o/s's listing"),
         () = listed => {}
     }
     assert!(

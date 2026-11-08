@@ -589,6 +589,59 @@ async fn slow_job_reads_do_not_push_the_next_listing_out() {
     );
 }
 
+/// A running job's run is cancelled and its runner does not exit, so the tick `CANCEL_GRACE` later removes it before
+/// it lists, and Docker takes 8 s to. The next listing still comes `poll_interval` after that tick's. The bug it
+/// catches: the next tick counted from the last one's start, so a slow collect before the listing and a quick one
+/// after brought two listings 7 s apart, closer than the interval.
+#[tokio::test(start_paused = true)]
+async fn a_slow_collect_does_not_bring_the_next_listing_sooner() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .slow_removes
+        .insert("container-1".to_owned(), Duration::from_secs(8));
+    let dir = TestDir::new("slow-collect");
+    let (engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    handle
+        .control
+        .pause(one("o/r"), RunningJobs::Kill)
+        .await
+        .unwrap();
+    let mut listed_at = Vec::new();
+    let mut listings = 0;
+    let until =
+        Instant::now() + crate::scheduler::engine::control::CANCEL_GRACE + Duration::from_mins(1);
+    while Instant::now() < until {
+        let now = github
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("runners "))
+            .count();
+        if now > listings {
+            listings = now;
+            listed_at.push(Instant::now());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+    let gaps: Vec<Duration> = listed_at.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert!(gaps.len() >= 8, "too few listings: {gaps:?}");
+    // The world looks every 100 ms.
+    assert!(
+        gaps.iter().all(|gap| *gap >= Duration::from_millis(14_900)),
+        "two listings came closer than `poll_interval`: {gaps:?}"
+    );
+}
+
 /// Four slots work through a long backlog while each removal takes 5 to 25 s, so a slot's next runner ends while
 /// another's release still waits, generation after generation. Polls keep their pace and a command is answered
 /// within a pass's bound. The bug it catches: a pass taking every later exit for as long as some release waited,

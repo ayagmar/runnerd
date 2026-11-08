@@ -267,7 +267,9 @@ struct Held {
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
-    pub(super) async fn tick(&mut self, mode: Shutdown) {
+    /// One tick: collects what finished, lists the runners and queued jobs, follows the running jobs, plans and
+    /// applies the plan. Returns when its listing began, which the next tick's due time counts from (ADR 0111).
+    pub(super) async fn tick(&mut self, mode: Shutdown) -> tokio::time::Instant {
         let began = SystemTime::now();
         let mut pace = Pace::new();
         self.passes_in_tick = std::time::Duration::ZERO;
@@ -299,6 +301,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // What a runner takes from here on, this listing may still show queued.
         self.listing += 1;
         let listing = self.listing;
+        let listed_at = tokio::time::Instant::now();
         let listings = self
             .serving(
                 list(self.github.clone(), self.store.clone(), runners, queued),
@@ -372,12 +375,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.follow_running(described).await;
         }
         self.idle_caches(mode, began).await;
-        if self.records.listed {
-            self.expire_records().await;
-        } else {
-            self.list_records().await;
-        }
+        self.keep_records().await;
         self.prune();
+        listed_at
     }
 
     /// A pass between ticks for the runners Docker said stopped (ADR 0095): releases those whose containers did, as
