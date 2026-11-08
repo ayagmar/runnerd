@@ -16,6 +16,7 @@ starts only the jobs those paths can affect:
 | `site-build`: Astro build, then a check that every internal link and `#anchor` of the built pages resolves | `site/**`, `.github/scripts/check-site-links.py` |
 | `lint`: shellcheck, actionlint, zizmor | `.github/**`, any `*.sh` |
 | `text`: typos, `taplo fmt --check` | any file |
+| `state`: `check-state.py`, its fixtures, and the debt file against `origin/main` | any file |
 
 A change to `ci.yml` itself runs all of them. Pushes to `main` run every job and then deploy the site. A weekly
 schedule runs `deny`, so new advisories show up without a dependency change. Draft pull requests run only `changes`;
@@ -79,6 +80,25 @@ owner's slot layers and can reseed the owner's snapshot, and smaller shared-cach
    config does not run ([ADR 0040](docs/adr/0040-unused-runner-images-removed.md)), the owner's profile images among
    them, so the owner's daemon pulls them again before those profiles start runners; `docker pull` each `image` of
    the owner's config first to skip that wait.
+
+## State machines
+
+`.github/scripts/check-state.py` fails on a lifecycle spread over several fields or written from more than one place
+(CLAUDE.md, "State"; [ADR 0114](docs/adr/0114-a-lifecycle-is-one-value-with-one-owner.md)). What it still finds is
+listed in `.github/state-debt.txt`, each group with what removes it. A change that fixes a finding deletes its lines.
+The run compares with `origin/main`, fetching it, and skips that comparison if it cannot: a line added, the limit
+raised or a new marker fails.
+
+A refactor of one of these proves it kept behaviour with the invariants' trace. Run this on the base commit and on the
+change, and compare the two directories with `diff -r`; never sort them, as call order is what they show:
+
+```sh
+RUNNERD_INVARIANT_TRACE=<directory> cargo test -p runnerd-core --lib engine::tests::invariants::the_trace
+```
+
+Seeds in `TRACE_UNSTABLE` in `tests/invariants.rs` differ from run to run and are left out. A pull request says which
+call orders it changes on purpose. Tests reach the engine's state through `engine/tests/access.rs` and the
+`#[cfg(test)]` constructors, so moving a field changes only those bodies.
 
 ## The wire between releases
 

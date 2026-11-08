@@ -1,0 +1,80 @@
+# What check-state.py still finds on main, and what removes each line. See CLAUDE.md, State, and ADR 0114.
+#
+# Every pull request that fixes a finding deletes its lines. Lines may only leave: a new one, or a higher limit, fails
+# CI. A line may leave by becoming a marker in the script's MARKED, with its reason. The last pull request of the work
+# deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the script.
+#
+# Two machines the check cannot see, as it looks at how fields are declared and written, not what values mean. Each
+# gets a change of its own:
+#   docker_in_stop: read in five places, and pairs with Control's shutdown mode (Force plus Failed reads as Detach).
+#   warm.learned: UNIX_EPOCH stands for stale.
+
+engine-lifecycle-fields 40
+
+# Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
+C1 core Occupant
+C3 busy job &&
+C3 busy job ||
+
+# Watch: split. A capture and its recapture become one value per runner.
+C2 captures recaptures
+
+# Job followed: split. queued_jobs, closing and claims become one map of a job's phase.
+C1 core Claims
+C2 closing queued_jobs
+
+# Repository presence: split. draining folds into repositories, so these false pairs go with it.
+C1 core Drain
+C2 draining repositories
+C2 draining retired
+C2 draining slots
+
+# Repository state: split. Its listing, holds and waits each become one sealed value, the waits last.
+C1 core RepositoryState
+
+# Pool health: split into one enum.
+C1 core PoolHold
+
+# Pool waits: split. Waits seals, and cpu_held moves in.
+C1 core Waits
+
+# Replayer: seal, with the pool waits. It is one replay's working state and never outlives the call: it moves to
+# admission/replay.rs, a leaf, with its fields private.
+C1 core Replayer
+
+# Measured: split raised (slot occupant), the wait sets (wait accounting) and the host band out; the host band's change
+# then seals what stays, the predictor and the log memos, with private fields.
+C1 core crates/core/src/scheduler/engine/admission.rs:Measured
+
+# Host band: split into one enum.
+C1 core Remembered
+
+# Profile upkeep: split. These become one map of a profile's upkeep.
+C2 measure_due measured_at
+C2 measure_due measures
+C2 measure_due oversized
+C2 measure_due reseed_due
+C2 measure_due reseed_requested
+C2 measured_at measures
+C2 measures reseed_due
+C2 oversized reseed_due
+C2 oversized reseed_requested
+C2 reseed_due reseed_requested
+C2 reseed_memory reseeded_at
+C2 reseed_memory reseeds
+C2 reseeded_at reseeds
+
+# Record list: split list and listed into one value; the same change seals recordings and shells behind methods.
+C1 core crates/core/src/scheduler/engine/records.rs:RecordState
+
+# Build cache save: split Save into one enum.
+C1 core Save
+C3 dropped finalized &&
+
+# Build cache runner: split, with the save. held belongs to the undecided state of writes, so it moves there; a marker
+# then covers saves and found, which are independent tables.
+C1 core crates/core/src/buildcache.rs:Runner
+
+# TUI prompt: split confirm, removal, resize and help into one value; a marker then covers App's other fields, each a
+# view's own data.
+C1 cli App

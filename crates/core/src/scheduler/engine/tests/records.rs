@@ -127,7 +127,7 @@ async fn an_idle_runner_whose_job_fails_while_it_is_deregistered_is_recorded_not
     }
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
     engine.recover().await.unwrap();
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= crate::scheduler::IDLE_TIMEOUT;
     }
     // The tick saw it running and idle, so it removes it as expired; meanwhile it takes job 1, which fails, and its
@@ -185,7 +185,7 @@ async fn an_idle_runner_whose_capture_names_a_failed_job_while_github_still_dere
     }
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
     engine.recover().await.unwrap();
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= crate::scheduler::IDLE_TIMEOUT;
     }
     // While its delete waits, it takes job 1, which its capture reports, and the job fails; GitHub has not dropped

@@ -8,7 +8,7 @@ use super::*;
 use crate::buildcache::{self, BuildCache, actions};
 
 /// An engine on the fakes with a build cache in `dir`, for `config`.
-fn engine_with_cache(
+pub(super) fn engine_with_cache(
     github: &FakeGithub,
     docker: &FakeDocker,
     dir: &TestDir,
@@ -180,6 +180,27 @@ async fn save_now(socket: &std::path::Path, key: &str, archive: &[u8]) -> bool {
     tokio::time::timeout(Duration::from_secs(5), actions::save(socket, key, archive))
         .await
         .expect("a save is answered at once")
+}
+
+/// The socket a runner's build cache listens on, by its container's name, if it has one.
+pub(super) fn socket_of(docker: &FakeDocker, name: &str) -> Option<std::path::PathBuf> {
+    let state = docker.0.lock().unwrap();
+    let mount = state
+        .mounts
+        .get(name)?
+        .iter()
+        .find(|mount| mount.target.as_deref() == Some(buildcache::MOUNT))?;
+    mount.source.clone().map(Into::into)
+}
+
+/// A GitHub Actions cache save a runner makes, as soon as it can be answered.
+pub(super) async fn save(socket: &std::path::Path) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        actions::save(socket, "deps", b"deps"),
+    )
+    .await
+    .is_ok_and(|saved| saved)
 }
 
 /// How many build cache uploads wait on disk to become entries, for the engine in `dir`.
@@ -1116,14 +1137,9 @@ async fn an_ended_jobs_actions_cache_saves_go_when_github_never_names_its_runner
     }
     assert_eq!(uploads(&dir), 2, "the saves wait for GitHub");
 
-    for ended in engine.ended_uploads.values_mut() {
-        ended.ended_at -= super::super::build_cache::ENDED_WAIT;
-    }
+    engine.age_ended_uploads(super::super::build_cache::ENDED_WAIT);
     engine.tick(Shutdown::No).await;
-    assert!(
-        engine.ended_uploads.is_empty(),
-        "no runner waits any longer"
-    );
+    assert!(engine.no_ended_uploads(), "no runner waits any longer");
     assert!(
         !cache.undecided(&first) && !cache.undecided(&second),
         "both runners' caches closed"

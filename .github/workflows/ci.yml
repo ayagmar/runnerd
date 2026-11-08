@@ -322,10 +322,24 @@ jobs:
           chmod +x "$RUNNER_TEMP/taplo"
           "$RUNNER_TEMP/taplo" fmt --check
 
+  # `text`'s filter is any file, so a pull request that edits only the debt file or the script runs this.
+  state:
+    name: state
+    needs: changes
+    if: needs.changes.outputs.text == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch main for the ratchet
+        run: git fetch --depth=1 origin main
+      - run: .github/scripts/check-state.py
+
   # The one required check. It passes when every job it needs passed or was skipped by the changes job.
   gate:
     name: gate
-    needs: [changes, rust, docs, deny, image, site, lint, text]
+    needs: [changes, rust, docs, deny, image, site, lint, text, state]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:

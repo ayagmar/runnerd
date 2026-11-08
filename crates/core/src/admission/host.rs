@@ -28,6 +28,14 @@ pub struct Remembered {
     pub stalled: bool,
 }
 
+#[cfg(test)]
+impl Remembered {
+    /// What a test starts from: whether the larger margin stands, and whether the host stalled.
+    pub(crate) fn testing(short: bool, stalled: bool) -> Self {
+        Self { short, stalled }
+    }
+}
+
 /// The margin `MemAvailable` keeps beside the runners' predicted peaks for a host with `total` memory: `host_margin`,
 /// half again as much while the host is `short`.
 pub fn margin(total: u64, short: bool) -> u64 {

@@ -1,0 +1,11 @@
+# One line for each case the check must catch. Anything else it reports is a failure too.
+C1 fixture Open
+C1 fixture ThroughEnum
+C1 fixture ThroughTuple
+C1 fixture Taken
+C1 fixture Borrowed
+C1 fixture TwoBools
+C2 first second
+C3 busy job ||
+C5 crates/fixture/src/updates.rs
+engine-lifecycle-fields 2

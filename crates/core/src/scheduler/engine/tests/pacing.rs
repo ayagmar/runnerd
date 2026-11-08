@@ -28,7 +28,7 @@ async fn idle_runner_beside_a_queued_job(
     }
     let (mut engine, handle) = engine_with(github, docker, dir, &two_repositories());
     engine.recover().await.unwrap();
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
     (engine, handle)

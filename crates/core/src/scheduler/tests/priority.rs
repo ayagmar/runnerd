@@ -27,10 +27,7 @@ fn pool(name: &str, memory: u64, waits: Waits, queued: &[u64]) -> Repository {
 }
 
 fn starved_of_memory(job: u64) -> Waits {
-    Waits {
-        memory: Some(waited(job)),
-        ..Waits::default()
-    }
+    Waits::default().with_memory(Some(waited(job)))
 }
 
 /// `free` of the memory budget left, an empty slice having room for 16G.
@@ -94,13 +91,10 @@ fn younger_jobs_wait_behind_one_starved_of_memory_though_they_fit() {
 /// A barrier from the first shortage would idle the slice for every job that waits out one short run.
 #[test]
 fn a_job_short_of_memory_lets_younger_ones_past_until_it_waited_long_enough() {
-    let just_now = Waits {
-        memory: Some(Wait {
-            job: 1,
-            since: now() - PRIORITY_AFTER + Duration::from_secs(1),
-        }),
-        ..Waits::default()
-    };
+    let just_now = Waits::default().with_memory(Some(Wait {
+        job: 1,
+        since: now() - PRIORITY_AFTER + Duration::from_secs(1),
+    }));
     let plan = plan(
         &a_big_job_and_a_small_one(just_now),
         &profiles(vec![Slot::Free, Slot::Free]),
@@ -117,13 +111,10 @@ fn a_job_short_of_memory_lets_younger_ones_past_until_it_waited_long_enough() {
 
 /// One wait for `job` of `waited` ago.
 fn waited_for(job: u64, waited: Duration) -> Waits {
-    Waits {
-        memory: Some(Wait {
-            job,
-            since: now() - waited,
-        }),
-        ..Waits::default()
-    }
+    Waits::default().with_memory(Some(Wait {
+        job,
+        since: now() - waited,
+    }))
 }
 
 /// The two limits are the rule of ADR 0098: mixing them up either holds on every short wait or starves a large pool.
@@ -140,10 +131,7 @@ fn a_job_holds_after_the_limit_of_whether_a_barrier_served_its_pool() {
         .map(|barrier| barrier.job)
     };
     let second = Duration::from_secs(1);
-    let served = |waits| Waits {
-        served: true,
-        ..waits
-    };
+    let served = |waits: Waits| waits.with_served(true);
     assert_eq!(
         barrier(waited_for(1, PRIORITY_AFTER.saturating_sub(second))),
         None
@@ -167,10 +155,7 @@ fn a_job_holds_after_the_limit_of_whether_a_barrier_served_its_pool() {
 #[test]
 fn an_older_job_of_an_unserved_pool_takes_the_barrier_when_it_matures() {
     let owner = |older_waited| {
-        let served = Waits {
-            served: true,
-            ..waited_for(2, SERVED_PRIORITY_AFTER)
-        };
+        let served = waited_for(2, SERVED_PRIORITY_AFTER).with_served(true);
         plan(
             &[
                 pool("o/older", 8 * GIB, waited_for(1, older_waited), &[1]),
@@ -437,10 +422,7 @@ fn a_starved_pool_without_a_free_slot_erects_no_barrier_and_keeps_its_wait() {
 /// A wait for one resource must count when the shortage moves to the other, or the job goes back to the end each time.
 #[test]
 fn a_job_starved_of_cpu_that_now_lacks_memory_owns_the_barrier_as_memory() {
-    let waits = Waits {
-        cpu: Some(waited(1)),
-        ..Waits::default()
-    };
+    let waits = Waits::default().with_cpu(Some(waited(1)));
     let plan = plan(
         &a_big_job_and_a_small_one(waits),
         &profiles(vec![Slot::Free, Slot::Free]),
@@ -508,10 +490,7 @@ fn opposing_demands_share_one_barrier_the_older_ones() {
             ..pool(
                 "o/cpu",
                 GIB,
-                Waits {
-                    cpu: Some(waited(2)),
-                    ..Waits::default()
-                },
+                Waits::default().with_cpu(Some(waited(2))),
                 &[2],
             )
         },

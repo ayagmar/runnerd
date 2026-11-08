@@ -201,10 +201,10 @@ async fn a_reseed_waits_while_the_slice_is_at_the_high_water_mark() {
     // 9.2G of 10G, though nothing runnerd counts holds any of it: the 4G seed container would push it to the cap.
     slice_at(&handle.store, 92 * G / 10);
     engine.tick(Shutdown::No).await;
-    assert!(engine.reseeds.is_empty(), "the seed waits");
+    assert!(engine.no_reseeds(), "the seed waits");
     slice_at(&handle.store, 3 * G);
     engine.tick(Shutdown::No).await;
-    assert!(engine.reseeds.contains_key("app"), "the seed starts");
+    assert!(engine.reseeding("app"), "the seed starts");
 }
 
 #[tokio::test]
@@ -1134,7 +1134,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     );
     assert_eq!(runners_of(&mut engine, &handle, "o/b"), 0);
     assert_eq!(
-        engine.repositories["o/r"].waits["app"],
+        engine.waits_of("o/r", "app").unwrap(),
         crate::scheduler::Waits {
             served: true,
             ..Default::default()
@@ -1161,9 +1161,8 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
     github.0.lock().unwrap().queued = (1..=2).map(job).collect();
     engine.tick(Shutdown::No).await;
     assert_eq!(
-        engine.repositories["o/r"]
-            .waits
-            .get("app")
+        engine
+            .waits_of("o/r", "app")
             .and_then(|waits| waits.cpu)
             .map(|wait| wait.job),
         Some(2)
@@ -1172,7 +1171,7 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
     github.0.lock().unwrap().queued = vec![job(1)];
     engine.tick(Shutdown::No).await;
     assert!(
-        engine.repositories["o/r"].waits.is_empty(),
+        engine.keeps_no_waits("o/r"),
         "a job gone from the queue no longer waits"
     );
 }
@@ -1295,10 +1294,7 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     // The last fits neither, so the larger margin stands again, until the host has room for it.
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 3, "no room is left");
-    assert!(
-        engine.measured.host.short,
-        "no waiter fits the plain margin"
-    );
+    assert!(engine.host_is_short(), "no waiter fits the plain margin");
     tokio::time::sleep(Duration::from_millis(20)).await;
     host_at(&handle.store, 0, 6 * G + 4 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
@@ -1409,10 +1405,7 @@ async fn third_job_waits_for_a_slot(
     github.0.lock().unwrap().queued = (1..=3).map(job).collect();
     slice_at(&handle.store, 0);
     engine.tick(Shutdown::No).await;
-    assert!(
-        engine.measured.slot_waiting.0.contains(&3),
-        "job 3 waits for a slot"
-    );
+    assert!(engine.waits_for_a_slot(3), "job 3 waits for a slot");
     (engine, handle)
 }
 
@@ -1429,10 +1422,7 @@ async fn the_job_a_runner_took_stops_waiting_when_its_capture_names_it() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     let runner = engine.occupied().next().unwrap().1.runner_name.clone();
     engine.note_found(&crate::scheduler::engine::history::Found::named(runner, 3));
-    assert!(
-        !engine.measured.slot_waiting.0.contains(&3),
-        "job 3 no longer waits"
-    );
+    assert!(!engine.waits_for_a_slot(3), "job 3 no longer waits");
     github.0.lock().unwrap().queued = (1..=2).map(job).collect();
     tokio::time::sleep(Duration::from_millis(300)).await;
     engine.tick(Shutdown::No).await;
@@ -1456,12 +1446,12 @@ async fn a_job_waits_for_a_slot_or_the_hosts_memory_never_both() {
     let (mut engine, _handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
     engine.note_host_waits(BTreeSet::from([3]), time::now_ms());
     assert!(
-        !engine.measured.slot_waiting.0.contains(&3),
+        !engine.waits_for_a_slot(3),
         "a job now short of the host's memory left the slot wait"
     );
     engine.note_slots(BTreeSet::from([3]));
     assert!(
-        !engine.measured.host_waiting.0.contains(&3),
+        !engine.waits_for_the_host(3),
         "a job now short of a slot left the host wait"
     );
 }
@@ -1907,15 +1897,8 @@ async fn a_pass_raises_what_waiting_runners_reserve_before_it_admits() {
     // One runner ran build 2, which ended; the tick that follows has listed two e2e jobs beside build 1 and not yet
     // raised the waiting runner's reservation for them when Docker says the other's container stopped.
     let ended = {
-        let occupant = engine
-            .slots
-            .values_mut()
-            .flatten()
-            .flatten()
-            .last()
-            .unwrap();
-        occupant.job = Some(2);
-        occupant.busy = true;
+        let occupant = engine.occupants_mut().last().unwrap();
+        occupant.has_taken(2);
         occupant.container.clone()
     };
     for container in &mut docker.0.lock().unwrap().containers {
@@ -1927,7 +1910,7 @@ async fn a_pass_raises_what_waiting_runners_reserve_before_it_admits() {
         name: "e2e".to_owned(),
         ..job(id)
     };
-    engine.repositories.get_mut("o/r").unwrap().queued = vec![job(1), e2e(5), e2e(6)];
+    engine.set_queued("o/r", vec![job(1), e2e(5), e2e(6)]);
     engine.exits.stopped(ended);
     engine.turnover().await;
 
@@ -1957,15 +1940,8 @@ async fn waiting_runners_a_pass_raised_past_the_budget_are_stopped_by_the_next_t
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4, "4 × 1.25G");
     let ended = {
-        let occupant = engine
-            .slots
-            .values_mut()
-            .flatten()
-            .flatten()
-            .last()
-            .unwrap();
-        occupant.job = Some(4);
-        occupant.busy = true;
+        let occupant = engine.occupants_mut().last().unwrap();
+        occupant.has_taken(4);
         occupant.container.clone()
     };
     for container in &mut docker.0.lock().unwrap().containers {
@@ -1978,7 +1954,7 @@ async fn waiting_runners_a_pass_raised_past_the_budget_are_stopped_by_the_next_t
         ..job(5)
     };
     let queued = vec![job(1), job(2), job(3), e2e];
-    engine.repositories.get_mut("o/r").unwrap().queued = queued.clone();
+    engine.set_queued("o/r", queued.clone());
     github.0.lock().unwrap().queued = queued;
     engine.exits.stopped(ended);
     engine.turnover().await;
@@ -2015,8 +1991,8 @@ fn roomy_readings(github: &FakeGithub, store: &Store, used: u64) {
 
 /// Every running job's first minute went by.
 fn first_minute_passes(engine: &mut Engine<FakeGithub, FakeDocker>) {
-    for occupant in engine.slots.values_mut().flatten().flatten() {
-        occupant.job_started = occupant.job_started.map(|at| at - POOL_AFTER);
+    for occupant in engine.occupants_mut() {
+        occupant.age_job_start(POOL_AFTER);
     }
 }
 
@@ -2272,10 +2248,10 @@ async fn a_raised_waiting_runner_stops_only_once_the_pooled_count_is_past_the_bu
     github.0.lock().unwrap().queued = Vec::new();
     let waiting = engine
         .occupied()
-        .find(|(_, occupant)| occupant.job.is_none())
+        .find(|(_, occupant)| occupant.named_job().is_none())
         .map(|(_, occupant)| occupant.runner_name.clone())
         .unwrap();
-    engine.measured.raised.push(waiting);
+    engine.raise(waiting);
 
     // 8.25G plain of the 8G budget: past it, but the count is not.
     roomy_readings(&github, &handle.store, 512 * M);
@@ -2308,15 +2284,15 @@ async fn the_last_check_before_a_start_keeps_the_margin_its_plan_chose() {
     let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
     // 21G available: 1G past the 20G kept by the margin, under the 22G kept by the larger one.
     host_at(&handle.store, G, 21 * G, 0);
-    engine.measured.host.short = true;
+    engine.set_host_short();
     let lint = 1280 * M;
     let mut plan = engine.admitting(&mut [], None);
-    plan.remembered.short = false;
+    access::set_plan_short(&mut plan, false);
     assert!(
         engine.still_fits(&plan, "app", lint, 0),
         "1G left and 1G of credit, by the plan's margin"
     );
-    plan.remembered.short = true;
+    access::set_plan_short(&mut plan, true);
     assert!(
         !engine.still_fits(&plan, "app", lint, 0),
         "no credit by the larger margin"
@@ -2518,7 +2494,7 @@ async fn a_waiting_runner_a_restart_adopts_counts_in_full_once_it_takes_a_job() 
     roomy_readings(&github, &handle.store, 512 * M);
     let found = engine
         .occupied()
-        .filter(|(_, occupant)| occupant.job_started.is_some() && occupant.key.is_some())
+        .filter(|(_, occupant)| occupant.job_found_at().is_some() && occupant.has_key())
         .count();
     assert_eq!(found, 2, "this daemon found both jobs");
     engine.publish();
@@ -2748,7 +2724,7 @@ warm = 0
     tight_host(&github, &handle.store, 12 * G);
     engine.tick(Shutdown::No).await;
     assert!(
-        engine.reseeds.contains_key("seedy"),
+        engine.reseeding("seedy"),
         "the 1G seed starts in the room plans see"
     );
 }

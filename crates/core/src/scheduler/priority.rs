@@ -136,6 +136,27 @@ impl Waits {
     }
 }
 
+#[cfg(test)]
+impl Waits {
+    /// With a wait for memory, for tests that start from one.
+    pub(crate) fn with_memory(mut self, wait: impl Into<Option<Wait>>) -> Self {
+        self.memory = wait.into();
+        self
+    }
+
+    /// With a wait for CPU, for tests that start from one.
+    pub(crate) fn with_cpu(mut self, wait: impl Into<Option<Wait>>) -> Self {
+        self.cpu = wait.into();
+        self
+    }
+
+    /// With a barrier having served the pool, or not.
+    pub(crate) fn with_served(mut self, served: bool) -> Self {
+        self.served = served;
+        self
+    }
+}
+
 /// What the budgets would leave once every runner ended, the mirror, seed containers and shells still there; `None`,
 /// no such bound known. A job holds younger ones only for room that draining can give it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

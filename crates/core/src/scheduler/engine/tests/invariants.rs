@@ -7,6 +7,11 @@
 //!
 //! The sequences come from a seeded generator, so a failure replays: it prints its seed and the shortest sequence
 //! it shrank to. `RUNNERD_INVARIANT_CASES` runs more cases than the default, `RUNNERD_INVARIANT_SEED` one seed.
+//!
+//! A change that must not change behaviour is checked by its trace: `RUNNERD_INVARIANT_TRACE=<directory>` makes
+//! `the_trace_of_each_seed` write what each case asked of GitHub and Docker, step by step, and its history's jobs. Run it
+//! on the base commit and on the change and compare the directories; never sort them, as the order is what it shows. See
+//! `TRACE_UNSTABLE`.
 
 use std::fmt::Write as _;
 use std::panic::AssertUnwindSafe;
@@ -21,6 +26,7 @@ use crate::api::{Basis, HoldCause, JobPeak};
 use crate::config::Admission;
 use crate::observe::metrics::Events;
 use crate::scheduler::engine::clock::Clock;
+use crate::scheduler::engine::control::RunningJobs;
 use crate::scheduler::{Decision, IDLE_TIMEOUT, PRIORITY_AFTER};
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
@@ -94,6 +100,12 @@ struct Shape {
     pooled_host: bool,
     /// The `heavy` profile's memory, in gigabytes.
     heavy_memory: u64,
+    /// `[caches] mirror`'s `enabled`.
+    mirror: bool,
+    /// The `heavy` profile's `record_failures`.
+    record_failures: bool,
+    /// Whether the engine has a build cache, which it is given at its start.
+    build_cache: bool,
 }
 
 /// A pool as the config has it.
@@ -114,6 +126,9 @@ impl Shape {
         pooled_count: true,
         pooled_host: true,
         heavy_memory: 4,
+        mirror: false,
+        record_failures: false,
+        build_cache: false,
     };
 
     fn pools(&self) -> Vec<PoolShape> {
@@ -160,7 +175,7 @@ slice = "ci.slice"
 isolation = "sysbox"
 {host}
 [caches]
-mirror = {{ enabled = false, memory = "512M", cpus = 1, ttl = "168h" }}
+mirror = {{ enabled = {}, memory = "512M", cpus = 1, ttl = "168h" }}
 pnpm = {{ max_size = "5G" }}
 maven = {{ max_size = "5G" }}
 
@@ -169,8 +184,9 @@ image_stage = "app"
 cpus = 2
 memory = "{}G"
 slots = {}
+record_failures = {}
 "#,
-            self.heavy_memory, self.heavy_slots
+            self.mirror, self.heavy_memory, self.heavy_slots, self.record_failures
         );
         if let Some(slots) = self.light_slots {
             let _ = write!(
@@ -271,6 +287,8 @@ enum Change {
     PooledCount,
     PooledHost,
     HeavyMemory,
+    Mirror,
+    RecordFailures,
 }
 
 /// One thing that happens. Indexes pick among the candidates there are then, modulo their number.
@@ -361,11 +379,34 @@ enum Step {
     /// Docker says runners stopped, and a pass between ticks frees their slots and starts runners from the last
     /// tick's listings (ADR 0095).
     Pass,
+    /// A running job's runner and container go, and GitHub goes on saying the job is in progress.
+    RunnerGoes(usize),
+    /// As `RunnerGoes`, and GitHub goes on listing the job queued.
+    RunnerGoesStillListed(usize),
+    /// GitHub says a job whose runner went completed, and stops listing it.
+    OpenJobCompletes(usize),
+    /// A forced pause of `o/r` or `o/s`: their runs are cancelled.
+    ForcedPause {
+        second: bool,
+    },
+    Resume {
+        second: bool,
+    },
+    /// GitHub lists a runner of this machine's, busy, that no slot holds: its deletes answer `Busy`.
+    BusyOrphan,
+    /// The heavy profile's snapshot measures over `snapshot_max` at the next check, which no runner is in the way of.
+    OversizedSnapshot,
+    /// As `Restart`, while Docker fails the restart's first read of a container's log.
+    RestartLogsFail,
+    /// The daemon restarts with a build cache.
+    UseBuildCache,
+    /// A running job saves to the build cache while GitHub names no runner for it.
+    SaveUnnamed(usize),
 }
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
     (0..EVENTS)
-        .map(|_| match rng.below(100) {
+        .map(|_| match rng.below(112) {
             0..=17 => Step::Queue {
                 second: rng.below(3) == 0,
                 labels: match rng.below(10) {
@@ -431,6 +472,20 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             },
             83..=89 => Step::Pass,
             90..=93 => Step::Settle,
+            100..=101 => Step::RunnerGoes(rng.index()),
+            102 => Step::RunnerGoesStillListed(rng.index()),
+            103..=104 => Step::OpenJobCompletes(rng.index()),
+            105 => Step::ForcedPause {
+                second: rng.below(3) == 0,
+            },
+            106 => Step::Resume {
+                second: rng.below(3) == 0,
+            },
+            107 => Step::BusyOrphan,
+            108 => Step::OversizedSnapshot,
+            109 => Step::Reload(Change::Mirror),
+            110 => Step::Reload(Change::RecordFailures),
+            111 => Step::RestartLogsFail,
             _ => Step::Tick,
         })
         .collect()
@@ -471,6 +526,10 @@ enum Phase {
     /// A runner of this machine runs it.
     Running {
         container: String,
+    },
+    /// Its runner went and GitHub has not said it ended: `ran` as for `Done`, once it does.
+    Open {
+        ran: Option<(String, String)>,
     },
     /// Over: `ran` is the profile and repository of the runner that ran it, if one of this machine's did.
     Done {
@@ -536,6 +595,71 @@ struct Seen {
     exits_freed: usize,
     /// Jobs a runner started for that had not taken it yet.
     runners_starting: usize,
+    /// Ticks that ended with a job whose runner went and that GitHub has not said ended.
+    closing: usize,
+    /// Ticks that ended with such a job still followed as queued too.
+    closing_and_queued: usize,
+    /// Ticks that ended with a runner's build cache uploads waiting for GitHub's word.
+    ended_uploads: usize,
+    /// Ticks that ended with a cancelled run's runner waiting to exit.
+    cancelling: usize,
+    /// Ticks that ended with a busy registration no slot holds.
+    busy_orphans: usize,
+    /// Ticks that ended with a snapshot marked over its limit.
+    oversized: usize,
+    /// Ticks that ended with a leftover container Docker could not say what to do with.
+    unread: usize,
+    /// Ticks that ended with the registry mirror running.
+    mirrors: usize,
+    /// Ticks that ended with a pool's memory and CPU waits on different jobs.
+    split_waits: usize,
+    /// Ticks that ended with a capture running beside its next start's memory of where it broke.
+    captures_with_recaptures: usize,
+}
+
+impl Seen {
+    fn add(&mut self, case: Seen) {
+        self.barriers += case.barriers;
+        self.exits_freed += case.exits_freed;
+        self.runners_starting += case.runners_starting;
+        self.closing += case.closing;
+        self.closing_and_queued += case.closing_and_queued;
+        self.ended_uploads += case.ended_uploads;
+        self.cancelling += case.cancelling;
+        self.busy_orphans += case.busy_orphans;
+        self.oversized += case.oversized;
+        self.unread += case.unread;
+        self.mirrors += case.mirrors;
+        self.split_waits += case.split_waits;
+        self.captures_with_recaptures += case.captures_with_recaptures;
+    }
+
+    /// The states no generated case reached, so nothing checks them.
+    fn unreached(&self) -> Vec<&'static str> {
+        [
+            ("a barrier", self.barriers),
+            ("a runner that left without a job", self.exits_freed),
+            ("a runner started before its job", self.runners_starting),
+            ("a job whose runner went, still open", self.closing),
+            (
+                "a job closing and followed as queued",
+                self.closing_and_queued,
+            ),
+            ("uploads waiting for GitHub", self.ended_uploads),
+            ("a cancelled run's runner", self.cancelling),
+            ("a busy orphan registration", self.busy_orphans),
+            ("an oversized snapshot", self.oversized),
+            ("an unread leftover", self.unread),
+            ("the mirror running", self.mirrors),
+            (
+                "a capture beside a recapture",
+                self.captures_with_recaptures,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(state, count)| (count == 0).then_some(state))
+        .collect()
+    }
 }
 
 struct Case {
@@ -572,6 +696,17 @@ struct Case {
     /// Each busy runner as the tick or pass began: its container, repository and profile. One that ends in it proves
     /// its pool works and ends any hold.
     busy_before: Vec<(String, String, String)>,
+    /// Runners whose job ended since the engine last looked, as in `busy_before`: one that took and finished a job
+    /// between two looks was never seen busy.
+    ended_between: Vec<(String, String, String)>,
+    /// Jobs GitHub goes on listing queued after their runner went.
+    listed_after_runner: BTreeSet<u64>,
+    /// Containers of runs a forced pause cancelled: the engine may remove them, ending their jobs.
+    forced: BTreeSet<String>,
+    /// Registrations `BusyOrphan` made.
+    orphans: Vec<u64>,
+    /// What the case asked of the fakes, step by step, when traced.
+    trace: Option<Vec<String>>,
     step: usize,
 }
 
@@ -617,6 +752,11 @@ impl Case {
             capture_faults: HashMap::new(),
             exits: Vec::new(),
             busy_before: Vec::new(),
+            ended_between: Vec::new(),
+            listed_after_runner: BTreeSet::new(),
+            forced: BTreeSet::new(),
+            orphans: Vec::new(),
+            trace: None,
             step: 0,
         }
     }
@@ -628,7 +768,13 @@ impl Case {
         shape: Shape,
         clock: Clock,
     ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
-        let (mut engine, handle) = engine_with(github, docker, dir, &shape.toml());
+        let (mut engine, handle) = if shape.build_cache {
+            let (engine, handle, _cache) =
+                build_cache::engine_with_cache(github, docker, dir, &shape.toml());
+            (engine, handle)
+        } else {
+            engine_with(github, docker, dir, &shape.toml())
+        };
         engine.clock = clock;
         engine.memory_max = Some(MEMORY_MAX);
         engine.cpus = Some(SLICE_CPUS);
@@ -686,6 +832,79 @@ impl Case {
                 _ => None,
             })
             .collect()
+    }
+
+    /// When traced, records what this step asked of the fakes, once the background work it began has run.
+    async fn trace_step(&mut self, step: &str) {
+        if self.trace.is_none() {
+            return;
+        }
+        self.settle_background().await;
+        let github = std::mem::take(&mut self.github.0.lock().unwrap().trace);
+        let (docker, execs) = {
+            let mut state = self.docker.0.lock().unwrap();
+            (
+                std::mem::take(&mut state.trace),
+                std::mem::take(&mut state.exec_trace),
+            )
+        };
+        if let Some(trace) = self.trace.as_mut() {
+            trace.push(format!("-- {step}"));
+            trace.extend(github.iter().map(|call| format!("github {}", steady(call))));
+            trace.extend(docker.iter().map(|call| format!("docker {}", steady(call))));
+            trace.extend(execs.iter().map(|call| format!("capture {}", steady(call))));
+        }
+    }
+
+    /// Waits until what the step set going has stopped calling the fakes: until the calls stop growing for
+    /// `QUIET_ROUNDS` rounds in a row, each round letting blocking threads and the runtime's tasks run.
+    async fn settle_background(&mut self) {
+        let mut quiet = 0;
+        let mut last = (usize::MAX, usize::MAX);
+        while quiet < QUIET_ROUNDS {
+            self.handle.store.flush().await;
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let now = (self.github.0.lock().unwrap().trace.len(), {
+                let state = self.docker.0.lock().unwrap();
+                state.trace.len() + state.exec_trace.len()
+            });
+            quiet = if now == last { quiet + 1 } else { 0 };
+            last = now;
+        }
+    }
+
+    /// The trace, with what the case left in its history's jobs table.
+    async fn finished_trace(mut self) -> Vec<String> {
+        self.handle.store.flush().await;
+        let mut trace = self.trace.take().unwrap_or_default();
+        trace.push("-- jobs".to_owned());
+        let db = rusqlite::Connection::open(self.dir.0.join("history.db")).unwrap();
+        let mut rows = db
+            .prepare(
+                "SELECT id, repository, state, conclusion, github_completed, runner, \
+                 started_at IS NOT NULL, finished_at IS NOT NULL FROM jobs ORDER BY id",
+            )
+            .unwrap();
+        let jobs = rows
+            .query_map([], |row| {
+                Ok(format!(
+                    "{} {} {} {:?} {} {:?} {} {}",
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?.map(|name| steady(&name)),
+                    row.get::<_, bool>(6)?,
+                    row.get::<_, bool>(7)?,
+                ))
+            })
+            .unwrap();
+        trace.extend(jobs.map(Result::unwrap));
+        trace
     }
 
     fn status(&mut self) -> api::Status {
@@ -872,8 +1091,215 @@ impl Case {
             }
             Step::Tick => self.tick().await?,
             Step::Pass => self.pass().await?,
+            Step::RunnerGoes(pick) => self.runner_goes(pick, Listing::Current),
+            Step::RunnerGoesStillListed(pick) => self.runner_goes(pick, Listing::Stale),
+            Step::OpenJobCompletes(pick) => self.open_job_completes(pick),
+            Step::ForcedPause { second } => self.forced_pause(second).await,
+            Step::Resume { second } => self.resume(second).await,
+            Step::BusyOrphan => self.busy_orphan(),
+            Step::OversizedSnapshot => self.oversized_snapshot(),
+            Step::RestartLogsFail => {
+                self.docker.0.lock().unwrap().fail_logs = 1;
+                self.restart().await?;
+                // For the restart alone: a later log that cannot be read says nothing of why its runner left.
+                self.docker.0.lock().unwrap().fail_logs = 0;
+                self.tick().await?;
+                self.a_restart_takes_the_host_credit_back()?;
+            }
+            Step::UseBuildCache => {
+                self.shape.build_cache = true;
+                self.restart().await?;
+                self.tick().await?;
+                self.a_restart_takes_the_host_credit_back()?;
+            }
+            Step::SaveUnnamed(pick) => self.save_unnamed(pick).await,
         }
         self.no_removal_of_a_running_job()
+    }
+
+    /// A running job's runner and container go while GitHub goes on saying the job runs, and with `Listing::Stale`
+    /// goes on listing it queued too.
+    fn runner_goes(&mut self, pick: usize, listing: Listing) {
+        let running = self.running();
+        let Some((id, container)) = pick_from(&running, pick).cloned() else {
+            return;
+        };
+        let ran = if self.unobserved(&container) || self.capture_unread(id, &container) {
+            None
+        } else {
+            self.jobs[&id].taken_by.clone()
+        };
+        let job = self.jobs.get_mut(&id).unwrap();
+        job.phase = Phase::Open { ran };
+        let (name, labels) = (job.name, job.labels.clone());
+        let mut docker = self.docker.0.lock().unwrap();
+        let runner = docker
+            .containers
+            .iter()
+            .find(|candidate| candidate.id == container)
+            .map(|candidate| candidate.name.clone());
+        docker
+            .containers
+            .retain(|candidate| candidate.id != container);
+        drop(docker);
+        let mut github = self.github.0.lock().unwrap();
+        github
+            .runners
+            .retain(|registered| Some(&registered.name) != runner.as_ref());
+        github.queued.retain(|queued| queued.id != id);
+        if listing == Listing::Stale {
+            github.queued.push(QueuedJob {
+                id,
+                run_id: id,
+                name: name.to_owned(),
+                labels,
+                created_at: time::now_ms(),
+                ..QueuedJob::default()
+            });
+            self.listed_after_runner.insert(id);
+        }
+        self.still_listed.remove(&id);
+        drop(github);
+        self.took_job.remove(&container);
+    }
+
+    /// The jobs whose runner went and that GitHub has not said ended.
+    fn open(&self) -> Vec<u64> {
+        self.jobs
+            .iter()
+            .filter(|(_, job)| matches!(job.phase, Phase::Open { .. }))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    fn open_job_completes(&mut self, pick: usize) {
+        let open = self.open();
+        let Some(id) = pick_from(&open, pick).copied() else {
+            return;
+        };
+        let job = self.jobs.get_mut(&id).unwrap();
+        let Phase::Open { ran } = job.phase.clone() else {
+            return;
+        };
+        job.phase = Phase::Done { ran };
+        let name = job.name;
+        let mut github = self.github.0.lock().unwrap();
+        let runner = github.jobs.get(&id).and_then(|job| job.runner_name.clone());
+        let mut completed = details(id, "completed", Some("success"));
+        completed.run_id = id;
+        completed.name = name.to_owned();
+        completed.runner_name = runner;
+        github.jobs.insert(id, completed);
+        github.queued.retain(|job| job.id != id);
+        drop(github);
+        self.listed_after_runner.remove(&id);
+    }
+
+    async fn forced_pause(&mut self, second: bool) {
+        let repository = if second { "o/s" } else { "o/r" };
+        let running = self.running();
+        self.forced.extend(
+            running
+                .into_iter()
+                .filter(|(id, _)| self.jobs[id].repository == repository)
+                .map(|(_, container)| container),
+        );
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.engine
+            .command(Command::Pause {
+                target: Target::Repository(repository.to_owned()),
+                jobs: RunningJobs::Kill,
+                reply,
+            })
+            .await;
+        // Refused for a repository a reload removed.
+        let _ = answer.await;
+    }
+
+    async fn resume(&mut self, second: bool) {
+        let repository = if second { "o/s" } else { "o/r" };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.engine
+            .command(Command::Resume {
+                target: Target::Repository(repository.to_owned()),
+                reply,
+            })
+            .await;
+        let _ = answer.await;
+    }
+
+    /// The jobs of containers a forced pause's kill removed are over.
+    fn forced_jobs_end(&mut self) {
+        let gone: Vec<(u64, String)> = {
+            let docker = self.docker.0.lock().unwrap();
+            self.running()
+                .into_iter()
+                .filter(|(_, container)| {
+                    self.forced.contains(container)
+                        && !docker.containers.iter().any(|c| c.id == *container)
+                })
+                .collect()
+        };
+        for (id, container) in gone {
+            self.end_job(id, &container, "cancelled");
+            self.jobs.get_mut(&id).unwrap().phase = Phase::Done { ran: None };
+        }
+    }
+
+    fn busy_orphan(&mut self) {
+        let name = format!(
+            "{}orphan-{}",
+            self.engine.runner_prefix(),
+            self.orphans.len()
+        );
+        let mut github = self.github.0.lock().unwrap();
+        github.registrations += 1;
+        let id = 1000 + github.registrations;
+        github.runners.push(Runner {
+            id,
+            name,
+            status: "online".to_owned(),
+            busy: true,
+        });
+        drop(github);
+        self.orphans.push(id);
+    }
+
+    /// The heavy profile's snapshot is too large, which a check of the caches finds once no runner runs.
+    fn oversized_snapshot(&mut self) {
+        let volume = Names::new("runnerd").base("heavy");
+        self.docker
+            .0
+            .lock()
+            .unwrap()
+            .volume_sizes
+            .insert(volume, u64::MAX / 2);
+        self.engine.make_trim_due();
+    }
+
+    /// A running job saves to the build cache while GitHub says it is queued on no runner.
+    async fn save_unnamed(&mut self, pick: usize) {
+        let running = self.running();
+        let Some((id, container)) = pick_from(&running, pick).cloned() else {
+            return;
+        };
+        let name = self
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .find(|candidate| candidate.id == container)
+            .map(|candidate| candidate.name.clone());
+        let Some(socket) = name.and_then(|name| build_cache::socket_of(&self.docker, &name)) else {
+            return;
+        };
+        if let Some(details) = self.github.0.lock().unwrap().jobs.get_mut(&id) {
+            details.status = "queued".to_owned();
+            details.runner_name = None;
+        }
+        build_cache::save(&socket).await;
     }
 
     /// A running job's container vanishes, as when someone removes it.
@@ -1043,11 +1469,21 @@ impl Case {
         job.phase = Phase::Done {
             ran: job.taken_by.clone(),
         };
+        let by_container = self
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .find(|candidate| candidate.id == container)
+            .map(|candidate| candidate.name.clone());
         let mut github = self.github.0.lock().unwrap();
         let name = github
             .jobs
             .get(&id)
-            .and_then(|details| details.runner_name.clone());
+            .and_then(|details| details.runner_name.clone())
+            .or(by_container);
         let mut completed = details(id, "completed", Some(conclusion));
         completed.run_id = id;
         completed.name = job.name.to_owned();
@@ -1059,7 +1495,17 @@ impl Case {
         github
             .runners
             .retain(|runner| Some(&runner.name) != name.as_ref());
+        drop(github);
         self.took_job.remove(container);
+        if let Some((slot, occupant)) = self
+            .engine
+            .occupied()
+            .find(|(_, occupant)| occupant.container == container)
+        {
+            let repository = occupant.repository.clone();
+            self.ended_between
+                .push((container.to_owned(), repository, slot.profile));
+        }
     }
 
     /// An idle runner's container exits without a job: at once, after `IDLE_TIMEOUT`, or having connected.
@@ -1069,7 +1515,7 @@ impl Case {
             return;
         };
         if exit == Exit::AfterIdleTimeout {
-            for occupant in self.engine.slots.values_mut().flatten().flatten() {
+            for occupant in self.engine.occupants_mut() {
                 if occupant.container == container.id {
                     occupant.started_at -= IDLE_TIMEOUT;
                 }
@@ -1113,8 +1559,8 @@ impl Case {
             .engine
             .occupied()
             .filter(|(_, occupant)| {
-                occupant.busy
-                    || occupant.job.is_some()
+                occupant.listed_busy()
+                    || occupant.named_job().is_some()
                     || self.took_job.contains(&occupant.container)
             })
             .map(|(slot, occupant)| {
@@ -1122,17 +1568,13 @@ impl Case {
                 (occupant.container.clone(), repository, slot.profile)
             })
             .collect();
+        self.busy_before.append(&mut self.ended_between);
     }
 
     /// Whether a pool is neither held now nor in a streak of runners that left without a job.
     fn pool_is_quiet(&self, repository: &str, profile: &str) -> bool {
         self.engine
-            .repositories
-            .get(repository)
-            .and_then(|state| state.holds.get(profile))
-            .is_none_or(|hold| {
-                hold.idle_exits == 0 && hold.held.is_none_or(|held| held.until <= SystemTime::now())
-            })
+            .pool_is_quiet(repository, profile, SystemTime::now())
     }
 
     /// Invariant 8 (ADR 0104), as a tick or a pass frees slots: a pool whose runner exited without connecting is held
@@ -1151,12 +1593,7 @@ impl Case {
         self.exits = waiting;
         let now = SystemTime::now();
         for watch in &freed {
-            let Some(hold) = self
-                .engine
-                .repositories
-                .get(&watch.repository)
-                .and_then(|state| state.holds.get(&watch.profile))
-            else {
+            let Some(hold) = self.engine.pool_hold(&watch.repository, &watch.profile) else {
                 continue;
             };
             let standing = hold.held.filter(|held| held.until > now);
@@ -1211,7 +1648,7 @@ impl Case {
     fn unobserved(&self, container: &str) -> bool {
         self.engine
             .occupied()
-            .any(|(_, occupant)| occupant.container == container && !occupant.observed)
+            .any(|(_, occupant)| occupant.container == container && !occupant.is_observed())
     }
 
     /// Whether job `id`, running in `container`, may end without the engine ever reading its log: its log capture
@@ -1263,6 +1700,8 @@ impl Case {
             Change::PooledHost => shape.pooled_host = !shape.pooled_host,
             // Down and back: a restart whose inspect fails must still count a runner at the cap it started with.
             Change::HeavyMemory => shape.heavy_memory = if shape.heavy_memory == 4 { 2 } else { 4 },
+            Change::Mirror => shape.mirror = !shape.mirror,
+            Change::RecordFailures => shape.record_failures = !shape.record_failures,
         }
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.engine
@@ -1353,9 +1792,7 @@ impl Case {
     }
 
     async fn restart(&mut self) -> Result<(), Violation> {
-        for (_, capture) in std::mem::take(&mut self.engine.captures) {
-            capture.abort();
-        }
+        self.engine.abort_captures();
         self.handle.store.flush().await;
         let (engine, handle) = Case::engine(
             &self.github,
@@ -1388,7 +1825,7 @@ impl Case {
         );
         drop(docker);
         self.host = Some(reading);
-        for occupant in self.engine.slots.values_mut().flatten().flatten() {
+        for occupant in self.engine.occupants_mut() {
             occupant.started_at -= IDLE_TIMEOUT;
         }
         for watch in &mut self.exits {
@@ -1397,26 +1834,17 @@ impl Case {
             }
         }
         let past = SystemTime::now() - Duration::from_secs(1);
-        for state in self.engine.repositories.values_mut() {
-            for hold in state.holds.values_mut() {
-                if let Some(held) = hold.held.as_mut() {
-                    held.until = past;
-                }
-            }
-            for waits in state.waits.values_mut() {
-                if let Some(wait) = waits.memory.as_mut() {
-                    wait.since -= PRIORITY_AFTER;
-                }
-                if let Some(wait) = waits.cpu.as_mut() {
-                    wait.since -= PRIORITY_AFTER;
-                }
-            }
-        }
+        self.engine.expire_holds(past);
+        self.engine.age_waits(PRIORITY_AFTER);
+        self.engine.expire_cancelling();
+        self.engine.make_unread_due();
+        self.engine
+            .age_ended_uploads(crate::scheduler::engine::build_cache::ENDED_WAIT);
     }
 
     fn settle(&mut self) {
-        for occupant in self.engine.slots.values_mut().flatten().flatten() {
-            occupant.job_started = occupant.job_started.map(|at| at - POOL_AFTER);
+        for occupant in self.engine.occupants_mut() {
+            occupant.age_job_start(POOL_AFTER);
             if let Some(admission) = occupant.admission.as_mut() {
                 admission.basis = Basis::Job {
                     runs: 10,
@@ -1529,9 +1957,9 @@ impl Case {
 
     async fn tick(&mut self) -> Result<(), Violation> {
         self.unregistered_runners_exit();
-        let was_short = self.engine.measured.host.short;
+        let was_short = self.engine.host_is_short();
         let calls_before = self.docker.0.lock().unwrap().calls.len();
-        let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
+        let seeds_before: BTreeSet<String> = self.engine.seed_memories().into_keys().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
         for (id, job) in &mut self.jobs {
             match job.phase {
@@ -1596,7 +2024,34 @@ impl Case {
         if same_reading {
             self.the_band_follows_the_waiters(was_short, seeded)?;
         }
+        self.note_states();
         self.no_removal_of_a_running_job()
+    }
+
+    /// Counts the states the checks exist for, as a tick or a pass leaves them.
+    fn note_states(&mut self) {
+        let counts = self.engine.state_counts();
+        let seen = &mut self.seen;
+        seen.closing += counts.closing;
+        seen.closing_and_queued += counts.shared_with_queued;
+        seen.ended_uploads += counts.ended_uploads;
+        seen.cancelling += counts.cancelling;
+        seen.busy_orphans += counts.busy_orphans;
+        seen.oversized += counts.oversized;
+        seen.unread += counts.unread;
+        seen.split_waits += counts.split_waits;
+        seen.captures_with_recaptures += counts.captures_with_recaptures;
+        seen.mirrors += usize::from(
+            self.docker
+                .0
+                .lock()
+                .unwrap()
+                .containers
+                .iter()
+                .any(|container| {
+                    container.running && container.labels.contains_key("runnerd.mirror")
+                }),
+        );
     }
 
     /// The starts a reading taken while a runner started binds, if one was: those after it, seeds among them, which go
@@ -1641,6 +2096,7 @@ impl Case {
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
+        self.note_states();
         self.no_removal_of_a_running_job()
     }
 
@@ -1697,6 +2153,7 @@ impl Case {
                 .queued()
                 .into_iter()
                 .chain(self.cancelled_since_tick.iter().copied())
+                .chain(self.listed_after_runner.iter().copied())
                 .filter(|id| {
                     let job = &self.jobs[id];
                     job.repository == repository
@@ -1741,6 +2198,7 @@ impl Case {
             let queued = self
                 .queued()
                 .into_iter()
+                .chain(self.listed_after_runner.iter().copied())
                 .filter(|id| {
                     let job = &self.jobs[id];
                     job.repository == repository
@@ -1841,7 +2299,7 @@ impl Case {
                 .saturating_add(reading.available)
                 .saturating_sub(HOST_MARGIN);
             // The seed containers that run, at their caps; not the room a waiting one holds.
-            let seeds: u64 = self.engine.reseed_memory.values().sum();
+            let seeds: u64 = self.engine.seed_memories().values().sum();
             let credit = host_credit(budget);
             let reserved = runners_of(status)
                 .map(|(_, runner)| runner.reserved)
@@ -1902,7 +2360,7 @@ impl Case {
         for (_, occupant) in self.engine.occupied() {
             let sample = self.handle.store.latest_sample(&occupant.runner_name);
             let settled = occupant
-                .job_started
+                .job_found_at()
                 .and_then(|started| now.duration_since(started).ok())
                 .is_some_and(|ran| ran >= POOL_AFTER);
             let predicted = occupant.admission.is_some_and(|admission| {
@@ -1911,7 +2369,7 @@ impl Case {
                     Basis::Job { .. } | Basis::Profile { .. } | Basis::ProfileMax { .. }
                 )
             });
-            let known = occupant.key.is_some() && occupant.purpose.is_some();
+            let known = occupant.has_key() && occupant.was_started_here();
             let takes = self.engine.takes(occupant);
             match sample.filter(|sample| sample.at >= fresh_after) {
                 Some(sample) if settled && predicted && known => {
@@ -2038,17 +2496,17 @@ impl Case {
         was_short: bool,
         seeded: bool,
     ) -> Result<(), Violation> {
-        let remembered = self.engine.measured.host;
+        let short = self.engine.host_is_short();
         let (plan, admitting) = self.engine.plan();
         let Some(host) = admitting.host.as_ref() else {
-            if remembered.short {
+            if short {
                 let detail = "the larger margin with no reading".to_owned();
                 return violation(self, "the_band_follows_the_waiters", detail);
             }
             return Ok(());
         };
         if host.stalled {
-            if !remembered.short {
+            if !short {
                 let detail = format!("a stall without the larger margin: {:?}", host.memory);
                 return violation(self, "the_band_follows_the_waiters", detail);
             }
@@ -2069,16 +2527,16 @@ impl Case {
             .decisions
             .iter()
             .any(|decision| matches!(decision, Decision::Start { .. }));
-        if remembered.short && fits {
+        if short && fits {
             let detail = format!("{needs:?} wait, {room} is left by the plain margin");
             return violation(self, "the_band_follows_the_waiters", detail);
         }
-        if !remembered.short && !fits && !needs.is_empty() && !starts && !seeded {
+        if !short && !fits && !needs.is_empty() && !starts && !seeded {
             let detail = format!("{needs:?} wait, {room} is left, and the margin is plain");
             return violation(self, "the_band_follows_the_waiters", detail);
         }
-        self.seen.bands += usize::from(remembered.short && !needs.is_empty());
-        self.seen.released += usize::from(was_short && !remembered.short && starts);
+        self.seen.bands += usize::from(short && !needs.is_empty());
+        self.seen.released += usize::from(was_short && !short && starts);
         Ok(())
     }
 
@@ -2138,12 +2596,13 @@ impl Case {
                 );
             }
         }
-        for (name, state) in self.engine.repositories.iter().filter(|(_, s)| s.listed) {
-            let waits = state.waits.values();
+        for listed in self.engine.listed_repositories() {
+            let (name, queued) = (listed.name, listed.queued);
+            let waits = listed.waits.iter();
             let kept = waits.flat_map(|waits| waits.memory.iter().chain(&waits.cpu));
             if let Some(wait) = kept
                 .into_iter()
-                .find(|wait| !state.queued.iter().any(|job| job.id == wait.job))
+                .find(|wait| !queued.iter().any(|job| job.id == wait.job))
             {
                 return violation(
                     self,
@@ -2151,7 +2610,7 @@ impl Case {
                     format!("{name} keeps a wait for job {}, listed no more", wait.job),
                 );
             }
-            if state.queued.is_empty() && state.waits.values().any(|waits| waits.served) {
+            if queued.is_empty() && listed.waits.iter().any(|waits| waits.served) {
                 return violation(
                     self,
                     "one_barrier_and_only_for_a_queued_job",
@@ -2165,6 +2624,7 @@ impl Case {
     /// Invariant 3: runnerd never removes a container whose job still runs, whatever restarts, reloads and failed
     /// Docker calls came before.
     fn no_removal_of_a_running_job(&mut self) -> Result<(), Violation> {
+        self.forced_jobs_end();
         let calls = self.docker.calls();
         let running: BTreeMap<String, u64> = self
             .running()
@@ -2250,6 +2710,17 @@ impl Case {
         while !self.running().is_empty() {
             self.apply(Step::Finish(0)).await?;
         }
+        while !self.open().is_empty() {
+            self.open_job_completes(0);
+        }
+        // What GitHub lists of this machine that no slot holds goes when its job does.
+        let orphans = std::mem::take(&mut self.orphans);
+        self.github
+            .0
+            .lock()
+            .unwrap()
+            .runners
+            .retain(|runner| !orphans.contains(&runner.id));
         for _ in 0..6 {
             self.elapse();
             self.tick().await?;
@@ -2441,18 +2912,74 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
     })
 }
 
+/// A runner's name without the second it was started in, which is all of a trace the machine's clock decides.
+fn steady(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let run = bytes[i + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if bytes[i] == b'-' && run == 10 {
+            i += 11;
+        } else {
+            out.push(char::from(bytes[i]));
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
 async fn run(steps: &[Step]) -> Result<Seen, Violation> {
-    let mut case = Case::new();
+    run_case(steps, Case::new()).await.map(|case| case.seen)
+}
+
+async fn run_case(steps: &[Step], mut case: Case) -> Result<Case, Violation> {
     case.recover().await?;
     case.tick().await?;
+    case.trace_step("start").await;
     for (index, step) in steps.iter().enumerate() {
         case.step = index;
         case.apply(*step).await?;
+        case.trace_step(&format!("{index} {step:?}")).await;
     }
     case.step = steps.len();
     case.drain().await?;
-    Ok(case.seen)
+    case.trace_step("drained").await;
+    Ok(case)
+}
+
+/// What a generated case runs: its seed's steps, after the scenarios every so many seeds start from.
+fn steps_of(seed: u64) -> Vec<Step> {
+    let mut steps = generate(&mut Rng(seed));
+    if seed % 2 == 1 {
+        steps.splice(0..0, TWO_JOBS_SETTLED);
+    }
+    match seed % 8 {
+        0 => drop(steps.splice(0..0, SLOT_FREED_BETWEEN_TICKS)),
+        2 => drop(steps.splice(0..0, BAND_RELEASED[..BAND_STANDS].iter().copied())),
+        4 => drop(steps.splice(0..0, THREE_JOBS_SETTLED)),
+        6 => drop(steps.splice(0..0, BAND_RELEASED)),
+        _ => {}
+    }
+    if seed % 2 == 1 {
+        let rarely: &[Step] = match seed % 16 {
+            1 => &A_JOB_STAYS_OPEN,
+            3 => &A_JOB_STAYS_LISTED,
+            5 => &THE_MIRROR_RUNS,
+            7 => &A_FORCED_PAUSE,
+            9 => &A_BUSY_ORPHAN,
+            11 => &AN_OVERSIZED_SNAPSHOT,
+            13 => &AN_UNREAD_LEFTOVER,
+            _ => &UPLOADS_WAIT_FOR_GITHUB,
+        };
+        // Two ticks, for what the scenario left to end, so the slots are free for what starts next.
+        steps.splice(0..0, rarely.iter().copied().chain([Step::Tick, Step::Tick]));
+    }
+    steps
 }
 
 /// `run`, with a panic reported as the broken invariant `no_panic`, so it keeps its seed and shrinks like any other;
@@ -2619,6 +3146,100 @@ const THREE_JOBS_SETTLED: [Step; 17] = [
     Step::Tick,
 ];
 
+const HEAVY: Step = Step::Queue {
+    second: false,
+    labels: Labels::Heavy,
+};
+
+/// A sample of a host with room, or `available` gigabytes of it.
+const fn host_has(available: u64) -> Step {
+    Step::Sample {
+        percent: 10,
+        available,
+        stalled: false,
+    }
+}
+
+/// Each scenario below starts one case in sixteen, ends with nothing running, and reaches a state no chance sequence
+/// reliably does; `Seen` proves it was.
+const A_JOB_STAYS_OPEN: [Step; 7] = [
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::RunnerGoes(0),
+    Step::Tick,
+    Step::OpenJobCompletes(0),
+];
+
+const A_JOB_STAYS_LISTED: [Step; 8] = [
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::RunnerGoesStillListed(0),
+    Step::Tick,
+    Step::Tick,
+    Step::OpenJobCompletes(0),
+];
+
+const THE_MIRROR_RUNS: [Step; 7] = [
+    Step::Reload(Change::Mirror),
+    HEAVY,
+    Step::Tick,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Finish(0),
+    Step::Tick,
+];
+
+const A_FORCED_PAUSE: [Step; 9] = [
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::ForcedPause { second: false },
+    Step::Tick,
+    Step::Elapse,
+    Step::Tick,
+    Step::Resume { second: false },
+];
+
+const A_BUSY_ORPHAN: [Step; 2] = [Step::BusyOrphan, Step::Tick];
+
+const AN_OVERSIZED_SNAPSHOT: [Step; 5] = [
+    Step::OversizedSnapshot,
+    Step::Tick,
+    host_has(3),
+    Step::Tick,
+    host_has(50),
+];
+
+const AN_UNREAD_LEFTOVER: [Step; 8] = [
+    Step::Reload(Change::RecordFailures),
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::Finish(0),
+    Step::RestartLogsFail,
+    Step::Tick,
+];
+
+const UPLOADS_WAIT_FOR_GITHUB: [Step; 11] = [
+    Step::UseBuildCache,
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::SaveUnnamed(0),
+    Step::RunnerGoes(0),
+    Step::Tick,
+    Step::Elapse,
+    Step::OpenJobCompletes(0),
+    Step::Tick,
+];
+
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()
@@ -2639,24 +3260,12 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     // Cases at once: each waits now and then for its captures, which the others use.
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
-            let mut steps = generate(&mut Rng(seed));
-            if seed % 2 == 1 {
-                steps.splice(0..0, TWO_JOBS_SETTLED);
-            }
-            match seed % 8 {
-                0 => drop(steps.splice(0..0, SLOT_FREED_BETWEEN_TICKS)),
-                2 => drop(steps.splice(0..0, BAND_RELEASED[..BAND_STANDS].iter().copied())),
-                4 => drop(steps.splice(0..0, THREE_JOBS_SETTLED)),
-                6 => drop(steps.splice(0..0, BAND_RELEASED)),
-                _ => {}
-            }
+            let steps = steps_of(seed);
             (seed, attempt(&steps).await, steps)
         });
         for (seed, outcome, steps) in futures_util::future::join_all(runs).await {
             if let Ok(case) = &outcome {
-                seen.barriers += case.barriers;
-                seen.exits_freed += case.exits_freed;
-                seen.runners_starting += case.runners_starting;
+                seen.add(*case);
                 assert!(
                     seed % 8 != 2 || case.bands > 0,
                     "seed {seed} starts from a job no margin fits, so the larger margin stands"
@@ -2690,17 +3299,48 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         }
     }
     assert!(
-        seen.barriers > 0 || seeds.len() == 1,
-        "the generated runs reach a barrier, or its invariant checks nothing"
+        seen.unreached().is_empty() || seeds.len() == 1,
+        "the generated runs never reach {:?}, so nothing checks them",
+        seen.unreached()
     );
     assert!(
-        seen.exits_freed > 0 || seeds.len() == 1,
-        "the generated runs free a runner that left without a job, or its invariant checks nothing"
+        seen.split_waits > 0 || seeds.len() < RARE_STATES_AFTER,
+        "{} generated runs never leave a pool's memory and CPU waits on different jobs",
+        seeds.len()
     );
-    assert!(
-        seen.runners_starting > 0 || seeds.len() == 1,
-        "the generated runs start a runner for a job before it takes it, or its invariant checks nothing"
-    );
+}
+
+/// How many rounds without a call to a fake say that a step's background work has ended.
+const QUIET_ROUNDS: u32 = 8;
+
+/// How many cases it takes to count on chance leaving a pool's memory and CPU waits on different jobs.
+const RARE_STATES_AFTER: usize = 512;
+
+/// Seeds whose trace differed between runs of one binary, over eight runs of each of the first 64 seeds: a comparison
+/// leaves them out. Seed 21 differed once, in where a capture's end reads the runner's files.
+const TRACE_UNSTABLE: &[u64] = &[21];
+
+/// Writes each seed's trace under `RUNNERD_INVARIANT_TRACE`, for comparing two commits (see the module's documentation).
+#[tokio::test]
+async fn the_trace_of_each_seed() {
+    let Some(directory) = std::env::var_os("RUNNERD_INVARIANT_TRACE") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    for seed in (0..env_u64("RUNNERD_INVARIANT_CASES").unwrap_or(CASES))
+        .filter(|seed| !TRACE_UNSTABLE.contains(seed))
+    {
+        let mut case = Case::new();
+        case.trace = Some(Vec::new());
+        let case = run_case(&steps_of(seed), case)
+            .await
+            .unwrap_or_else(|found| {
+                panic!("seed {seed} breaks {}: {}", found.invariant, found.detail)
+            });
+        let trace = case.finished_trace().await;
+        std::fs::write(directory.join(format!("{seed}.trace")), trace.join("\n")).unwrap();
+    }
 }
 
 /// Runs `steps` as the generated test does, and returns what broke.

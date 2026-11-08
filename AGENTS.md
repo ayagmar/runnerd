@@ -15,6 +15,7 @@ cargo clippy -p runnerd-core --no-default-features --features client --all-targe
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 .github/scripts/check-boundaries.sh
+.github/scripts/check-state.py
 .github/scripts/check-wire-compat.sh
 cargo build --locked -p runnerd -p runnerd-cli && .github/scripts/check-docs-commands.sh target/debug
 cargo machete
@@ -47,6 +48,20 @@ versions.
 
 When you change a boundary (a crate's dependencies, what a module owns, an invariant), update ARCHITECTURE.md and
 add an ADR in the same change.
+
+## State
+
+[ADR 0114](docs/adr/0114-a-lifecycle-is-one-value-with-one-owner.md) says why; `check-state.py` enforces what it can.
+
+- A lifecycle is one value: an enum, or a struct whose fields are all independent, owned by one type. Data of one
+  state lives in that variant.
+- It lives in a leaf file with private fields. Only methods of the owning type, in that file, write it; an `on(event)`
+  method is a suggestion, not the rule. Readers use methods, and a condition over its state is never spelled at a call
+  site.
+- Two maps with one key are one map of a struct. A second `Option` or `bool` beside a first is a state to name.
+- The type's doc says what survives a restart and a reload.
+- Exceptions are in `MARKED` in `check-state.py`, each with its reason. What is still to fix is in
+  `.github/state-debt.txt`. Both only shrink.
 
 ## Dependencies
 

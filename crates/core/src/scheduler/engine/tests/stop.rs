@@ -445,7 +445,7 @@ async fn a_stop_leaves_a_reseed_and_a_check_of_the_caches_to_the_next_start() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert!(engine.trim.is_some(), "the caches are being checked");
-    assert!(!engine.reseeds.is_empty(), "app is reseeding");
+    assert!(!engine.no_reseeds(), "app is reseeding");
 
     handle.control.shutdown(Shutdown::Graceful);
     tokio::time::timeout(Duration::from_secs(10), engine.schedule())

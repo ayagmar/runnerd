@@ -389,10 +389,7 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
         let repositories = [
             Repository {
                 runner_cpu: Some(4000),
-                waits: Waits {
-                    cpu: waiting_since.map(|since| Wait { job: 1, since }),
-                    ..Waits::default()
-                },
+                waits: Waits::default().with_cpu(waiting_since.map(|since| Wait { job: 1, since })),
                 ..repository(
                     "o/heavy",
                     "app",
@@ -663,13 +660,10 @@ fn younger_jobs_wait_behind_one_starved_of_cpu() {
     let repositories = [
         Repository {
             runner_cpu: Some(4000),
-            waits: Waits {
-                cpu: Some(Wait {
-                    job: 1,
-                    since: long_ago,
-                }),
-                ..Waits::default()
-            },
+            waits: Waits::default().with_cpu(Some(Wait {
+                job: 1,
+                since: long_ago,
+            })),
             ..repository("o/heavy", "app", vec![job(1, &["app"])])
         },
         Repository {

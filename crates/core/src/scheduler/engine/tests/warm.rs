@@ -285,15 +285,15 @@ async fn a_job_a_pass_plans_but_leaves_to_the_tick_keeps_waiting() {
         labels: vec!["self-hosted".to_owned(), "other".to_owned()],
         ..job(7)
     };
-    engine.repositories.get_mut("o/s").unwrap().queued = vec![job_of_s];
-    engine.measured.host_waiting.0.insert(7);
+    engine.set_queued("o/s", vec![job_of_s]);
+    engine.wait_for_the_host(7);
     assert_eq!(
         engine.refill().await,
         0,
         "only a tick takes a warm runner's room"
     );
     assert!(
-        engine.measured.host_waiting.0.contains(&7),
+        engine.waits_for_the_host(7),
         "job 7 goes on waiting for the host's memory"
     );
 }
@@ -392,7 +392,7 @@ async fn warm_runners_stop_once_the_repository_is_quiet_and_do_not_come_back() {
 
     // An hour and more later: no job since, and the runner waited past IDLE_TIMEOUT.
     engine.warm.learned = Some((Learned::default(), SystemTime::now()));
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
     engine.tick(Shutdown::No).await;
@@ -606,7 +606,7 @@ async fn a_warm_runner_gone_without_a_job_after_waiting_holds_back_nothing() {
     engine.tick(Shutdown::No).await;
 
     // Docker restarted under it an hour later: its container ended, and it took no job.
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= Duration::from_secs(3600);
     }
     {
@@ -643,7 +643,8 @@ async fn runners_failing_together_hold_their_repository_back_once() {
     }
     engine.tick(Shutdown::No).await;
     assert_eq!(
-        engine.repositories["o/r"].holds["app"].failures, 1,
+        engine.pool_hold("o/r", "app").unwrap().failures,
+        1,
         "two runners of one start fail once"
     );
 }
@@ -656,7 +657,7 @@ async fn a_warm_runner_leaving_slot_1_without_a_job_needs_no_reseed() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     engine.warm.learned = Some((Learned::default(), SystemTime::now()));
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
     for _ in 0..3 {
@@ -750,7 +751,7 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
     for exits in 1..=2 {
         engine.tick(Shutdown::No).await;
         // Something kills each one after it waited a while.
-        for occupant in engine.slots.values_mut().flatten().flatten() {
+        for occupant in engine.occupants_mut() {
             occupant.started_at -= Duration::from_secs(3600);
         }
         for container in &mut docker.0.lock().unwrap().containers {
@@ -758,7 +759,7 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
         }
         engine.tick(Shutdown::No).await;
         assert_eq!(
-            engine.repositories["o/r"].holds["app"].held.is_some(),
+            engine.pool_hold("o/r", "app").unwrap().held.is_some(),
             exits == 2,
             "held after the second in a row, not the first"
         );
@@ -804,13 +805,13 @@ async fn runners_a_cancelled_run_took_with_it_hold_nothing_but_the_next_ones_lea
     assert_eq!(registered(&github.calls()).len(), 2, "both started");
     engine.tick(Shutdown::No).await;
     assert!(
-        engine.repositories["o/r"].holds["app"].held.is_none(),
+        engine.pool_hold("o/r", "app").unwrap().held.is_none(),
         "both were up when the first left: one event"
     );
 
     runners_connect_and_leave(&mut engine, &github, &docker, 2).await;
     engine.tick(Shutdown::No).await;
-    let held = engine.repositories["o/r"].holds["app"].held;
+    let held = engine.pool_hold("o/r", "app").unwrap().held;
     assert_eq!(
         held.map(|held| held.cause),
         Some(HoldCause::IdleExits),
@@ -859,7 +860,7 @@ async fn a_runner_that_never_connected_still_holds_its_pool_on_its_first_exit() 
         state.containers[0].running = false;
     }
     engine.tick(Shutdown::No).await;
-    let held = engine.repositories["o/r"].holds["app"].held;
+    let held = engine.pool_hold("o/r", "app").unwrap().held;
     assert_eq!(held.map(|held| held.cause), Some(HoldCause::NoJob));
 }
 
@@ -880,7 +881,7 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
         .or_default()
         .failures = 1;
 
-    for occupant in engine.slots.values_mut().flatten().flatten() {
+    for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
     {
@@ -893,7 +894,8 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
     engine.tick(Shutdown::No).await;
 
     assert_eq!(
-        engine.repositories["o/r"].holds["app"].failures, 0,
+        engine.pool_hold("o/r", "app").unwrap().failures,
+        0,
         "the next failure is announced as a new streak's first"
     );
 }
@@ -989,14 +991,14 @@ async fn a_warm_runner_waits_while_a_shell_holds_back_its_profiles_reseed() {
         .unwrap();
 
     // The shell mounts the snapshot, so the reseed waits for it to close, and the warm runner with it.
-    engine.reseed_due.insert("app".to_owned());
+    engine.make_reseed_due("app");
     for _ in 0..3 {
         engine.tick(Shutdown::No).await;
     }
     engine.publish();
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
     assert!(
-        engine.reseeds.is_empty(),
+        engine.no_reseeds(),
         "no reseed runs while the shell is open"
     );
 }
@@ -1013,13 +1015,13 @@ async fn a_warm_runner_keeps_waiting_for_a_due_reseed_whose_seed_would_not_fit()
 
     // The slice shrinks under the 4G seed container: stopping the warm runner would not make room for the reseed.
     engine.memory_max = Some(3 << 30);
-    engine.reseed_due.insert("app".to_owned());
+    engine.make_reseed_due("app");
     for _ in 0..3 {
         engine.tick(Shutdown::No).await;
     }
     engine.publish();
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
-    assert!(engine.reseeds.is_empty(), "the reseed waits for room");
+    assert!(engine.no_reseeds(), "the reseed waits for room");
 }
 
 #[tokio::test]
@@ -1146,7 +1148,7 @@ warm = 0
     for _ in 0..3 {
         engine.tick(Shutdown::No).await;
     }
-    assert!(engine.reseeds.contains_key("heavy"), "the seed starts");
+    assert!(engine.reseeding("heavy"), "the seed starts");
     assert_eq!(registered(&github.calls()).len(), 1, "o/t's job waits");
 }
 
@@ -1437,9 +1439,7 @@ async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
             RunStep::Take(pick) => take(&engine, &github, &docker, &handle, &mut runs, pick).await,
             RunStep::Finish(pick) => finish(&github, &docker, &mut runs, pick),
             RunStep::Restart => {
-                for (_, capture) in std::mem::take(&mut engine.captures) {
-                    capture.abort();
-                }
+                engine.abort_captures();
                 handle.store.flush().await;
                 (engine, handle) = engine_with(&github, &docker, &dir, &config);
                 engine.recover().await.map_err(|error| error.to_string())?;
@@ -1460,7 +1460,7 @@ async fn run_steps(steps: &[RunStep], burst: usize) -> Result<(), String> {
             .sum();
         let idle = engine
             .occupied()
-            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+            .filter(|(_, occupant)| !occupant.listed_busy() && occupant.named_job().is_none())
             .count();
         // One warm runner, as o/r is active, one per queued job, and per run its burst less its open jobs.
         if started && idle > 1 + queued + expected {
@@ -1483,7 +1483,7 @@ async fn take(
 ) {
     let idle: Vec<(String, String)> = engine
         .occupied()
-        .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+        .filter(|(_, occupant)| !occupant.listed_busy() && occupant.named_job().is_none())
         .map(|(_, occupant)| (occupant.container.clone(), occupant.runner_name.clone()))
         .collect();
     let queued: Vec<(usize, u64)> = runs
@@ -1649,9 +1649,8 @@ async fn held_and_announced(
         .into_iter()
         .filter(|envelope| matches!(envelope.event, api::Event::RunnerFailed { .. }))
         .count();
-    let held = engine.repositories["o/r"]
-        .holds
-        .get("app")
+    let held = engine
+        .pool_hold("o/r", "app")
         .is_some_and(|hold| hold.held.is_some());
     (held, announced)
 }
