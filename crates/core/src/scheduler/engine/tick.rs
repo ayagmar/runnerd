@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
 use super::history::{CAPTURE_DRAIN, Followed};
-use super::runners::{Collected, Removal};
+use super::runners::{Collected, Removal, StartOutcome};
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::{host, pooled};
 use crate::api::{AdmissionPolicy, Basis};
@@ -525,12 +525,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if !replacing.is_empty() || self.stopping() != Shutdown::No {
                 continue;
             }
-            // The plan's later starts counted on the room of one that no longer fits: the tick plans again.
-            if !self.apply_start(decision.clone(), &mut admitting).await {
-                break;
+            match self.apply_start(decision.clone(), &mut admitting).await {
+                Some(StartOutcome::Started) => started += 1,
+                Some(StartOutcome::Failed) => {}
+                // The plan's later starts counted on the room of one that no longer fits: the tick plans again.
+                None => break,
             }
             not_carried_out.remove(job);
-            started += 1;
         }
         self.note_pass_waits(&plan, &not_carried_out);
         // A plan's waits count whichever path ran it, and only once its starts are done.
@@ -604,14 +605,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 // GitHub registers no runner before its rate limit resets.
                 Decision::Start { .. } if self.github_limit().is_some() => {}
                 Decision::Start { .. } if applied.deferred > 0 => applied.deferred += 1,
-                start @ Decision::Start { .. } => {
-                    if self.apply_start(start, admitting).await {
+                start @ Decision::Start { .. } => match self.apply_start(start, admitting).await {
+                    Some(StartOutcome::Started) => {
                         applied.acted = true;
                         pace.started += 1;
-                    } else {
-                        applied.deferred += 1;
                     }
-                }
+                    // It changed nothing a plan again would start more by.
+                    Some(StartOutcome::Failed) => {}
+                    None => applied.deferred += 1,
+                },
             }
         }
         pace.lap(Phase::Starting, self.passes_in_tick);
@@ -637,8 +639,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Carries out a plan's `Decision::Start`, unless a warm runner it replaces is still there: that one took a job
-    /// before its stop, and the start waits for the next plan. Returns whether it went ahead.
-    async fn apply_start(&mut self, start: Decision, admitting: &mut Admitting) -> bool {
+    /// before its stop, and the start waits for the next plan. Returns what the start came to, or `None` when it waits
+    /// for the next plan.
+    async fn apply_start(
+        &mut self,
+        start: Decision,
+        admitting: &mut Admitting,
+    ) -> Option<StartOutcome> {
         let Decision::Start {
             slot,
             repository,
@@ -649,11 +656,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             behind,
         } = start
         else {
-            return true;
+            return None;
         };
         if replacing.iter().any(|slot| self.holds_runner(slot)) {
             info!("{repository}: a warm runner it would replace took a job; planning again");
-            return false;
+            return None;
         }
         // The plan's budgets are those of its start: the starts before this one are counted since, and so are what
         // ran meanwhile.
@@ -662,7 +669,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 "{repository}: its runner in {} no longer fits what runs now; planning again",
                 slot.profile
             );
-            return false;
+            return None;
         }
         if let Some(owner) = behind {
             info!(
@@ -687,8 +694,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 repository: repository.clone(),
                 profile: slot.profile.clone(),
             });
-            self.start(&slot, &repository, admission, purpose).await;
-            return true;
+            return Some(self.start(&slot, &repository, admission, purpose).await);
         };
         let held_since = self
             .repositories
@@ -698,15 +704,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
             cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
         }
-        self.start(&slot, &repository, admission, Purpose::Job)
+        let outcome = self
+            .start(&slot, &repository, admission, Purpose::Job)
             .await;
         // Only a runner in its slot ends the wait: a start that failed served nothing, even one that left a container
         // there. Its backoff takes the pool's wait; the job waits for neither a slot nor the host's memory since.
-        let in_slot = self.holds_runner(&slot);
-        if in_slot {
+        if self.holds_runner(&slot) {
             self.note_started(job);
         }
-        if in_slot
+        if outcome == StartOutcome::Started
             && !self.backing_off(&repository, &slot.profile, SystemTime::now())
             && let Some(waits) = self
                 .repositories
@@ -722,7 +728,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 );
             }
         }
-        true
+        Some(outcome)
     }
 
     /// Plans from the last poll's listings, as they stand now.

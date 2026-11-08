@@ -427,6 +427,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// or the last reseed unfinished, or could not tell, or the last check of the caches found the snapshot over
     /// `snapshot_max`.
     reseed_due: BTreeSet<String>,
+    /// The slots whose last start failed preparing its caches. Not kept over a restart.
+    prepare_failures: BTreeMap<SlotRef, runners::PrepareFailures>,
     /// Profiles whose snapshot the last check of the caches measured over `snapshot_max`: due, and reseeded however
     /// little slot 1 changed.
     oversized: BTreeSet<String>,
@@ -618,6 +620,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             measures: BTreeMap::new(),
             measured_at: BTreeMap::new(),
             reseed_due: BTreeSet::new(),
+            prepare_failures: BTreeMap::new(),
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),
             ran: BTreeMap::new(),
