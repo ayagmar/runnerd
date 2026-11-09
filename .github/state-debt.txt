@@ -11,8 +11,6 @@ engine-lifecycle-fields 40
 # Each gets a change of its own.
 # docker_in_stop is read in five places, and pairs with Control's shutdown mode (Force plus Failed reads as Detach).
 C6 docker_in_stop
-# warm.learned: UNIX_EPOCH stands for stale.
-C6 warm.learned
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
