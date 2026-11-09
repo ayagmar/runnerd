@@ -1260,7 +1260,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     None if !runner.name.starts_with(&self.runner_prefix) => {}
                     None => match self.github.delete_runner(&repository, runner.id).await {
                         // One released here whose registration GitHub kept past its job: nothing went wrong.
-                        Ok(Deleted::Deleted) if self.ended_busy.contains_key(&runner.id) => {}
+                        Ok(Deleted::Deleted) if self.registrations.is_ended_here(runner.id) => {}
                         Ok(Deleted::Deleted) => {
                             info!(
                                 "{repository}: deleted {}, which had no container",
@@ -1270,9 +1270,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         Ok(Deleted::NotFound) => {}
                         Ok(Deleted::Busy) => {
                             left = true;
-                            if self.busy_orphans.insert(runner.id)
-                                && !self.ended_busy.contains_key(&runner.id)
-                            {
+                            if self.registrations.refused(runner.id) {
                                 warn!(
                                     "{repository}: {} has no container, but GitHub says it runs a job; \
                                      deleting it once GitHub lets go",
@@ -1287,8 +1285,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     },
                 }
             }
-            self.ended_busy
-                .retain(|id, of| *of != repository || listed.contains(id));
+            self.registrations.listed(&repository, &listed);
             if let Some(drain) = self.draining.get_mut(&repository) {
                 drain.failing_since = None;
                 if left {

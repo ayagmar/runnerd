@@ -72,6 +72,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.found.0.clone()
     }
 
+    /// Whether this engine remembers having ended `runner`.
+    pub(super) fn ended_here(&self, runner: u64) -> bool {
+        self.registrations.is_ended_here(runner)
+    }
+
     /// How many runners gone count against a job listed for `repository` without the engine knowing which.
     pub(super) fn unnamed_claims(&self, repository: &str) -> usize {
         self.claims
@@ -326,7 +331,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
                 .count(),
             ended_uploads: self.ended_uploads.len(),
             cancelling: self.cancelling.len(),
-            busy_orphans: self.busy_orphans.len(),
+            busy_orphans: self.registrations.reported(),
             oversized: self.upkeep.oversized(),
             unread: self.leftovers.unread(),
             split_waits: self

@@ -8,7 +8,7 @@
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
 //! `leftovers` (the containers still to read or remove once nothing occupies them), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
-//! profile's measures and reseeds are doing and have due), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
+//! profile's measures and reseeds are doing and have due), `registrations` (what is remembered of a registration with no slot), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
 
@@ -26,6 +26,7 @@ mod open_waits;
 mod pool_health;
 mod records;
 mod recover;
+mod registrations;
 mod runner_exit;
 mod runners;
 mod status;
@@ -53,6 +54,7 @@ use self::leftovers::Leftovers;
 use self::mirror::Mirror;
 use self::pool_health::PoolHealth;
 pub use self::records::RecordSelection;
+use self::registrations::Registrations;
 use self::upkeep::Upkeep;
 use super::{SlotRef, Waits};
 use crate::admission::Key;
@@ -492,11 +494,8 @@ pub struct Engine<G = Github, D = Docker> {
     mirror: Mirror,
     /// Until when GitHub's rate limit is used up, from the last answer that said so: no runner starts before.
     github_limited_until: Option<SystemTime>,
-    /// Runners without a container that GitHub still holds busy, already logged.
-    busy_orphans: BTreeSet<u64>,
-    /// Runners this engine released or killed, by ID, with their repository, until a listing of that repository no
-    /// longer has them: GitHub holding one busy then is no orphan to warn of.
-    ended_busy: BTreeMap<u64, String>,
+    /// What is known of the registrations with no slot.
+    registrations: Registrations,
     status: watch::Sender<api::Status>,
     /// The profiles as the last run announced them, until the first publish compares the profiles with them. Their
     /// slots are older than the `slot.changed` events clients have, so that publish announces every slot instead.
@@ -657,8 +656,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             trim: None,
             checked_at: SystemTime::now(),
             github_limited_until: None,
-            busy_orphans: BTreeSet::new(),
-            ended_busy: BTreeMap::new(),
+            registrations: Registrations::default(),
             status,
             announced_profiles: Some(announced.profiles),
             control: control.clone(),
