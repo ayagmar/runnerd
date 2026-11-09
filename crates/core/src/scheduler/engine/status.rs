@@ -172,7 +172,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .iter_listed()
             .flat_map(|(repository, state)| {
                 // Unlisted at the last tick: a failed listing or a shutdown, which the history does not follow.
-                let queued = if state.listed { &state.queued[..] } else { &[] };
+                let queued = state.listing.listed().unwrap_or_default();
                 queued
                     .iter()
                     .filter(|job| !taken.contains(&job.id))

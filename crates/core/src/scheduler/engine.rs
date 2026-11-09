@@ -7,7 +7,7 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `leftovers` (the containers still to read or remove once nothing occupies them), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
+//! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
 //! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
@@ -21,6 +21,7 @@ mod exits;
 mod history;
 mod images;
 mod leftovers;
+mod listing;
 mod mirror;
 mod open_waits;
 mod pool_health;
@@ -52,6 +53,7 @@ pub use self::control::{
 use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
 use self::leftovers::Leftovers;
+use self::listing::Listing;
 use self::mirror::Mirror;
 use self::pool_health::PoolHealth;
 use self::presence::Repositories;
@@ -65,7 +67,7 @@ use crate::buildcache::BuildCache;
 use crate::cache::{self, Names, Trimmed};
 use crate::config::Config;
 use crate::docker::{self, Docker, DockerApi};
-use crate::github::{Github, GithubApi, QueuedJob};
+use crate::github::{Github, GithubApi};
 use crate::isolation::{self, Isolation};
 use crate::observe::metrics::{self, Paths, Sampler, Tracked};
 use crate::observe::mirror::Leases;
@@ -425,9 +427,8 @@ struct Claims {
 /// A repository's state, shared by its pools but for their holds and what they wait for CPU.
 #[derive(Debug, Default)]
 struct RepositoryState {
-    queued: Vec<QueuedJob>,
-    /// Whether the last poll of its queued jobs succeeded.
-    listed: bool,
+    /// Its queued jobs as its last listing showed them.
+    listing: Listing,
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
     holds: BTreeMap<String, PoolHealth>,

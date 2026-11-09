@@ -115,24 +115,28 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn set_queued(&mut self, repository: &str, jobs: Vec<QueuedJob>) {
-        self.repositories.listed_mut(repository).unwrap().queued = jobs;
+        self.repositories
+            .listed_mut(repository)
+            .unwrap()
+            .listing
+            .replace_jobs(jobs);
     }
 
     pub(super) fn set_listed(&mut self, repository: &str, jobs: Vec<QueuedJob>) {
         let state = self.repositories.listed_mut(repository).unwrap();
-        state.queued = jobs;
-        state.listed = true;
+        state.listing.answer(jobs);
     }
 
     /// The jobs each repository whose last listing succeeded has queued, with what its pools keep.
     pub(super) fn listed_repositories(&self) -> Vec<ListedFacts<'_>> {
         self.repositories
             .iter_listed()
-            .filter(|(_, state)| state.listed)
-            .map(|(name, state)| ListedFacts {
-                name,
-                queued: &state.queued,
-                waits: state.waits.values().copied().collect(),
+            .filter_map(|(name, state)| {
+                Some(ListedFacts {
+                    name,
+                    queued: state.listing.listed()?,
+                    waits: state.waits.values().copied().collect(),
+                })
             })
             .collect()
     }

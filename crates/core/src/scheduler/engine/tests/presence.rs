@@ -28,11 +28,17 @@ fn draining(removed: &str, kept: &str) -> Repositories {
 
 /// Marks `name`'s state, so a test can tell it was kept from one made afresh.
 fn mark(repositories: &mut Repositories, name: &str) {
-    repositories.listed_mut(name).unwrap().listed = true;
+    repositories
+        .listed_mut(name)
+        .unwrap()
+        .listing
+        .answer(Vec::new());
 }
 
 fn is_marked(repositories: &Repositories, name: &str) -> bool {
-    repositories.listed(name).is_some_and(|state| state.listed)
+    repositories
+        .listed(name)
+        .is_some_and(|state| state.listing.is_listed())
 }
 
 #[test]

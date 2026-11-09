@@ -17,7 +17,7 @@ C2 captures recaptures
 C1 core Claims
 C2 closing queued_jobs
 
-# Repository state: split. Its listing, holds and waits each become one sealed value, the waits last.
+# Repository state: split. Its holds and waits each become one sealed value, the waits last; its listing is one.
 C1 core RepositoryState
 
 # Measured: split raised out (slot occupant), which seals what stays, the predictor and the log memos, with private
