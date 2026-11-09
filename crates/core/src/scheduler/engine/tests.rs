@@ -1974,11 +1974,7 @@ async fn until_state(handle: &Handle, job: u64, state: JobState) -> api::Job {
 /// the test may have paused Tokio's.
 async fn until_captures_end(engine: &Engine<FakeGithub, FakeDocker>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while !engine
-        .captures
-        .values()
-        .all(tokio::task::JoinHandle::is_finished)
-    {
+    while !engine.watches.every_capture_ended() {
         assert!(
             std::time::Instant::now() < deadline,
             "a log capture never ended"

@@ -64,7 +64,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     /// Makes `capture` the log capture of `runner`, whatever one it had.
     pub(super) fn set_capture(&mut self, runner: &str, capture: JoinHandle<Capture>) {
-        self.captures.insert(runner.to_owned(), capture);
+        self.watches.replace_capture(runner, capture);
     }
 
     /// Where a runner's capture reports the job it found.
@@ -228,9 +228,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     /// Ends every log capture, as a daemon's exit does.
     pub(super) fn abort_captures(&mut self) {
-        for (_, capture) in std::mem::take(&mut self.captures) {
-            capture.abort();
-        }
+        self.watches.abort_all();
     }
 
     /// As if every runner holding uploads ended `by` earlier.
@@ -311,9 +309,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     /// As if every broken capture last stored up to `position`, ahead of or behind what the store has.
     pub(super) fn set_recapture_resumes(&mut self, position: LogPosition) {
-        for recapture in self.recaptures.values_mut() {
-            recapture.resume_at(position);
-        }
+        self.watches.resume_every_break_at(position);
     }
 
     /// The runners' names this machine registers begin with this.
@@ -362,11 +358,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
                         .is_some_and(|(a, b)| a.job != b.job)
                 })
                 .count(),
-            captures_with_recaptures: self
-                .captures
-                .keys()
-                .filter(|runner| self.recaptures.contains_key(*runner))
-                .count(),
+            captures_with_recaptures: self.watches.live_after_breaks(),
         }
     }
 }

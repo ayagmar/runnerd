@@ -249,7 +249,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         occupant: &Occupant,
     ) -> impl Future<Output = Collected> + Send + 'static {
         self.take_found();
-        let capture = self.captures.remove(&occupant.runner_name);
+        let capture = self.watches.take_capture(&occupant.runner_name);
         let docker = self.docker.clone();
         let (container, runner) = (occupant.container.clone(), occupant.runner_name.clone());
         async move {
@@ -293,7 +293,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     ) -> bool {
         self.take_found();
         // A pass can reap it before `recapture` looks: what the capture left unread goes with the container.
-        if self.recaptures.remove(&occupant.runner_name).is_some() || drained.capture_unread {
+        if self.watches.end_breaks(&occupant.runner_name) || drained.capture_unread {
             self.claim_from_worker_log(occupant).await;
         }
         self.count_mirror_bytes().await;
@@ -908,7 +908,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             labels: Some(labels),
             image: Some(image),
             spec: Some(THIS_SPEC.to_owned()),
-            observed: false,
             purpose: Some(purpose),
         };
         self.place(slot, occupant, purpose, failure).await

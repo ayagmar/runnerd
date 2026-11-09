@@ -1655,9 +1655,10 @@ impl Case {
 
     /// Whether the engine has not watched `container` yet, as Docker failed every inspect of it.
     fn unobserved(&self, container: &str) -> bool {
-        self.engine
-            .occupied()
-            .any(|(_, occupant)| occupant.container == container && !occupant.is_observed())
+        self.engine.occupied().any(|(_, occupant)| {
+            occupant.container == container
+                && !self.engine.watches.is_watched(&occupant.runner_name)
+        })
     }
 
     /// Whether job `id`, running in `container`, may end without the engine ever reading its log: its log capture

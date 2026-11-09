@@ -5,13 +5,10 @@
 # a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
 # script.
 #
-engine-lifecycle-fields 25
+engine-lifecycle-fields 23
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
-
-# Watch: split. A capture and its recapture become one value per runner.
-C2 captures recaptures
 
 # Job followed: split. queued_jobs, closing and claims become one map of a job's phase.
 C1 core Claims
