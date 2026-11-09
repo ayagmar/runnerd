@@ -6339,6 +6339,7 @@ async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the
 mod access;
 mod admission;
 mod build_cache;
+mod exit;
 mod invariants;
 mod occupant;
 mod pacing;

@@ -122,4 +122,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0112](0112-no-start-and-no-hold-while-githubs-rate-limit-is-used-up.md) | No start and no hold while GitHub's rate limit is used up | Accepted |
 | [0113](0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md) | A released runner's slot does not wait for its registration's delete | Accepted |
 | [0114](0114-a-lifecycle-is-one-value-with-one-owner.md) | A lifecycle is one value with one owner | Accepted |
+| [0117](0117-a-runners-exit-is-one-verdict.md) | A runner's exit is one verdict | Accepted |
 | [0120](0120-a-job-its-runner-failed-reads-as-a-runner-fault.md) | A job its runner failed reads as a runner fault | Accepted |
