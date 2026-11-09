@@ -298,11 +298,12 @@ pub(crate) fn profile_class(status: &Status, profile: &str) -> String {
     }
 }
 
-/// The CSS class of an outcome's kind: `success`, `failure`, `running`, `queued` or `neutral`.
+/// The CSS class of an outcome's kind: `success`, `failure`, `warn`, `running`, `queued` or `neutral`.
 pub(crate) fn outcome_kind_class(kind: api::OutcomeKind) -> &'static str {
     match kind {
         api::OutcomeKind::Succeeded => "success",
         api::OutcomeKind::Failed => "failure",
+        api::OutcomeKind::RunnerFault => "warn",
         api::OutcomeKind::Running => "running",
         api::OutcomeKind::Waiting => "queued",
         api::OutcomeKind::Ended => "neutral",

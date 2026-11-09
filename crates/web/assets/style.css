@@ -1532,6 +1532,7 @@ dl.health-figures {
 .run-time .ran { min-height: 2px; background: var(--muted); }
 .run-time .ran.success { background: var(--memory); }
 .run-time .ran.failure { background: var(--failure-ink); }
+.run-time .ran.warn { background: var(--wait); }
 .run-time .ran.running { background: var(--cpu); }
 .run-time .waited { background: var(--wait); }
 .run-peak { border-top: 1px solid var(--line); }

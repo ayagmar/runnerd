@@ -302,6 +302,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             bytes: lines.iter().map(|line| line.len() as u64 + 1).sum(),
             truncated: false,
         },
+        runner_fault: false,
     };
     (
         Job {

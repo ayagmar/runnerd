@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use super::{banner, expired, failed, listed, make_room, secrets_left};
+use super::{banner, expired, failed, listed, make_room, runner_fault, secrets_left};
 use crate::api::{self, RecordRemoval};
 use crate::config::{ByteSize, Records};
 use crate::testdir::TestDir;
@@ -473,4 +473,158 @@ fn a_shell_shows_another_step_when_asked() {
     );
     let text = banner(&failed_job(), &log(), Some(9));
     assert!(text.contains("The job has no such step."), "{text}");
+}
+
+/// A step as the runner logs it: its group, with the script's lines, then what it printed.
+fn logged(command: &str, header: &[&str], output: &[&str]) -> Vec<String> {
+    let stamp = |text: &str| format!("2026-11-09T00:16:00.1Z {text}");
+    let mut lines = vec![stamp(&format!("##[group]Run {command}"))];
+    lines.extend(header.iter().map(|line| stamp(line)));
+    lines.push(stamp("##[endgroup]"));
+    lines.extend(output.iter().map(|line| stamp(line)));
+    lines
+}
+
+/// A job with steps `(command, conclusion)`, named as GitHub names a script step.
+fn job_of(steps: &[(&str, &str)]) -> api::Job {
+    let mut job = failed_job();
+    job.steps = vec![step(1, "Set up job", "success")];
+    for (number, (command, conclusion)) in (2..).zip(steps) {
+        job.steps
+            .push(step(number, &format!("Run {command}"), conclusion));
+    }
+    job
+}
+
+const ERROR: &str = "##[error]Process completed with exit code 1.";
+const DENIED: &str = "mount: /mnt/data: permission denied";
+
+/// What fretboard's runners logged when Sysbox lost their seccomp listener or failed an injection (jobs
+/// 42539128682, 42331166731 and 42492465395).
+const FAULTS: [&str; 4] = [
+    "error during container init: error mounting \"cgroup\" to rootfs at \"/sys/fs/cgroup\": mount src=cgroup, dst=/sys/fs/cgroup, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: function not implemented",
+    "error setting cgroup config for procHooks process: openat2 /sys/fs/cgroup/docker/33152f90/cgroup.controllers: function not implemented",
+    "failed to extract layer sha256:4115682a: failed to unmount /state/docker/containerd/daemon/tmpmounts/containerd-mount2793291316: function not implemented",
+    "\u{1b}[31mopen sysctl net.ipv4.ip_unprivileged_port_start file: unsafe procfs detected: openat2 /proc/./sys/net/ipv4/ip_unprivileged_port_start: invalid argument\u{1b}[0m",
+];
+
+/// Whether `./gradlew check`, the failing step after a passing `checkout`, is the runner's fault for what it printed.
+fn fault_in_output(output: &[&str]) -> bool {
+    let job = job_of(&[
+        ("actions/checkout@v7", "success"),
+        ("./gradlew check", "failure"),
+    ]);
+    let mut log = logged(
+        "actions/checkout@v7",
+        &["with:", "  fetch-depth: 1"],
+        &["Syncing"],
+    );
+    log.extend(logged("./gradlew check", &["shell: bash"], output));
+    runner_fault(&job, &log)
+}
+
+#[test]
+fn a_failing_step_that_logged_sysboxs_lost_listener_or_failed_injection_is_the_runners_fault() {
+    for fault in FAULTS {
+        assert!(fault_in_output(&[fault, ERROR]), "{fault}");
+    }
+    // As glibc's strerror writes it, capitalised.
+    assert!(fault_in_output(&[
+        "umount: /x: Function not implemented",
+        ERROR
+    ]));
+}
+
+#[test]
+fn another_failure_in_the_failing_step_is_the_codes_whatever_it_looks_like() {
+    let misread: Vec<&str> = [
+        // `ENOSYS` from a call that is not a mount, umount or openat2.
+        "Error: ENOSYS: function not implemented, copyfile 'a.txt' -> 'b.txt'",
+        // A mount refused for another reason, and an unsafe procfs that is not an invalid argument.
+        DENIED,
+        "unsafe procfs detected: openat2 /proc/self/fd: operation not permitted",
+        // A line about a mount that is not an error.
+        "mounting the volume took 3s",
+        // `mount` inside a repository's name, a hook's name and a file's.
+        "Error: ENOSYS: function not implemented, copyfile '/home/runner/work/amount-api/amount-api/a.txt' -> 'b.txt'",
+        "[Vue warn]: Error in mounted hook: \"Error: Function not implemented.\"",
+        "src/paramount.c:12: error: function not implemented",
+        // A path or a name that is `mount` itself.
+        "Error: ENOSYS: function not implemented, copyfile '/home/runner/work/mount-api/mount-api/a.txt' -> 'b.txt'",
+        "src/mount.c:12: error: function not implemented",
+        "FAIL test_mount: function not implemented",
+    ]
+    .into_iter()
+    .filter(|output| fault_in_output(&[output, ERROR]))
+    .collect();
+    assert_eq!(misread, Vec::<&str>::new(), "read as the runner's fault");
+}
+
+#[test]
+fn the_steps_own_script_and_environment_are_not_what_it_printed() {
+    let job = job_of(&[("grep -q 'mount.*function not implemented' out", "failure")]);
+    let script = [
+        "shell: /usr/bin/bash -e {0}",
+        "grep -q 'mount.*function not implemented' out && echo sysbox",
+        "env:",
+        "  RETRY_ON: umount: function not implemented",
+    ];
+    let log = logged(
+        "grep -q 'mount.*function not implemented' out",
+        &script,
+        &["assertion failed: 1 == 2", ERROR],
+    );
+    assert!(
+        !runner_fault(&job, &log),
+        "the title, the script and the environment are not output"
+    );
+}
+
+#[test]
+fn only_the_step_that_failed_is_read() {
+    let signature = FAULTS[1];
+    let assertion = ["assertion failed: 1 == 2", ERROR];
+    let tests = |log: &mut Vec<String>| log.extend(logged("cargo test", &[], &assertion));
+
+    // A step allowed to fail printed it, and the tests failed.
+    let job = job_of(&[("./optional", "success"), ("cargo test", "failure")]);
+    let mut log = logged("./optional", &[], &[signature, ERROR]);
+    tests(&mut log);
+    assert!(!runner_fault(&job, &log), "a step that did not fail");
+
+    // A passing step printed it with an annotation, and the tests failed.
+    let job = job_of(&[("./lint", "success"), ("cargo test", "failure")]);
+    let mut log = logged("./lint", &[], &[signature, "##[error]lint found a problem"]);
+    tests(&mut log);
+    assert!(!runner_fault(&job, &log), "a passing step's annotation");
+
+    // The tests failed, and a post step printed it after.
+    let job = job_of(&[("cargo test", "failure")]);
+    let mut log = logged("cargo test", &[], &assertion);
+    log.push("2026-11-09T00:17:00.0Z Post job cleanup.".to_owned());
+    log.push(format!("2026-11-09T00:17:00.1Z {signature}"));
+    assert!(
+        !runner_fault(&job, &log),
+        "a post step is not the failing step"
+    );
+
+    // The failing step's own fault, though it prints a `::group::Run …` line afterwards.
+    let job = job_of(&[("cargo test", "failure")]);
+    let log = logged(
+        "cargo test",
+        &[],
+        &[signature, "##[group]Run integration", ERROR],
+    );
+    assert!(runner_fault(&job, &log), "the fault came before the group");
+
+    // Named by its author, so found by the exit code it ended with.
+    let mut job = job_of(&[("cargo test", "failure")]);
+    job.steps[1].name = "Integration tests".to_owned();
+    let log = logged("cargo test", &[], &[signature, ERROR]);
+    assert!(runner_fault(&job, &log), "a step named by its author");
+
+    // No step failed: nothing to read, whatever the log has.
+    let job = job_of(&[("cargo test", "success")]);
+    let log = logged("cargo test", &[], &[signature]);
+    assert!(!runner_fault(&job, &log), "no failed step");
 }

@@ -74,6 +74,12 @@ pub struct JobSummary {
     pub metrics: JobMetrics,
     /// How much of its log is stored.
     pub log: LogSummary,
+    /// Whether the runner failed it rather than its code (`record::runner_fault`): Sysbox lost the runner's seccomp
+    /// listener, so what its failed step printed has `function not implemented` on a mount, umount or openat2, or
+    /// `unsafe procfs detected` with `invalid argument`. Read from the log once the record is final; false for a job
+    /// that has not concluded failed, and in records from before it was kept.
+    #[serde(default)]
+    pub runner_fault: bool,
 }
 
 /// `GET /v1/jobs/{id}`: a job with its steps.

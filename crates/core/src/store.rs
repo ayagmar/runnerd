@@ -60,6 +60,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
          ALTER TABLE runners ADD COLUMN purpose TEXT;\n\
          ALTER TABLE runners ADD COLUMN stopped_for TEXT;",
     ),
+    (
+        20,
+        "ALTER TABLE jobs ADD COLUMN runner_fault INTEGER NOT NULL DEFAULT 0;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.

@@ -53,7 +53,10 @@ CREATE TABLE jobs (
     -- When runnerd first listed it queued (ADR 0092): its first listing's answer, kept across later listings and
     -- restarts. NULL for a job no listing showed queued, such as one a warm runner took first, and in rows from
     -- before schema 19.
-    seen_at INTEGER
+    seen_at INTEGER,
+    -- Whether the runner failed the job rather than its code (ADR 0120): read from its log once the record is final.
+    -- 0 in rows from before schema 20.
+    runner_fault INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

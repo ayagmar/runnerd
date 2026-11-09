@@ -16,6 +16,9 @@ pub enum OutcomeKind {
     Succeeded,
     /// It failed.
     Failed,
+    /// It failed because the runner failed it, not its code: a job read as `runner fault` (`JobSummary::runner_fault`).
+    /// Only a job's outcome has it.
+    RunnerFault,
     /// It is under way.
     Running,
     /// It has not begun: waiting for a runner, or a step not reached yet.
@@ -71,8 +74,9 @@ impl JobSummary {
         }
     }
 
-    /// Its outcome: where it is while it can change, then how it ended. Its kind is [`OutcomeKind::Failed`] exactly
-    /// when it [failed](JobSummary::is_failure). A job that left the queue without starting, as one a newer push
+    /// Its outcome: where it is while it can change, then how it ended. Its kind is [`OutcomeKind::Failed`] or
+    /// [`OutcomeKind::RunnerFault`] exactly when it [failed](JobSummary::is_failure); a job that concluded failed and
+    /// that the runner failed reads `runner fault` (`runner_fault`) and counts as failed all the same. A job that left the queue without starting, as one a newer push
     /// cancelled, did not run elsewhere: it reads `cancelled in queue`, or as it concluded.
     pub fn outcome(&self) -> Outcome {
         let started = self.timeline.started_at.is_some();
@@ -89,6 +93,11 @@ impl JobSummary {
             },
             (JobState::Elsewhere, _) => Outcome::new("elsewhere", OutcomeKind::Ended),
             (JobState::Completed, None) => Outcome::new("completed", OutcomeKind::Ended),
+            (JobState::Completed, Some(conclusion))
+                if self.runner_fault && failed_conclusion(conclusion) =>
+            {
+                Outcome::new("runner fault", OutcomeKind::RunnerFault)
+            }
             (JobState::Completed, Some(conclusion)) => Outcome::concluded(conclusion),
         }
     }

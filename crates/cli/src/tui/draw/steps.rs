@@ -112,7 +112,7 @@ pub(super) fn step_line(
         .min(bar_width.saturating_sub(offset));
     let style = match step.outcome().kind {
         api::OutcomeKind::Succeeded => theme.memory(),
-        api::OutcomeKind::Failed => theme.tone(Tone::Bad),
+        api::OutcomeKind::Failed | api::OutcomeKind::RunnerFault => theme.tone(Tone::Bad),
         api::OutcomeKind::Running => theme.cpu(),
         api::OutcomeKind::Waiting | api::OutcomeKind::Ended => theme.dim(),
     };

@@ -1226,6 +1226,7 @@ mod tests {
                 timeline: Timeline::default(),
                 metrics: JobMetrics::default(),
                 log: LogSummary::default(),
+                runner_fault: false,
             },
             steps: Vec::new(),
             record: None,

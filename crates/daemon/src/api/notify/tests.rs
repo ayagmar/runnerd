@@ -151,6 +151,7 @@ fn finished(id: u64, state: JobState, conclusion: Option<&str>) -> Event {
             timeline: Timeline::default(),
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
+            runner_fault: false,
         },
     }
 }

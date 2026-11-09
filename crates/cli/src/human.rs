@@ -161,7 +161,9 @@ pub(crate) fn outcome_tone(kind: api::OutcomeKind) -> Tone {
     match kind {
         api::OutcomeKind::Succeeded => Tone::Good,
         api::OutcomeKind::Failed => Tone::Bad,
-        api::OutcomeKind::Running | api::OutcomeKind::Waiting => Tone::Busy,
+        api::OutcomeKind::RunnerFault | api::OutcomeKind::Running | api::OutcomeKind::Waiting => {
+            Tone::Busy
+        }
         api::OutcomeKind::Ended => Tone::Dim,
     }
 }
@@ -334,7 +336,7 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
 fn step_mark(step: &Step) -> (String, Tone) {
     match step.outcome().kind {
         api::OutcomeKind::Succeeded => cell("✓", Tone::Good),
-        api::OutcomeKind::Failed => cell("✗", Tone::Bad),
+        api::OutcomeKind::Failed | api::OutcomeKind::RunnerFault => cell("✗", Tone::Bad),
         api::OutcomeKind::Running => cell("●", Tone::Busy),
         api::OutcomeKind::Waiting => cell("○", Tone::Dim),
         api::OutcomeKind::Ended => cell("-", Tone::Dim),
@@ -497,7 +499,9 @@ fn steps(steps: &[Step], now: u64, paint: Paint) -> String {
             let outcome = step.outcome();
             // The mark says success, running and waiting; the word says how any other step ended.
             let note = match outcome.kind {
-                api::OutcomeKind::Failed | api::OutcomeKind::Ended => outcome.label.into_owned(),
+                api::OutcomeKind::Failed
+                | api::OutcomeKind::RunnerFault
+                | api::OutcomeKind::Ended => outcome.label.into_owned(),
                 api::OutcomeKind::Succeeded
                 | api::OutcomeKind::Running
                 | api::OutcomeKind::Waiting => String::new(),

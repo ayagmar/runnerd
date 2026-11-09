@@ -155,8 +155,8 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         );
         assert!(html.contains(&reason), "{reason}");
     }
-    // The latest eight jobs, the two running ones among them: all but the oldest two finished ones.
-    let latest = &facts.rows[..facts.rows.len() - 2];
+    // The latest eight jobs, the two running ones among them: all but the oldest three finished ones.
+    let latest = &facts.rows[..facts.rows.len() - 3];
     assert_rows(&html, latest, false);
 }
 

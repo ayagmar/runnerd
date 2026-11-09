@@ -324,6 +324,104 @@ fn completed_in_window(
     store.runner_removed(runner, ms(since + 310));
 }
 
+/// A job a runner took and finished with `conclusion`, `steps` `(name, conclusion)` and `log`, its runner removed
+/// last, as a job ends.
+async fn finished_with_log(
+    store: &Store,
+    id: u64,
+    conclusion: &str,
+    steps: &[(&str, &str)],
+    log: &[&str],
+) {
+    let runner = format!("r{id}");
+    store.queued("o/r", &queued(id), crate::time::now_ms());
+    store.runner_started(self::runner(&runner, 1_000_100));
+    store.claimed(id, 10, &runner, 1_000_200);
+    store
+        .log(
+            id,
+            log.iter().map(|line| (*line).to_owned()).collect(),
+            LogPosition { page: 1, offset: 0 },
+            u64::MAX,
+        )
+        .await;
+    store.details(crate::github::JobDetails {
+        id,
+        run_id: 10,
+        run_attempt: 1,
+        name: format!("job {id}"),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some(conclusion.to_owned()),
+        started_at: None,
+        completed_at: None,
+        runner_name: Some(runner.clone()),
+        steps: steps
+            .iter()
+            .zip(1..)
+            .map(|((name, conclusion), number)| crate::github::JobStep {
+                number,
+                name: (*name).to_owned(),
+                status: "completed".to_owned(),
+                conclusion: Some((*conclusion).to_owned()),
+                started_at: None,
+                completed_at: None,
+            })
+            .collect(),
+    });
+    store.runner_removed(&runner, 1_000_300);
+}
+
+#[tokio::test]
+async fn a_failed_job_whose_failed_step_shows_sysboxs_lost_listener_reads_as_a_runner_fault_once_it_closes()
+ {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let steps = [
+        ("Set up job", "success"),
+        ("Run ./gradlew check", "failure"),
+    ];
+    let step = "2026-11-09T00:16:00.1Z ##[group]Run ./gradlew check";
+    let end = "2026-11-09T00:16:00.1Z ##[endgroup]";
+    let fault = "2026-11-09T00:16:02.8Z error setting cgroup config for procHooks process: openat2 /sys/fs/cgroup/docker/33152f90/cgroup.controllers: function not implemented";
+    let near_miss = "2026-11-09T00:16:02.8Z Error: ENOSYS: function not implemented, copyfile '/home/runner/work/amount-api/a.txt' -> 'b.txt'";
+    let error = "2026-11-09T00:16:10.8Z ##[error]Process completed with exit code 1.";
+    finished_with_log(&store, 1, "failure", &steps, &[step, end, fault, error]).await;
+    finished_with_log(&store, 2, "failure", &steps, &[step, end, near_miss, error]).await;
+    // Cancelled, as when the run was: not a failure of anything.
+    let cancelled = [
+        ("Set up job", "success"),
+        ("Run ./gradlew check", "cancelled"),
+    ];
+    finished_with_log(
+        &store,
+        3,
+        "cancelled",
+        &cancelled,
+        &[step, end, fault, error],
+    )
+    .await;
+    store.flush().await;
+    let outcome = |id| {
+        let store = store.clone();
+        async move {
+            let job = store.job(id).await.unwrap().unwrap().summary;
+            (job.runner_fault, job.outcome().label.into_owned())
+        }
+    };
+    assert_eq!(outcome(1).await, (true, "runner fault".to_owned()));
+    assert_eq!(outcome(2).await, (false, "failure".to_owned()));
+    assert_eq!(outcome(3).await, (false, "cancelled".to_owned()));
+    assert!(
+        store.job(1).await.unwrap().unwrap().summary.is_failure(),
+        "a runner fault still counts as a failure in the stats"
+    );
+}
+
 #[tokio::test]
 async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_it_was_queued() {
     let dir = TestDir::new("store");

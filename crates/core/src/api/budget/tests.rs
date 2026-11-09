@@ -426,6 +426,7 @@ fn job(memory_cap: Option<u64>, cpu_cap: Option<u64>) -> Job {
             timeline: Timeline::default(),
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
+            runner_fault: false,
         },
         steps: vec![],
         record: None,
