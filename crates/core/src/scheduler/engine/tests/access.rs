@@ -3,10 +3,14 @@
 
 use std::time::{Duration, SystemTime};
 
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
 use super::*;
 use crate::admission::{Predictor, host};
 use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
+use crate::scheduler::engine::history::{Capture, Found};
 use crate::scheduler::{Hold, Key, Wait, Waits};
 use crate::store::LogPosition;
 
@@ -54,6 +58,16 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         let hold = state.holds.entry(profile.to_owned()).or_default();
         hold.failures = failures;
         hold.idle_exits = idle_exits;
+    }
+
+    /// Makes `capture` the log capture of `runner`, whatever one it had.
+    pub(super) fn set_capture(&mut self, runner: &str, capture: JoinHandle<Capture>) {
+        self.captures.insert(runner.to_owned(), capture);
+    }
+
+    /// Where a runner's capture reports the job it found.
+    pub(super) fn found_sender(&self) -> mpsc::UnboundedSender<Found> {
+        self.found.0.clone()
     }
 
     /// How many runners gone count against a job listed for `repository` without the engine knowing which.

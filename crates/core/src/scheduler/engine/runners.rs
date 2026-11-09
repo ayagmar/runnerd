@@ -539,9 +539,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         else {
             return;
         };
-        let busy = occupant.engaged();
-        let what = if busy { "killing" } else { "removing idle" };
-        let exit = Exit::Killed { busy };
+        let what = if occupant.engaged() {
+            "killing"
+        } else {
+            "removing idle"
+        };
         info!("{}: {what} {}", occupant.repository, occupant.runner_name);
         if let Err(error) = self.docker.remove(&occupant.container).await
             && !is_not_found(&error)
@@ -555,6 +557,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         }
         self.end_capture(&occupant.runner_name).await;
+        // Its capture may have named its job as it ended.
+        let exit = Exit::Killed {
+            busy: self.occupant(slot).is_some_and(Occupant::engaged),
+        };
         // Responses the mirror logged since this tick's count: on a shutdown, the mirror and its log go next.
         self.count_mirror_bytes().await;
         self.note_exit(&occupant.repository, &slot.profile, &exit);
@@ -691,11 +697,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         reason.words()
                     );
                     self.end_capture(&occupant.runner_name).await;
+                    // Its capture may have named its job as it ended.
+                    let exit = Exit::RemovedIdle {
+                        busy: self.occupant(&slot).is_some_and(Occupant::engaged),
+                    };
                     self.store
                         .runner_stopped_for(&occupant.runner_name, reason.as_str());
-                    let exit = Exit::RemovedIdle {
-                        busy: occupant.engaged(),
-                    };
                     self.note_exit(&occupant.repository, &slot.profile, &exit);
                     self.forget(&occupant);
                     self.vacate(&slot, &exit);

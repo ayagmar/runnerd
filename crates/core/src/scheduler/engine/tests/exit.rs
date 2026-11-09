@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::api::HoldCause;
+use crate::scheduler::engine::history::{Capture, Found};
 use crate::scheduler::engine::runners::Removal;
 use crate::scheduler::warm::Learned;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
@@ -242,4 +243,61 @@ async fn an_adopted_runner_removed_as_idle_is_measured_but_ended_no_job() {
             claimed: 0,
         }
     );
+}
+
+/// A log capture that reports `job` only once the runner's container has gone, as one does that reads to its end.
+fn capture_names_a_job_once_its_container_went(
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    docker: &FakeDocker,
+    job: u64,
+) {
+    let occupant = engine.occupant(&first_slot()).unwrap().clone();
+    let (found, docker) = (engine.found_sender(), docker.clone());
+    let runner = occupant.runner_name.clone();
+    let capture = tokio::spawn(async move {
+        while docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .any(|container| container.id == occupant.container)
+        {
+            tokio::task::yield_now().await;
+        }
+        found.send(Found::named(runner, job)).unwrap();
+        Capture::Done
+    });
+    engine.set_capture(
+        &engine.occupant(&first_slot()).unwrap().runner_name.clone(),
+        capture,
+    );
+}
+
+/// What it ran stays in slot 1, so a forced stop that read the runner before its capture ended must still measure it.
+#[tokio::test]
+async fn a_job_named_as_a_forced_stop_ends_its_capture_counts_as_run() {
+    for kill in [true, false] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("exit-after-capture");
+        let (mut engine, _handle) = engine_with_a_started_runner(&github, &docker, &dir).await;
+        capture_names_a_job_once_its_container_went(&mut engine, &docker, 5);
+
+        if kill {
+            engine.kill(&first_slot()).await;
+        } else {
+            engine
+                .remove_idle(vec![(first_slot(), StopReason::Shutdown)])
+                .await;
+        }
+
+        assert!(
+            engine.occupant(&first_slot()).is_none(),
+            "its runner has gone (killed: {kill})"
+        );
+        assert!(
+            engine.measure_is_due("app"),
+            "slot 1 ran the job its capture named, so it is measured (killed: {kill})"
+        );
+    }
 }
