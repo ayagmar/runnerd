@@ -93,6 +93,13 @@ impl Warm {
             freshness: Freshness::ReadAt(SystemTime::now()),
         });
     }
+
+    /// As if the last read of the history were `REREAD` old.
+    pub(super) fn testing_age_read(&mut self) {
+        if let Some(read) = &mut self.read {
+            read.freshness = Freshness::ReadAt(SystemTime::now() - REREAD);
+        }
+    }
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {

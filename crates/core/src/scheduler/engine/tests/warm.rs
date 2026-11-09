@@ -404,6 +404,74 @@ async fn warm_runners_stop_once_the_repository_is_quiet_and_do_not_come_back() {
     assert_eq!(registered(&github.calls()).len(), 1, "none starts again");
 }
 
+/// The pool of `CONFIG`'s repository.
+fn app_pool() -> Pool {
+    Pool {
+        repository: "o/r".to_owned(),
+        profile: "app".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn the_history_is_read_again_once_the_last_read_is_old_and_not_before() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &warm_config());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.warm_targets()[&app_pool()],
+        0,
+        "the history is empty"
+    );
+
+    // A job the engine never saw listed, which only the history knows.
+    handle.store.queued(
+        "o/r",
+        &ci_job(1, 1, time::now_ms() - 5 * MINUTE),
+        time::now_ms(),
+    );
+    handle.store.flush().await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.warm_targets()[&app_pool()],
+        0,
+        "a read inside REREAD stands, so the history is not read every tick"
+    );
+
+    engine.warm.testing_age_read();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.warm_targets()[&app_pool()],
+        1,
+        "the read past REREAD learned the job"
+    );
+}
+
+#[tokio::test]
+async fn a_read_of_the_history_that_fails_keeps_what_was_learned() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(engine.warm_targets()[&app_pool()], 1, "o/r is active");
+
+    // The next read finds no table to read.
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute_batch("ALTER TABLE jobs RENAME TO jobs_gone")
+        .unwrap();
+    engine.warm.testing_age_read();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.warm_targets()[&app_pool()],
+        1,
+        "one failed read drops no warm runner"
+    );
+}
+
 #[tokio::test]
 async fn a_warm_runner_stops_for_its_profiles_reseed_once_slot_1_changed_reseed_at() {
     let github = FakeGithub::default();
