@@ -770,7 +770,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             | api::CacheKind::Build => self.occupied().map(|(at, _)| at).collect(),
         };
         let shared = matches!(volume.kind, api::CacheKind::Pnpm | api::CacheKind::Maven);
-        if shared && !self.records.shells.is_empty() {
+        if shared && self.records.has_shells() {
             return Err(ControlError::Conflict(format!(
                 "a shell open in a record mounts {name}; clean it once the shell exits"
             )));

@@ -863,7 +863,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// a check of the caches are not, as the next start adopts the reseed and checks the caches first.
     fn stopped(&self, mode: Shutdown) -> bool {
         let idle = self.slots.values().flatten().all(Option::is_none);
-        let recorded = self.records.recordings.is_empty();
+        let recorded = !self.records.is_recording();
         match mode {
             Shutdown::No => false,
             Shutdown::Detach => recorded,

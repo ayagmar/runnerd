@@ -197,11 +197,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn no_recordings(&self) -> bool {
-        self.records.recordings.is_empty()
+        !self.records.is_recording()
     }
 
     pub(super) fn no_shells(&self) -> bool {
-        self.records.shells.is_empty()
+        !self.records.has_shells()
     }
 
     pub(super) fn is_closing(&self, job: u64) -> bool {
