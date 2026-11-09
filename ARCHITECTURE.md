@@ -235,7 +235,9 @@ queued → slot → container → removed
    memory of each process outside the slice, never its command line
    ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
-   and the container is gone, or 15 minutes after the container is gone (`lost`).
+   and the container is gone, or 15 minutes after the container is gone (`lost`). A job that failed is then
+   read for a runner fault: `record::runner_fault` over its stored log, kept in `jobs.runner_fault`, which makes
+   its outcome `runner fault` in every client ([ADR 0120](docs/adr/0120-a-job-its-runner-failed-reads-as-a-runner-fault.md)).
 6. After a job in slot 1, `cache::measure` reads what slot 1's layers changed, read-only beside the profile's runners,
    at most every 10 minutes per profile. When that reaches `[caches] reseed_at`, the last reseed did not finish or the
    measure failed, or the caches' check measured the snapshot over `[caches] snapshot_max`, the profile is due to

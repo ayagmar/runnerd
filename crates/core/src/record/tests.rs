@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use super::{banner, expired, failed, listed, make_room, secrets_left};
+use super::{banner, expired, failed, listed, make_room, runner_fault, secrets_left};
 use crate::api::{self, RecordRemoval};
 use crate::config::{ByteSize, Records};
 use crate::testdir::TestDir;
@@ -473,4 +473,67 @@ fn a_shell_shows_another_step_when_asked() {
     );
     let text = banner(&failed_job(), &log(), Some(9));
     assert!(text.contains("The job has no such step."), "{text}");
+}
+
+/// What fretboard's runners logged when Sysbox lost their seccomp listener or failed an injection: a failing step's
+/// output, then the line that ends it.
+fn failing_step(output: &str) -> Vec<String> {
+    [
+        "2026-11-09T00:16:00.1Z ##[group]Run ./gradlew check",
+        "2026-11-09T00:16:00.1Z shell: /usr/bin/bash -e {0}",
+        "2026-11-09T00:16:00.1Z ##[endgroup]",
+        output,
+        "2026-11-09T00:16:10.8Z ##[error]Process completed with exit code 1.",
+        "2026-11-09T00:16:10.9Z Post job cleanup.",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+#[test]
+fn a_failing_step_that_logged_sysboxs_lost_listener_or_failed_injection_is_the_runners_fault() {
+    for output in [
+        // A mount (job 42539128682), a second call the same second (openat2), and an umount (job 42331166731).
+        "2026-11-09T00:16:02.8Z error during container init: error mounting \"cgroup\" to rootfs at \"/sys/fs/cgroup\": mount src=cgroup, dst=/sys/fs/cgroup, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: function not implemented",
+        "2026-11-09T00:16:02.8Z error setting cgroup config for procHooks process: openat2 /sys/fs/cgroup/docker/33152f90/cgroup.controllers: function not implemented",
+        "2026-11-07T02:52:37.1Z failed to extract layer sha256:4115682a: failed to unmount /state/docker/containerd/daemon/tmpmounts/containerd-mount2793291316: function not implemented",
+        // A failed injection (job 42492465395), coloured as a runner prints it.
+        "2026-11-08T15:03:16.9Z \u{1b}[31mopen sysctl net.ipv4.ip_unprivileged_port_start file: unsafe procfs detected: openat2 /proc/./sys/net/ipv4/ip_unprivileged_port_start: invalid argument\u{1b}[0m",
+    ] {
+        assert!(runner_fault(&failing_step(output)), "{output}");
+    }
+}
+
+#[test]
+fn other_failures_and_the_same_words_in_a_step_that_did_not_fail_are_the_codes() {
+    for output in [
+        // `ENOSYS` from a call that is not a mount, umount or openat2.
+        "2026-11-09T00:16:02.8Z Error: ENOSYS: function not implemented, copyfile 'a.txt' -> 'b.txt'",
+        // A mount that failed for another reason, and an unsafe procfs that is not an invalid argument.
+        "2026-11-09T00:16:02.8Z mount: /mnt/data: permission denied",
+        "2026-11-09T00:16:02.8Z unsafe procfs detected: openat2 /proc/self/fd: operation not permitted",
+        // A line about a mount that is not an error.
+        "2026-11-09T00:16:02.8Z mounting the volume took 3s",
+    ] {
+        assert!(!runner_fault(&failing_step(output)), "{output}");
+    }
+    let mut passed = failing_step("2026-11-09T00:16:02.8Z umount2 /mnt: function not implemented");
+    passed.remove(4);
+    assert!(
+        !runner_fault(&passed),
+        "a step without an error is not what failed the job"
+    );
+}
+
+#[test]
+fn the_signature_counts_in_the_step_that_failed_not_in_the_one_before_it() {
+    let mut log = failing_step("2026-11-09T00:16:02.8Z umount2 /mnt: function not implemented");
+    log.remove(4);
+    log.extend(failing_step(
+        "2026-11-09T00:16:20.0Z assertion failed: 1 == 2",
+    ));
+    assert!(
+        !runner_fault(&log),
+        "a passing step's output does not make the next step's failure the runner's"
+    );
 }

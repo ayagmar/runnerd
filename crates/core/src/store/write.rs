@@ -16,6 +16,7 @@ use super::{
 };
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, QueuedJob};
+use crate::record;
 use crate::sync::lock;
 use crate::time;
 
@@ -699,10 +700,26 @@ impl Writer<'_> {
                 metrics.cpu_stalled,
             ],
         )?;
+        if closed == 1 {
+            self.read_runner_fault(job)?;
+        }
         if closed == 1
             && let Some(job) = read::summary(&self.db, job)?
         {
             announced.push(Event::JobFinished { job });
+        }
+        Ok(())
+    }
+
+    /// Keeps whether a job that failed was failed by its runner (`record::runner_fault`), from its log, which is
+    /// complete once the record is final.
+    fn read_runner_fault(&self, job: u64) -> rusqlite::Result<()> {
+        let failed = read::summary(&self.db, job)?.is_some_and(|summary| {
+            summary.state == api::JobState::Completed && summary.is_failure()
+        });
+        if failed && record::runner_fault(&read::log_text(&self.db, job)?) {
+            self.db
+                .execute("UPDATE jobs SET runner_fault = 1 WHERE id = ?1", [job])?;
         }
         Ok(())
     }

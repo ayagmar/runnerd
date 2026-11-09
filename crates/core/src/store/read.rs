@@ -55,7 +55,7 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
      coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
-     j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
+     j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
     let labels: String = row.get(8)?;
@@ -121,6 +121,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             bytes: row.get(28)?,
             truncated: row.get(29)?,
         },
+        runner_fault: row.get(44)?,
     })
 }
 
@@ -453,6 +454,13 @@ pub(super) fn log_lines(
         Ok((row.get(0)?, row.get(1)?))
     })?
     .collect()
+}
+
+/// Every stored line of a job's log, in order.
+pub(super) fn log_text(db: &Connection, job: u64) -> rusqlite::Result<Vec<String>> {
+    db.prepare_cached("SELECT text FROM log_lines WHERE job = ?1 ORDER BY line")?
+        .query_map([job], |row| row.get(0))?
+        .collect()
 }
 
 pub(super) fn sizing_change(row: &Row<'_>) -> rusqlite::Result<api::SizingChange> {

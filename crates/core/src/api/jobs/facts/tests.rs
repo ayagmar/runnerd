@@ -21,6 +21,7 @@ fn job(state: JobState, conclusion: Option<&str>) -> JobSummary {
         },
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
+        runner_fault: false,
     }
 }
 
@@ -105,6 +106,42 @@ fn a_timed_out_job_failed_and_reads_timed_out() {
 }
 
 #[test]
+fn a_failed_job_its_runner_failed_reads_runner_fault_and_no_other_does() {
+    for (conclusion, fault, expected) in [
+        (
+            Some("failure"),
+            true,
+            Outcome::new("runner fault", OutcomeKind::RunnerFault),
+        ),
+        (
+            Some("timed_out"),
+            true,
+            Outcome::new("runner fault", OutcomeKind::RunnerFault),
+        ),
+        (
+            Some("failure"),
+            false,
+            Outcome::new("failure", OutcomeKind::Failed),
+        ),
+        // A job that did not fail is not a runner's fault, whatever was kept of its log.
+        (
+            Some("success"),
+            true,
+            Outcome::new("success", OutcomeKind::Succeeded),
+        ),
+        (
+            Some("cancelled"),
+            true,
+            Outcome::new("cancelled", OutcomeKind::Ended),
+        ),
+    ] {
+        let mut job = job(JobState::Completed, conclusion);
+        job.runner_fault = fault;
+        assert_eq!(job.outcome(), expected, "{conclusion:?} {fault}");
+    }
+}
+
+#[test]
 fn a_job_reads_as_failed_exactly_when_it_counts_as_failed() {
     let conclusions = [
         None,
@@ -127,7 +164,10 @@ fn a_job_reads_as_failed_exactly_when_it_counts_as_failed() {
         for conclusion in conclusions {
             let job = job(state, conclusion);
             assert_eq!(
-                job.outcome().kind == OutcomeKind::Failed,
+                matches!(
+                    job.outcome().kind,
+                    OutcomeKind::Failed | OutcomeKind::RunnerFault
+                ),
                 job.is_failure(),
                 "{state:?} {conclusion:?}"
             );

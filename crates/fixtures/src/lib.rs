@@ -1,7 +1,7 @@
 //! Daemon data every client's parity test draws, and the facts `runnerd-core` computes from it, which the dashboard,
 //! the TUI and `runnerctl` must each state as core words them (ADR 0062). The data is chosen where clients drifted
-//! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job, and one cancelled before any
-//! runner took it; an adopted job without a name;
+//! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job, one cancelled before any
+//! runner took it, and one its runner failed (`runner fault`); an adopted job without a name;
 //! a step without an end time and a cancelled one with times; a job no pool serves; a measured budget of which the
 //! host's memory leaves less free than `MemoryMax` does, and a job waiting for the host; warm and starting runners
 //! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
@@ -47,6 +47,8 @@ pub const CANCELLED: u64 = 9205;
 pub const NEVER_STARTED: u64 = 9207;
 /// A job a runner took before the daemon saw it queued, so the daemon never learnt its name.
 pub const UNNAMED: u64 = 9206;
+/// A job that concluded `failure` because its runner's Sysbox lost the seccomp listener, not because of its code.
+pub const RUNNER_FAULT: u64 = 9208;
 /// A queued job asking for a label no pool of its repository has.
 pub const NO_POOL: u64 = 9301;
 /// A queued job waiting for the host's memory, which leaves less than `MemoryMax` does.
@@ -318,6 +320,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         timeline: Timeline::default(),
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
+        runner_fault: false,
     }
 }
 
@@ -430,6 +433,18 @@ fn jobs() -> Vec<Job> {
         1800,
         Some(1700),
     );
+    let mut runner_fault = ran(
+        summary(
+            RUNNER_FAULT,
+            STOREFRONT,
+            JobState::Completed,
+            Some("failure"),
+        ),
+        1500,
+        Some(1400),
+    );
+    "image".clone_into(&mut runner_fault.name);
+    runner_fault.runner_fault = true;
     let mut timed_out = ran(
         summary(TIMED_OUT, LEDGER, JobState::Completed, Some("timed_out")),
         7180,
@@ -473,6 +488,7 @@ fn jobs() -> Vec<Job> {
         job(not_busy),
         job(unnamed),
         job(cancelled),
+        job(runner_fault),
         Job {
             steps: vec![
                 step(1, "Set up job", Some("success"), 7180, Some(7177)),
@@ -1311,6 +1327,7 @@ mod tests {
         assert_eq!(label(STARTUP_FAILURE), Some("startup failure"));
         assert_eq!(label(TIMED_OUT), Some("timed out"));
         assert_eq!(label(CANCELLED), Some("cancelled"));
+        assert_eq!(label(RUNNER_FAULT), Some("runner fault"));
         assert!(
             facts.rows.iter().any(|row| row.title == "job 9206"),
             "the unnamed job is named by its ID"

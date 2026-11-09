@@ -107,6 +107,7 @@ fn queued_summary(job: &QueuedJob) -> JobSummary {
         },
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
+        runner_fault: false,
     }
 }
 

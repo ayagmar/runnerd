@@ -501,6 +501,7 @@ pub(crate) fn job_summary() -> JobSummary {
             bytes: 90_000,
             truncated: false,
         },
+        runner_fault: true,
     }
 }
 

@@ -1,5 +1,6 @@
 //! Records of failed jobs: which runner containers may be kept, the files a record must never hold, which records go
-//! to keep within `[records]`, and what a shell in a record shows first. Pure functions: the engine
+//! to keep within `[records]`, what a shell in a record shows first, and whether a failed job's log says its runner
+//! failed it (`runner_fault`). Pure functions: the engine
 //! (`scheduler::engine`) commits, lists and removes the images, and the daemon serves the shell.
 //!
 //! A record is the runner container's own layer, committed as the image `runnerd-record:<job>` once the runner
@@ -326,6 +327,36 @@ fn section_of<'log>(
         })
         .position(|candidate| candidate.number == step.number)?;
     sections.get(place)
+}
+
+/// Whether a failed job's log says its runner failed it, not its code: in a step that ended in an error
+/// (`##[error]…`), a line with `function not implemented` on a mount, umount or openat2, or Sysbox's `unsafe procfs
+/// detected … invalid argument`. Sysbox answers a trapped call with `ENOSYS` once it lost the runner's seccomp
+/// listener, and with `EINVAL` when a descriptor it injected was interrupted; no retry in the same runner helps, and
+/// the job's code is not at fault. A step is what follows a top-level `##[group]Run …` line, so a line in a step that
+/// did not fail, such as a test's own output, does not count. `log` is the stored lines, as `banner` reads them.
+pub fn runner_fault(log: &[String]) -> bool {
+    let (mut signature, mut errored) = (false, false);
+    for line in log {
+        let text = plain(line);
+        if text.starts_with("##[group]Run ") {
+            if signature && errored {
+                return true;
+            }
+            (signature, errored) = (false, false);
+        }
+        errored |= text.starts_with("##[error]");
+        signature |= sysbox_fault(&text);
+    }
+    signature && errored
+}
+
+/// Whether a log line is what a runner whose Sysbox lost its seccomp listener, or failed an injection, prints.
+fn sysbox_fault(text: &str) -> bool {
+    let text = text.to_lowercase();
+    (text.contains("function not implemented")
+        && (text.contains("mount") || text.contains("openat2")))
+        || (text.contains("unsafe procfs detected") && text.contains("invalid argument"))
 }
 
 /// A stored log line without its timestamp and colour codes.

@@ -138,6 +138,7 @@ fn summary(id: u64, state: JobState) -> JobSummary {
         },
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
+        runner_fault: false,
     }
 }
 
