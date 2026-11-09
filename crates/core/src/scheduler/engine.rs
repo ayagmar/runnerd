@@ -7,8 +7,8 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `mirror` (whether
-//! the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
+//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
+//! profile's measures and reseeds are doing and have due), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
 
@@ -28,6 +28,7 @@ mod runners;
 mod status;
 mod stop;
 mod tick;
+mod upkeep;
 mod warm;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +48,7 @@ use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
 use self::mirror::Mirror;
 pub use self::records::RecordSelection;
+use self::upkeep::Upkeep;
 use super::{Hold, SlotRef, Waits};
 use crate::admission::Key;
 use crate::api;
@@ -468,13 +470,10 @@ pub struct Engine<G = Github, D = Docker> {
     cpus: Option<u64>,
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
     repositories: BTreeMap<String, RepositoryState>,
-    reseeds: BTreeMap<String, JoinHandle<Result<String, docker::Error>>>,
+    /// What each profile's measures and reseeds are doing and have due.
+    upkeep: Upkeep,
     /// The pulled images of the config's profiles, and the removal of those no profile runs.
     images: Images,
-    /// The memory cap each running reseed's container started with, which a reload does not change.
-    reseed_memory: BTreeMap<String, u64>,
-    /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
-    reseed_requested: BTreeSet<String>,
     /// Repositories a reload removed, polled until none of this machine's runners is registered on them.
     draining: BTreeMap<String, tick::Drain>,
     /// The runner and shell containers an earlier run left that recovery failed to remove, by ID with their names:
@@ -485,24 +484,8 @@ pub struct Engine<G = Github, D = Docker> {
     unread: Vec<recover::Left>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
-    /// Profiles whose slot 1 ran a job since their last measure or reseed (ADR 0094).
-    measure_due: BTreeSet<String>,
-    /// The measures of slot 1 running, by profile.
-    measures: BTreeMap<String, JoinHandle<Result<cache::Measured, docker::Error>>>,
-    /// When each profile's last measure started: the next waits `MEASURE_EVERY`.
-    measured_at: BTreeMap<String, tokio::time::Instant>,
-    /// Profiles whose upkeep reseeds once their runners are idle: a measure found slot 1 changed `reseed_at` or more,
-    /// or the last reseed unfinished, or could not tell, or the last check of the caches found the snapshot over
-    /// `snapshot_max`.
-    reseed_due: BTreeSet<String>,
     /// The slots whose last start failed preparing its caches. Not kept over a restart.
     prepare_failures: BTreeMap<SlotRef, runners::PrepareFailures>,
-    /// Profiles whose snapshot the last check of the caches measured over `snapshot_max`: due, and reseeded however
-    /// little slot 1 changed.
-    oversized: BTreeSet<String>,
-    /// When each profile's last reseed finished: a check of the caches that started before then measured the old
-    /// snapshot.
-    reseeded_at: BTreeMap<String, SystemTime>,
     /// The job each slot ran last, which left its caches in the slot's layer: what `plan` matches queued jobs to
     /// (ADR 0080). A slot is absent once its last job is not known, or a reseed dropped its layer.
     ran: BTreeMap<SlotRef, Key>,
@@ -672,21 +655,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cpus,
             slots,
             repositories,
-            reseeds: BTreeMap::new(),
+            upkeep: Upkeep::default(),
             images: Images::new(),
-            reseed_memory: BTreeMap::new(),
-            reseed_requested: BTreeSet::new(),
             retired: BTreeMap::new(),
             draining: BTreeMap::new(),
             leftover: BTreeMap::new(),
             unread: Vec::new(),
-            measure_due: BTreeSet::new(),
-            measures: BTreeMap::new(),
-            measured_at: BTreeMap::new(),
-            reseed_due: BTreeSet::new(),
             prepare_failures: BTreeMap::new(),
-            oversized: BTreeSet::new(),
-            reseeded_at: BTreeMap::new(),
             ran: BTreeMap::new(),
             docker_disk,
             disk: None,
@@ -1024,9 +999,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .get(&slot.profile)
                 .is_some_and(|slots| slot.index < slots.len())
         });
-        let (slots, reseeds) = (&self.slots, &self.reseeds);
+        let (slots, upkeep) = (&self.slots, &self.upkeep);
         self.retired
-            .retain(|name, _| slots.contains_key(name) || reseeds.contains_key(name));
+            .retain(|name, _| slots.contains_key(name) || upkeep.reseed_runs(name));
     }
 }
 

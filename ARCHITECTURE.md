@@ -123,7 +123,7 @@ client → transport → principal → handler → core
    planning, and the passes that refill a slot between polls), `exits` (following Docker's events of runner
    containers that stop, as hints), `runners` (a slot's runner from start to removal), `runner_exit` (what a runner's end concludes), `images` (pulling the profiles' images and removing the published runner images none runs,
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
-   `caches` (reseeds, the mirror, the shared caches), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
+   `caches` (reseeds, the mirror, the shared caches), `upkeep` (what each profile's measures and reseeds are doing and have due, one value per profile, [ADR 0116](docs/adr/0116-a-profiles-upkeep-is-one-state.md)), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
    whether its job may write), `records` (records of failed jobs and the shells in them),
    `history` (what the store records), `admission` (what a new runner reserves), `warm` (how many warm runners each
    repository wants, from `scheduler::warm`), `control` (`Control` and the commands), `stop` (how far the daemon's stop has got) and `status` (what it

@@ -6347,6 +6347,7 @@ mod pools;
 mod priority;
 mod records;
 mod stop;
+mod upkeep;
 mod warm;
 
 #[tokio::test]

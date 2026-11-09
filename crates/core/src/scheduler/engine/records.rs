@@ -754,7 +754,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let (memory, cpus) = (profile.memory.0, profile.cpus);
         // A reseed replaces the snapshot the shell's layers sit on.
-        if self.reseeds.contains_key(&record.profile) {
+        if self.upkeep.reseed_runs(&record.profile) {
             return Err(ControlError::Conflict(format!(
                 "{} is reseeding its snapshot, which a shell mounts; open it once the reseed is done",
                 record.profile
