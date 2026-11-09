@@ -208,6 +208,11 @@ impl Watches {
         })
     }
 
+    /// The runners watched, in name order.
+    pub(super) fn runners(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
     /// How many runners have a live capture after an earlier one broke off.
     pub(super) fn live_after_breaks(&self) -> usize {
         self.0

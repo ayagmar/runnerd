@@ -2027,6 +2027,7 @@ impl Case {
         started.extend(seeds);
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
+        self.no_watch_outlives_its_runner()?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
@@ -2104,6 +2105,7 @@ impl Case {
         let bound = self.starts_after_a_reading(&order);
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
+        self.no_watch_outlives_its_runner()?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
@@ -2690,6 +2692,30 @@ impl Case {
                 self,
                 "docker_runs_no_runner_the_engine_lost",
                 format!("no slot holds {lost:?}"),
+            )
+        }
+    }
+
+    /// Every runner the engine watches holds a slot: a runner's watch goes with it, and a restart starts none.
+    fn no_watch_outlives_its_runner(&self) -> Result<(), Violation> {
+        let held: BTreeSet<&str> = self
+            .engine
+            .occupied()
+            .map(|(_, occupant)| occupant.runner_name.as_str())
+            .collect();
+        let outlived: Vec<&str> = self
+            .engine
+            .watches
+            .runners()
+            .filter(|runner| !held.contains(runner))
+            .collect();
+        if outlived.is_empty() {
+            Ok(())
+        } else {
+            violation(
+                self,
+                "no_watch_outlives_its_runner",
+                format!("{outlived:?} are watched with no slot"),
             )
         }
     }

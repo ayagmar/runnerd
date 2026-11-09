@@ -1428,6 +1428,87 @@ async fn a_pass_that_reaps_a_runner_whose_capture_just_broke_keeps_its_job_in_th
     assert!(job.runner.is_some(), "its runner is named: {job:?}");
 }
 
+/// A capture that broke twice waits before it starts again; a pass that reaps its runner meanwhile, with no capture
+/// left to drain, still reads the job from the stopped container's worker log.
+#[tokio::test]
+async fn a_pass_that_reaps_a_runner_waiting_to_capture_again_keeps_its_job_in_the_history() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("waiting-claim");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    // Its first capture fails, and so does the one the next tick starts: the third waits 5 seconds.
+    docker.0.lock().unwrap().fail_execs = 2;
+    github.0.lock().unwrap().queued = vec![job(5)];
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+        until_captures_end(&engine).await;
+    }
+    assert_eq!(
+        docker.0.lock().unwrap().fail_execs,
+        0,
+        "both captures failed"
+    );
+    {
+        let mut github = github.0.lock().unwrap();
+        github.queued = Vec::new();
+        github
+            .jobs
+            .insert(5, details(5, "completed", Some("success")));
+    }
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers[0].running = false;
+        let container = state.containers[0].id.clone();
+        state
+            .container_logs
+            .insert(container.clone(), "Running job: build\n".to_owned());
+        state.diag.insert(container, docker::tests::diag_archive(5));
+    }
+    engine.exits.any();
+    engine.turnover().await;
+    handle.store.flush().await;
+    let job = handle.store.job(5).await.unwrap().unwrap().summary;
+    assert!(job.runner.is_some(), "its runner is named: {job:?}");
+}
+
+/// A runner whose broken capture was due again when its container stopped or went has its worker log read at most
+/// once, by `recapture`, not again by its release.
+#[tokio::test]
+async fn a_runner_whose_capture_broke_before_its_container_ended_has_its_worker_log_read_at_most_once()
+ {
+    for gone in [false, true] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("ended-claim");
+        let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+        engine.recover().await.unwrap();
+        docker.0.lock().unwrap().break_captures = 1;
+        github.0.lock().unwrap().queued = vec![job(5)];
+        engine.tick(Shutdown::No).await;
+        until_captures_end(&engine).await;
+        github.0.lock().unwrap().queued = Vec::new();
+        let container = {
+            let mut state = docker.0.lock().unwrap();
+            let container = state.containers[0].id.clone();
+            if gone {
+                state.containers.clear();
+            } else {
+                state.containers[0].running = false;
+            }
+            container
+        };
+        for _ in 0..3 {
+            engine.tick(Shutdown::No).await;
+        }
+        let reads = docker
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with(&format!("files {container} ")))
+            .count();
+        // A stopped container's log is read once; a gone one has none to read.
+        assert_eq!(reads, usize::from(!gone), "gone: {gone}");
+    }
+}
+
 /// A failed job whose runner ends between polls is recorded without GitHub being listed sooner than
 /// `poll_interval`. The bug it catches: the end of each recording's check and commit waking a full tick, so failed
 /// jobs released by a pass (ADR 0095) multiplied the polls.
