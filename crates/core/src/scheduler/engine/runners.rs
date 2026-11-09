@@ -14,6 +14,7 @@ use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
 use crate::github::{self, Deleted, GithubApi, Runner};
+use crate::isolation;
 use crate::record;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
 use crate::sync::lock;
@@ -896,7 +897,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (container, failure) = match self.docker.start(&spec, self.isolation).await {
             Ok(container) => (container, None),
             Err(failed) => {
-                let failure = format!("cannot start {name}: {}", failed.error);
+                let failure = isolation::start_failure(&name, &failed.error.to_string());
                 warn!("{repository}: {failure}");
                 self.recheck_image(&spec.image);
                 let Some(container) = failed.container else {

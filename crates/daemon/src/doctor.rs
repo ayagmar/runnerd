@@ -10,6 +10,7 @@ use runnerd_core::admission::host;
 use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
+use runnerd_core::isolation::modules_check;
 use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::record;
 use runnerd_core::sizing::{Window, advise};
@@ -39,10 +40,19 @@ pub(crate) struct Host {
     /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
     pub sysbox_unit: bool,
     pub kvm: bool,
+    /// The running kernel and whether its modules are on disk; `None` when `/proc` does not say its release.
+    pub kernel: Option<Kernel>,
     /// The host's memory and how long its tasks stalled for it; `None` when `/proc/meminfo` does not say.
     pub memory: Option<api::HostMemory>,
     /// The config's file; `None` without one, or when it cannot be read.
     pub config_file: Option<ConfigFile>,
+}
+
+/// The running kernel, whose modules Sysbox mounts into every runner.
+pub(crate) struct Kernel {
+    pub release: String,
+    /// Whether `/lib/modules/{release}` exists: a package upgrade removes it while that kernel runs.
+    pub modules: bool,
 }
 
 /// The file a config was read from, and who may read it.
@@ -190,6 +200,7 @@ impl Host {
                 sysbox_daemons,
                 sysbox_unit,
                 kvm: Path::new("/dev/kvm").exists(),
+                kernel: read_kernel(),
                 memory,
                 config_file,
             }
@@ -240,6 +251,19 @@ fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
 }
 
 /// Whether `name` runs as its systemd unit or, as a source build starts it, as a bare process.
+fn read_kernel() -> Option<Kernel> {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+    let release = release.trim().to_owned();
+    // A release is one path component; anything else is not read as a directory name.
+    if release.is_empty() || release.contains('/') {
+        return None;
+    }
+    Some(Kernel {
+        modules: Path::new("/lib/modules").join(&release).exists(),
+        release,
+    })
+}
+
 fn read_daemon(name: &str) -> DaemonState {
     // One unit per call: `systemctl is-active` with several units succeeds when any one runs.
     let unit = Command::new("systemctl")
@@ -606,6 +630,12 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             "Docker has the sysbox-runc runtime and sysbox's services run".to_owned(),
         ),
     });
+    // Only Sysbox mounts the modules into a runner.
+    if isolation == Isolation::Sysbox
+        && let Some(kernel) = &host.kernel
+    {
+        checks.push(modules_check(&kernel.release, kernel.modules));
+    }
     checks.extend(slice_checks(host, config));
     checks.extend(host.config_file.as_ref().map(config_file_check));
     checks.push(memory_check(host.memory.as_ref(), config));
