@@ -12,7 +12,7 @@ USER root
 # Every apt-get in this image and the stages on top resolves against Ubuntu's archive as it was at this moment
 # (snapshot.ubuntu.com), so a rebuild installs the same package versions until someone moves the date. apt also maps the base image's git-core
 # PPA to its snapshot (snapshot.ppa.launchpadcontent.net). docs/adr/0023 says how to bump.
-ARG UBUNTU_SNAPSHOT=20261022T000000Z
+ARG UBUNTU_SNAPSHOT=20261105T000000Z
 RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50runnerd-snapshot
 
 # What the workflows expect from GitHub's ubuntu-24.04 image and the base image lacks: iptables for dockerd, make,
