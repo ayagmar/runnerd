@@ -315,10 +315,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A reload may have lowered the configured cap since the mirror started.
         match self.docker.inspect(&self.names.mirror()).await {
             Ok(state) if state.running => {
-                self.mirror_memory = state.memory.unwrap_or(self.mirror_memory);
+                self.mirror.found_running(state.memory);
             }
-            Ok(_) => self.mirror_memory = 0,
-            Err(error) if is_not_found(&error) => self.mirror_memory = 0,
+            Ok(_) => self.mirror.found_not_running(),
+            Err(error) if is_not_found(&error) => self.mirror.found_not_running(),
             // Unknown: the configured cap.
             Err(_) => {}
         }

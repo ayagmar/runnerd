@@ -5,7 +5,7 @@
 # a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
 # script.
 #
-engine-lifecycle-fields 41
+engine-lifecycle-fields 40
 
 # Two machines the other rules cannot see, as they look at how fields are declared and written, not what values mean.
 # Each gets a change of its own.

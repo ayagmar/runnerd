@@ -1163,12 +1163,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // The configured mirror is reserved for; a running one keeps the cap it started with until it stops.
         let mirror = &self.config.caches.mirror;
         let configured = if mirror.enabled { mirror.memory.0 } else { 0 };
-        let running = if self.mirror_up {
-            self.mirror_memory
-        } else {
-            0
-        };
-        configured.max(running)
+        configured.max(self.mirror.running_memory())
     }
 
     /// Takes each repository's queued jobs from its listing, begun as `listing`. A repository a command removed
