@@ -340,7 +340,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !failed {
             return Ok(false);
         }
-        let job = match occupant.job {
+        let job = match occupant.named_job() {
             Some(job) => Some(job),
             None => self.left_job(&occupant.container).await?,
         };

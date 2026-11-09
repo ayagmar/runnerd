@@ -201,7 +201,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .iter()
             .map(|(runner, ended)| (runner.as_str(), Some(ended.job)));
         self.occupied()
-            .map(|(_, occupant)| (occupant.runner_name.as_str(), occupant.job))
+            .map(|(_, occupant)| (occupant.runner_name.as_str(), occupant.named_job()))
             .chain(ended)
             .filter(|(runner, _)| cache.undecided(runner))
             .filter_map(|(runner, job)| {

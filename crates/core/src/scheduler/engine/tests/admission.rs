@@ -7,6 +7,7 @@ use crate::admission::pooled::POOL_AFTER;
 use crate::api::{AdmissionPolicy, Basis, JobPeak};
 use crate::observe::metrics::Events;
 use crate::scheduler::PRIORITY_AFTER;
+use crate::scheduler::{Decision, Key, SlotRef};
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -2749,5 +2750,136 @@ async fn a_job_held_with_a_host_credit_waits_for_the_growth_it_keeps() {
         only_reason(&handle),
         "The host has 10G of 64G available, but what runs may still grow into it: it uses 1.5G and keeps 6G for \
          growth; needs 1.25G, 0B is free"
+    );
+}
+
+/// A raised runner stays raised while it waits, and while its job is named but not yet told apart: GitHub may still
+/// have given it the heavy one. `key` ends it, not a slot being freed alone.
+#[tokio::test]
+async fn a_raised_runner_stays_raised_until_its_job_is_told_apart() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "4 × 1.25G");
+    github.0.lock().unwrap().queued = Vec::new();
+    let names: Vec<String> = engine
+        .occupants_mut()
+        .map(|occupant| occupant.runner_name.clone())
+        .collect();
+    for name in names.iter().cloned().chain(["gone".to_owned()]) {
+        engine.raise(name);
+    }
+    engine.note_found(&crate::scheduler::engine::history::Found::named(
+        names[1].clone(),
+        77,
+    ));
+    let key = Key {
+        repository: "o/r".to_owned(),
+        workflow: Some("ci".to_owned()),
+        name: "build".to_owned(),
+    };
+    engine.occupants_mut().nth(2).unwrap().set_key(key);
+
+    engine.rereserve().await;
+
+    let raised: BTreeSet<&str> = engine.raised().iter().map(String::as_str).collect();
+    assert!(raised.contains(names[0].as_str()), "it still waits");
+    assert!(
+        raised.contains(names[1].as_str()),
+        "its job has no record yet"
+    );
+    assert!(!raised.contains(names[2].as_str()), "its job is known");
+    assert!(!raised.contains("gone"), "no slot holds it");
+}
+
+/// Stopping a raised runner past the budget takes a waiting one: a capture may have named its job before a listing.
+#[tokio::test]
+async fn a_runner_raised_past_the_budget_stays_once_a_capture_named_its_job() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "4 × 1.25G");
+    engine.memory_max = Some(G);
+    let names: Vec<String> = engine
+        .occupants_mut()
+        .map(|occupant| occupant.runner_name.clone())
+        .collect();
+    for name in &names {
+        engine.raise(name.clone());
+    }
+    engine.note_found(&crate::scheduler::engine::history::Found::named(
+        names[0].clone(),
+        77,
+    ));
+
+    let stops = engine.over_budget(&[]);
+
+    assert_eq!(stops.len(), 3, "every runner but the one with a named job");
+    let first = SlotRef {
+        profile: "app".to_owned(),
+        index: 0,
+    };
+    assert!(
+        !stops
+            .iter()
+            .any(|stop| matches!(stop, Decision::Stop { slot, .. } if *slot == first)),
+        "not the runner in slot 1, whose capture named its job"
+    );
+}
+
+/// The repository of a runner holding a job admission cannot tell apart yet runs copies beside anything else of it,
+/// also while the listing still shows that runner idle: a capture named its job, the history has no record.
+#[tokio::test]
+async fn a_job_named_without_a_record_makes_its_repository_unknown_though_the_listing_shows_its_runner_idle()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    runs_of(
+        &handle.store,
+        "build",
+        1000,
+        2,
+        200 * M,
+        0,
+        Ended::Succeeded,
+    )
+    .await;
+    engine.recover().await.unwrap();
+    docker.0.lock().unwrap().slot_captures = HashMap::from([(1, "@@job 1 1\n".to_owned())]);
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    slice_at(&handle.store, G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    until_state(&handle, 1, JobState::Running).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    slice_at(&handle.store, G);
+    engine.tick(Shutdown::No).await;
+    let second = engine.occupants_mut().nth(1).unwrap().runner_name.clone();
+    engine.note_found(&crate::scheduler::engine::history::Found::named(second, 99));
+
+    engine.rereserve().await;
+
+    let first = engine.occupants_mut().next().unwrap();
+    assert!(first.has_key(), "job 1 has its record");
+    assert_eq!(
+        first.reserved(),
+        3584 * M,
+        "the copy goes by its profile's p95, as another of its repository's jobs is unknown"
     );
 }

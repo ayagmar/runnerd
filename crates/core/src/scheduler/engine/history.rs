@@ -211,7 +211,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             memory_cap: state.memory,
             cpu_cap: state.cpus,
             admission: occupant.admission,
-            purpose: occupant.purpose.map(super::Purpose::as_str),
+            purpose: occupant.purpose().map(super::Purpose::as_str),
         });
         if let Some(pid) = state.pid {
             self.tracked.send_modify(|tracked| {
@@ -317,8 +317,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn named_job(&self, occupant: &Occupant) -> Option<u64> {
         self.occupied()
             .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
-            .and_then(|(_, candidate)| candidate.job)
-            .or(occupant.job)
+            .and_then(|(_, candidate)| candidate.named_job())
+            .or(occupant.named_job())
     }
 
     /// Claims the job a stopped runner's worker log names, if no capture read one: nothing else may link the two, and a
@@ -365,7 +365,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn observe_again(&mut self) {
         let unobserved: Vec<(SlotRef, Occupant)> = self
             .occupied()
-            .filter(|(_, occupant)| !occupant.observed)
+            .filter(|(_, occupant)| !occupant.is_observed())
             .map(|(slot, occupant)| (slot, occupant.clone()))
             .collect();
         for (slot, occupant) in unobserved {
@@ -395,7 +395,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         // A capture started again reports the job it reported before.
-        if occupant.job == Some(found.job) {
+        if occupant.runs(found.job) {
             return;
         }
         occupant.job = Some(found.job);
@@ -433,7 +433,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn unclaimed_runner(&self, details: &JobDetails) -> Option<String> {
         let name = details.runner_name.as_ref()?;
         self.occupied()
-            .find(|(_, occupant)| occupant.runner_name == *name && occupant.job.is_none())
+            .find(|(_, occupant)| occupant.runner_name == *name && occupant.named_job().is_none())
             .map(|(_, occupant)| occupant.runner_name.clone())
     }
 
@@ -446,7 +446,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             name: details.name.clone(),
         };
         for occupant in self.slots.values_mut().flatten().flatten() {
-            if occupant.job == Some(details.id) {
+            if occupant.runs(details.id) {
                 occupant.key = Some(key.clone());
             }
         }
@@ -515,7 +515,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn follow_jobs(&mut self) -> Described {
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         self.follow_listed(&taken);
         let mut left: Vec<(String, u64)> = Vec::new();
@@ -585,8 +585,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.find_keys().await;
         let unnamed: Vec<(String, u64)> = self
             .occupied()
-            .filter(|(_, occupant)| occupant.key.is_none())
-            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
+            .filter(|(_, occupant)| !occupant.has_key())
+            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.named_job()?)))
             .collect();
         self.describe(unnamed).await
     }
@@ -629,7 +629,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|ended| (ended.repository.clone(), ended.job));
         let running: Vec<(String, u64)> = self
             .occupied()
-            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
+            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.named_job()?)))
             .chain(ended)
             .filter(|(_, id)| !before.asked.contains(id))
             .collect();

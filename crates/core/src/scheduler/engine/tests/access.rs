@@ -190,6 +190,14 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.measured.raised.push(runner);
     }
 
+    pub(super) fn raised(&self) -> &[String] {
+        &self.measured.raised
+    }
+
+    pub(super) fn measure_is_due(&self, profile: &str) -> bool {
+        self.measure_due.contains(profile)
+    }
+
     pub(super) fn forget_predictor(&mut self) {
         self.measured.predictor = None;
     }
@@ -309,17 +317,13 @@ pub(super) struct ListedFacts<'engine> {
 }
 
 impl Occupant {
-    pub(super) fn listed_busy(&self) -> bool {
-        self.busy
-    }
-
-    pub(super) fn named_job(&self) -> Option<u64> {
-        self.job
-    }
-
     /// When its capture found its job; `None` before.
     pub(super) fn job_found_at(&self) -> Option<SystemTime> {
         self.job_started
+    }
+
+    pub(super) fn found_job_at(&mut self, at: SystemTime) {
+        self.job_started = Some(at);
     }
 
     pub(super) fn age_job_start(&mut self, by: Duration) {
@@ -333,17 +337,5 @@ impl Occupant {
 
     pub(super) fn set_key(&mut self, key: Key) {
         self.key = Some(key);
-    }
-
-    pub(super) fn has_key(&self) -> bool {
-        self.key.is_some()
-    }
-
-    pub(super) fn was_started_here(&self) -> bool {
-        self.purpose.is_some()
-    }
-
-    pub(super) fn is_observed(&self) -> bool {
-        self.observed
     }
 }

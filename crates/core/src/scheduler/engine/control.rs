@@ -607,7 +607,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         let jobs: Vec<api::RunningJob> = runners
             .iter()
-            .filter(|(_, occupant)| occupant.busy || occupant.job.is_some())
+            .filter(|(_, occupant)| occupant.engaged())
             .map(|(_, occupant)| occupant.running_job())
             .collect();
         if running == RunningJobs::Keep && !jobs.is_empty() {
@@ -640,10 +640,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         for (slot, occupant) in runners {
             let repository = &occupant.repository;
-            let cancelled = if let Some(job) = occupant.job {
+            let cancelled = if let Some(job) = occupant.named_job() {
                 self.cancel(repository, job).await
             } else {
-                if occupant.busy {
+                if occupant.listed_busy() {
                     warn!(
                         "{repository}: {} runs a job its log has not named yet; GitHub fails it once the runner is gone",
                         occupant.runner_name
@@ -791,10 +791,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // job meanwhile stays, and holds the clean back.
         let idle = using
             .iter()
-            .filter(|slot| {
-                self.occupant(slot)
-                    .is_some_and(|occupant| !occupant.busy && occupant.job.is_none())
-            })
+            .filter(|slot| self.occupant(slot).is_some_and(Occupant::idle))
             .map(|slot| (slot.clone(), StopReason::Clean))
             .collect();
         self.remove_idle(idle).await;

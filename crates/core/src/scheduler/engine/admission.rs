@@ -601,7 +601,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// How long `occupant`'s job in `profile` usually keeps it, once that job is known and its runs say.
     pub(super) fn usual_run(&self, occupant: &super::Occupant, profile: &str) -> Option<Duration> {
         let (predictor, _) = self.measured.predictor.as_ref()?;
-        predictor.usual(occupant.key.as_ref()?, profile)
+        predictor.usual(occupant.key()?, profile)
     }
 
     /// Tells apart the jobs of the runners whose job the history now has a record of, unless that record is the
@@ -609,8 +609,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn find_keys(&mut self) {
         let unknown: Vec<(String, u64)> = self
             .occupied()
-            .filter(|(_, occupant)| occupant.key.is_none())
-            .filter_map(|(_, occupant)| Some((occupant.runner_name.clone(), occupant.job?)))
+            .filter(|(_, occupant)| !occupant.has_key())
+            .filter_map(|(_, occupant)| Some((occupant.runner_name.clone(), occupant.named_job()?)))
             .collect();
         for (runner, job) in unknown {
             let Ok(Some(record)) = self.store.job(job).await else {
@@ -651,7 +651,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let now = time::now_ms();
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         let running = self.running();
         let cpu_budget = self.cpu_budget();
@@ -662,20 +662,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut raised = std::mem::take(&mut self.measured.raised);
         for (profile, slots) in &mut self.slots {
             for occupant in slots.iter_mut().flatten() {
-                let first = occupant
-                    .key
-                    .as_ref()
-                    .is_some_and(|key| seen.insert(key.clone()));
+                let key = occupant.key().cloned();
+                let first = key.as_ref().is_some_and(|key| seen.insert(key.clone()));
                 let Some(admission) = &mut occupant.admission else {
                     continue;
                 };
                 // Its job's average CPU once known; until then what it started with, the largest of its queue's.
-                let cpu = admission.cpu.zip(occupant.key.as_ref()).map(|(cpu, key)| {
+                let cpu = admission.cpu.zip(key.as_ref()).map(|(cpu, key)| {
                     job_cpu(predictor, key, profile, occupant.cpus, cpu_budget, cpu)
                 });
                 let mut dirty = cpu.is_some() && cpu != admission.cpu;
                 admission.cpu = cpu.or(admission.cpu);
-                let prediction = if let Some(key) = &occupant.key {
+                let prediction = if let Some(key) = &key {
                     let copies = if first && !running.unknown.contains(&key.repository) {
                         Copies::Alone
                     } else {
@@ -713,7 +711,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     admission.reserved = prediction.memory;
                     admission.basis = prediction.basis;
                     dirty = true;
-                    if occupant.key.is_none() && !raised.contains(&occupant.runner_name) {
+                    if key.is_none() && !raised.contains(&occupant.runner_name) {
                         raised.push(occupant.runner_name.clone());
                     }
                 }
@@ -724,7 +722,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         raised.retain(|name| {
             self.occupied()
-                .any(|(_, occupant)| occupant.key.is_none() && occupant.runner_name == *name)
+                .any(|(_, occupant)| !occupant.has_key() && occupant.runner_name == *name)
         });
         self.measured.raised = raised;
         for (runner, admission) in changed {
@@ -738,13 +736,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Running {
             keys: self
                 .occupied()
-                .filter_map(|(_, occupant)| occupant.key.clone())
+                .filter_map(|(_, occupant)| occupant.key().cloned())
                 .collect(),
             unknown: self
                 .occupied()
-                .filter(|(_, occupant)| {
-                    (occupant.busy || occupant.job.is_some()) && occupant.key.is_none()
-                })
+                .filter(|(_, occupant)| occupant.runs_unknown_job())
                 .map(|(_, occupant)| occupant.repository.clone())
                 .collect(),
         }
@@ -767,8 +763,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let stopping = decisions.iter().any(
                 |decision| matches!(decision, Decision::Stop { slot: other, .. } if *other == slot),
             );
-            if occupant.busy
-                || occupant.job.is_some()
+            if occupant.engaged()
                 || stopping
                 || !self.measured.raised.contains(&occupant.runner_name)
             {
@@ -810,7 +805,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let in_use = self.cpu_in_use();
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         let now = SystemTime::now();
         let pools: Vec<(Pool, BTreeSet<u64>, bool)> = self

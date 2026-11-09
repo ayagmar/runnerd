@@ -6340,6 +6340,7 @@ mod access;
 mod admission;
 mod build_cache;
 mod invariants;
+mod occupant;
 mod pacing;
 mod pools;
 mod priority;

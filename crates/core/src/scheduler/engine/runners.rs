@@ -379,16 +379,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let took_job = logs.map(|logs| logs.contains("Running job: "));
         // Its capture may have named its job by now.
-        let job = self.occupant(slot).and_then(|now| now.job).or(occupant.job);
+        let job = self
+            .occupant(slot)
+            .and_then(Occupant::named_job)
+            .or(occupant.named_job());
         // GitHub may hold its registration busy a while yet, also for a job no poll or capture saw it take: the next
         // listings delete it then, without a warning.
         self.ended_busy
             .insert(occupant.runner_id, occupant.repository.clone());
         self.forget(occupant);
         // Unread logs: it may have run one.
-        let ran = occupant.busy || job.is_some() || took_job != Some(false);
+        let ran = occupant.listed_busy() || job.is_some() || took_job != Some(false);
         // Its repository stays active past its job's end, for the next push (ADR 0107).
-        if occupant.busy || job.is_some() || took_job == Some(true) {
+        if occupant.listed_busy() || job.is_some() || took_job == Some(true) {
             self.note_finished(&occupant.repository);
         }
         // Its logs say it connected. One that waited `IDLE_TIMEOUT` did too, unless they no longer show it.
@@ -486,7 +489,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .and_then(Option::take);
         // Its layer holds what that job cached. A runner that ran a job nobody named leaves the layer to a job
         // unknown, and one that ran none leaves it as it was.
-        match left.and_then(|occupant| occupant.key) {
+        match left.and_then(|occupant| occupant.key().cloned()) {
             Some(key) => {
                 self.ran.insert(slot.clone(), key);
             }
@@ -537,7 +540,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         else {
             return;
         };
-        let busy = occupant.busy || occupant.job.is_some();
+        let busy = occupant.engaged();
         let what = if busy { "killing" } else { "removing idle" };
         info!("{}: {what} {}", occupant.repository, occupant.runner_name);
         if let Err(error) = self.docker.remove(&occupant.container).await
@@ -586,9 +589,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn remove_every_idle(&mut self) {
         let idle: Vec<(SlotRef, StopReason)> = self
             .occupied()
-            .filter(|(_, occupant)| {
-                occupant.job.is_none() && (!occupant.busy || occupant.purpose.is_none())
-            })
+            .filter(|(_, occupant)| occupant.goes_when_detaching())
             .map(|(slot, _)| (slot, StopReason::Shutdown))
             .collect();
         self.remove_idle(idle).await;
@@ -635,7 +636,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut removing = Vec::new();
         let mut unregistered = Vec::new();
         for (slot, occupant, reason, answer) in deleted {
-            let took_job = self.occupant(&slot).is_some_and(|now| now.job.is_some());
+            let took_job = self
+                .occupant(&slot)
+                .is_some_and(|now| now.named_job().is_some());
             match answer {
                 // Its capture named a job since the plan, which may have ended before GitHub dropped its
                 // registration: it ends as busy runners do, its logs and record before its container goes.
@@ -694,7 +697,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.store
                         .runner_stopped_for(&occupant.runner_name, reason.as_str());
                     self.forget(&occupant);
-                    self.vacate(&slot, occupant.busy || occupant.job.is_some());
+                    self.vacate(&slot, occupant.engaged());
                     any = true;
                 }
             }

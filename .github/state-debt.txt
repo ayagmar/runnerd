@@ -9,8 +9,6 @@ engine-lifecycle-fields 40
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
-C3 busy job &&
-C3 busy job ||
 
 # Watch: split. A capture and its recapture become one value per runner.
 C2 captures recaptures
