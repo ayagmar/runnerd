@@ -11,9 +11,11 @@ pub(super) struct Mirror(Phase);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Since the daemon's start, until it stops the mirror or starts one. `cap` is what it counts at: none once Docker
-    /// said it does not run, though a stopped container may be left, which only stopping it removes.
+    /// Recovery has not asked Docker, or could not read its answer: an earlier run may have left it up. `cap` is the
+    /// configured cap, the most it can be sure of.
     Unknown { cap: u64 },
+    /// Docker says none runs, but a stopped container may be left.
+    Absent,
     /// It runs, with this memory cap.
     Up { cap: u64 },
     /// It is stopped, and no container of it is left.
@@ -34,7 +36,7 @@ impl Mirror {
 
     /// Docker says no mirror runs.
     pub(super) fn found_not_running(&mut self) {
-        self.0 = Phase::Unknown { cap: 0 };
+        self.0 = Phase::Absent;
     }
 
     /// The engine started it, or found it up, with this cap.
@@ -70,7 +72,7 @@ impl Mirror {
     pub(super) fn running_memory(self) -> u64 {
         match self.0 {
             Phase::Unknown { cap } | Phase::Up { cap } => cap,
-            Phase::Down => 0,
+            Phase::Absent | Phase::Down => 0,
         }
     }
 }

@@ -3882,6 +3882,124 @@ fn idle_runner(github: &FakeGithub, docker: &FakeDocker) {
 }
 
 #[tokio::test]
+async fn a_mirror_the_daemon_started_keeps_its_cap_after_a_reload_lowers_it() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("4G", "6G", "1G"));
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "the first job starts");
+    engine.reload(
+        Config::parse(&sized("512M", "6G", "3G")).unwrap(),
+        Some(10 << 30),
+        None,
+    );
+    github.0.lock().unwrap().queued = vec![job(1), small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the mirror still holds 4G, so 3G more does not fit"
+    );
+}
+
+#[tokio::test]
+async fn a_mirror_recovery_found_stopped_counts_at_nothing_after_a_reload() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("4G", "6G", "1G"));
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.reload(
+        Config::parse(&sized("512M", "6G", "3G")).unwrap(),
+        Some(10 << 30),
+        None,
+    );
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "no mirror runs, so 3G fits beside 6G and a 512M mirror"
+    );
+}
+
+#[tokio::test]
+async fn a_mirror_recovery_could_not_read_counts_at_the_configured_cap() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .fail_inspects
+        .insert(Names::new("runnerd").mirror(), 1);
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("4G", "6G", "1G"));
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.reload(
+        Config::parse(&sized("512M", "6G", "3G")).unwrap(),
+        Some(10 << 30),
+        None,
+    );
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        0,
+        "it may run at 4G, so 3G more does not fit"
+    );
+}
+
+#[tokio::test]
+async fn a_running_mirror_docker_gives_no_cap_for_counts_at_the_configured_cap() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker.0.lock().unwrap().containers.push(Container {
+        id: Names::new("runnerd").mirror(),
+        name: Names::new("runnerd").mirror(),
+        running: true,
+        labels: HashMap::from([("runnerd.mirror".to_owned(), String::new())]),
+    });
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("4G", "6G", "1G"));
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.reload(
+        Config::parse(&sized("512M", "6G", "3G")).unwrap(),
+        Some(10 << 30),
+        None,
+    );
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        0,
+        "it runs at the configured 4G at best"
+    );
+}
+
+#[tokio::test]
 async fn a_job_cancelled_in_the_queue_did_not_run_on_another_machine() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
