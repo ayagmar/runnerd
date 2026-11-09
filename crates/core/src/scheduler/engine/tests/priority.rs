@@ -339,6 +339,20 @@ async fn a_failed_listing_keeps_the_wait_and_suspends_the_barrier() {
     );
 }
 
+/// A stop polls no queued jobs: the listing it keeps is stale and says nothing of the job a pool waits for, so no wait
+/// ends, even one whose job that listing lacks.
+#[tokio::test]
+async fn a_stop_ends_no_wait() {
+    let mut fixture = Fixture::starved().await;
+    let wait = Wait {
+        job: 12,
+        since: fixture.wait().unwrap().since,
+    };
+    fixture.engine.set_memory_wait("o/big", "big", wait);
+    fixture.engine.tick(Shutdown::Graceful).await;
+    assert_eq!(fixture.wait(), Some(wait));
+}
+
 /// A hold that outlives its job would stop a queue for nobody.
 #[tokio::test]
 async fn a_job_gone_from_a_listing_that_succeeded_ends_the_wait_and_the_barrier() {

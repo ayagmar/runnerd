@@ -416,10 +416,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let Some(state) = self.repositories.listed(&repository.name) else {
                 continue;
             };
-            if !state.listed {
+            let Some(listed) = state.listing.listed() else {
                 continue;
-            }
-            for job in &state.queued {
+            };
+            for job in listed {
                 if crate::scheduler::matches(job, &repository.labels) && !taken.contains(&job.id) {
                     self.queued_jobs
                         .entry(job.id)
@@ -525,9 +525,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 && self
                     .repositories
                     .listed(&followed.repository)
-                    .is_none_or(|state| {
-                        state.listed && !state.queued.iter().any(|job| job.id == *id)
-                    });
+                    .is_none_or(|state| state.listing.no_longer_shows(*id));
             if read {
                 left.push((followed.repository.clone(), *id));
             } else {

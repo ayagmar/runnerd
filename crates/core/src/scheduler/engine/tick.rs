@@ -313,7 +313,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.note_queued();
         } else {
             for (_, state) in self.repositories.iter_listed_mut() {
-                state.listed = false;
+                state.listing.stop();
             }
         }
         self.forget_unlisted();
@@ -882,7 +882,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let claims = self.claims.get(repository);
         self.repositories
             .listed(repository)
-            .map(|state| state.queued.as_slice())
+            .map(|state| state.listing.jobs())
             .unwrap_or_default()
             .iter()
             .filter(|job| {
@@ -1206,9 +1206,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     for waits in state.waits.values_mut() {
                         waits.retain(|job| queued.iter().any(|listed| listed.id == job));
                     }
+                    state.listing.answer(queued);
+                } else {
+                    state.listing.fail();
                 }
-                state.queued = queued;
-                state.listed = listed;
             } else {
                 for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
                     self.queued_jobs

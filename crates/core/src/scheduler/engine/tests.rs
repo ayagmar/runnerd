@@ -4260,6 +4260,52 @@ async fn a_queued_job_github_fails_to_read_for_a_quarter_hour_closes_as_run_else
     assert_eq!(github.0.lock().unwrap().job_reads, before, "no longer read");
 }
 
+/// A stop polls no queued jobs, so the listing that showed a job leave the queue is stale: the job is not read again
+/// until the next start lists it.
+#[tokio::test]
+async fn a_stop_reads_no_job_that_left_the_queue() {
+    let github = FakeGithub::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) =
+        a_job_that_left_the_queue(&github, &FakeDocker::default(), &dir).await;
+    let listed = github.0.lock().unwrap().job_reads;
+    engine.tick(Shutdown::No).await;
+    let before = github.0.lock().unwrap().job_reads;
+    assert!(
+        before > listed,
+        "a listing that answered without job 5 reads it"
+    );
+    engine.tick(Shutdown::Graceful).await;
+    assert_eq!(
+        github.0.lock().unwrap().job_reads,
+        before,
+        "not read during the stop"
+    );
+}
+
+/// A runner that ends during a stop leaves its job to the runner's own following: the stale listing that still
+/// shows the job queued does not follow it as queued as well.
+#[tokio::test]
+async fn a_job_whose_runner_ends_during_a_stop_is_not_followed_as_queued_from_the_stale_listing() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    // GitHub lags: it still lists job 1 queued.
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().runners.clear();
+    engine.tick(Shutdown::Graceful).await;
+    assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
+    assert_eq!(
+        engine.state_counts().shared_with_queued,
+        0,
+        "job 1 is followed once"
+    );
+}
+
 #[tokio::test]
 async fn a_job_github_never_ends_after_its_runner_went_is_lost_as_of_when_it_went() {
     const WENT_MS: u64 = 1_792_697_000_000;

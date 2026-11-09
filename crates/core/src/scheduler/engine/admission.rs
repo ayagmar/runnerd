@@ -673,7 +673,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     let queued = self
                         .repositories
                         .listed(&occupant.repository)
-                        .map(|state| state.queued.as_slice())
+                        .map(|state| state.listing.jobs())
                         .unwrap_or_default()
                         .iter()
                         .filter(|job| !taken.contains(&job.id) && matches(job, labels));
@@ -818,7 +818,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let Some(state) = self.repositories.listed_mut(&pool.repository) else {
                 continue;
             };
-            let listed = state.listed;
+            let listed = state.listing.is_listed();
             let waits = state.waits.entry(pool.profile.clone()).or_default();
             if stopped {
                 waits.stopped();
