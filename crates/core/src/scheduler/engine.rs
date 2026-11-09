@@ -22,6 +22,7 @@ mod history;
 mod images;
 mod mirror;
 mod open_waits;
+mod pool_health;
 mod records;
 mod recover;
 mod runner_exit;
@@ -48,9 +49,10 @@ pub use self::control::{
 use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
 use self::mirror::Mirror;
+use self::pool_health::PoolHealth;
 pub use self::records::RecordSelection;
 use self::upkeep::Upkeep;
-use super::{Hold, SlotRef, Waits};
+use super::{SlotRef, Waits};
 use crate::admission::Key;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -421,7 +423,7 @@ struct RepositoryState {
     listed: bool,
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
-    holds: BTreeMap<String, PoolHold>,
+    holds: BTreeMap<String, PoolHealth>,
     /// By the profile of each of its pools, what that pool's next job has waited for and since when (ADR 0096): from
     /// the first plan of a tick or a pass that held it, not one a status runs, until a runner of the pool is in its
     /// slot, the pool may no longer start one, or a listing that succeeded no longer shows the job. A plan that holds
@@ -429,19 +431,6 @@ struct RepositoryState {
     /// whether a barrier has served the pool (ADR 0098), until a listing that succeeded shows its queue empty or the
     /// pool may no longer start a runner. Not kept over a restart.
     waits: BTreeMap<String, Waits>,
-}
-
-/// A pool's runners held back after they failed, as `RepositoryState::holds` keeps them.
-#[derive(Debug, Default)]
-struct PoolHold {
-    held: Option<Hold>,
-    /// Runners in a row that ended without taking a job.
-    failures: u32,
-    /// Runners in a row that connected and ended without a job, or waited `IDLE_TIMEOUT` for one (ADR 0104). Those
-    /// `left_beside` holds count with the one before them.
-    idle_exits: u32,
-    /// The pool's other runners when the last of those ended: already up, they say nothing of a later start.
-    left_beside: BTreeSet<String>,
 }
 
 /// How long a stop that detaches or is forced takes at most, from its request: what Docker and GitHub have not

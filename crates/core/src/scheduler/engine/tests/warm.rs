@@ -984,14 +984,7 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     // A failure days ago, and no job since to end its streak.
-    engine
-        .repositories
-        .get_mut("o/r")
-        .unwrap()
-        .holds
-        .entry("app".to_owned())
-        .or_default()
-        .failures = 1;
+    engine.set_streaks("o/r", "app", 1, 0);
 
     for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;

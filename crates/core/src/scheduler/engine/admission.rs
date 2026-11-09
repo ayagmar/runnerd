@@ -773,8 +773,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.repositories[repository]
             .holds
             .get(profile)
-            .and_then(|hold| hold.held)
-            .is_some_and(|hold| hold.until > now)
+            .is_some_and(|health| health.holding(now))
     }
 
     /// Commits what the last plan of a tick or a pass found (ADR 0096): the pools it `held`, each wait starting with

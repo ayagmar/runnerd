@@ -5451,7 +5451,7 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
             .holds
             .get_mut("app")
             .unwrap()
-            .held = None;
+            .set_held(None);
         engine.tick(Shutdown::No).await;
     }
     handle.store.flush().await;
@@ -6344,6 +6344,7 @@ mod invariants;
 mod occupant;
 mod open_waits;
 mod pacing;
+mod pool_health;
 mod pools;
 mod priority;
 mod records;

@@ -32,9 +32,9 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     pub(super) fn pool_hold(&self, repository: &str, profile: &str) -> Option<HoldFacts> {
         let hold = self.repositories.get(repository)?.holds.get(profile)?;
         Some(HoldFacts {
-            held: hold.held,
-            failures: hold.failures,
-            idle_exits: hold.idle_exits,
+            held: hold.held(),
+            failures: hold.failures(),
+            idle_exits: hold.idle_exits(),
         })
     }
 
@@ -43,9 +43,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.repositories
             .get(repository)
             .and_then(|state| state.holds.get(profile))
-            .is_none_or(|hold| {
-                hold.idle_exits == 0 && hold.held.is_none_or(|held| held.until <= now)
-            })
+            .is_none_or(|hold| hold.idle_exits() == 0 && !hold.holding(now))
     }
 
     /// Sets a pool's two streaks: runners that failed, and runners that left without a job.
@@ -57,9 +55,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         idle_exits: u32,
     ) {
         let state = self.repositories.get_mut(repository).unwrap();
-        let hold = state.holds.entry(profile.to_owned()).or_default();
-        hold.failures = failures;
-        hold.idle_exits = idle_exits;
+        state
+            .holds
+            .entry(profile.to_owned())
+            .or_default()
+            .set_streaks(failures, idle_exits);
     }
 
     /// Makes `capture` the log capture of `runner`, whatever one it had.
@@ -81,13 +81,17 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     pub(super) fn set_held(&mut self, repository: &str, profile: &str, held: Hold) {
         let state = self.repositories.get_mut(repository).unwrap();
-        state.holds.entry(profile.to_owned()).or_default().held = Some(held);
+        state
+            .holds
+            .entry(profile.to_owned())
+            .or_default()
+            .set_held(Some(held));
     }
 
     pub(super) fn clear_holds(&mut self) {
         for state in self.repositories.values_mut() {
             for hold in state.holds.values_mut() {
-                hold.held = None;
+                hold.set_held(None);
             }
         }
     }
@@ -95,9 +99,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     pub(super) fn expire_holds(&mut self, past: SystemTime) {
         for state in self.repositories.values_mut() {
             for hold in state.holds.values_mut() {
-                if let Some(held) = hold.held.as_mut() {
-                    held.until = past;
-                }
+                hold.expire(past);
             }
         }
     }
