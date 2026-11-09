@@ -45,12 +45,9 @@ C1 core Waits
 # admission/replay.rs, a leaf, with its fields private.
 C1 core Replayer
 
-# Measured: split raised (slot occupant), the wait sets (wait accounting) and the host band out; the host band's change
-# then seals what stays, the predictor and the log memos, with private fields.
+# Measured: split raised (slot occupant) and the wait sets (wait accounting) out; the last of those seals what stays,
+# the predictor and the log memos, with private fields.
 C1 core crates/core/src/scheduler/engine/admission.rs:Measured
-
-# Host band: split into one enum.
-C1 core Remembered
 
 # Profile upkeep: split. These become one map of a profile's upkeep.
 C2 measure_due measured_at

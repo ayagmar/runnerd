@@ -17,22 +17,111 @@ pub const STALL_ENTER: u32 = 500;
 /// Once stopped, starts resume when that share falls under this: 1%.
 pub const STALL_LEAVE: u32 = 100;
 
-/// What admission remembers of the host from the last plan.
+/// Which margin the last plan left standing for the next. A restart begins at `Plain`, as nothing of it is stored; a
+/// reload keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostBand {
+    /// The plain margin.
+    #[default]
+    Plain,
+    /// Jobs waited for the host's memory and none fitted even the plain margin (`short`): the margin grows by half.
+    Larger,
+    /// The host stalled: the margin grows by half, and starts resume only under `STALL_LEAVE`.
+    Stalled,
+}
+
+impl HostBand {
+    /// The band a plan leaves, by what `memory` leaves beside the `reserved` memory of what runs and the memory each
+    /// job waiting for the host `needs`, and whether the host `stalled`: see `short`.
+    pub fn after_plan(
+        memory: &HostMemory,
+        reserved: u64,
+        stalled: bool,
+        needs: impl IntoIterator<Item = u64>,
+    ) -> Self {
+        if stalled {
+            HostBand::Stalled
+        } else if short(memory, reserved, stalled, needs) {
+            HostBand::Larger
+        } else {
+            HostBand::Plain
+        }
+    }
+
+    /// Whether the plan left the larger margin, whatever runs now.
+    pub fn is_short(self) -> bool {
+        !matches!(self, HostBand::Plain)
+    }
+
+    /// Whether the larger margin stands for a slice in this state: the first runner into an empty slice needs only the
+    /// margin.
+    pub fn short(self, occupancy: Occupancy) -> bool {
+        self.is_short() && occupancy == Occupancy::Occupied
+    }
+
+    /// Whether the host stalled at the plan that left this band.
+    pub fn was_stalled(self) -> bool {
+        self == HostBand::Stalled
+    }
+}
+
+/// Whether any runner is in the slice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Occupancy {
+    /// No runner: the first one needs only the margin.
+    #[default]
+    Empty,
+    /// At least one runner.
+    Occupied,
+}
+
+impl Occupancy {
+    /// `Occupied` when any runner is in the slice.
+    pub fn of(any_runner: bool) -> Self {
+        if any_runner {
+            Occupancy::Occupied
+        } else {
+            Occupancy::Empty
+        }
+    }
+}
+
+/// What admission goes by of the host: the band the last plan left, and the slice as it is now.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Remembered {
-    /// The host stalled, or jobs waited for its memory and none fitted even the plain margin (`short`): the margin
-    /// grows by half. The engine clears it while no runner runs, so the first runner into an empty slice needs only the
-    /// margin.
-    pub short: bool,
-    /// The host stalled: starts resume only under `STALL_LEAVE`.
-    pub stalled: bool,
+    band: HostBand,
+    occupancy: Occupancy,
+}
+
+impl Remembered {
+    /// The `band` the last plan left, for a slice in this state.
+    pub fn new(band: HostBand, occupancy: Occupancy) -> Self {
+        Self { band, occupancy }
+    }
+
+    /// Whether the margin grows by half.
+    pub fn short(self) -> bool {
+        self.band.short(self.occupancy)
+    }
+
+    /// Whether the host stalled at the last plan: starts resume only under `STALL_LEAVE`.
+    pub fn was_stalled(self) -> bool {
+        self.band.was_stalled()
+    }
 }
 
 #[cfg(test)]
 impl Remembered {
-    /// What a test starts from: whether the larger margin stands, and whether the host stalled.
+    /// What a test starts from: whether the larger margin stands, and whether the host stalled. A stall without the
+    /// larger margin is what a slice that emptied since reads.
     pub(crate) fn testing(short: bool, stalled: bool) -> Self {
-        Self { short, stalled }
+        let occupancy = Occupancy::of(short);
+        let band = match (short, stalled) {
+            (_, true) => HostBand::Stalled,
+            (true, false) => HostBand::Larger,
+            (false, false) => HostBand::Plain,
+        };
+        Self { band, occupancy }
     }
 }
 
@@ -73,8 +162,8 @@ const CREDIT_ALLOWANCE_SHARE: u64 = 4;
 
 /// The host as the pooled count reads it, by the margin in force.
 pub fn pooling(memory: &HostMemory, remembered: Remembered) -> pooled::Host {
-    let stalled = stalls(memory, remembered.stalled);
-    let margin = margin(memory.grown(), remembered.short || stalled);
+    let stalled = stalls(memory, remembered.was_stalled());
+    let margin = margin(memory.grown(), remembered.short() || stalled);
     pooled::Host {
         available: memory.available.saturating_add(memory.growable()),
         keeps: margin.saturating_add(memory.grown() / CREDIT_ALLOWANCE_SHARE),
@@ -108,8 +197,8 @@ pub fn limit(memory: &HostMemory, short: bool) -> u64 {
 /// What `memory` leaves runners beside what runs in the slice, as the host's limit reads its `count`
 /// (`pooled::Count::hosted`, ADR 0108), given what the last plan `remembered`.
 pub fn budget(memory: HostMemory, count: pooled::Count, remembered: Remembered) -> HostBudget {
-    let stalled = stalls(&memory, remembered.stalled);
-    let limit = limit(&memory, remembered.short || stalled);
+    let stalled = stalls(&memory, remembered.was_stalled());
+    let limit = limit(&memory, remembered.short() || stalled);
     HostBudget {
         memory,
         limit,

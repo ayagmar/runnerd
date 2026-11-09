@@ -261,8 +261,8 @@ mod generated {
         reserved: &mut u64,
         queue: &mut Vec<u64>,
     ) -> usize {
-        let stalled = stalls(memory, remembered.stalled);
-        let limit = limit(memory, remembered.short || stalled);
+        let stalled = stalls(memory, remembered.was_stalled());
+        let limit = limit(memory, remembered.short() || stalled);
         let queued = queue.len();
         queue.retain(|needs| {
             let fits = left(limit, *reserved, stalled) >= i64::try_from(*needs).unwrap();
@@ -291,8 +291,8 @@ mod generated {
             let mut resumed = 0;
             let mut held = false;
             for _ in 0..12 {
-                let fitting = !stalls(&memory, remembered.stalled)
-                    && !remembered.short
+                let fitting = !stalls(&memory, remembered.was_stalled())
+                    && !remembered.short()
                     && queue.iter().any(|needs| {
                         left(limit(&memory, false), reserved, false)
                             >= i64::try_from(*needs).unwrap()
@@ -306,14 +306,14 @@ mod generated {
                 let fits = queue
                     .iter()
                     .any(|needs| room >= i64::try_from(*needs).unwrap());
-                if remembered.stalled {
+                if remembered.was_stalled() {
                     assert!(
-                        remembered.short,
+                        remembered.short(),
                         "seed {seed}: a stall keeps the larger margin"
                     );
                 } else {
                     assert_eq!(
-                        remembered.short,
+                        remembered.short(),
                         !queue.is_empty() && !fits,
                         "seed {seed}: the larger margin stands while no waiter fits the plain one"
                     );

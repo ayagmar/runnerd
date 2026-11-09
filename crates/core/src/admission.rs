@@ -674,7 +674,7 @@ pub fn simulate<'known>(
         most_credit,
         host_reserve,
         expects_credit: credit_room,
-        short: false,
+        host_band: host::HostBand::Plain,
         next_plan: 0,
         needs: RefCell::new(BTreeMap::new()),
         held_for_slice: 0,
@@ -871,8 +871,8 @@ struct Replayer<'run> {
     most_credit: u64,
     host_reserve: HostReserve,
     expects_credit: CreditRoom,
-    /// Whether the larger margin stands for the next plan (`band_stands`).
-    short: bool,
+    /// The band that stands for the next plan (`next_band`).
+    host_band: host::HostBand,
     /// When the next plan with no arrival or end is, in ms.
     next_plan: u64,
     /// What each pool's next runner starts with this pass, with a trace: a long queue asks it of every job, every plan.
@@ -1026,7 +1026,7 @@ impl<'run> Replayer<'run> {
                 .saturating_sub(host_slice);
             hazard.under_throttling += span * u64::from(available < THROTTLES_UNDER);
             hazard.under_oomd += span * u64::from(available < OOMD_UNDER);
-            hazard.in_band += span * u64::from(self.short);
+            hazard.in_band += span * u64::from(self.host_band.is_short());
             hazard.lowest_available = Some(
                 hazard
                     .lowest_available
@@ -1053,9 +1053,9 @@ impl<'run> Replayer<'run> {
     /// that growth took past is not the credit's.
     fn overdrawn(&self, last: pooled::Count, now: pooled::Count) -> bool {
         let max = self.memory_max.unwrap_or(u64::MAX);
-        let host = self
-            .host_memory()
-            .map_or(u64::MAX, |memory| host::limit(&memory, self.short));
+        let host = self.host_memory().map_or(u64::MAX, |memory| {
+            host::limit(&memory, self.host_band.is_short())
+        });
         let before = pooled::Count {
             credit: last.credit,
             host_credit: last.host_credit,
@@ -1167,10 +1167,7 @@ impl<'run> Replayer<'run> {
             host: host.map(|memory| {
                 host::pooling(
                     &memory,
-                    host::Remembered {
-                        short: self.short,
-                        stalled: false,
-                    },
+                    host::Remembered::new(self.host_band, host::Occupancy::Occupied),
                 )
             }),
             most: if self.trace.is_some() && self.policy == Policy::Measured {
@@ -1187,7 +1184,11 @@ impl<'run> Replayer<'run> {
     /// What the host leaves beside what runs, the mirror's memory counted; `None` without a trace of it.
     fn host_left(&self) -> Option<i64> {
         let memory = self.host_memory()?;
-        let limit = host::limit(&memory, self.short && !self.running.is_empty());
+        let limit = host::limit(
+            &memory,
+            self.host_band
+                .short(host::Occupancy::of(!self.running.is_empty())),
+        );
         Some(host::left(limit, self.count().hosted(), false))
     }
 
@@ -1253,17 +1254,19 @@ impl<'run> Replayer<'run> {
                 }
             }
         }
-        self.short = self.band_stands();
+        self.host_band = self.next_band();
         self.settle_waits(waiting);
     }
 
-    /// Whether the larger margin stands for the next pass.
-    fn band_stands(&self) -> bool {
+    /// The band that stands for the next pass; a replay does not model stalls.
+    fn next_band(&self) -> host::HostBand {
         match self.band {
-            Band::AnyWaiter => self.held_for_host > 0,
-            Band::NoWaiterFits => self.host_memory().is_some_and(|memory| {
+            Band::AnyWaiter if self.held_for_host > 0 => host::HostBand::Larger,
+            Band::AnyWaiter => host::HostBand::Plain,
+            Band::NoWaiterFits => self.host_memory().map_or(host::HostBand::Plain, |memory| {
                 let reserved = self.count().hosted();
-                host::short(&memory, reserved, false, self.host_needs.iter().copied())
+                let needs = self.host_needs.iter().copied();
+                host::HostBand::after_plan(&memory, reserved, false, needs)
             }),
         }
     }
