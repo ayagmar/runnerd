@@ -731,6 +731,40 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     );
 }
 
+#[test]
+fn a_refused_pause_asks_over_a_resize_which_comes_back_once_answered() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('4')));
+    app.update(Msg::Sizing(sizing()));
+    app.update(key(KeyCode::Char('j')));
+    app.update(key(KeyCode::Char('a')));
+    app.update(Msg::Busy(Refused {
+        repository: Some("halyard/ledger".to_owned()),
+        message: "halyard/ledger runs job 42".to_owned(),
+        jobs: 1,
+    }));
+    let asked = screen(&app, 120, 24, false);
+    assert!(asked.contains("halyard/ledger runs job 42"), "{asked}");
+
+    assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
+    let back = screen(&app, 120, 24, false);
+    assert!(
+        back.contains("y writes memory = \"3.25G\", slots = 4 for node"),
+        "the resize is asked again: {back}"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::Resize(Resizing {
+            profile: "node".to_owned(),
+            resize: Resize {
+                memory: 3328 << 20,
+                slots: 4,
+                cpus: None
+            }
+        })]
+    );
+}
+
 fn queued(id: u64, repository: &str, name: &str, at: u64) -> QueuedJob {
     QueuedJob {
         id,
