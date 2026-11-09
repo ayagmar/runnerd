@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::history::{CAPTURE_DRAIN, Capture};
+use super::runner_exit::{Exit, Logged, TOOK_JOB};
 use super::{Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
@@ -16,7 +17,7 @@ use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, 
 use crate::github::{self, Deleted, GithubApi, Runner};
 use crate::isolation;
 use crate::record;
-use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
+use crate::scheduler::{Hold, SlotRef, StopReason};
 use crate::sync::lock;
 
 /// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
@@ -32,9 +33,6 @@ pub(super) const SPEC: &str = "runnerd.spec";
 
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
-
-/// What a runner logs once GitHub gave it a session: it started and connected, whatever ends it after that.
-const CONNECTED: &str = "Listening for Jobs";
 
 /// What a runner logs as its job ends, whatever the result. GitHub drops an ephemeral runner's registration with its
 /// job, so one that logged this needs no delete.
@@ -377,7 +375,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         }
-        let took_job = logs.map(|logs| logs.contains("Running job: "));
+        let logged = Logged::read(logs, occupant.started_at);
         // Its capture may have named its job by now.
         let job = self
             .occupant(slot)
@@ -388,23 +386,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.ended_busy
             .insert(occupant.runner_id, occupant.repository.clone());
         self.forget(occupant);
-        // Unread logs: it may have run one.
-        let ran = occupant.listed_busy() || job.is_some() || took_job != Some(false);
-        // Its repository stays active past its job's end, for the next push (ADR 0107).
-        if occupant.listed_busy() || job.is_some() || took_job == Some(true) {
-            self.note_finished(&occupant.repository);
-        }
-        // Its logs say it connected. One that waited `IDLE_TIMEOUT` did too, unless they no longer show it.
-        let connected = logs.is_some_and(|logs| logs.contains(CONNECTED))
-            || occupant
-                .started_at
-                .elapsed()
-                .is_ok_and(|waited| waited >= IDLE_TIMEOUT);
-        // A job the last poll listed queued may be the one it ran, or if it connected and took none, the one cancelled
-        // under it: with no hold, a pass would start a runner for that job from the listing (ADR 0104).
-        if job.is_none() && (took_job != Some(false) || connected) {
-            self.spend(&occupant.repository, &slot.profile);
-        }
+        let exit = Exit::Released {
+            logged,
+            listed_busy: occupant.listed_busy(),
+            job,
+        };
+        self.note_exit(&occupant.repository, &slot.profile, &exit);
         let beside: BTreeSet<String> = self
             .occupied()
             .filter(|(other, runner)| {
@@ -419,8 +406,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .get_mut(&occupant.repository)
             .map(|state| state.holds.entry(slot.profile.clone()).or_default())
         {
-            match took_job {
-                Some(true) => {
+            match logged {
+                Logged::TookJob => {
                     state.failures = 0;
                     state.idle_exits = 0;
                     state.left_beside.clear();
@@ -431,7 +418,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 // Holding the pool would clear its waits and served mark (ADR 0098) for nothing. The second in a row
                 // is a fault that would restart one every few minutes, unless it was already up when the first left:
                 // a cancelled run takes several at once (ADR 0104).
-                Some(false) if connected => {
+                Logged::NoJob { connected: true } => {
                     let again = !state.left_beside.remove(&occupant.runner_name);
                     if again {
                         state.idle_exits += 1;
@@ -457,7 +444,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         );
                     }
                 }
-                Some(false) => {
+                Logged::NoJob { connected: false } => {
                     warn!(
                         "{}: {} ended without taking a job; it last said: {}",
                         occupant.repository,
@@ -471,17 +458,29 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         format!("{} ended without taking a job", occupant.runner_name),
                     );
                 }
-                None => {}
+                Logged::Unread => {}
             }
         }
-        self.vacate(slot, ran);
+        self.vacate(slot, &exit);
     }
 
-    /// Frees a slot whose runner is gone. Its runner may have grown the shared caches, and if it `ran` a job in slot
-    /// 1, its profile's layers: both are checked once idle. A killed job's partial writes count too: they stay in
-    /// slot 1 and would reach the snapshot on any later reseed, like those of a job cancelled or out of memory. A
+    /// Notes what a runner's end says of its repository: its job ended, or it may have taken one the last poll listed
+    /// queued.
+    fn note_exit(&mut self, repository: &str, profile: &str, exit: &Exit) {
+        if exit.job_ended() {
+            self.note_finished(repository);
+        }
+        if exit.spends() {
+            self.spend(repository, profile);
+        }
+    }
+
+    /// Frees a slot whose runner is gone. Its runner may have grown the shared caches, and if `exit` says it ran a job
+    /// in slot 1, its profile's layers: both are checked once idle. A killed job's partial writes count too: they stay
+    /// in slot 1 and would reach the snapshot on any later reseed, like those of a job cancelled or out of memory. A
     /// warm runner that leaves slot 1 without a job changed nothing there.
-    fn vacate(&mut self, slot: &SlotRef, ran: bool) {
+    fn vacate(&mut self, slot: &SlotRef, exit: &Exit) {
+        let ran = exit.ran();
         let left = self
             .slots
             .get_mut(&slot.profile)
@@ -542,6 +541,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let busy = occupant.engaged();
         let what = if busy { "killing" } else { "removing idle" };
+        let exit = Exit::Killed { busy };
         info!("{}: {what} {}", occupant.repository, occupant.runner_name);
         if let Err(error) = self.docker.remove(&occupant.container).await
             && !is_not_found(&error)
@@ -557,10 +557,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.end_capture(&occupant.runner_name).await;
         // Responses the mirror logged since this tick's count: on a shutdown, the mirror and its log go next.
         self.count_mirror_bytes().await;
-        // A job it ran ended now, as one a runner ends on its own does (ADR 0107).
-        if busy {
-            self.note_finished(&occupant.repository);
-        }
+        self.note_exit(&occupant.repository, &slot.profile, &exit);
         self.forget(&occupant);
         match self
             .github
@@ -579,7 +576,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
-        self.vacate(slot, busy);
+        self.vacate(slot, &exit);
     }
 
     /// Removes the idle and warm runners a detaching stop leaves no work for (ADR 0091). An idle runner left
@@ -661,7 +658,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         .await;
         for (slot, occupant, reason, logs) in read {
             match logs {
-                Ok(logs) if logs.contains("Running job: ") => self.keep_busy(&slot),
+                Ok(logs) if logs.contains(TOOK_JOB) => self.keep_busy(&slot),
                 Ok(_) => removing.push((slot, occupant, reason)),
                 // Someone removed it: `collect_finished` frees its slot once it stopped.
                 Err(error) if is_log_gone(&error) => {}
@@ -696,8 +693,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.end_capture(&occupant.runner_name).await;
                     self.store
                         .runner_stopped_for(&occupant.runner_name, reason.as_str());
+                    let exit = Exit::RemovedIdle {
+                        busy: occupant.engaged(),
+                    };
+                    self.note_exit(&occupant.repository, &slot.profile, &exit);
                     self.forget(&occupant);
-                    self.vacate(&slot, occupant.engaged());
+                    self.vacate(&slot, &exit);
                     any = true;
                 }
             }

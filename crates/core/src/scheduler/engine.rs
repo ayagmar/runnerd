@@ -23,6 +23,7 @@ mod images;
 mod mirror;
 mod records;
 mod recover;
+mod runner_exit;
 mod runners;
 mod status;
 mod stop;

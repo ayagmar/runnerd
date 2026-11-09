@@ -15,6 +15,7 @@ use crate::store::LogPosition;
 pub(super) struct HoldFacts {
     pub(super) held: Option<Hold>,
     pub(super) failures: u32,
+    pub(super) idle_exits: u32,
 }
 
 impl<G: GithubApi, D: DockerApi> Engine<G, D> {
@@ -27,6 +28,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         Some(HoldFacts {
             held: hold.held,
             failures: hold.failures,
+            idle_exits: hold.idle_exits,
         })
     }
 
@@ -38,6 +40,27 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
             .is_none_or(|hold| {
                 hold.idle_exits == 0 && hold.held.is_none_or(|held| held.until <= now)
             })
+    }
+
+    /// Sets a pool's two streaks: runners that failed, and runners that left without a job.
+    pub(super) fn set_streaks(
+        &mut self,
+        repository: &str,
+        profile: &str,
+        failures: u32,
+        idle_exits: u32,
+    ) {
+        let state = self.repositories.get_mut(repository).unwrap();
+        let hold = state.holds.entry(profile.to_owned()).or_default();
+        hold.failures = failures;
+        hold.idle_exits = idle_exits;
+    }
+
+    /// How many runners gone count against a job listed for `repository` without the engine knowing which.
+    pub(super) fn unnamed_claims(&self, repository: &str) -> usize {
+        self.claims
+            .get(repository)
+            .map_or(0, |claims| claims.unnamed.len())
     }
 
     pub(super) fn set_held(&mut self, repository: &str, profile: &str, held: Hold) {
@@ -328,6 +351,11 @@ impl Occupant {
 
     pub(super) fn age_job_start(&mut self, by: Duration) {
         self.job_started = self.job_started.map(|at| at - by);
+    }
+
+    /// As a listing shows it busy, with no job named.
+    pub(super) fn set_listed_busy(&mut self) {
+        self.busy = true;
     }
 
     pub(super) fn has_taken(&mut self, job: u64) {
