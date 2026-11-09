@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use super::*;
-use crate::admission::Predictor;
+use crate::admission::{Predictor, host};
 use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
 use crate::scheduler::{Hold, Key, Wait, Waits};
@@ -165,11 +165,13 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn host_is_short(&self) -> bool {
-        self.measured.host.short
+        self.measured.host.is_short()
     }
 
     pub(super) fn set_host_short(&mut self) {
-        self.measured.host.short = true;
+        if self.measured.host == host::HostBand::Plain {
+            self.measured.host = host::HostBand::Larger;
+        }
     }
 
     pub(super) fn waits_for_a_slot(&self, job: u64) -> bool {
@@ -282,7 +284,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
 /// Sets what a plan remembers of the host's margin.
 pub(super) fn set_plan_short(plan: &mut Admitting, short: bool) {
-    plan.remembered.short = short;
+    plan.remembered = host::Remembered::testing(short, plan.remembered.was_stalled());
 }
 
 /// How much of each state the invariants' steps exist to reach the engine holds right now.

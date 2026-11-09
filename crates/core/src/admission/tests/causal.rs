@@ -92,10 +92,21 @@ fn trace_of(jobs: &[Ran]) -> Trace {
 }
 
 fn replay(jobs: &[Ran], trace: &Trace, most_credit: u64) -> Replay {
+    replay_held(jobs, trace, most_credit, SLICE, Band::NoWaiterFits)
+}
+
+/// A replay under `memory_max`, whose larger margin `band` holds up.
+fn replay_held(
+    jobs: &[Ran],
+    trace: &Trace,
+    most_credit: u64,
+    memory_max: u64,
+    band: Band,
+) -> Replay {
     let known = known();
     simulate(
         &config(),
-        Some(SLICE),
+        Some(memory_max),
         None,
         jobs,
         Policy::Measured,
@@ -108,7 +119,7 @@ fn replay(jobs: &[Ran], trace: &Trace, most_credit: u64) -> Replay {
             most_credit,
             host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
-            band: Band::NoWaiterFits,
+            band,
         },
     )
 }
@@ -227,6 +238,131 @@ fn a_host_short_of_memory_keeps_a_replay_from_pooling() {
     let replay = replay(&jobs, &trace, MOST_CREDIT);
     assert!(replay.hazard.most_credit < G, "{:?}", replay.hazard);
     assert_eq!(page_waited(&replay), 25 * 60);
+}
+
+/// `jobs` on a 64G host whose other programs leave the runners `limit` by its plain margin of 4G, 2G less by the larger.
+fn host_limited(jobs: &[Ran], limit: u64) -> Trace {
+    let mut trace = trace_of(jobs);
+    for reading in &mut trace.outside {
+        reading.memory = 60 * G - limit;
+    }
+    trace
+}
+
+/// A job of a repository with no runs yet: it reserves what its profile's jobs do, 3.5G, more than these hosts leave.
+fn report(queued: u64) -> Ran {
+    run("halyard/other", "report", "jvm", queued, 30, 3 * G)
+}
+
+/// `check` from `NOW`, beside which a 7G limit leaves 3G; `report` waiting from minute 5; `page`, 2.5G, from minute 10,
+/// which fits the plain margin and not the larger.
+fn one_job_never_fits() -> (Vec<Ran>, Trace) {
+    let jobs = vec![
+        in_run(check(NOW, 30), 1, 1),
+        in_run(report(NOW + 5 * MINUTE), 2, 1),
+        in_run(page(NOW + 10 * MINUTE, 5), 3, 1),
+    ];
+    let trace = host_limited(&jobs, 7 * G);
+    (jobs, trace)
+}
+
+#[test]
+fn a_job_no_margin_fits_holds_up_the_larger_margin_until_a_waiter_fits_the_plain_one() {
+    let (jobs, trace) = one_job_never_fits();
+    let replay = replay_held(&jobs, &trace, 0, 40 * G, Band::NoWaiterFits);
+    let waited = page_waited(&replay);
+    assert!(
+        (1..=30).contains(&waited),
+        "refused by the larger margin, then it fits at the next plan, waited {waited}"
+    );
+    assert!(
+        replay.hazard.in_band >= 20 * MINUTE,
+        "the margin stood from minute 5 on: {:?}",
+        replay.hazard
+    );
+}
+
+#[test]
+fn any_job_waiting_for_the_host_holds_up_the_larger_margin_when_a_replay_is_asked_to() {
+    let (jobs, trace) = one_job_never_fits();
+    let replay = replay_held(&jobs, &trace, 0, 40 * G, Band::AnyWaiter);
+    assert_eq!(
+        page_waited(&replay),
+        50 * 60,
+        "report starts into the empty slice at minute 30, and while anything waits the margin stands, so page waits it out"
+    );
+    assert!(
+        replay.hazard.in_band >= 25 * MINUTE,
+        "the margin stood from minute 5 on: {:?}",
+        replay.hazard
+    );
+}
+
+#[test]
+fn a_replay_starts_at_the_plain_margin() {
+    let jobs = vec![in_run(check(NOW, 30), 1, 1), in_run(page(NOW, 5), 2, 1)];
+    let trace = host_limited(&jobs, 7 * G);
+    let replay = replay_held(&jobs, &trace, 0, 40 * G, Band::NoWaiterFits);
+    assert_eq!(
+        page_waited(&replay),
+        0,
+        "page fits beside check by the plain margin at the first plan"
+    );
+}
+
+#[test]
+fn the_first_runner_into_an_empty_slice_needs_only_the_plain_margin() {
+    let jobs = vec![
+        in_run(check(NOW, 30), 1, 1),
+        in_run(site(NOW + 5 * MINUTE, 30), 2, 1),
+    ];
+    // Beside the mirror a 5G limit leaves 4.5G by the plain margin, past site's 3.5G, and 2.5G by the larger.
+    let trace = host_limited(&jobs, 5 * G);
+    let replay = replay_held(&jobs, &trace, 0, 40 * G, Band::NoWaiterFits);
+    assert_eq!(
+        page_waited(&replay),
+        25 * 60,
+        "the plan that finds the slice empty starts it, though the larger margin stood"
+    );
+}
+
+#[test]
+fn a_host_credits_fall_is_judged_by_the_margin_that_stands() {
+    let jobs = vec![
+        in_run(check(NOW, 30), 1, 1),
+        in_run(site(NOW, 30), 2, 1),
+        in_run(page(NOW, 30), 3, 1),
+        in_run(report(NOW + 3 * MINUTE), 4, 1),
+    ];
+    // Page comes to use all it takes at minute 8, which ends the host's 2G credit: 10G counted, up from 8G, under the
+    // plain limit of 11G and past the 9G that stands while report waits.
+    let mut trace = host_limited(&jobs, 11 * G);
+    let page_run = trace.runs.get_mut(&RunId::of(&jobs[2])).unwrap();
+    for point in &mut page_run.samples {
+        if point.at >= 8 * MINUTE {
+            point.memory = 2560 * M;
+        }
+    }
+    let hazard = replay_held(&jobs, &trace, 0, 40 * G, Band::NoWaiterFits).hazard;
+    assert_eq!(hazard.overdrawn, 1, "{hazard:?}");
+}
+
+#[test]
+fn a_replays_credit_keeps_clear_of_the_larger_margin_while_it_stands() {
+    let jobs = vec![
+        in_run(check(NOW, 30), 1, 1),
+        in_run(site(NOW, 30), 2, 1),
+        in_run(report(NOW), 3, 1),
+    ];
+    // A 24G host with 10G available beside the two runners, and report waiting from the first plan: the credit is
+    // what is left past the larger margin of 3G and a quarter of the host, 1G of the 1.75G their use would allow.
+    let mut trace = trace_of(&jobs);
+    trace.total = 24 * G;
+    for reading in &mut trace.outside {
+        reading.memory = 13 * G;
+    }
+    let hazard = replay_held(&jobs, &trace, MOST_CREDIT, 40 * G, Band::NoWaiterFits).hazard;
+    assert_eq!(hazard.most_credit, G, "{hazard:?}");
 }
 
 #[test]

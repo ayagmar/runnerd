@@ -161,6 +161,16 @@ fn a_ceiling_does_not_change_when_the_host_stalls() {
 }
 
 #[test]
+fn only_a_stall_keeps_starts_stopped_between_the_two_bounds() {
+    // 2% of the last 10 s, short of memory: over `STALL_LEAVE`, under `STALL_ENTER`.
+    let memory = stalled(host(64 * G, 5 * G), 200);
+    let waiters = budget(memory.clone(), plain(0), Remembered::testing(true, false));
+    assert!(!waiters.stalled, "a band waiters left stops no start");
+    let stall = budget(memory, plain(0), Remembered::testing(true, true));
+    assert!(stall.stalled, "a stall holds until it falls under 1%");
+}
+
+#[test]
 fn with_a_ceiling_a_stall_counts_below_twice_the_margin_of_mem_total() {
     // 5G available on an 8G VM that could grow to 96G: twice the 6G margin of 96G would count the stall, but the
     // stall rule reads the host as it is, whose margin is 2G, so with 5G available the stall is the runners' own.
@@ -261,8 +271,8 @@ mod generated {
         reserved: &mut u64,
         queue: &mut Vec<u64>,
     ) -> usize {
-        let stalled = stalls(memory, remembered.stalled);
-        let limit = limit(memory, remembered.short || stalled);
+        let stalled = stalls(memory, remembered.was_stalled());
+        let limit = limit(memory, remembered.short() || stalled);
         let queued = queue.len();
         queue.retain(|needs| {
             let fits = left(limit, *reserved, stalled) >= i64::try_from(*needs).unwrap();
@@ -291,8 +301,8 @@ mod generated {
             let mut resumed = 0;
             let mut held = false;
             for _ in 0..12 {
-                let fitting = !stalls(&memory, remembered.stalled)
-                    && !remembered.short
+                let fitting = !stalls(&memory, remembered.was_stalled())
+                    && !remembered.short()
                     && queue.iter().any(|needs| {
                         left(limit(&memory, false), reserved, false)
                             >= i64::try_from(*needs).unwrap()
@@ -306,14 +316,14 @@ mod generated {
                 let fits = queue
                     .iter()
                     .any(|needs| room >= i64::try_from(*needs).unwrap());
-                if remembered.stalled {
+                if remembered.was_stalled() {
                     assert!(
-                        remembered.short,
+                        remembered.short(),
                         "seed {seed}: a stall keeps the larger margin"
                     );
                 } else {
                     assert_eq!(
-                        remembered.short,
+                        remembered.short(),
                         !queue.is_empty() && !fits,
                         "seed {seed}: the larger margin stands while no waiter fits the plain one"
                     );

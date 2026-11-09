@@ -42,7 +42,7 @@ const HISTORY: u64 = 30 * 24 * 3600 * 1000;
 #[derive(Debug, Default)]
 pub(super) struct Measured {
     /// What the last plan saw of the host's memory.
-    pub host: host::Remembered,
+    pub host: host::HostBand,
     /// The jobs the last plan had waiting for the host's memory, and when (ms): each waited since then.
     pub(super) host_waiting: (BTreeSet<u64>, u64),
     /// The jobs the last plan had waiting only for a slot (`Plan::slot_waiting`), and when (ms): each waited since.
@@ -338,10 +338,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// busy host back to the edge; with no runner in the slice there is no such start to follow, so the first
     /// runners need only the margin.
     pub(super) fn host_remembered(&self) -> host::Remembered {
-        host::Remembered {
-            short: self.measured.host.short && self.occupied().next().is_some(),
-            ..self.measured.host
-        }
+        let occupancy = host::Occupancy::of(self.occupied().next().is_some());
+        host::Remembered::new(self.measured.host, occupancy)
     }
 
     /// Remembers what this plan saw of the host for the next: whether it stalled, whether the larger margin stands
@@ -359,12 +357,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             _ => None,
         });
         let count = self.count(self.host_remembered());
-        let short = admitting
+        let band = admitting
             .host
             .as_ref()
-            .is_some_and(|host| host::short(&host.memory, count.hosted(), stalled, needs));
-        let was_short = self.measured.host.short;
-        self.measured.host = host::Remembered { short, stalled };
+            .map_or(host::HostBand::Plain, |host| {
+                host::HostBand::after_plan(&host.memory, count.hosted(), stalled, needs)
+            });
+        let was_short = self.measured.host.is_short();
+        self.measured.host = band;
         let now = time::now_ms();
         let waiting_now: BTreeMap<u64, u64> = waiting
             .iter()
@@ -387,7 +387,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .map(|(job, _)| *job)
             })
             .collect();
-        let holds = match (short, stalled || !lacking.is_empty()) {
+        let holds = match (band.is_short(), stalled || !lacking.is_empty()) {
             (false, _) => HostHolds::Nothing,
             (true, false) => HostHolds::Counted,
             (true, true) => HostHolds::Short,
