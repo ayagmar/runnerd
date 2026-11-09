@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::history::{Closing, Followed};
+use super::leftovers::Unread;
 use super::records::Undecided;
 use super::{Engine, Occupant};
 use crate::api;
@@ -30,46 +31,10 @@ struct Caps {
     started_at: Option<SystemTime>,
 }
 
-/// A runner container an earlier run left, not adopted. One that stopped and Docker could not yet tell recovery
-/// whether to keep as its failed job's record waits in `Engine::unread` until `due`.
-#[derive(Debug)]
-pub(super) struct Left {
-    pub(super) container: docker::Container,
-    pub(super) slot: SlotRef,
-    pub(super) occupant: Occupant,
-    /// How many times Docker could not tell.
-    undecided: u32,
-    /// When it is asked again.
-    pub(super) due: tokio::time::Instant,
-}
-
-impl Left {
-    fn new(container: docker::Container, slot: SlotRef, occupant: Occupant) -> Left {
-        Left {
-            container,
-            slot,
-            occupant,
-            undecided: 0,
-            due: tokio::time::Instant::now(),
-        }
-    }
-}
-
 /// The second a runner's name carries: the engine names the next runner later, even within that second or after the
 /// clock stepped back.
 fn name_second(name: &str) -> Option<u64> {
     name.rsplit_once('-')?.1.parse().ok()
-}
-
-/// The longest a container recovery could not decide on waits before it is asked about again.
-const UNREAD_BACKOFF_MAX: Duration = Duration::from_secs(600);
-
-/// How long a container recovery could not decide on `undecided` times waits before it is asked about again: one
-/// poll interval, doubling each time, up to `UNREAD_BACKOFF_MAX`.
-fn unread_backoff(poll_interval: Duration, undecided: u32) -> Duration {
-    poll_interval
-        .saturating_mul(1 << undecided.saturating_sub(1).min(16))
-        .min(UNREAD_BACKOFF_MAX)
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -85,7 +50,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 match self.docker.remove(&container.id).await {
                     Err(error) if !is_not_found(&error) => {
                         warn!("cannot remove {}: {error}", container.name);
-                        self.leftover.insert(container.id, container.name);
+                        self.leftovers.removing(container.id, container.name);
                     }
                     _ => info!("removed {}, left by an earlier run", container.name),
                 }
@@ -178,7 +143,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             info!("removing {}, a shell an earlier run left", shell.name);
             if let Err(error) = self.docker.remove(&shell.id).await {
                 warn!("cannot remove {}: {error}", shell.name);
-                self.leftover.insert(shell.id, shell.name);
+                self.leftovers.removing(shell.id, shell.name);
             }
         }
     }
@@ -220,46 +185,64 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes a runner container an earlier run left that is not adopted, unless it stopped after a failed job whose
-    /// runner its profile keeps: that becomes the job's record. One Docker could not tell that of stays, never
-    /// removed, and is asked about again after a backoff (`unread_backoff`), as an unreadable one would otherwise be
-    /// read again at every tick.
-    pub(super) async fn remove_left(&mut self, mut left: Left) {
-        if !left.container.running {
-            match self.keep_left_record(&left.slot, &left.occupant).await {
-                // Its capture ended with the last daemon, which may have left the job unnamed. Read once it is
-                // decided, as one Docker cannot read comes back here until it is.
-                Ok(kept) => {
-                    self.claim_from_worker_log(&left.occupant).await;
-                    if kept {
-                        return;
-                    }
-                }
-                Err(error) => {
-                    left.undecided += 1;
-                    let wait = unread_backoff(self.config.host.poll_interval, left.undecided);
-                    left.due = tokio::time::Instant::now() + wait;
-                    warn!(
-                        "cannot tell whether {} ran a failed job to keep; trying again in {}s: {error}",
-                        left.container.name,
-                        wait.as_secs()
-                    );
-                    if let Undecided::Docker(error) = &error {
-                        self.docker_failed(error);
-                    }
-                    self.unread.push(left);
+    /// runner its profile keeps: `decide_left` reads that.
+    async fn remove_left(
+        &mut self,
+        container: docker::Container,
+        slot: SlotRef,
+        occupant: Occupant,
+    ) {
+        if container.running {
+            self.remove_unkept(container.id, container.name).await;
+        } else {
+            self.decide_left(Unread::new(slot, occupant)).await;
+        }
+    }
+
+    /// Keeps a stopped runner container an earlier run left as its failed job's record, or removes it. One Docker could
+    /// not tell that of stays, never removed, and is asked about again after a backoff, as an unreadable one would
+    /// otherwise be read again at every tick.
+    pub(super) async fn decide_left(&mut self, unread: Unread) {
+        match self.keep_left_record(&unread.slot, &unread.occupant).await {
+            // Its capture ended with the last daemon, which may have left the job unnamed. Read once it is
+            // decided, as one Docker cannot read comes back here until it is.
+            Ok(kept) => {
+                self.claim_from_worker_log(&unread.occupant).await;
+                if kept {
                     return;
                 }
             }
-        }
-        let container = left.container;
-        info!("removing {}, left by an earlier run", container.name);
-        match self.docker.remove(&container.id).await {
-            Err(error) if is_being_removed(&error) => {
-                self.leftover.insert(container.id, container.name);
+            Err(error) => {
+                let name = unread.occupant.runner_name.clone();
+                let wait = self
+                    .leftovers
+                    .undecided(unread, self.config.host.poll_interval);
+                warn!(
+                    "cannot tell whether {name} ran a failed job to keep; trying again in {}s: {error}",
+                    wait.as_secs()
+                );
+                if let Undecided::Docker(error) = &error {
+                    self.docker_failed(error);
+                }
+                return;
             }
+        }
+        let Occupant {
+            container,
+            runner_name,
+            ..
+        } = unread.occupant;
+        self.remove_unkept(container, runner_name).await;
+    }
+
+    /// Removes a container an earlier run left that nothing keeps; each tick tries again if Docker does not.
+    async fn remove_unkept(&mut self, id: String, name: String) {
+        info!("removing {name}, left by an earlier run");
+        match self.docker.remove(&id).await {
+            Err(error) if is_being_removed(&error) => self.leftovers.removing(id, name),
             Err(error) if !is_not_found(&error) => {
-                warn!("cannot remove {}: {error}", container.name);
-                self.leftover.insert(container.id, container.name);
+                warn!("cannot remove {name}: {error}");
+                self.leftovers.removing(id, name);
             }
             _ => {}
         }
@@ -398,7 +381,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         profile,
                         index: index.unwrap_or(0),
                     };
-                    self.remove_left(Left::new(container, slot, occupant)).await;
+                    self.remove_left(container, slot, occupant).await;
                 }
             }
         }

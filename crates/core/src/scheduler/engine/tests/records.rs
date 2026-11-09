@@ -888,6 +888,296 @@ async fn a_left_runner_docker_cannot_read_is_asked_about_less_and_less_and_never
     );
 }
 
+/// A stopped runner an earlier daemon left, of a failed job the worker log names, whose diagnostic files Docker cannot
+/// read.
+fn left_runner_docker_cannot_read(docker: &FakeDocker) {
+    let mut state = docker.0.lock().unwrap();
+    state.containers = vec![runner_container(2, 8, false)];
+    state
+        .container_logs
+        .insert("container-2".to_owned(), FAILED.to_owned());
+    state
+        .diag
+        .insert("container-2".to_owned(), docker::tests::diag_archive(5));
+    state.fail_files = u32::MAX;
+}
+
+fn removals_of(docker: &FakeDocker, container: &str) -> usize {
+    let call = format!("remove {container}");
+    docker.calls().iter().filter(|made| **made == call).count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_left_runner_read_at_last_whose_removal_fails_is_tried_again_within_that_tick() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    left_runner_docker_cannot_read(&docker);
+    let dir = TestDir::new("unread-retried");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 1, "it waits to be read");
+    {
+        // It turns out to have nothing to keep, and Docker refuses the first removal.
+        let mut state = docker.0.lock().unwrap();
+        state.fail_files = 0;
+        state.container_logs.remove("container-2");
+        state.fail_removes = 1;
+    }
+    engine.make_unread_due();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removals_of(&docker, "container-2"), 2, "asked twice");
+    assert!(
+        docker.0.lock().unwrap().containers.is_empty(),
+        "the second removal took it"
+    );
+    assert_eq!(engine.state_counts().unread, 0, "it no longer waits");
+    assert!(engine.no_leftovers(), "and nothing is left to remove");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_left_runner_whose_profile_a_reload_removed_is_removed_at_its_next_ask() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    left_runner_docker_cannot_read(&docker);
+    let dir = TestDir::new("unread-reloaded");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert_eq!(removals_of(&docker, "container-2"), 0, "not removed yet");
+    let config = CONFIG
+        .replace("[profiles.app]", "[profiles.big]")
+        .replace("profile = \"app\"", "profile = \"big\"");
+    engine.reload(Config::parse(&config).unwrap(), None, None);
+    assert_eq!(
+        engine.state_counts().unread,
+        1,
+        "a reload keeps it waiting to be read"
+    );
+    engine.make_unread_due();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removals_of(&docker, "container-2"), 1, "nothing keeps it");
+    assert!(engine.no_recordings(), "no profile records its failure");
+}
+
+#[tokio::test]
+async fn a_reload_keeps_a_container_left_to_remove() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let mut left = runner_container(1, 7, true);
+    left.id = "runnerd-shell-10-1".to_owned();
+    left.name = left.id.clone();
+    left.labels
+        .insert(record::SHELL_LABEL.to_owned(), "10".to_owned());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![left];
+        state.fail_removes = 1;
+    }
+    let dir = TestDir::new("left-reloaded");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    engine.reload(Config::parse(&recording()).unwrap(), None, None);
+    assert!(
+        engine.is_leftover("runnerd-shell-10-1"),
+        "it stays to remove"
+    );
+    engine.tick(Shutdown::No).await;
+    assert!(engine.no_leftovers(), "and the next tick removes it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_finds_again_what_the_last_daemon_could_not_read_or_remove() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    left_runner_docker_cannot_read(&docker);
+    let dir = TestDir::new("left-restarted");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 1, "it could not be read");
+    drop(engine);
+
+    // A new daemon asks at once, with no backoff carried over; Docker refuses the removal that follows.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.fail_files = 0;
+        state.container_logs.remove("container-2");
+        state.fail_removes = 1;
+    }
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 0, "it was read");
+    assert!(engine.is_leftover("container-2"), "and is left to remove");
+    engine.tick(Shutdown::No).await;
+    assert!(
+        docker.0.lock().unwrap().containers.is_empty(),
+        "the next tick removed it"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_left_runners_job_only_the_history_names_is_still_recorded_when_docker_reads_it_late() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let runner = runner_container(2, 8, false);
+    let name = runner.name.clone();
+    {
+        // No diagnostic files: its worker log does not name the job.
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner];
+        state
+            .container_logs
+            .insert("container-2".to_owned(), FAILED.to_owned());
+        state.written = 1 << 30;
+        state.fail_logs = 1;
+    }
+    let dir = TestDir::new("unread-history");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    handle.store.queued(
+        "o/r",
+        &QueuedJob {
+            id: 5,
+            run_id: 5,
+            name: "build".to_owned(),
+            ..QueuedJob::default()
+        },
+        crate::time::now_ms(),
+    );
+    handle.store.runner_started(RunnerRecord {
+        name: name.clone(),
+        repository: "o/r".to_owned(),
+        profile: "app".to_owned(),
+        slot: 2,
+        container: "container-2".to_owned(),
+        started_at: crate::time::now_ms(),
+        memory_cap: None,
+        cpu_cap: None,
+        admission: None,
+        purpose: None,
+    });
+    handle.store.claimed(5, 5, &name, crate::time::now_ms());
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 1, "its log was not read");
+
+    engine.make_unread_due();
+    tokio::task::yield_now().await;
+    for _ in 0..200 {
+        engine.tick(Shutdown::No).await;
+        if engine.state_counts().unread == 0 && engine.no_recordings() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    engine.publish();
+    let jobs: Vec<u64> = handle
+        .records
+        .borrow()
+        .records
+        .iter()
+        .map(|record| record.job)
+        .collect();
+    assert_eq!(jobs, [5], "the retry still knows which job it ran");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_left_runner_read_late_has_its_job_read_from_github_under_its_repository() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    left_runner_docker_cannot_read(&docker);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(5, details(5, "completed", Some("failure")));
+    let dir = TestDir::new("unread-repository");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    handle.store.queued(
+        "o/r",
+        &QueuedJob {
+            id: 5,
+            run_id: 5,
+            name: "build".to_owned(),
+            ..QueuedJob::default()
+        },
+        crate::time::now_ms(),
+    );
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 1, "its files were not read");
+
+    docker.0.lock().unwrap().fail_files = 0;
+    engine.make_unread_due();
+    let poll = engine.config.host.poll_interval;
+    for _ in 0..8 {
+        engine.tick(Shutdown::No).await;
+        tokio::time::advance(poll).await;
+    }
+    let asked = github.0.lock().unwrap().job_repositories.clone();
+    assert_eq!(
+        asked,
+        BTreeSet::from(["o/r".to_owned()]),
+        "the only one asked"
+    );
+}
+
+#[tokio::test]
+async fn a_left_runner_still_running_with_no_slot_is_removed_without_reading_it_for_a_record() {
+    // Read, its log of a failed job would make a record of a container that is still running.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let adopted = runner_container(1, 7, true);
+    let mut left = runner_container(2, 8, true);
+    left.labels
+        .insert("runnerd.slot".to_owned(), "1".to_owned());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![adopted, left];
+        state
+            .container_logs
+            .insert("container-2".to_owned(), FAILED.to_owned());
+        state
+            .diag
+            .insert("container-2".to_owned(), docker::tests::diag_archive(5));
+    }
+    let dir = TestDir::new("left-running");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert_eq!(removals_of(&docker, "container-2"), 1, "it is removed");
+    assert!(engine.no_recordings(), "and no record is made of it");
+}
+
+#[tokio::test]
+async fn a_left_runner_docker_is_already_removing_stays_followed_until_it_is_gone() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner_container(2, 8, false)];
+        state.being_removed.insert("container-2".to_owned());
+    }
+    let dir = TestDir::new("left-being-removed");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert!(
+        engine.is_leftover("container-2"),
+        "Docker's removal can fail"
+    );
+    docker.0.lock().unwrap().being_removed.clear();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.no_leftovers(), "the next tick saw it through");
+    assert!(
+        docker.0.lock().unwrap().containers.is_empty(),
+        "and it is gone"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn docker_going_away_while_a_left_runner_is_read_during_a_stop_ends_the_stops_wait() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    left_runner_docker_cannot_read(&docker);
+    let dir = TestDir::new("unread-outage");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    handle.control.shutdown(Shutdown::Graceful);
+    docker.set_outage(Outage::Refused);
+    engine.make_unread_due();
+    engine.collect_finished().await;
+    assert!(engine.control.docker_gone(), "the stop stops asking Docker");
+    assert_eq!(engine.state_counts().unread, 1, "it stays to read");
+}
+
 /// A job queued in the history whose runner stopped while no daemon ran, as an idle runner that took it during a
 /// detaching stop. The restart claims it from the worker log, so nothing else closes it: its runner is in no slot. A
 /// runner the history never recorded, as Docker failed to inspect it, leaves no removal to wait for.

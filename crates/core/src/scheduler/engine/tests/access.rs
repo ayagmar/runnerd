@@ -197,11 +197,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn is_leftover(&self, container: &str) -> bool {
-        self.leftover.contains_key(container)
+        self.leftovers.is_removing(container)
     }
 
     pub(super) fn no_leftovers(&self) -> bool {
-        self.leftover.is_empty()
+        self.leftovers.to_remove().is_empty()
     }
 
     /// Ends every log capture, as a daemon's exit does.
@@ -313,10 +313,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     /// As if every unread leftover's backoff ran out.
     pub(super) fn make_unread_due(&mut self) {
-        let now = tokio::time::Instant::now();
-        for left in &mut self.unread {
-            left.due = now;
-        }
+        self.leftovers.make_due();
     }
 
     pub(super) fn state_counts(&self) -> StateCounts {
@@ -331,7 +328,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
             cancelling: self.cancelling.len(),
             busy_orphans: self.busy_orphans.len(),
             oversized: self.upkeep.oversized(),
-            unread: self.unread.len(),
+            unread: self.leftovers.unread(),
             split_waits: self
                 .repositories
                 .values()

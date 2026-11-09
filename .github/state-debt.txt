@@ -5,7 +5,7 @@
 # a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
 # script.
 #
-engine-lifecycle-fields 31
+engine-lifecycle-fields 29
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant

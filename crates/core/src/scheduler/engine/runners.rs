@@ -56,7 +56,7 @@ pub(super) struct Collected {
 pub(super) enum Removal {
     /// It is gone, or stays as a record.
     Done,
-    /// Docker is removing it already, which can still fail: `leftover` follows it (ADR 0105).
+    /// Docker is removing it already, which can still fail: `leftovers` follows it (ADR 0105).
     UnderWay,
 }
 
@@ -147,24 +147,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.exits.inspecting_all();
         self.released.clear();
         let now = tokio::time::Instant::now();
-        let (due, waiting) = std::mem::take(&mut self.unread)
-            .into_iter()
-            .partition(|left| left.due <= now);
-        self.unread = waiting;
-        for left in due {
-            self.remove_left(left).await;
+        for unread in self.leftovers.take_due(now) {
+            self.decide_left(unread).await;
         }
-        for (id, name) in std::mem::take(&mut self.leftover) {
-            match self.docker.remove(&id).await {
+        // Those the reads above just left to remove too.
+        for left in self.leftovers.to_remove() {
+            match self.docker.remove(&left.id).await {
                 // Asked again until Docker says it is gone, or why it is not.
-                Err(error) if is_being_removed(&error) => {
-                    self.leftover.insert(id, name);
-                }
+                Err(error) if is_being_removed(&error) => {}
                 Err(error) if !is_not_found(&error) => {
-                    warn!("cannot remove {name}: {error}");
-                    self.leftover.insert(id, name);
+                    warn!("cannot remove {}: {error}", left.name);
                 }
-                _ => info!("removed {name}"),
+                _ => {
+                    info!("removed {}", left.name);
+                    self.leftovers.removed(&left.id);
+                }
             }
         }
         let occupied: Vec<(SlotRef, Occupant)> = self
@@ -366,8 +363,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         match removed {
             Ok(Removal::Done) => {}
             Ok(Removal::UnderWay) => {
-                self.leftover
-                    .insert(occupant.container.clone(), occupant.runner_name.clone());
+                self.leftovers
+                    .removing(occupant.container.clone(), occupant.runner_name.clone());
             }
             Err(error) => {
                 warn!("cannot remove {}: {error}", occupant.runner_name);
