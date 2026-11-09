@@ -380,8 +380,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .or(occupant.named_job());
         // GitHub may hold its registration busy a while yet, also for a job no poll or capture saw it take: the next
         // listings delete it then, without a warning.
-        self.ended_busy
-            .insert(occupant.runner_id, occupant.repository.clone());
+        self.registrations
+            .ended_here(occupant.runner_id, &occupant.repository);
         self.forget(occupant);
         let exit = Exit::Released {
             logged,
@@ -552,8 +552,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     "{}: GitHub keeps {} until it notices its job is gone; a later listing deletes it",
                     occupant.repository, occupant.runner_name
                 );
-                self.ended_busy
-                    .insert(occupant.runner_id, occupant.repository.clone());
+                self.registrations
+                    .ended_here(occupant.runner_id, &occupant.repository);
             }
             Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),

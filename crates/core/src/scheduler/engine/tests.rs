@@ -6417,6 +6417,7 @@ mod pool_health;
 mod pools;
 mod priority;
 mod records;
+mod registrations;
 mod stop;
 mod upkeep;
 mod warm;
