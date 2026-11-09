@@ -4008,6 +4008,37 @@ async fn a_running_mirror_docker_gives_no_cap_for_counts_at_the_configured_cap()
 }
 
 #[tokio::test]
+async fn a_mirror_recovery_could_not_read_is_started_for_the_first_runner() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .fail_inspects
+        .insert(Names::new("runnerd").mirror(), 1);
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    let mirror = Names::new("runnerd").mirror();
+    assert!(
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .any(|container| container.name == mirror && container.running),
+        "the mirror runs for the runner started"
+    );
+}
+
+#[tokio::test]
 async fn a_job_cancelled_in_the_queue_did_not_run_on_another_machine() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

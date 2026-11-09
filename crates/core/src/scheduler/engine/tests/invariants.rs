@@ -2030,6 +2030,7 @@ impl Case {
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
+        self.a_runner_started_finds_the_mirror_up(&starts)?;
         if same_reading {
             self.the_band_follows_the_waiters(was_short, seeded)?;
         }
@@ -2626,6 +2627,25 @@ impl Case {
                     format!("{name} keeps a served mark with nothing queued"),
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// With the mirror enabled, a tick that started a runner leaves the mirror running, as its runners pull through it.
+    /// Only an empty slice stops it.
+    fn a_runner_started_finds_the_mirror_up(&self, starts: &[String]) -> Result<(), Violation> {
+        let held = self.engine.occupied().next().is_some();
+        let up = self
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .any(|container| container.running && container.labels.contains_key("runnerd.mirror"));
+        if self.shape.mirror && held && !up && !starts.is_empty() {
+            let detail = format!("{starts:?} started and no mirror runs");
+            return violation(self, "a_runner_started_finds_the_mirror_up", detail);
         }
         Ok(())
     }
@@ -3401,6 +3421,13 @@ async fn broken(steps: &[Step]) -> Option<(&'static str, String)> {
         .await
         .err()
         .map(|found| (found.invariant, found.detail))
+}
+
+#[tokio::test]
+async fn a_daemon_started_with_a_job_queued_starts_the_mirror_for_its_runner() {
+    // The restart finds no mirror, and its first tick starts a runner before any tick found the slice empty.
+    let steps = [Step::Reload(Change::Mirror), HEAVY, Step::Restart];
+    assert_eq!(broken(&steps).await, None);
 }
 
 #[tokio::test]
