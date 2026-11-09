@@ -6,6 +6,9 @@ use crate::scheduler::SlotRef;
 /// The runner `idle_runner` adopts.
 const RUNNER: u64 = 7;
 
+/// A registration of this machine that no slot holds.
+const ORPHAN: u64 = 9;
+
 /// An engine that adopted `idle_runner` and has seen one listing.
 async fn adopted(
     github: &FakeGithub,
@@ -27,6 +30,62 @@ async fn released_while_github_holds_it(
     github.0.lock().unwrap().busy_deletes = 2;
     docker.0.lock().unwrap().containers[0].running = false;
     engine.tick(Shutdown::No).await;
+}
+
+/// The messages the engine logs on this thread, while installed with `tracing::subscriber::set_default`.
+#[derive(Clone, Default)]
+struct LogLines(Arc<Mutex<Vec<String>>>);
+
+impl LogLines {
+    fn containing(&self, text: &str) -> usize {
+        let lines = self.0.lock().unwrap();
+        lines.iter().filter(|line| line.contains(text)).count()
+    }
+}
+
+impl tracing::Subscriber for LogLines {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        event.record(&mut Message(&self.0));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Takes an event's message into the lines it borrows.
+struct Message<'lines>(&'lines Mutex<Vec<String>>);
+
+impl tracing::field::Visit for Message<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0.lock().unwrap().push(format!("{value:?}"));
+        }
+    }
+}
+
+/// Lists a busy registration of this machine that no slot holds, and has GitHub refuse the next `refusals` deletes.
+fn orphan_listed(github: &FakeGithub, refusals: u32) {
+    let mut state = github.0.lock().unwrap();
+    state.runners.push(runner(
+        ORPHAN,
+        &identity("ci", ID_A).runner_name("app", 2, 1),
+        true,
+    ));
+    state.registered_on.insert(ORPHAN, "o/r".to_owned());
+    state.busy_deletes = refusals;
 }
 
 fn app_slot() -> SlotRef {
@@ -71,6 +130,16 @@ async fn a_killed_runner_counts_as_ended_only_if_github_keeps_it() {
     github.0.lock().unwrap().busy_deletes = 1;
     engine.kill(&app_slot()).await;
     assert!(engine.ended_here(RUNNER), "GitHub refused the delete");
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.ended_here(RUNNER),
+        "the listing that deleted it still had it"
+    );
+    engine.tick(Shutdown::No).await;
+    assert!(
+        !engine.ended_here(RUNNER),
+        "the next listing no longer has it"
+    );
 
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
@@ -82,19 +151,39 @@ async fn a_killed_runner_counts_as_ended_only_if_github_keeps_it() {
 async fn a_registration_no_slot_explains_is_recorded_as_refused_and_not_as_ended_here() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
-    {
-        let mut state = github.0.lock().unwrap();
-        state.runners.push(runner(
-            9,
-            &identity("ci", ID_A).runner_name("app", 2, 1),
-            true,
-        ));
-        state.registered_on.insert(9, "o/r".to_owned());
-        state.busy_deletes = 1;
-    }
+    orphan_listed(&github, 1);
     engine.tick(Shutdown::No).await;
     assert_eq!(engine.state_counts().busy_orphans, 1, "refused once");
-    assert!(!engine.ended_here(9), "this engine never ran it");
+    assert!(!engine.ended_here(ORPHAN), "this engine never ran it");
+}
+
+#[tokio::test]
+async fn an_orphan_github_holds_is_warned_of_at_its_first_refusal_and_never_again() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
+    let lines = LogLines::default();
+    let _logging = tracing::subscriber::set_default(lines.clone());
+    orphan_listed(&github, 2);
+
+    engine.tick(Shutdown::No).await;
+    assert_eq!(lines.containing("GitHub says it runs a job"), 1, "first");
+
+    engine.tick(Shutdown::No).await;
+    assert_eq!(lines.containing("GitHub says it runs a job"), 1, "second");
+}
+
+#[tokio::test]
+async fn deleting_a_registration_github_held_past_a_release_raises_no_false_alarm() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
+    let lines = LogLines::default();
+    let _logging = tracing::subscriber::set_default(lines.clone());
+    released_while_github_holds_it(&mut engine, &github, &docker).await;
+
+    engine.tick(Shutdown::No).await;
+    assert_eq!(github.0.lock().unwrap().runners.len(), 0, "GitHub let go");
+    assert_eq!(lines.containing("which had no container"), 0);
+    assert_eq!(lines.containing("GitHub says it runs a job"), 0);
 }
 
 #[tokio::test]
