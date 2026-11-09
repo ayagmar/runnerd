@@ -161,6 +161,16 @@ fn a_ceiling_does_not_change_when_the_host_stalls() {
 }
 
 #[test]
+fn only_a_stall_keeps_starts_stopped_between_the_two_bounds() {
+    // 2% of the last 10 s, short of memory: over `STALL_LEAVE`, under `STALL_ENTER`.
+    let memory = stalled(host(64 * G, 5 * G), 200);
+    let waiters = budget(memory.clone(), plain(0), Remembered::testing(true, false));
+    assert!(!waiters.stalled, "a band waiters left stops no start");
+    let stall = budget(memory, plain(0), Remembered::testing(true, true));
+    assert!(stall.stalled, "a stall holds until it falls under 1%");
+}
+
+#[test]
 fn with_a_ceiling_a_stall_counts_below_twice_the_margin_of_mem_total() {
     // 5G available on an 8G VM that could grow to 96G: twice the 6G margin of 96G would count the stall, but the
     // stall rule reads the host as it is, whose margin is 2G, so with 5G available the stall is the runners' own.
