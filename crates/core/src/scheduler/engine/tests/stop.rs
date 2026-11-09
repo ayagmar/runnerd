@@ -268,7 +268,12 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
             Some(Stopping::LeavesJobs),
             "a second `runnerd stop` says what the first does once Docker stopped answering (Docker gone: {gone})"
         );
-        assert_eq!(handle.shutdown(Shutdown::Force), Some(Stopping::KillsJobs));
+        assert_eq!(
+            handle.shutdown(Shutdown::Force),
+            handle.status.borrow().stopping,
+            "`runnerd stop --force` answers what status says, as Docker cannot kill anything (Docker gone: {gone})"
+        );
+        assert_eq!(handle.status.borrow().stopping, Some(Stopping::LeavesJobs));
         let calls = github.calls();
         for id in [7, 8] {
             let deletes = calls

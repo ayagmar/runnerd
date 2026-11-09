@@ -377,12 +377,12 @@ impl Control {
         *configured = repositories;
     }
 
-    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way. Returns the most
-    /// urgent request so far.
+    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way. Returns how it
+    /// stops now, which is what status says.
     pub fn shutdown(&self, mode: Shutdown) -> Shutdown {
         self.shutdown.send_if_modified(|stop| stop.ask(mode));
         self.wake.notify_one();
-        self.shutdown.borrow().asked()
+        self.mode()
     }
 
     /// Whether the repository is paused.
