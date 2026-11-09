@@ -28,7 +28,7 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Decision, Demand, Plan, Pool, Repository, Scarce, StopReason, Waits, matches,
+    Barrier, Decision, Demand, Plan, Pool, Repository, Scarce, StopReason, matches,
 };
 use crate::time;
 
@@ -838,7 +838,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let listed = state.listed;
             let waits = state.waits.entry(pool.profile.clone()).or_default();
             if stopped {
-                *waits = Waits::default();
+                waits.stopped();
             } else if listed {
                 waits.retain(|job| queued.contains(&job));
                 if queued.is_empty() {
@@ -869,13 +869,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if let Some(barrier) = barrier {
                 waits.own(barrier.job);
             }
+            waits.set_cpu_held(cpu_held);
             if waits.is_empty() {
                 state.waits.remove(&pool.profile);
-            }
-            if cpu_held {
-                state.cpu_held.insert(pool.profile);
-            } else {
-                state.cpu_held.remove(&pool.profile);
             }
         }
         let job = barrier.map(|barrier| barrier.job);

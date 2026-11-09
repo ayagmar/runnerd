@@ -29,13 +29,6 @@ C1 core RepositoryState
 # Pool health: split into one enum.
 C1 core PoolHold
 
-# Pool waits: split. Waits seals, and cpu_held moves in.
-C1 core Waits
-
-# Replayer: seal, with the pool waits. It is one replay's working state and never outlives the call: it moves to
-# admission/replay.rs, a leaf, with its fields private.
-C1 core Replayer
-
 # Measured: split raised (slot occupant) and the wait sets (wait accounting) out; the last of those seals what stays,
 # the predictor and the log memos, with private fields.
 C1 core crates/core/src/scheduler/engine/admission.rs:Measured

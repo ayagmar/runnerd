@@ -947,9 +947,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             state
                 .waits
                 .retain(|profile, _| config.pool_in(name, profile).is_some());
-            state
-                .cpu_held
-                .retain(|profile| config.pool_in(name, profile).is_some());
         }
         self.control.set_repositories(names);
         let profiles = &self.config.profiles;

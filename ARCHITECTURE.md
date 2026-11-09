@@ -53,7 +53,8 @@ flowchart TB
 - `admission`, `buildcache`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`,
   `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU,
-  replays the history for `runnerd simulate`, and works out what the host's memory leaves the slice
+  replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
+  methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
   aggregate count of what runs, which the engine and a replay by `admission::trace` both call
   ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)); `admission::recent` reads
@@ -177,7 +178,7 @@ queued → slot → container → removed
    not fit takes the room of warm runners of other repositories, which stop, or is passed by younger jobs that fit,
    until it has waited 10 minutes for memory or CPU, or 2 in a pool a barrier has served until its queue empties
    ([ADR 0098](docs/adr/0098-a-pool-waits-longer-for-its-first-barrier.md)): then the first such job that draining
-   what runs would make room for puts up the plan's one barrier (`scheduler::priority`), and no younger job starts until a runner of its pool
+   what runs would make room for puts up the plan's one barrier (`scheduler::priority`, reading the pool's `scheduler::waits::Waits`, which only its own methods write), and no younger job starts until a runner of its pool
    does, but one that usually ends before the running runners' usual ends let the owner or an older waiting job
    start, counting the largest credit the pooled count could reach, and whose cap leaves the owner its room even if it
    never ends. `plan` names each pool's held job and the engine keeps its wait, from the

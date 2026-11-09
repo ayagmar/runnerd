@@ -133,17 +133,18 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     pub(super) fn set_memory_wait(&mut self, repository: &str, profile: &str, wait: Wait) {
         let state = self.repositories.get_mut(repository).unwrap();
-        state.waits.entry(profile.to_owned()).or_default().memory = Some(wait);
+        let waits = state.waits.entry(profile.to_owned()).or_default();
+        *waits = waits.with_memory(wait);
     }
 
     /// As if every wait began `by` earlier.
     pub(super) fn age_waits(&mut self, by: Duration) {
         for state in self.repositories.values_mut() {
             for waits in state.waits.values_mut() {
-                if let Some(wait) = waits.memory.as_mut() {
+                if let Some(wait) = waits.memory_mut() {
                     wait.since -= by;
                 }
-                if let Some(wait) = waits.cpu.as_mut() {
+                if let Some(wait) = waits.cpu_mut() {
                     wait.since -= by;
                 }
             }
@@ -313,8 +314,8 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
                 .flat_map(|state| state.waits.values())
                 .filter(|waits| {
                     waits
-                        .memory
-                        .zip(waits.cpu)
+                        .memory()
+                        .zip(waits.cpu())
                         .is_some_and(|(a, b)| a.job != b.job)
                 })
                 .count(),

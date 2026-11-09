@@ -2,10 +2,11 @@
 //! long each pool's next job waited, whether a barrier has served the pool (ADR 0098), what an empty slice would hold,
 //! the rule that picks a plan's one barrier, and which younger jobs may start behind it all the same (`Backfill`, ADR
 //! 0097). `plan` and `admission::simulate` both decide by it, so a replay shows what the daemon does. It does no I/O
-//! and reads no clock; the engine keeps the waits, and it never stops or clamps what already runs.
+//! and reads no clock; the engine keeps the waits (`waits`), and it never stops or clamps what already runs.
 
 use std::time::{Duration, SystemTime};
 
+use super::waits::Waits;
 use super::{Left, signed};
 use crate::api::Waiting;
 
@@ -25,136 +26,6 @@ pub enum Scarce {
     Memory,
     /// The CPU budget.
     Cpu,
-}
-
-/// Since when a job has waited for something scarce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Wait {
-    /// The job's ID: a wait counts for this job alone, so it cannot outlive it.
-    pub job: u64,
-    /// When a scheduling plan first held it.
-    pub since: SystemTime,
-}
-
-/// What a pool's next job has waited for, and whether a barrier has served the pool. Each clock runs from the first plan
-/// that held the job for it and goes on through a plan that holds it for the other, or for a slot.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Waits {
-    /// Its wait for memory.
-    pub memory: Option<Wait>,
-    /// Its wait for CPU.
-    pub cpu: Option<Wait>,
-    /// The waiting job, if a plan's barrier was ever its own. Not only the last plan's: the plan that starts it has no
-    /// barrier, as it fits, and a start refused, or that failed preparing its caches, plans again. A failure that brings
-    /// a backoff clears this with the waits.
-    pub owner: Option<u64>,
-    /// Whether a runner of the pool started for a job that owned a barrier, since its queue last emptied: its next jobs
-    /// wait `SERVED_PRIORITY_AFTER`.
-    pub served: bool,
-}
-
-impl Waits {
-    /// Whether nothing is kept for the pool.
-    pub fn is_empty(&self) -> bool {
-        *self == Waits::default()
-    }
-
-    /// Starts the clock of `scarce` for `job`, unless one runs; whether it started.
-    pub fn note(&mut self, scarce: Scarce, job: u64, now: SystemTime) -> bool {
-        let wait = match scarce {
-            Scarce::Memory => &mut self.memory,
-            Scarce::Cpu => &mut self.cpu,
-        };
-        let started = wait.is_none();
-        wait.get_or_insert(Wait { job, since: now });
-        started
-    }
-
-    /// Drops what is kept for the jobs `queued` says are gone. The mark stays: a job taken elsewhere says nothing of the
-    /// jobs behind it.
-    pub fn retain(&mut self, queued: impl Fn(u64) -> bool) {
-        for wait in [&mut self.memory, &mut self.cpu] {
-            if wait.is_some_and(|wait| !queued(wait.job)) {
-                *wait = None;
-            }
-        }
-        self.owner = self.owner.filter(|job| queued(*job));
-    }
-
-    /// Notes that the plan's barrier is `job`'s, if this pool waits for it.
-    pub fn own(&mut self, job: u64) {
-        let waits = [self.memory, self.cpu];
-        if waits.iter().flatten().any(|wait| wait.job == job) {
-            self.owner = Some(job);
-        }
-    }
-
-    /// A runner of the pool is in its slot: its waits end, and if it came to a job that owned a barrier, the barrier has
-    /// served the pool. A proposed start, a deferred one or one that failed comes to nothing, so it does not count.
-    pub fn started(&mut self) {
-        self.served |= self.owner.is_some();
-        *self = Waits {
-            served: self.served,
-            ..Waits::default()
-        };
-    }
-
-    /// A listing that succeeded shows none of the pool's jobs queued: the next job to wait is a new contention.
-    pub fn emptied(&mut self) {
-        self.served = false;
-    }
-
-    /// How long a job of the pool waits before it may own a barrier.
-    fn limit(&self) -> Duration {
-        if self.served {
-            SERVED_PRIORITY_AFTER
-        } else {
-            PRIORITY_AFTER
-        }
-    }
-
-    /// When each wait reaches its limit, for a replay to look again then.
-    pub fn deadlines(&self) -> impl Iterator<Item = SystemTime> {
-        let limit = self.limit();
-        [self.memory, self.cpu]
-            .into_iter()
-            .flatten()
-            .map(move |wait| wait.since + limit)
-    }
-
-    /// When `job` first had waited long enough for either, if it has by `now`: a job that waited for CPU and now lacks
-    /// memory, or the other way round, keeps what it waited.
-    fn matured(&self, job: u64, now: SystemTime) -> Option<SystemTime> {
-        let limit = self.limit();
-        [self.memory, self.cpu]
-            .into_iter()
-            .flatten()
-            .filter(|wait| wait.job == job)
-            .map(|wait| wait.since + limit)
-            .filter(|reached| *reached <= now)
-            .min()
-    }
-}
-
-#[cfg(test)]
-impl Waits {
-    /// With a wait for memory, for tests that start from one.
-    pub(crate) fn with_memory(mut self, wait: impl Into<Option<Wait>>) -> Self {
-        self.memory = wait.into();
-        self
-    }
-
-    /// With a wait for CPU, for tests that start from one.
-    pub(crate) fn with_cpu(mut self, wait: impl Into<Option<Wait>>) -> Self {
-        self.cpu = wait.into();
-        self
-    }
-
-    /// With a barrier having served the pool, or not.
-    pub(crate) fn with_served(mut self, served: bool) -> Self {
-        self.served = served;
-        self
-    }
 }
 
 /// What the budgets would leave once every runner ended, the mirror, seed containers and shells still there; `None`,

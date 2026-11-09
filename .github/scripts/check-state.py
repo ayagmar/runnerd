@@ -44,7 +44,7 @@ COMPARED = ("MARKED", "ENGINE_LIFECYCLE_LIMIT", "OPAQUE", "ROOTS")
 ROOTS = (
     "crates/core/src/scheduler/engine.rs:Engine",
     "crates/core/src/buildcache.rs:State",
-    "crates/core/src/admission.rs:Replayer",
+    "crates/core/src/admission/replay.rs:Replayer",
     "crates/core/src/client.rs:Events",
     "crates/core/src/observe/metrics.rs:Sampler",
     "crates/daemon/src/api/notify.rs:Target",

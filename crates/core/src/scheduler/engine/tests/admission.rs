@@ -1092,7 +1092,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
         .repositories
         .get_mut("o/r")
         .and_then(|state| state.waits.get_mut("app"))
-        .and_then(|waits| waits.cpu.as_mut())
+        .and_then(|waits| waits.cpu_mut())
         .expect("the build's wait is kept")
         .since -= PRIORITY_AFTER;
 
@@ -1136,10 +1136,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     assert_eq!(runners_of(&mut engine, &handle, "o/b"), 0);
     assert_eq!(
         engine.waits_of("o/r", "app").unwrap(),
-        crate::scheduler::Waits {
-            served: true,
-            ..Default::default()
-        },
+        crate::scheduler::Waits::default().with_served(true),
         "started, the build no longer waits, and the barrier served its pool"
     );
 }
@@ -1164,7 +1161,7 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
     assert_eq!(
         engine
             .waits_of("o/r", "app")
-            .and_then(|waits| waits.cpu)
+            .and_then(|waits| waits.cpu())
             .map(|wait| wait.job),
         Some(2)
     );

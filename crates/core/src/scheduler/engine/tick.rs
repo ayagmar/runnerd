@@ -699,7 +699,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let held_since = self
             .repositories
             .get(&repository)
-            .and_then(|state| state.waits.get(&slot.profile)?.cpu)
+            .and_then(|state| state.waits.get(&slot.profile)?.cpu())
             .map(|wait| wait.since);
         if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
             cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
@@ -718,15 +718,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .repositories
                 .get_mut(&repository)
                 .and_then(|state| state.waits.get_mut(&slot.profile))
+            && waits.started()
         {
-            let served = waits.served;
-            waits.started();
-            if waits.served && !served {
-                info!(
-                    "{repository}: a barrier served its pool in {}: its next jobs hold sooner until its queue empties",
-                    slot.profile
-                );
-            }
+            info!(
+                "{repository}: a barrier served its pool in {}: its next jobs hold sooner until its queue empties",
+                slot.profile
+            );
         }
         Some(outcome)
     }

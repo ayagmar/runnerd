@@ -2609,7 +2609,7 @@ impl Case {
         for listed in self.engine.listed_repositories() {
             let (name, queued) = (listed.name, listed.queued);
             let waits = listed.waits.iter();
-            let kept = waits.flat_map(|waits| waits.memory.iter().chain(&waits.cpu));
+            let kept = waits.flat_map(|waits| waits.memory().into_iter().chain(waits.cpu()));
             if let Some(wait) = kept
                 .into_iter()
                 .find(|wait| !queued.iter().any(|job| job.id == wait.job))
@@ -2620,7 +2620,7 @@ impl Case {
                     format!("{name} keeps a wait for job {}, listed no more", wait.job),
                 );
             }
-            if queued.is_empty() && listed.waits.iter().any(|waits| waits.served) {
+            if queued.is_empty() && listed.waits.iter().any(crate::scheduler::Waits::served) {
                 return violation(
                     self,
                     "one_barrier_and_only_for_a_queued_job",
