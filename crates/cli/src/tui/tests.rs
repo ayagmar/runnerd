@@ -467,7 +467,7 @@ fn a_refused_pause_is_forced_only_after_y() {
     }));
     assert!(screen(&app, 120, 40, false).contains("runs job 42"));
     assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
-    assert!(app.confirm.is_none());
+    assert_eq!(app.prompts.top(), None, "n answers the question");
 
     app.update(Msg::Busy(Refused {
         repository: Some("halyard/ledger".to_owned()),
@@ -523,6 +523,46 @@ fn records_near_max_total_say_so_first_on_a_narrow_heading() {
 }
 
 #[test]
+fn a_refused_pause_asks_over_a_removal_which_comes_back_once_answered() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('3')));
+    app.update(Msg::Records(records(&[42, 43])));
+    app.update(key(KeyCode::Char('j')));
+    app.update(key(KeyCode::Char('d')));
+    let refused = |repository: &str| Refused {
+        repository: Some(repository.to_owned()),
+        message: format!("{repository} runs job 42"),
+        jobs: 1,
+    };
+    app.update(Msg::Busy(refused("halyard/ledger")));
+    app.update(Msg::Busy(refused("halyard/storefront")));
+    let asked = screen(&app, 120, 24, false);
+    assert!(asked.contains("halyard/storefront runs job 42"), "{asked}");
+    assert!(
+        !asked.contains("halyard/ledger runs job 42"),
+        "the newer refusal replaces the older: {asked}"
+    );
+
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::Pause {
+            repository: Some("halyard/storefront".to_owned()),
+            force: true,
+        }]
+    );
+    let back = screen(&app, 120, 24, false);
+    assert!(
+        back.contains("y removes the record of job 43"),
+        "the removal is asked again: {back}"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::RemoveRecords(Removal::Job(43))]
+    );
+    assert_eq!(app.prompts.top(), None, "both are answered");
+}
+
+#[test]
 fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
     let mut app = app();
     assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Records]);
@@ -545,7 +585,7 @@ fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
         "d asks first"
     );
     assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
-    assert_eq!(app.removal, None);
+    assert_eq!(app.prompts.top(), None);
     app.update(key(KeyCode::Char('d')));
     assert_eq!(
         app.update(key(KeyCode::Char('y'))),
@@ -640,7 +680,7 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
         Vec::new(),
         "jvm has nothing to apply"
     );
-    assert_eq!(app.resize, None);
+    assert_eq!(app.prompts.top(), None);
     app.update(key(KeyCode::Char('j')));
     let shown = screen(&app, 120, 24, false);
     for expected in [

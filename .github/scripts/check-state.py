@@ -67,6 +67,7 @@ OPAQUE = {
 # tags that finding as one that may become a marker: otherwise seal the type instead. One that no longer matches anything
 # fails, too.
 MARKED = {
+    "C1 cli App": "each field is one view's own data or one read of the daemon's, filled on its own; the footer's questions are one value, Prompts, and help is drawn over them, every combination meant",
     "C1 cli History": "what the user filters by, each on its own, and the pages behind the one shown: no field says what state another is in",
     "C1 cli JobView": "the buffers of three separate reads of the daemon, each filled when its answer comes",
     "C1 cli State": "the last value of each event stream the watch view follows: every stream is independent",

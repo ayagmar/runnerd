@@ -70,6 +70,3 @@ C2 reseeded_at reseeds
 # Record list: split list and listed into one value; the same change seals recordings and shells behind methods.
 C1 core crates/core/src/scheduler/engine/records.rs:RecordState
 
-# TUI prompt: split confirm, removal, resize and help into one value; a marker then covers App's other fields, each a
-# view's own data.
-C1 cli App # may become a marker
