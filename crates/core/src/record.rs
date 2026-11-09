@@ -268,6 +268,8 @@ struct Section {
     title: String,
     /// The group's lines: what the step ran, its shell and its environment.
     lines: Vec<String>,
+    /// What the step printed after its group, up to `Post job cleanup.`.
+    output: Vec<String>,
     /// From `##[error]Process completed with exit code N.`.
     exit_code: Option<i64>,
 }
@@ -275,7 +277,7 @@ struct Section {
 /// The `##[group]Run …` sections of a log, in order.
 fn sections(log: &[String]) -> Vec<Section> {
     let mut sections: Vec<Section> = Vec::new();
-    let mut in_group = false;
+    let (mut in_group, mut cleaning_up) = (false, false);
     for line in log {
         let text = plain(line);
         if let Some(title) = text.strip_prefix("##[group]Run ") {
@@ -283,18 +285,24 @@ fn sections(log: &[String]) -> Vec<Section> {
                 title: title.to_owned(),
                 ..Section::default()
             });
-            in_group = true;
+            (in_group, cleaning_up) = (true, false);
         } else if text.starts_with("##[endgroup]") {
             in_group = false;
-        } else if let Some(section) = sections.last_mut() {
+        } else if text == "Post job cleanup." {
+            // The post steps print after the last step, and are none of its.
+            cleaning_up = true;
+        } else if let Some(section) = sections.last_mut().filter(|_| !cleaning_up) {
             if in_group {
                 section.lines.push(text);
-            } else if let Some(code) = text
-                .strip_prefix("##[error]Process completed with exit code ")
-                .and_then(|code| code.strip_suffix('.'))
-                .and_then(|code| code.parse().ok())
-            {
-                section.exit_code.get_or_insert(code);
+            } else {
+                if let Some(code) = text
+                    .strip_prefix("##[error]Process completed with exit code ")
+                    .and_then(|code| code.strip_suffix('.'))
+                    .and_then(|code| code.parse().ok())
+                {
+                    section.exit_code.get_or_insert(code);
+                }
+                section.output.push(text);
             }
         }
     }
@@ -329,33 +337,39 @@ fn section_of<'log>(
     sections.get(place)
 }
 
-/// Whether a failed job's log says its runner failed it, not its code: in a step that ended in an error
-/// (`##[error]…`), a line with `function not implemented` on a mount, umount or openat2, or Sysbox's `unsafe procfs
+/// Whether a failed job's log says its runner failed it, not its code: the output of the step GitHub reports as
+/// `failure` has a line with `function not implemented` on a mount, umount or openat2, or Sysbox's `unsafe procfs
 /// detected … invalid argument`. Sysbox answers a trapped call with `ENOSYS` once it lost the runner's seccomp
 /// listener, and with `EINVAL` when a descriptor it injected was interrupted; no retry in the same runner helps, and
-/// the job's code is not at fault. A step is what follows a top-level `##[group]Run …` line, so a line in a step that
-/// did not fail, such as a test's own output, does not count. `log` is the stored lines, as `banner` reads them.
-pub fn runner_fault(log: &[String]) -> bool {
-    let (mut signature, mut errored) = (false, false);
-    for line in log {
-        let text = plain(line);
-        if text.starts_with("##[group]Run ") {
-            if signature && errored {
-                return true;
-            }
-            (signature, errored) = (false, false);
-        }
-        errored |= text.starts_with("##[error]");
-        signature |= sysbox_fault(&text);
-    }
-    signature && errored
+/// the job's code is not at fault. The step is found as `banner` finds the failed step's section, and only what it
+/// printed counts: not the script and environment the runner echoes before it, not the output of a step that
+/// passed or was allowed to fail, nor what a post step printed. A step that prints its own `::group::Run …` line cuts
+/// its output short there. `log` is the stored lines.
+pub fn runner_fault(job: &api::Job, log: &[String]) -> bool {
+    let Some(failed) = job
+        .steps
+        .iter()
+        .find(|step| step.conclusion.as_deref() == Some("failure"))
+    else {
+        return false;
+    };
+    section_of(job, &sections(log), failed)
+        .is_some_and(|section| section.output.iter().any(|line| sysbox_fault(line)))
 }
 
-/// Whether a log line is what a runner whose Sysbox lost its seccomp listener, or failed an injection, prints.
+/// What a call's name is in a line of Sysbox's trouble: the words of `mount`'s family and `openat2`.
+const FAULT_CALLS: [&str; 6] = [
+    "mount", "umount", "umount2", "unmount", "mounting", "openat2",
+];
+
+/// Whether a log line is what a runner whose Sysbox lost its seccomp listener, or failed an injection, prints. The
+/// call is a word of its own: a path or a name that holds `mount`, as `amount-api` or `mounted`, is not one.
 fn sysbox_fault(text: &str) -> bool {
     let text = text.to_lowercase();
     (text.contains("function not implemented")
-        && (text.contains("mount") || text.contains("openat2")))
+        && text
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| FAULT_CALLS.contains(&word)))
         || (text.contains("unsafe procfs detected") && text.contains("invalid argument"))
 }
 

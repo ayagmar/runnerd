@@ -13,15 +13,14 @@ and 42539128682), and each read as an ordinary `failure`, as a test or a build f
 
 ## Decision
 
-- **A failed job whose failing step's log shows the signature reads `runner fault`.** `record::runner_fault` takes
-  the stored log: a step is what follows a top-level `##[group]Run …` line; the job's is a runner fault when, in a step
-  that logged an error (`##[error]…`), one line has `function not implemented` with `mount` or `openat2` in it (an
-  `umount2` and a `mounting "cgroup"` have `mount`), or has `unsafe procfs detected` and `invalid argument`. The same
-  words in a step that did not fail, or `ENOSYS` from another call, do not count.
-- **It is read once, when the job's record is final** (the writer's `close`: GitHub completed it and its runner is
-  removed, so the log is complete) and kept in `jobs.runner_fault` (schema 20, `0` in older rows, which are not read
-  again). `JobSummary::runner_fault` carries it; the field defaults to `false`, so the previous release reads what this
-  one writes and this one reads what it wrote.
+- **A failed job whose failed step printed the signature reads `runner fault`.** `record::runner_fault` takes the job
+  and its stored log. It finds the step GitHub reports as `failure` (the first), and its section of the log as a
+  record's shell does (`section_of`), and reads what that step printed: not the `##[group]Run …` title, the script and
+  the environment the runner echoes, not a step that passed or was allowed to fail, and not what follows `Post job
+  cleanup.`. A line is the signature when it has `function not implemented` and, as a word of its own, `mount`,
+  `umount`, `umount2`, `unmount`, `mounting` or `openat2`, or has `unsafe procfs detected` and `invalid argument`;
+  case does not matter, as glibc capitalises what Go does not. Words that hold `mount` (`amount-api`, `mounted`) do not
+  count.
 - **Core words and classes it.** `JobSummary::outcome` returns `runner fault` with `OutcomeKind::RunnerFault` for a
   job that concluded `failure` or `timed_out` and has the field. Clients only draw it, in the colour of a warning: the
   dashboard's `warn` badge, the terminal's yellow.
@@ -33,6 +32,9 @@ and 42539128682), and each read as an ordinary `failure`, as a test or a build f
 
 - Every client shows the label through the parity fixtures (`RUNNER_FAULT` in `runnerd-fixtures`).
 - A job that failed before this release stays `failure`: nothing reads old logs again.
-- A log cut at `history.log_max` before the error is not read as a fault, and neither is one whose error is not a
-  `##[error]` line of a step, as a runner that lost its connection leaves; both read `failure`, as before.
-- The check is by words: another tool that prints them in a failing step is read as the runner's fault too.
+- A log cut at `history.log_max` before the error reads `failure`, and so does a job whose failed step cannot be
+  found in the log: one named by its author whose section the exit code or its place does not give, or one that prints
+  its own `::group::Run …` line before the signature, which ends its output there. A job that concluded `timed_out`
+  with no step reported as `failure` reads as it did.
+- A step allowed to fail (`continue-on-error`) is skipped only if GitHub reports it as other than `failure`.
+- The check is by words: another tool that prints them in the failed step is read as the runner's fault too.

@@ -711,15 +711,21 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Keeps whether a job that failed was failed by its runner (`record::runner_fault`), from its log, which is
-    /// complete once the record is final.
+    /// Keeps whether a job that failed was failed by its runner (`record::runner_fault`), from its failed step's
+    /// log, which is complete once the record is final.
     fn read_runner_fault(&self, job: u64) -> rusqlite::Result<()> {
-        let failed = read::summary(&self.db, job)?.is_some_and(|summary| {
-            summary.state == api::JobState::Completed && summary.is_failure()
-        });
-        if failed && record::runner_fault(&read::log_text(&self.db, job)?) {
-            self.db
-                .execute("UPDATE jobs SET runner_fault = 1 WHERE id = ?1", [job])?;
+        let Some(job) = read::job(&self.db, job)? else {
+            return Ok(());
+        };
+        let summary = &job.summary;
+        if summary.state == api::JobState::Completed
+            && summary.is_failure()
+            && record::runner_fault(&job, &read::log_text(&self.db, summary.id)?)
+        {
+            self.db.execute(
+                "UPDATE jobs SET runner_fault = 1 WHERE id = ?1",
+                [summary.id],
+            )?;
         }
         Ok(())
     }

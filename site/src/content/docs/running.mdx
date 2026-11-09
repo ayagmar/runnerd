@@ -144,6 +144,8 @@ A job's wait runs from queued to started; the part that passed while runnerd was
 
 A job that leaves GitHub's queue without one of this machine's runners is recorded as `elsewhere` (the dashboard's "Not run here"), as `cancelled in queue` when its run was cancelled first, or as its conclusion, such as `skipped`. No wait, median or cost counts it. A finished job goes after `history.jobs`.
 
+A job that failed reads `runner fault`, not `failure`, when its failed step's log shows Sysbox losing the runner's seccomp listener: `function not implemented` on a mount, umount or openat2, or `unsafe procfs detected … invalid argument`. Its code did not fail, and a re-run on a new runner is the answer. It still counts as a failure in the stats and notifications.
+
 ## API
 
 JSON over `$XDG_RUNTIME_DIR/runnerd.sock` (`curl --unix-socket`), mode 0600: only the user runnerd runs as may connect. Types: [`crates/core/src/api.rs`](https://github.com/ayagmar/runnerd/blob/main/crates/core/src/api.rs). Times are Unix seconds, sizes bytes, CPU millicores.
