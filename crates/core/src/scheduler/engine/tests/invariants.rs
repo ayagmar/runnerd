@@ -652,6 +652,10 @@ impl Seen {
             ("an unread leftover", self.unread),
             ("the mirror running", self.mirrors),
             (
+                "a pool's memory and CPU waits on different jobs",
+                self.split_waits,
+            ),
+            (
                 "a capture beside a recapture",
                 self.captures_with_recaptures,
             ),
@@ -2989,6 +2993,9 @@ fn steps_of(seed: u64) -> Vec<Step> {
         6 => drop(steps.splice(0..0, BAND_RELEASED)),
         _ => {}
     }
+    if seed.is_multiple_of(32) {
+        steps.splice(0..0, WAITS_ON_DIFFERENT_JOBS);
+    }
     if seed % 2 == 1 {
         let rarely: &[Step] = match seed % 16 {
             1 => &A_JOB_STAYS_OPEN,
@@ -3217,6 +3224,32 @@ const THE_MIRROR_RUNS: [Step; 7] = [
     Step::Tick,
 ];
 
+/// One plan leaves a pool's memory and CPU waits on different jobs. With a heavy runner up, the next heavy job has the
+/// memory it needs and lacks CPU; a light job behind it fits and starts, which leaves the last heavy job short of memory,
+/// and memory is what `why_waits` asks about first.
+const WAITS_ON_DIFFERENT_JOBS: [Step; 16] = [
+    Step::Reload(Change::CpuOvercommit),
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    HEAVY,
+    Step::Queue {
+        second: false,
+        labels: Labels::Light,
+    },
+    HEAVY,
+    Step::Tick,
+    // The light runner takes the light job and the heavy ones are cancelled, so what comes next finds the slots free.
+    Step::Assign(0),
+    Step::Cancel(0),
+    Step::Cancel(0),
+    Step::Finish(0),
+    Step::Finish(0),
+    Step::Reload(Change::CpuOvercommit),
+    Step::Tick,
+];
+
 const A_FORCED_PAUSE: [Step; 9] = [
     HEAVY,
     Step::Tick,
@@ -3327,11 +3360,6 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         "the generated runs never reach {:?}, so nothing checks them",
         seen.unreached()
     );
-    assert!(
-        seen.split_waits > 0 || seeds.len() < RARE_STATES_AFTER,
-        "{} generated runs never leave a pool's memory and CPU waits on different jobs",
-        seeds.len()
-    );
 }
 
 /// Status fields a trace leaves out (`steady_status`).
@@ -3339,9 +3367,6 @@ const UNSTEADY_STATUS: &[&str] = &["seed_memory", "reseeding"];
 
 /// How many rounds without a call to a fake say that a step's background work has ended.
 const QUIET_ROUNDS: u32 = 8;
-
-/// How many cases it takes to count on chance leaving a pool's memory and CPU waits on different jobs.
-const RARE_STATES_AFTER: usize = 512;
 
 /// Seeds whose trace differed between runs of one binary, over eight runs of each of the first 64 seeds: a comparison
 /// leaves them out. Seed 21 differed once, in where a capture's end reads the runner's files.
