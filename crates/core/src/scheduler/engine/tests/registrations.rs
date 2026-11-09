@@ -114,8 +114,8 @@ async fn a_released_runner_github_holds_is_known_as_ended_until_a_listing_no_lon
     assert!(engine.ended_here(RUNNER), "released here, and still listed");
     assert_eq!(
         engine.state_counts().busy_orphans,
-        1,
-        "the listing's refused delete is recorded"
+        0,
+        "GitHub refusing a runner ended here is no orphan"
     );
 
     engine.tick(Shutdown::No).await;
@@ -249,4 +249,84 @@ async fn a_restarted_engine_knows_of_no_runner_it_ended() {
     restarted.recover().await.unwrap();
     assert!(!restarted.ended_here(RUNNER), "nothing survives a restart");
     assert_eq!(restarted.state_counts().busy_orphans, 0);
+}
+
+/// Reloads `engine` without the repository `o/r`, which starts its drain.
+fn remove_repository(engine: &mut Engine<FakeGithub, FakeDocker>) {
+    engine.reload(
+        Config::parse(&CONFIG.replace("name = \"o/r\"", "name = \"o/x\"")).unwrap(),
+        None,
+        None,
+    );
+}
+
+#[tokio::test]
+async fn an_orphan_github_held_is_forgotten_once_a_listing_no_longer_has_it() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
+    orphan_listed(&github, 1);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(engine.state_counts().busy_orphans, 1, "GitHub holds it");
+
+    github
+        .0
+        .lock()
+        .unwrap()
+        .runners
+        .retain(|runner| runner.id != ORPHAN);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.state_counts().busy_orphans,
+        0,
+        "the listing no longer has it"
+    );
+}
+
+#[tokio::test]
+async fn a_runner_ended_here_is_forgotten_when_the_drain_of_its_repository_gives_up() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
+    remove_repository(&mut engine);
+    released_while_github_holds_it(&mut engine, &github, &docker).await;
+    assert!(engine.ended_here(RUNNER), "its drain still lists it");
+
+    // The token lost the repository: no listing of it will ever say the runner went.
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_runners
+        .insert("o/r".to_owned(), reqwest::StatusCode::NOT_FOUND);
+    engine.tick(Shutdown::No).await;
+    assert!(!engine.ended_here(RUNNER), "nothing lists its repository");
+}
+
+#[tokio::test]
+async fn the_claims_of_a_removed_repository_last_as_long_as_its_drain() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    remove_repository(&mut engine);
+    engine.spend("o/r", "app");
+    engine.consume("o/r", 5);
+
+    engine.tick(Shutdown::No).await;
+    assert!(engine.has_claims("o/r"), "one clean listing ends no drain");
+
+    engine.tick(Shutdown::No).await;
+    assert!(!engine.has_claims("o/r"), "nothing lists it any more");
+}
+
+#[tokio::test]
+async fn the_claims_of_a_repository_the_config_keeps_stay_through_a_failed_listing() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.consume("o/r", 5);
+    github.0.lock().unwrap().rate_limited =
+        Some(std::time::SystemTime::now() + Duration::from_secs(60));
+    engine.tick(Shutdown::No).await;
+    assert!(engine.has_claims("o/r"), "no listing answered");
 }

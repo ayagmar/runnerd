@@ -72,6 +72,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.found.0.clone()
     }
 
+    /// Whether any claim on `repository`'s listed jobs is remembered.
+    pub(super) fn has_claims(&self, repository: &str) -> bool {
+        self.claims.contains_key(repository)
+    }
+
     /// Whether this engine remembers having ended `runner`.
     pub(super) fn ended_here(&self, runner: u64) -> bool {
         self.registrations.is_ended_here(runner)
@@ -331,7 +336,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
                 .count(),
             ended_uploads: self.ended_uploads.len(),
             cancelling: self.cancelling.len(),
-            busy_orphans: self.registrations.reported(),
+            busy_orphans: self.registrations.orphans(),
             oversized: self.upkeep.oversized(),
             unread: self.leftovers.unread(),
             split_waits: self

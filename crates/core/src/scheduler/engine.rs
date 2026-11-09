@@ -406,7 +406,8 @@ struct Unnamed {
 }
 
 /// What a repository's listings may show queued that this machine's runners took (ADR 0018, 0095). It outlives the
-/// repository's removal from the config: a listing begun before the removal may answer after it is added back.
+/// repository's removal from the config, as a listing begun before the removal may answer after it is added back, and
+/// ends with the repository's drain, as nothing lists it after that.
 #[derive(Debug, Default)]
 struct Claims {
     /// Its runners gone that may have taken a listed job without the engine knowing which: one ended before its
