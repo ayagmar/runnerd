@@ -71,9 +71,11 @@ flowchart TB
   the engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.
+  `buildcache::decision` owns that answer, with the uploads held until it comes and the scopes that come with it.
   `buildcache::actions` serves GitHub Actions' cache service on the same socket from the same entries, and passes
   every other request of GitHub's results service to GitHub
-  ([ADR 0082](docs/adr/0082-github-actions-cache-served-from-the-host.md)). `buildcache::turbo` answers the rest of
+  ([ADR 0082](docs/adr/0082-github-actions-cache-served-from-the-host.md)); `buildcache::actions::save` owns what one
+  save not yet an entry has on disk. `buildcache::turbo` answers the rest of
   Turborepo's remote cache API, whose artifacts, like Nx's, are entries as Gradle's are, and passes a request with a
   workflow's own token to Vercel's API
   ([ADR 0083](docs/adr/0083-turborepo-and-nx-from-the-build-cache.md)).

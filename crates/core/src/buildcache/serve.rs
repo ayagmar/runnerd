@@ -20,7 +20,7 @@ use tokio::net::UnixStream;
 use tokio::sync::watch;
 use tracing::debug;
 
-use super::{Inner, MAX_HELD, Upload, Writes, charge, valid_segment};
+use super::{Inner, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
 
 pub(super) type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -170,7 +170,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
 
     let (writes, max_size) = {
         let state = lock(&inner.state);
-        let writes = state.runners.get(runner).map(|open| open.writes);
+        let writes = state.runners.get(runner).map(|open| open.writes.current());
         (writes, state.max_size)
     };
     let refused = || {
@@ -213,16 +213,14 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         }
     }
     let upload = receiving.into_upload(entry);
-    let writes = {
+    let (writes, upload) = {
         let mut state = lock(&inner.state);
         match state.runners.get_mut(runner) {
-            Some(open) if open.writes == Writes::Undecided && open.held.len() < MAX_HELD => {
-                open.held.push(upload);
-                return accepted();
-            }
-            Some(open) if open.writes == Writes::Undecided => None,
-            Some(open) => Some(open.writes),
-            None => None,
+            Some(open) => match open.writes.hold(upload) {
+                Ok(()) => return accepted(),
+                Err(upload) => (Some(open.writes.current()), upload),
+            },
+            None => (None, upload),
         }
     };
     if writes == Some(Writes::Allowed) {
@@ -296,7 +294,7 @@ impl<'inner> Receiving<'inner> {
             .runners
             .get(self.runner)
             .is_some_and(|open| match self.purpose {
-                Purpose::Build => open.writes != Writes::Refused,
+                Purpose::Build => open.writes.current() != Writes::Refused,
                 Purpose::Save(id) => super::actions::takes_uploads(&open.saves, id),
             })
     }

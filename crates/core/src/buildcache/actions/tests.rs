@@ -153,6 +153,16 @@ fn uploads(dir: &TestDir) -> usize {
         .count()
 }
 
+/// How many saves not yet entries `runner` has.
+fn saves(cache: &BuildCache, runner: &str) -> usize {
+    lock(&cache.inner.state).runners[runner].saves.len()
+}
+
+/// Sends `archive` whole to the save whose upload URL is `url`, and its answer's status.
+async fn put_archive(dir: &Path, url: &str, archive: &[u8]) -> u16 {
+    send(dir, "PUT", url, &[], archive).await.status
+}
+
 /// The scopes of a run of pull request `number` into `base`.
 fn pull_request(number: u64, base: &str) -> Scopes {
     Scopes {
@@ -766,6 +776,225 @@ async fn an_archive_in_blocks_over_a_quarter_of_the_limit_is_dropped_and_its_roo
     assert_eq!(cache.size().entries, 3, "the dropped blocks took no room");
     let counts = cache.detach("builder").unwrap();
     assert_eq!((counts.refused, counts.written_bytes), (1, 24 << 10));
+}
+
+#[tokio::test]
+async fn what_a_save_lets_go_leaves_the_disk_and_gives_back_its_room() {
+    let dir = TestDir::new("actions-let-go");
+    let cache = open(&dir, 64 << 10);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    let block = "QkxPQ0sxPT0=";
+
+    let blocks = reserve(&main, "blocks").await;
+    assert_eq!(put_block(&main, &blocks, block, &[1; 5 << 10]).await, 201);
+    assert_eq!(put_block(&main, &blocks, block, &[2; 6 << 10]).await, 201);
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (1, 6 << 10),
+        "a block sent again replaces the first"
+    );
+    assert_eq!(put_archive(&main, &blocks, &[3; 8 << 10]).await, 201);
+    assert!(
+        finalize(&main, "blocks", 8 << 10).await,
+        "its archive is whole"
+    );
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (0, 0),
+        "the block no list joined goes when the archive becomes an entry"
+    );
+
+    let archive = reserve(&main, "archive").await;
+    assert_eq!(put_archive(&main, &archive, &[1; 5 << 10]).await, 201);
+    assert_eq!(put_archive(&main, &archive, &[2; 6 << 10]).await, 201);
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (1, 6 << 10),
+        "an archive sent again replaces the first"
+    );
+    assert!(
+        finalize(&main, "archive", 6 << 10).await,
+        "the size of the last one sent"
+    );
+    assert_eq!(
+        restore(&main, "archive", &[]).await,
+        Some(("archive".to_owned(), vec![2; 6 << 10]))
+    );
+
+    let wrong = reserve(&main, "wrong").await;
+    assert_eq!(put_archive(&main, &wrong, &[1; 5 << 10]).await, 201);
+    assert!(
+        !finalize(&main, "wrong", 4 << 10).await,
+        "an archive not the size its job says is not stored"
+    );
+    assert_eq!((uploads(&dir), uploading(&cache)), (0, 0));
+    assert_eq!(restore(&main, "wrong", &[]).await, None);
+
+    // Together over the quarter of the limit a save's blocks may take.
+    let over = reserve(&main, "over").await;
+    assert_eq!(put_block(&main, &over, block, &[1; 10 << 10]).await, 201);
+    assert_eq!(
+        put_block(&main, &over, "QkxPQ0syPT0=", &[2; 10 << 10]).await,
+        201
+    );
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (0, 0),
+        "the block past the limit goes with the ones before it"
+    );
+
+    let left = reserve(&main, "left").await;
+    assert_eq!(put_archive(&main, &left, &[1; 5 << 10]).await, 201);
+    assert_eq!(put_block(&main, &left, block, &[2; 5 << 10]).await, 201);
+    cache.detach("main");
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (0, 0),
+        "a runner's end takes the archive and the blocks of a save it never finalized"
+    );
+}
+
+#[tokio::test]
+async fn a_finalize_before_the_archive_keeps_the_save_and_one_of_a_dropped_save_frees_its_place() {
+    let dir = TestDir::new("actions-finalize");
+    let cache = open(&dir, 64 << 10);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+
+    let layers = reserve(&main, "layers").await;
+    assert_eq!(
+        put_block(&main, &layers, "QkxPQ0sxPT0=", b"layer").await,
+        201
+    );
+    assert!(
+        finalize(&main, "layers", 5).await,
+        "answered as kept, with no archive to finalize yet"
+    );
+    assert_eq!(uploads(&dir), 1, "its blocks wait for their list");
+    assert_eq!(put_block_list(&main, &layers, &["QkxPQ0sxPT0="]).await, 201);
+    assert!(finalize(&main, "layers", 5).await, "its archive is whole");
+    assert_eq!(
+        restore(&main, "layers", &[]).await,
+        Some(("layers".to_owned(), b"layer".to_vec()))
+    );
+
+    let mut urls = Vec::new();
+    for n in 0..super::MAX_SAVES {
+        urls.push(reserve(&main, &format!("save-{n}")).await);
+    }
+    let dropped_url = |url: &str| url.ends_with("/0");
+    assert!(
+        !dropped_url(&urls[super::MAX_SAVES - 1]),
+        "the last place is a save's"
+    );
+    assert!(
+        dropped_url(&reserve(&main, "one-more").await),
+        "past the limit a save gets the URL that drops what it is sent"
+    );
+    assert_eq!(
+        put_archive(&main, &urls[0], &vec![1; (16 << 10) + 1]).await,
+        201
+    );
+    assert!(
+        finalize(&main, "save-0", (16 << 10) + 1).await,
+        "a dropped save's finalize is answered as kept"
+    );
+    assert!(
+        !dropped_url(&reserve(&main, "in-its-place").await),
+        "its finalize freed its place"
+    );
+    assert_eq!(cache.detach("main").unwrap().refused, 2);
+}
+
+#[tokio::test]
+async fn a_job_allowed_no_scope_of_its_own_saves_nothing_and_a_second_decision_changes_nothing() {
+    let dir = TestDir::new("actions-decisions");
+    let cache = open(&dir, 1 << 20);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+
+    // A run GitHub ties to several pull requests: it may write, and has no ref of its own to write to.
+    let many = cache.attach("many", "o/app", ActionsCache::Served).unwrap();
+    assert!(save_now(&many, "deps", b"finalized").await);
+    let layers = reserve(&many, "layers").await;
+    assert_eq!(
+        put_block(&many, &layers, "QkxPQ0sxPT0=", b"layer").await,
+        201
+    );
+    assert_eq!(uploads(&dir), 2, "the finalized archive and the block");
+    cache.decide("many", Writes::Allowed, reader());
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (0, 0),
+        "neither has anywhere to go"
+    );
+    assert_eq!(
+        saves(&cache, "many"),
+        1,
+        "the finalized one is done; the open one stays to answer its finalize"
+    );
+    assert_eq!(restore(&main, "deps", &[]).await, None);
+    assert_eq!(cache.detach("many").unwrap().refused, 2);
+
+    let fork = cache.attach("fork", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("fork", Writes::Refused, reader());
+    cache.decide("fork", Writes::Allowed, branch("main"));
+    assert!(save_now(&fork, "poison", b"poison").await);
+    assert_eq!(
+        restore(&main, "poison", &[]).await,
+        None,
+        "the first decision stands"
+    );
+    assert!(!cache.detach("fork").unwrap().writer, "it stays refused");
+}
+
+#[tokio::test]
+async fn a_saves_blocks_take_at_most_a_quarter_of_the_limit_a_block_sent_again_counted_once() {
+    let dir = TestDir::new("actions-block-sum");
+    let cache = open(&dir, 64 << 10);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    let (first, second) = ("QkxPQ0sxPT0=", "QkxPQ0syPT0=");
+    let url = reserve(&main, "layers").await;
+    assert_eq!(put_block(&main, &url, first, &[1; 8 << 10]).await, 201);
+    assert_eq!(put_block(&main, &url, second, &[2; 8 << 10]).await, 201);
+    assert_eq!(put_block(&main, &url, first, &[3; 8 << 10]).await, 201);
+    assert_eq!(
+        uploads(&dir),
+        2,
+        "exactly a quarter is kept, and the block sent again replaces its first copy in the sum"
+    );
+    assert_eq!(put_block(&main, &url, "QkxPQ0szPT0=", b"x").await, 201);
+    assert_eq!(uploads(&dir), 0, "one byte past the quarter drops the save");
+    assert_eq!(cache.detach("main").unwrap().refused, 1);
+}
+
+#[tokio::test]
+async fn a_save_takes_max_blocks_and_at_that_limit_only_a_block_it_has_again() {
+    let dir = TestDir::new("actions-block-count");
+    // Room for that many empty blocks, each counted at its least charge.
+    let cache = open(&dir, 1 << 32);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    let url = reserve(&main, "layers").await;
+    for n in 0..super::MAX_BLOCKS {
+        assert_eq!(put_block(&main, &url, &format!("b{n}"), b"").await, 201);
+    }
+    assert_eq!(
+        uploads(&dir),
+        super::MAX_BLOCKS,
+        "the last place is a block's"
+    );
+    assert_eq!(put_block(&main, &url, "b0", b"").await, 201);
+    assert_eq!(
+        uploads(&dir),
+        super::MAX_BLOCKS,
+        "a block it has is replaced at the limit"
+    );
+    assert_eq!(put_block(&main, &url, "one-more", b"").await, 201);
+    assert_eq!(uploads(&dir), 0, "a new one drops the save");
+    assert_eq!(cache.detach("main").unwrap().refused, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

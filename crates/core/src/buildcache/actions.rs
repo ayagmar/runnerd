@@ -20,6 +20,11 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::debug;
 
+mod save;
+
+pub(super) use save::Save;
+use save::{Finished, Part};
+
 use super::serve::{Body, Purpose, Receiving, drain, receive, status};
 use super::{ActionsCache, Inner, Runner, State, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
@@ -74,31 +79,6 @@ const REQUEST_ID: HeaderName = HeaderName::from_static("x-ms-request-id");
 
 /// The range Azure's clients ask for: theirs, or the standard one.
 const MS_RANGE: HeaderName = HeaderName::from_static("x-ms-range");
-
-/// A save being uploaded: an entry of the job's own scope, once its archive is in, its job finalizes it and the engine
-/// lets the job write. Its scope is never named before that: an undecided job has none.
-#[derive(Debug)]
-pub(super) struct Save {
-    key: String,
-    version: String,
-    /// The size limit when it started: its archive, whole or the sum of its blocks, takes at most a quarter of it.
-    max_size: u64,
-    /// Its blocks so far, by their ID, until a block list joins them.
-    blocks: HashMap<String, Upload>,
-    /// The archive, sent whole or joined from blocks.
-    archive: Option<Upload>,
-    /// What it sent passed a limit, or its job may not write, and was dropped: its finalize answers as stored.
-    dropped: bool,
-    /// Its job finalized it before its writes were decided: its archive waits for the decision and takes no more.
-    finalized: bool,
-}
-
-impl Save {
-    /// What of it is on disk, to be removed.
-    pub(super) fn into_uploads(self) -> Vec<Upload> {
-        self.blocks.into_values().chain(self.archive).collect()
-    }
-}
 
 /// The client that passes requests to GitHub's results service, made when the first is passed.
 #[derive(Debug)]
@@ -267,10 +247,10 @@ fn missed() -> Response<Body> {
 /// then the default branch, as its decision said or, while undecided, as the last decision of its repository did.
 fn read_scopes(open: &Runner, default_branch: Option<&String>) -> Vec<String> {
     let mut scopes = Vec::new();
-    if open.writes == Writes::Allowed {
-        scopes.extend(open.scopes.own.iter().chain(&open.scopes.base).cloned());
+    if let Some(allowed) = open.writes.allowed() {
+        scopes.extend(allowed.own.iter().chain(&allowed.base).cloned());
     }
-    if let Some(default) = open.scopes.default.as_ref().or(default_branch) {
+    if let Some(default) = open.writes.default_branch().or(default_branch) {
         scopes.push(default.clone());
     }
     scopes.dedup();
@@ -330,9 +310,9 @@ fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
     let writable = open.saves.len() < MAX_SAVES
-        && match open.writes {
+        && match open.writes.current() {
             Writes::Undecided => true,
-            Writes::Allowed => open.scopes.own.is_some(),
+            Writes::Allowed => open.writes.own().is_some(),
             Writes::Refused => false,
         };
     if !writable {
@@ -342,8 +322,8 @@ fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body
     if let Some(to) = destination(open, &request.key, &request.version) {
         let saving = state.runners.values().any(|other| {
             other.saves.values().any(|save| {
-                !save.dropped
-                    && destination(other, &save.key, &save.version)
+                !save.is_dropped()
+                    && destination(other, save.key(), save.version())
                         .is_some_and(|theirs| theirs.dir == to.dir)
             })
         });
@@ -355,18 +335,8 @@ fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body
     state.next_upload += 1;
     let id = state.next_upload;
     if let Some(open) = state.runners.get_mut(runner) {
-        open.saves.insert(
-            id,
-            Save {
-                key: request.key,
-                version: request.version,
-                max_size,
-                blocks: HashMap::new(),
-                archive: None,
-                dropped: false,
-                finalized: false,
-            },
-        );
+        open.saves
+            .insert(id, Save::new(request.key, request.version, max_size));
     }
     created(host, id)
 }
@@ -406,32 +376,21 @@ fn finalize(inner: &Inner, runner: &str, body: &[u8]) -> Response<Body> {
     let found = open
         .saves
         .iter()
-        .filter(|(_, save)| {
-            save.key == request.key && save.version == request.version && !save.finalized
-        })
-        .find(|(_, save)| save.archive.is_some() || save.dropped)
+        .find(|(_, save)| save.answers_finalize(&request.key, &request.version))
         .map(|(id, _)| *id);
     let Some((id, mut save)) = found.and_then(|id| Some((id, open.saves.remove(&id)?))) else {
         return stored(0);
     };
-    gone.extend(save.blocks.drain().map(|(_, upload)| upload));
-    let archive = save.archive.take().filter(|_| !save.dropped);
-    let answer = match archive {
-        Some(archive) if size.is_none_or(|size| size == archive.bytes) => {
-            save.archive = Some(archive);
-            if open.writes == Writes::Undecided {
-                save.finalized = true;
-                open.saves.insert(id, save);
-                stored(0)
-            } else {
-                stored(publish(inner, &mut state, runner, save, &mut gone).unwrap_or(0))
-            }
+    let answer = match save.finalize(size, &mut gone) {
+        Finished::Archived if open.writes.is_undecided() => {
+            open.saves.insert(id, save);
+            stored(0)
         }
-        Some(archive) => {
-            gone.push(archive);
-            not_stored()
+        Finished::Archived => {
+            stored(publish(inner, &mut state, runner, save, &mut gone).unwrap_or(0))
         }
-        None => stored(0),
+        Finished::WrongSize => not_stored(),
+        Finished::Nothing => stored(0),
     };
     drop(state);
     inner.remove_uploads(Some(runner), &gone);
@@ -441,11 +400,7 @@ fn finalize(inner: &Inner, runner: &str, body: &[u8]) -> Response<Body> {
 /// Where a save of `open`'s of `key` and `version` goes: `None` unless its writes are `Allowed` into a scope of its
 /// own.
 fn destination(open: &Runner, key: &str, version: &str) -> Option<Destination> {
-    let own = open
-        .scopes
-        .own
-        .as_ref()
-        .filter(|_| open.writes == Writes::Allowed)?;
+    let own = open.writes.own()?;
     Some(Destination {
         scope: scope_dir(&open.repository, own, version),
         dir: entry_dir(&open.repository, own, version, key),
@@ -479,19 +434,11 @@ fn publish(
     save: Save,
     gone: &mut Vec<Upload>,
 ) -> Option<u64> {
-    let Save {
-        key,
-        version,
-        blocks,
-        archive,
-        ..
-    } = save;
-    gone.extend(blocks.into_values());
-    let mut archive = archive?;
     let to = state
         .runners
         .get(runner)
-        .and_then(|open| destination(open, &key, &version));
+        .and_then(|open| destination(open, save.key(), save.version()));
+    let mut archive = save.into_archive()?;
     let Some(to) = to.filter(|to| !stored_already(state, to)) else {
         gone.push(archive);
         return None;
@@ -512,11 +459,11 @@ pub(super) fn decided(inner: &Inner, state: &mut State, runner: &str) -> Vec<Upl
     let Some(open) = state.runners.get_mut(runner) else {
         return gone;
     };
-    if open.writes == Writes::Allowed && open.scopes.own.is_some() {
+    if open.writes.own().is_some() {
         let mut finalized: Vec<u64> = open
             .saves
             .iter()
-            .filter(|(_, save)| save.finalized)
+            .filter(|(_, save)| save.is_finalized())
             .map(|(id, _)| *id)
             .collect();
         // In the order they were made, as they would have been stored had the decision come first.
@@ -534,15 +481,14 @@ pub(super) fn decided(inner: &Inner, state: &mut State, runner: &str) -> Vec<Upl
     }
     let mut refused = 0;
     open.saves.retain(|_, save| {
-        if save.dropped {
+        if save.is_dropped() {
             return true;
         }
         refused += 1;
-        gone.extend(save.blocks.drain().map(|(_, upload)| upload));
-        gone.extend(save.archive.take());
-        save.dropped = true;
         // A finalized one has nothing left to answer.
-        !save.finalized
+        let answers = !save.is_finalized();
+        save.drop_uploads(&mut gone);
+        answers
     });
     open.counts.refused += refused;
     gone
@@ -550,14 +496,14 @@ pub(super) fn decided(inner: &Inner, state: &mut State, runner: &str) -> Vec<Upl
 
 /// How many of `saves` were finalized and wait for their job's decision.
 pub(super) fn finalized(saves: &HashMap<u64, Save>) -> u64 {
-    saves.values().filter(|save| save.finalized).count() as u64
+    saves.values().filter(|save| save.is_finalized()).count() as u64
 }
 
 /// Takes out of `saves` those not finalized.
 pub(super) fn unfinished(saves: &mut HashMap<u64, Save>) -> HashMap<u64, Save> {
     let ids: Vec<u64> = saves
         .iter()
-        .filter(|(_, save)| !save.finalized)
+        .filter(|(_, save)| !save.is_finalized())
         .map(|(id, _)| *id)
         .collect();
     ids.into_iter()
@@ -592,8 +538,8 @@ async fn upload(
         .runners
         .get(runner)
         .and_then(|open| open.saves.get(&id))
-        .filter(|save| !save.dropped && !save.finalized)
-        .map(|save| save.max_size);
+        .filter(|save| save.is_open())
+        .map(Save::max_size);
     let body = request.into_body();
     let Some(max_size) = max_size else {
         drain(body).await;
@@ -639,11 +585,6 @@ async fn take(
     }
 }
 
-enum Part {
-    Block(String),
-    Archive,
-}
-
 /// Keeps what save `id` was sent, or, when it passed a limit, drops the save's archive for good. An upload of a
 /// save no longer open goes.
 fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Part) {
@@ -655,39 +596,15 @@ fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Pa
             inner.remove_uploads(None, &received.into_iter().collect::<Vec<_>>());
             return;
         };
-        let Some(save) = open
-            .saves
-            .get_mut(&id)
-            .filter(|save| !save.dropped && !save.finalized)
-        else {
+        let Some(save) = open.saves.get_mut(&id).filter(|save| save.is_open()) else {
             gone.extend(received);
             drop(state);
             inner.remove_uploads(Some(runner), &gone);
             return;
         };
-        // The blocks together are the archive: they take at most a quarter of the limit, as a whole archive does.
-        let blocks_fit = |upload: &Upload, block: &str| {
-            let others: u64 = save
-                .blocks
-                .iter()
-                .filter(|(id, _)| id.as_str() != block)
-                .map(|(_, upload)| upload.bytes)
-                .sum();
-            (save.blocks.len() < MAX_BLOCKS || save.blocks.contains_key(block))
-                && others + upload.bytes <= save.max_size / 4
-        };
-        match (received, part) {
-            (Some(upload), Part::Block(block)) if blocks_fit(&upload, &block) => {
-                gone.extend(save.blocks.insert(block, upload));
-            }
-            (Some(upload), Part::Archive) => gone.extend(save.archive.replace(upload)),
-            (received, _) => {
-                gone.extend(received);
-                gone.extend(save.blocks.drain().map(|(_, upload)| upload));
-                gone.extend(save.archive.take());
-                save.dropped = true;
-                open.counts.refused += 1;
-            }
+        save.keep(received, part, &mut gone);
+        if save.is_dropped() {
+            open.counts.refused += 1;
         }
     }
     inner.remove_uploads(Some(runner), &gone);
@@ -717,7 +634,7 @@ async fn join(
         else {
             return blob_created();
         };
-        std::mem::take(&mut save.blocks)
+        save.take_blocks()
     };
     let mut blocks = blocks;
     let mut parts = Vec::with_capacity(order.len());
@@ -820,9 +737,7 @@ impl Joining {
 
 /// Whether save `id` of `saves` still takes what its job sends: open, neither dropped nor finalized.
 pub(super) fn takes_uploads(saves: &HashMap<u64, Save>, id: u64) -> bool {
-    saves
-        .get(&id)
-        .is_some_and(|save| !save.dropped && !save.finalized)
+    saves.get(&id).is_some_and(Save::is_open)
 }
 
 /// The block IDs of an Azure block list, in order: `<Latest>`, `<Committed>` and `<Uncommitted>` alike.

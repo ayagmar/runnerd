@@ -79,6 +79,7 @@ MARKED = {
     "C1 core State": "the build cache's tables under its one mutex: entries with their index, runners, default branches",
     "C1 core Store": "memos other threads read instead of a query (the latest samples, the held samples, the runners gone) and one flag that stops a prune: each is written alone, and none says what state another is in",
     "C1 core Trace": "the input of one replay, built whole by store::trace_at and only read after",
+    "C1 core crates/core/src/buildcache.rs:Runner": "two independent tables of a runner's GitHub Actions cache: the saves it has not yet made entries, and the entries its lookups found",
     "C1 core crates/core/src/cache.rs:Trimmed": "what one trim task returns, built whole",
     "C1 core crates/core/src/scheduler.rs:Left": "three independent budgets of one plan: each is bounded or not on its own",
     "C1 core crates/core/src/scheduler/warm.rs:Run": "what is known of one workflow run so far: its name when learned, and the jobs seen",

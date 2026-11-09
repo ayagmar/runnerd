@@ -70,14 +70,6 @@ C2 reseeded_at reseeds
 # Record list: split list and listed into one value; the same change seals recordings and shells behind methods.
 C1 core crates/core/src/scheduler/engine/records.rs:RecordState
 
-# Build cache save: split Save into one enum.
-C1 core Save
-C3 dropped finalized &&
-
-# Build cache runner: split, with the save. held belongs to the undecided state of writes, so it moves there; a marker
-# then covers saves and found, which are independent tables.
-C1 core crates/core/src/buildcache.rs:Runner # may become a marker
-
 # TUI prompt: split confirm, removal, resize and help into one value; a marker then covers App's other fields, each a
 # view's own data.
 C1 cli App # may become a marker

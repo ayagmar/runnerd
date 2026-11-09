@@ -8,6 +8,7 @@
 //! 0082) from the same entries' directory and limits.
 
 pub(crate) mod actions;
+mod decision;
 mod serve;
 mod turbo;
 
@@ -253,10 +254,9 @@ struct Entry {
 #[derive(Debug)]
 struct Runner {
     repository: String,
-    writes: Writes,
+    /// Whether its job may write, the uploads waiting for that, and its GitHub Actions cache scopes once it is known.
+    writes: decision::WriteDecision,
     counts: BuildCacheCounts,
-    /// Uploads waiting for `Writes` to be decided, at most `MAX_HELD`.
-    held: Vec<Upload>,
     /// What its uploads not yet entries, being received or held, count for: at most a quarter of `max_size` while
     /// its writes are undecided, so one job cannot take the room another's uploads need.
     uploading: u64,
@@ -264,8 +264,6 @@ struct Runner {
     serving: JoinHandle<()>,
     /// Whether it serves GitHub Actions' cache.
     actions: ActionsCache,
-    /// Its GitHub Actions cache scopes, once its writes are decided.
-    scopes: Scopes,
     /// Changes when its writes are decided, for the uploads it is receiving.
     decided: watch::Sender<()>,
     /// Its GitHub Actions cache saves not yet entries, by the number in their upload URL: being uploaded, or, while
@@ -398,14 +396,12 @@ impl BuildCache {
             runner.to_owned(),
             Runner {
                 repository: repository.to_owned(),
-                writes: Writes::Undecided,
+                writes: decision::WriteDecision::undecided(),
                 counts: BuildCacheCounts::default(),
-                held: Vec::new(),
                 uploading: 0,
                 dir: dir.clone(),
                 serving,
                 actions,
-                scopes: Scopes::default(),
                 decided: watch::Sender::new(()),
                 saves: HashMap::new(),
                 found: HashMap::new(),
@@ -413,7 +409,7 @@ impl BuildCache {
         );
         if let Some(mut old) = old {
             old.serving.abort();
-            self.inner.remove_uploads(None, &old.held);
+            self.inner.remove_uploads(None, old.writes.held());
             self.inner.remove_saves(None, &mut old.saves);
         }
         Ok(dir)
@@ -440,7 +436,7 @@ impl BuildCache {
         lock(&self.inner.state)
             .runners
             .get(runner)
-            .is_some_and(|runner| runner.writes == Writes::Undecided)
+            .is_some_and(|runner| runner.writes.is_undecided())
     }
 
     /// Decides whether `runner`'s job may write, once, with the scopes of its GitHub Actions cache entries: what it
@@ -451,17 +447,13 @@ impl BuildCache {
             let Some(open) = state.runners.get_mut(runner) else {
                 return;
             };
-            if open.writes != Writes::Undecided || writes == Writes::Undecided {
+            let default = scopes.default.clone();
+            let Some(held) = open.writes.decide(writes, scopes) else {
                 return;
-            }
-            open.writes = writes;
-            let held = std::mem::take(&mut open.held);
+            };
             let repository = open.repository.clone();
-            if let Some(default) = &scopes.default {
-                state.default_branches.insert(repository, default.clone());
-            }
-            if let Some(open) = state.runners.get_mut(runner) {
-                open.scopes = scopes;
+            if let Some(default) = default {
+                state.default_branches.insert(repository, default);
             }
             // Under the same lock as the decision: no save is finalized between the two.
             let dropped = actions::decided(&self.inner, &mut state, runner);
@@ -495,8 +487,8 @@ impl BuildCache {
             let Some(open) = state.runners.get_mut(runner) else {
                 return false;
             };
-            if open.writes != Writes::Undecided
-                || open.held.is_empty() && actions::finalized(&open.saves) == 0
+            if !open.writes.is_undecided()
+                || open.writes.held().is_empty() && actions::finalized(&open.saves) == 0
             {
                 return false;
             }
@@ -527,16 +519,16 @@ impl BuildCache {
         };
         open.serving.abort();
         // Its finalized saves are left only while its writes are undecided: `decide` stores or drops them.
-        let dropped = open.held.len() as u64 + actions::finalized(&open.saves);
-        if open.writes == Writes::Undecided && dropped > 0 {
+        let dropped = open.writes.held().len() as u64 + actions::finalized(&open.saves);
+        if open.writes.is_undecided() && dropped > 0 {
             warn!(
                 "{runner}: dropped {dropped} build cache uploads its job sent: GitHub never said which runner ran the job"
             );
         }
-        self.inner.remove_uploads(None, &open.held);
+        self.inner.remove_uploads(None, open.writes.held());
         self.inner.remove_saves(None, &mut open.saves);
         open.counts.refused += dropped;
-        open.counts.writer = open.writes == Writes::Allowed;
+        open.counts.writer = open.writes.current() == Writes::Allowed;
         if let Err(error) = std::fs::remove_dir_all(&open.dir)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -678,7 +670,7 @@ impl Inner {
             return false;
         };
         let fits = total + bytes <= max_size
-            && match open.writes {
+            && match open.writes.current() {
                 Writes::Undecided => open.uploading + bytes <= max_size / 4,
                 Writes::Allowed => true,
                 Writes::Refused => false,
