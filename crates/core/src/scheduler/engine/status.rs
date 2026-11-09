@@ -7,7 +7,7 @@ use super::{Engine, Shutdown, unix_secs};
 use crate::api;
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
-use crate::scheduler::{Plan, SlotRef};
+use crate::scheduler::{Plan, SlotRef, Waits};
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn publish(&mut self) {
@@ -154,7 +154,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     held: self
                         .repositories
                         .values()
-                        .any(|state| !state.cpu_held.is_empty()),
+                        .flat_map(|state| state.waits.values())
+                        .any(Waits::cpu_held),
                 }),
         }
     }

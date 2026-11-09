@@ -426,8 +426,6 @@ struct RepositoryState {
     /// whether a barrier has served the pool (ADR 0098), until a listing that succeeded shows its queue empty or the
     /// pool may no longer start a runner. Not kept over a restart.
     waits: BTreeMap<String, Waits>,
-    /// The profiles of its pools whose next job the last plan held for CPU.
-    cpu_held: BTreeSet<String>,
 }
 
 /// A pool's runners held back after they failed, as `RepositoryState::holds` keeps them.

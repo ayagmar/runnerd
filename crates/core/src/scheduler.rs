@@ -11,10 +11,12 @@ use crate::github::QueuedJob;
 
 pub mod engine;
 pub mod priority;
+mod waits;
 pub mod warm;
 
 use priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner};
-pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, Scarce, Wait, Waits};
+pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, Scarce};
+pub use waits::{Wait, Waits};
 
 /// How long a started runner may wait for a job before it counts as surplus: covers the container's start and
 /// GitHub's assignment.

@@ -1015,7 +1015,7 @@ mod generated {
                 });
                 if let Some((job, last)) = standing {
                     stood += 1;
-                    for_served += u32::from(model.waits.iter().any(|waits| waits.served));
+                    for_served += u32::from(model.waits.iter().any(Waits::served));
                     assert!(
                         model.tick <= last + LONGEST + 1,
                         "seed {seed}: job {job} still holds at tick {} with no start since {last}: {plan:?}",
@@ -1072,4 +1072,45 @@ mod generated {
             assert!(started <= began + limit + LONGEST + 2);
         }
     }
+}
+
+/// The status reads `cpu_held` between two plans, so a start or a listing in between must not end it (ADR 0115).
+#[test]
+fn a_start_or_a_listing_between_two_plans_leaves_what_the_last_plan_said_of_cpu() {
+    let mut waits = Waits::default();
+    waits.note(Scarce::Cpu, 1, now());
+    waits.set_cpu_held(true);
+
+    waits.started();
+    assert_eq!(waits.cpu(), None, "the start ended its wait");
+    assert!(waits.cpu_held(), "a start is not the next plan");
+
+    waits.note(Scarce::Cpu, 2, now());
+    waits.retain(|_| false);
+    assert_eq!(waits.cpu(), None, "the job left the queue");
+    assert!(waits.cpu_held(), "a listing is not the next plan");
+    assert!(
+        !waits.is_empty(),
+        "the pool is kept while the last plan's word stands"
+    );
+
+    waits.set_cpu_held(false);
+    assert!(waits.is_empty(), "the next plan held nothing for CPU");
+}
+
+/// Only the start that came to a job owning a barrier is the one that served the pool, once: its log line says so.
+#[test]
+fn only_the_first_start_for_a_barriers_owner_serves_the_pool() {
+    let mut waits = Waits::default();
+    waits.note(Scarce::Memory, 1, now());
+    assert!(!waits.started(), "no barrier was its own");
+
+    waits.note(Scarce::Memory, 2, now());
+    waits.own(2);
+    assert!(waits.started(), "job 2 owned the barrier");
+    assert!(waits.served(), "the pool was served");
+
+    waits.note(Scarce::Memory, 3, now());
+    waits.own(3);
+    assert!(!waits.started(), "it was served already");
 }
