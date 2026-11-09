@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
 use super::history::{CAPTURE_DRAIN, Followed};
+use super::pool_health::PoolHealth;
 use super::runners::{Collected, Removal, StartOutcome};
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::{host, pooled};
@@ -751,7 +752,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     held: state
                         .holds
                         .get(&repository.profile)
-                        .and_then(|hold| hold.held),
+                        .and_then(PoolHealth::held),
                     queued: self.listed_demand(repository, &taken),
                     runner_memory: None,
                     runner_cpu: None,

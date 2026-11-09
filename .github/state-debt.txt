@@ -26,9 +26,6 @@ C2 draining slots
 # Repository state: split. Its listing, holds and waits each become one sealed value, the waits last.
 C1 core RepositoryState
 
-# Pool health: split into one enum.
-C1 core PoolHold
-
 # Measured: split raised out (slot occupant), which seals what stays, the predictor and the log memos, with private
 # fields.
 C1 core crates/core/src/scheduler/engine/admission.rs:Measured

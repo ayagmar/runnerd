@@ -1,7 +1,11 @@
 //! A repository served by two pools (ADR 0058): a light job starts in the light pool while a heavy one waits, the
 //! light pool reserves only what its own jobs predict, and a job no pool's labels match says so.
 
+use std::time::SystemTime;
+
 use super::*;
+use crate::api::HoldCause;
+use crate::scheduler::Hold;
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -316,6 +320,75 @@ async fn a_pool_whose_runners_fail_holds_back_only_itself() {
         matches!(status.queued[0].waiting, Some(api::Waiting::Backoff { .. })),
         "the light job waits for its pool's backoff: {:?}",
         status.queued[0].waiting
+    );
+}
+
+#[tokio::test]
+async fn a_reload_that_leaves_a_pools_runners_alone_keeps_its_hold_and_streaks() {
+    // Catches a reload forgetting what failed: auto sizing changes a pool's slots now and then, and a broken pool
+    // would start again at each one and announce a new first failure.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &pools());
+    engine.recover().await.unwrap();
+    let until = SystemTime::now() + Duration::from_secs(300);
+    let cause = HoldCause::NoJob;
+    engine.set_streaks("o/r", "light", 2, 1);
+    engine.set_held("o/r", "light", Hold { until, cause });
+
+    let more_slots = pools().replacen(
+        "memory = \"1G\"\nslots = 2",
+        "memory = \"1G\"\nslots = 3",
+        1,
+    );
+    engine.reload(Config::parse(&more_slots).unwrap(), None, None);
+
+    let facts = engine.pool_hold("o/r", "light").unwrap();
+    assert_eq!(
+        (facts.failures, facts.idle_exits),
+        (2, 1),
+        "both streaks stay"
+    );
+    assert_eq!(
+        facts.held.map(|held| (held.until, held.cause)),
+        Some((until, cause)),
+        "the hold stays as it was"
+    );
+}
+
+#[tokio::test]
+async fn a_start_that_failed_and_left_its_container_holds_its_pool() {
+    // Catches a pool retrying at once when Docker kept the container of a start that failed: the slot's runner goes
+    // when its removal is confirmed, and the next start would fail the same way, with no backoff.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .late_failures
+        .push_back(LateFailure {
+            takes_job: false,
+            cleanup_fails: true,
+        });
+
+    engine.tick(Shutdown::No).await;
+
+    let facts = engine.pool_hold("o/r", "app").unwrap();
+    assert_eq!(facts.failures, 1, "it counts as a failed start");
+    assert_eq!(
+        facts.held.map(|held| held.cause),
+        Some(HoldCause::Start),
+        "the pool is held for the start"
     );
 }
 

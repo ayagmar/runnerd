@@ -17,7 +17,7 @@ use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, 
 use crate::github::{self, Deleted, GithubApi, Runner};
 use crate::isolation;
 use crate::record;
-use crate::scheduler::{Hold, SlotRef, StopReason};
+use crate::scheduler::{SlotRef, StopReason};
 use crate::sync::lock;
 
 /// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
@@ -401,48 +401,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })
             .map(|(_, runner)| runner.runner_name.clone())
             .collect();
-        if let Some(state) = self
+        if let Some(health) = self
             .repositories
             .get_mut(&occupant.repository)
             .map(|state| state.holds.entry(slot.profile.clone()).or_default())
         {
-            match logged {
-                Logged::TookJob => {
-                    state.failures = 0;
-                    state.idle_exits = 0;
-                    state.left_beside.clear();
-                    state.held = None;
-                }
+            let cause = health.runner_left(logged, &occupant.runner_name, beside);
+            let error = match logged {
+                Logged::TookJob | Logged::Unread => None,
                 // It started and connected, so it says nothing of the next one's start: a job cancelled before it
                 // began, a warm runner whose container went once (a restart of Docker, the runner removed on GitHub).
                 // Holding the pool would clear its waits and served mark (ADR 0098) for nothing. The second in a row
                 // is a fault that would restart one every few minutes, unless it was already up when the first left:
                 // a cancelled run takes several at once (ADR 0104).
                 Logged::NoJob { connected: true } => {
-                    let again = !state.left_beside.remove(&occupant.runner_name);
-                    if again {
-                        state.idle_exits += 1;
-                        state.left_beside = beside;
-                        // A failure before it is over, and the next one is a new streak's first, announced. Not so
-                        // for the second in a row, a fault of its own.
-                        if state.idle_exits == 1 {
-                            state.failures = 0;
-                        }
-                    }
                     warn!(
                         "{}: {} ended without a job after waiting for one; it last said: {}",
                         occupant.repository,
                         occupant.runner_name,
                         last_said(logs)
                     );
-                    if again && state.idle_exits >= 2 {
-                        self.hold(
-                            &occupant.repository,
-                            &slot.profile,
-                            HoldCause::IdleExits,
-                            "its runners end without a job after waiting for one".to_owned(),
-                        );
-                    }
+                    Some("its runners end without a job after waiting for one".to_owned())
                 }
                 Logged::NoJob { connected: false } => {
                     warn!(
@@ -451,14 +430,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         occupant.runner_name,
                         last_said(logs)
                     );
-                    self.hold(
-                        &occupant.repository,
-                        &slot.profile,
-                        HoldCause::NoJob,
-                        format!("{} ended without taking a job", occupant.runner_name),
-                    );
+                    Some(format!(
+                        "{} ended without taking a job",
+                        occupant.runner_name
+                    ))
                 }
-                Logged::Unread => {}
+            };
+            if let Some((cause, error)) = cause.zip(error) {
+                self.hold(&occupant.repository, &slot.profile, cause, error);
             }
         }
         self.vacate(slot, &exit);
@@ -733,33 +712,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// and announces the first hold of a streak as `runner.failed`: a pool that stays broken says so once, not every
     /// 10 minutes, until a runner takes a job. Its repository's other pools go on. Runners that fail while it is held started before the hold, so they do not lengthen it.
     fn hold(&mut self, repository: &str, profile: &str, cause: HoldCause, error: String) {
-        if let Some(state) = self
+        let Some(hold) = self
             .repositories
             .get_mut(repository)
             .map(|state| state.holds.entry(profile.to_owned()).or_default())
-            && state
-                .held
-                .is_none_or(|held| held.until <= SystemTime::now())
-        {
-            state.failures += 1;
-            let wait = backoff(state.failures);
-            state.held = Some(Hold {
-                until: SystemTime::now() + wait,
-                cause,
-            });
-            warn!(
-                "{repository}: no runner starts in {profile} for {}s",
-                wait.as_secs()
-            );
-            if state.failures > 1 {
-                return;
-            }
+            .and_then(|health| health.hold(cause, SystemTime::now()))
+        else {
+            return;
+        };
+        warn!(
+            "{repository}: no runner starts in {profile} for {}s",
+            hold.wait.as_secs()
+        );
+        if hold.first {
             self.store.event(Event::RunnerFailed {
                 failure: RunnerFailure {
                     repository: repository.to_owned(),
                     profile: profile.to_owned(),
                     error,
-                    held_for: wait.as_secs(),
+                    held_for: hold.wait.as_secs(),
                 },
             });
         }
