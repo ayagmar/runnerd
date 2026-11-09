@@ -70,9 +70,13 @@ pub fn backend(isolation: config::Isolation) -> &'static dyn Isolation {
 /// What Sysbox's runtime says when it cannot mount the running kernel's modules into a runner, up to the release.
 const MODULES_STAT_REFUSED: &str = "failed to stat mount source at /lib/modules/";
 
-/// The kernel release whose modules directory Docker's `error` says it could not stat, such as `7.2.11-arch1-1`.
+/// The kernel release whose modules directory Docker's `error` says is not there, such as `7.2.11-arch1-1`. A stat
+/// that failed for another reason, as `permission denied`, is not a reboot's to fix.
 fn missing_modules_release(error: &str) -> Option<&str> {
     let (_, after) = error.split_once(MODULES_STAT_REFUSED)?;
+    if !after.contains("no such file or directory") {
+        return None;
+    }
     let release = after.split(['/', ':']).next()?;
     (!release.is_empty()).then_some(release)
 }

@@ -93,9 +93,13 @@ fn a_start_refused_for_missing_kernel_modules_says_so_and_to_reboot() {
 fn other_refusals_keep_docker_text_alone() {
     for error in [
         "Docker responded with status code 409: Conflict. The container name is already in use",
-        // A different mount source, and a stat of the modules directory that failed for another reason.
+        // A different mount source.
         "failed to stat mount source at /var/lib/sysbox: stat /var/lib/sysbox: no such file or directory",
-        "failed to stat mount source at /lib/modules/: stat /lib/modules/: permission denied",
+        // The running kernel's directory, stat failing for a reason a reboot does not fix.
+        "Docker responded with status code 400: failed to create lib container mount: failed to stat mount source at /lib/modules/7.2.11-arch1-1: stat /lib/modules/7.2.11-arch1-1: permission denied",
+        "failed to stat mount source at /lib/modules/7.2.11-arch1-1/build: stat /lib/modules/7.2.11-arch1-1/build: too many levels of symbolic links",
+        // No release at all.
+        "failed to stat mount source at /lib/modules/: stat /lib/modules/: no such file or directory",
     ] {
         assert_eq!(
             start_failure("runnerd-node-4", error),
