@@ -11,6 +11,7 @@ use crate::admission::{Predictor, host};
 use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
 use crate::scheduler::engine::history::{Capture, Found};
+use crate::scheduler::engine::upkeep::Due;
 use crate::scheduler::{Hold, Key, Wait, Waits};
 use crate::store::LogPosition;
 
@@ -158,28 +159,38 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn reseeding(&self, profile: &str) -> bool {
-        self.reseeds.contains_key(profile)
+        self.upkeep.reseed_runs(profile)
     }
 
     pub(super) fn no_reseeds(&self) -> bool {
-        self.reseeds.is_empty()
+        self.upkeep.seed_memories().is_empty()
     }
 
     /// The memory of each seed container that runs, by profile.
     pub(super) fn seed_memories(&self) -> BTreeMap<String, u64> {
-        self.reseed_memory.clone()
+        self.upkeep.seed_memories()
+    }
+
+    /// A seed container of `profile` runs with this cap, and goes on running.
+    pub(super) fn seed_runs(&mut self, profile: &str, memory: u64) {
+        self.upkeep
+            .reseed_started(profile, tokio::spawn(std::future::pending()), memory);
+    }
+
+    pub(super) fn is_retired(&self, profile: &str) -> bool {
+        self.retired.contains_key(profile)
     }
 
     pub(super) fn reseed_is_requested(&self, profile: &str) -> bool {
-        self.reseed_requested.contains(profile)
+        self.upkeep.is_requested(profile)
     }
 
     pub(super) fn ask_reseed(&mut self, profile: &str) {
-        self.reseed_requested.insert(profile.to_owned());
+        self.upkeep.request(profile);
     }
 
     pub(super) fn make_reseed_due(&mut self, profile: &str) {
-        self.reseed_due.insert(profile.to_owned());
+        self.upkeep.mark(profile, Due::Changed);
     }
 
     pub(super) fn is_leftover(&self, container: &str) -> bool {
@@ -239,7 +250,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn measure_is_due(&self, profile: &str) -> bool {
-        self.measure_due.contains(profile)
+        self.upkeep.measure_is_due(profile)
     }
 
     pub(super) fn forget_predictor(&mut self) {
@@ -312,7 +323,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
             ended_uploads: self.ended_uploads.len(),
             cancelling: self.cancelling.len(),
             busy_orphans: self.busy_orphans.len(),
-            oversized: self.oversized.len(),
+            oversized: self.upkeep.oversized(),
             unread: self.unread.len(),
             split_waits: self
                 .repositories

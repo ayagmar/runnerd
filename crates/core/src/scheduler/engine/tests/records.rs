@@ -798,6 +798,23 @@ async fn a_failed_jobs_runner_a_stopped_daemon_did_not_keep_becomes_its_record_a
 }
 
 #[tokio::test]
+async fn no_shell_opens_while_its_profile_reseeds_the_snapshot_it_mounts() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell-reseed");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+
+    engine.seed_runs("app", 1 << 30);
+    let refused = engine.open_shell(10, SIZE).await.unwrap_err();
+    assert!(
+        matches!(refused, ControlError::Conflict(_)),
+        "a shell waits for the reseed: {refused}"
+    );
+    assert!(engine.no_shells(), "no shell is open");
+}
+
+#[tokio::test]
 async fn no_shell_opens_while_the_shared_caches_it_mounts_are_trimmed() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     docker.0.lock().unwrap().images = vec![record_image(10, 60)];

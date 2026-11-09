@@ -744,7 +744,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             )));
         }
         info!("{profile}: reseeding once its slots are free");
-        self.reseed_requested.insert(profile.to_owned());
+        self.upkeep.request(profile);
         Ok(())
     }
 
@@ -766,7 +766,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 )));
             }
             api::CacheKind::Slot { profile, slot } => {
-                if self.reseeds.contains_key(profile) {
+                if self.upkeep.reseed_runs(profile) {
                     return Err(ControlError::Conflict(format!(
                         "{profile} is reseeding, which writes {name}"
                     )));
@@ -950,11 +950,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         self.control.set_repositories(names);
         let profiles = &self.config.profiles;
-        self.reseed_requested
-            .retain(|name| profiles.contains_key(name));
-        self.oversized.retain(|name| profiles.contains_key(name));
-        self.measure_due.retain(|name| profiles.contains_key(name));
-        self.reseed_due.retain(|name| profiles.contains_key(name));
+        self.upkeep
+            .forget_removed(|name| profiles.contains_key(name));
         self.prepare_failures.retain(|slot, _| {
             profiles
                 .get(&slot.profile)

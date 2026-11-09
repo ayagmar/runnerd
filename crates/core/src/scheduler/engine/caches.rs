@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use super::upkeep::Due;
 use super::{Engine, Meanwhile, Occupant, Shutdown};
 use crate::admission::host;
 use crate::api;
@@ -60,8 +61,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if mode == Shutdown::No {
             self.start_measures(tick_began);
             let due: Vec<String> = self
-                .reseed_due
-                .union(&self.reseed_requested)
+                .upkeep
+                .due_to_reseed()
                 .filter(|name| {
                     self.slots
                         .get(*name)
@@ -69,8 +70,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 // A shell mounts the snapshot a reseed replaces.
                 .filter(|name| !self.shell_profiles().contains(name.as_str()))
-                // One that measures slot 1 would read layers the reseed drops: it ends in seconds.
-                .filter(|name| !self.measures.contains_key(*name))
                 // The seed container runs the profile's image: a reseed waits for its pull, still due.
                 .filter(|name| {
                     !self
@@ -87,12 +86,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 if !self.fits_seed(&name) {
                     continue;
                 }
-                self.reseed_due.remove(&name);
-                // The reseed weighs slot 1's changes itself.
-                self.measure_due.remove(&name);
-                let requested = self.reseed_requested.remove(&name);
-                let oversized = self.oversized.remove(&name);
-                self.spawn_reseed(name, requested || oversized);
+                let forced = self.upkeep.take_due(&name).is_some_and(Due::forces);
+                self.spawn_reseed(&name, forced);
             }
         }
         // A shell mounts the shared caches.
@@ -118,7 +113,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .config
                 .profiles
                 .iter()
-                .filter(|(name, _)| !self.reseeds.contains_key(*name))
+                .filter(|(name, _)| !self.upkeep.reseed_runs(name))
                 .map(|(name, profile)| (name.clone(), profile.slots as usize))
                 .collect();
             // Here, not in the background task: runners start only in the tick, so none starts while it removes
@@ -150,18 +145,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn start_measures(&mut self, tick_began: SystemTime) {
         let now = tokio::time::Instant::now();
         let due: Vec<String> = self
-            .measure_due
-            .iter()
-            .filter(|name| {
-                !self.reseed_due.contains(*name)
-                    && !self.reseed_requested.contains(*name)
-                    && !self.reseeds.contains_key(*name)
-                    && !self.measures.contains_key(*name)
-                    && self
-                        .measured_at
-                        .get(*name)
-                        .is_none_or(|at| now.duration_since(*at) >= MEASURE_EVERY)
-            })
+            .upkeep
+            .due_to_measure(now)
             // Mid-job, it would measure what the job is still changing.
             .filter(|name| {
                 self.slots
@@ -204,9 +189,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 )
                 .await
             });
-            self.measure_due.remove(&name);
-            self.measured_at.insert(name.clone(), now);
-            self.measures.insert(name, task);
+            self.upkeep.measure_started(&name, task, now);
         }
     }
 
@@ -214,17 +197,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// reseed did not finish, or whose measure failed, is due to reseed, which its upkeep then stops its runners for.
     /// One that changed less keeps them: a reseed would change nothing.
     pub(super) async fn collect_measures(&mut self) {
-        let finished: Vec<String> = self
-            .measures
-            .iter()
-            .filter(|(_, task)| task.is_finished())
-            .map(|(name, _)| name.clone())
-            .collect();
         let reseed_at = self.config.caches.reseed_at;
-        for name in finished {
-            let Some(task) = self.measures.remove(&name) else {
-                continue;
-            };
+        for (name, task) in self.upkeep.finished_measures() {
             let measured = match task.await {
                 Ok(measured) => measured.map_err(|error| error.to_string()),
                 Err(error) => Err(error.to_string()),
@@ -252,7 +226,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     "{name}: cannot measure what slot 1 changed, so its runners stop for a reseed that does: {error}"
                 ),
             }
-            self.reseed_due.insert(name);
+            self.upkeep.mark(&name, Due::Changed);
         }
     }
 
@@ -296,16 +270,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .slots
             .get(profile)
             .is_some_and(|slots| slots.iter().all(Option::is_none));
-        let waits = self.reseed_requested.contains(profile)
-            && !self.reseeds.contains_key(profile)
+        let waits = self.upkeep.requested_reseed_waits(profile)
             && drained
             && !self.shell_profiles().contains(profile);
         let memory = self.config.profiles.get(profile)?.memory.0;
         // Not `memory_in_use`, which counts this room. The host's limit as the first runner into an empty slice
         // sees it, without the larger margin of a short or stalling host, which passes.
-        let others = self.reseed_memory.values().sum::<u64>()
-            + self.shell_memory()
-            + self.mirror_memory_in_use();
+        let others = self.upkeep.seeds_memory() + self.shell_memory() + self.mirror_memory_in_use();
         let fits = self
             .memory_max
             .is_none_or(|max| max.saturating_sub(others) >= memory)
@@ -318,8 +289,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// The memory each seed container holds of the budget, by profile: a running one's cap as it started, and the
     /// room a requested reseed holds while it waits (`waiting_seed`).
     pub(super) fn seed_memory(&self) -> BTreeMap<String, u64> {
-        let mut seeds = self.reseed_memory.clone();
-        for profile in &self.reseed_requested {
+        let mut seeds = self.upkeep.seed_memories();
+        for profile in self.upkeep.requested() {
             if let Some(memory) = self.waiting_seed(profile) {
                 seeds.entry(profile.clone()).or_insert(memory);
             }
@@ -329,8 +300,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`
     /// reseed, or that of a snapshot over its limit, runs however little slot 1 changed.
-    fn spawn_reseed(&mut self, name: String, requested: bool) {
-        let Some(profile) = self.config.profiles.get(&name) else {
+    fn spawn_reseed(&mut self, name: &str, requested: bool) {
+        let Some(profile) = self.config.profiles.get(name) else {
             return;
         };
         let docker = self.docker.clone();
@@ -345,7 +316,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let max_size = self.config.caches.snapshot_max;
         let isolation = self.isolation;
-        let profile_name = name.clone();
+        let profile_name = name.to_owned();
         let task = tokio::spawn(async move {
             cache::reseed(
                 &*docker,
@@ -364,8 +335,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             )
             .await
         });
-        self.reseed_memory.insert(name.clone(), memory.0);
-        self.reseeds.insert(name, task);
+        self.upkeep.reseed_started(name, task, memory.0);
     }
 
     pub(super) async fn collect_trim(&mut self) {
@@ -465,35 +435,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let Some(&size) = sizes.get(&self.names.base(profile)) else {
                 continue;
             };
-            let reseeded = self
-                .reseeded_at
-                .get(profile)
-                .is_some_and(|&at| at >= self.checked_at);
-            if size > max.0 && !self.reseeds.contains_key(profile) && !reseeded {
+            if size > max.0
+                && self
+                    .upkeep
+                    .snapshot_unchanged_since(profile, self.checked_at)
+            {
                 info!(
                     "{profile}: the snapshot holds {}, over snapshot_max ({max}): it starts over at the next reseed, \
                      once the profile is idle",
                     ByteSize(size)
                 );
-                self.reseed_due.insert(profile.clone());
-                self.oversized.insert(profile.clone());
+                self.upkeep.mark(profile, Due::Oversized);
             }
         }
     }
 
     pub(super) async fn collect_reseeds(&mut self) {
-        let finished: Vec<String> = self
-            .reseeds
-            .iter()
-            .filter(|(_, task)| task.is_finished())
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in finished {
-            self.reseed_memory.remove(&name);
-            self.reseeded_at.insert(name.clone(), SystemTime::now());
-            let Some(task) = self.reseeds.remove(&name) else {
-                continue;
-            };
+        for (name, task) in self.upkeep.finished_reseeds() {
             let (output, error) = match task.await {
                 Ok(Ok(output)) => {
                     info!("{name}: {}", output.trim().replace('\n', "; "));
@@ -529,8 +487,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let idle = |slots: &Vec<Option<Occupant>>| slots.iter().flatten().all(Occupant::idle);
         // A shell holds back the reseed until it closes, so runners keep serving meanwhile. So does a due reseed
         // with no room for its seed even once they stop: it is not asked for, and may wait long.
-        let reseed = (self.reseed_requested.contains(profile)
-            || self.reseed_due.contains(profile) && self.fits_seed(profile))
+        let reseed = self
+            .upkeep
+            .due(profile)
+            .is_some_and(|due| due == Due::Requested || self.fits_seed(profile))
             && !self.shell_profiles().contains(profile)
             && self.slots.get(profile).is_some_and(idle);
         // Until the check ends: a runner started meanwhile mounts the volumes it may remove.
@@ -547,7 +507,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.
     pub(super) fn is_reseeding(&self, profile: &str) -> bool {
-        self.reseeds.contains_key(profile) || self.reseed_requested.contains(profile)
+        self.upkeep.reseed_runs_or_is_requested(profile)
     }
 }
 

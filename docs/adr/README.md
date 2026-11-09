@@ -123,5 +123,6 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0113](0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md) | A released runner's slot does not wait for its registration's delete | Accepted |
 | [0114](0114-a-lifecycle-is-one-value-with-one-owner.md) | A lifecycle is one value with one owner | Accepted |
 | [0115](0115-a-pools-waits-are-one-value.md) | A pool's waits are one value, and a replay's state is sealed | Accepted |
+| [0116](0116-a-profiles-upkeep-is-one-state.md) | A profile's upkeep is one state | Accepted |
 | [0117](0117-a-runners-exit-is-one-verdict.md) | A runner's exit is one verdict | Accepted |
 | [0120](0120-a-job-its-runner-failed-reads-as-a-runner-fault.md) | A job its runner failed reads as a runner fault | Accepted |

@@ -5,7 +5,7 @@
 # a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
 # script.
 #
-engine-lifecycle-fields 40
+engine-lifecycle-fields 31
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
@@ -32,19 +32,4 @@ C1 core PoolHold
 # Measured: split raised (slot occupant) and the wait sets (wait accounting) out; the last of those seals what stays,
 # the predictor and the log memos, with private fields.
 C1 core crates/core/src/scheduler/engine/admission.rs:Measured
-
-# Profile upkeep: split. These become one map of a profile's upkeep.
-C2 measure_due measured_at
-C2 measure_due measures
-C2 measure_due oversized
-C2 measure_due reseed_due
-C2 measure_due reseed_requested
-C2 measured_at measures
-C2 measures reseed_due
-C2 oversized reseed_due
-C2 oversized reseed_requested
-C2 reseed_due reseed_requested
-C2 reseed_memory reseeded_at
-C2 reseed_memory reseeds
-C2 reseeded_at reseeds
 

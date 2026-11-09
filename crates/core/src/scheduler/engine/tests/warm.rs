@@ -549,6 +549,28 @@ async fn a_requested_reseed_runs_though_slot_1_changed_under_reseed_at() {
 }
 
 #[tokio::test]
+async fn a_reseed_a_measure_made_due_weighs_again_what_slot_1_changed() {
+    for measured in [
+        "slot 1 changed 4294967296 bytes\n",
+        "the last reseed did not finish\n",
+        "du: cannot read directory '/workers/1/cache/upper': Input/output error\n",
+    ] {
+        let github = FakeGithub::default();
+        let docker = FakeDocker::default();
+        let (mut engine, _handle, _dir) =
+            slot_1_job_ends_and_measures(&github, &docker, measured).await;
+        let seed = Names::new("runnerd").seed("app");
+        until_called(&mut engine, &docker, &format!("start {seed}")).await;
+        let entrypoint = docker.0.lock().unwrap().entrypoints[&seed].clone();
+        assert_eq!(
+            entrypoint[1],
+            engine.config.caches.reseed_at.0.to_string(),
+            "after {measured:?}, only a requested or oversized reseed runs whatever slot 1 changed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_profile_reseeds_as_before_when_its_last_reseed_did_not_finish_or_slot_1_cannot_be_measured()
  {
     for measured in [
@@ -1111,6 +1133,30 @@ async fn a_warm_runner_keeps_waiting_for_a_due_reseed_whose_seed_would_not_fit()
     }
     engine.publish();
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert!(engine.no_reseeds(), "the reseed waits for room");
+}
+
+#[tokio::test]
+async fn a_warm_runner_stops_for_a_requested_reseed_though_its_seed_would_not_fit() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+
+    engine.memory_max = Some(3 << 30);
+    engine.ask_reseed("app");
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    engine.publish();
+    assert_eq!(
+        slots(&handle),
+        [None, None],
+        "the API asked for it, so it does not wait"
+    );
     assert!(engine.no_reseeds(), "the reseed waits for room");
 }
 

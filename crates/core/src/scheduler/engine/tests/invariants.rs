@@ -2012,7 +2012,7 @@ impl Case {
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
         let seeds = self
             .engine
-            .reseed_memory
+            .seed_memories()
             .keys()
             .filter(|profile| !seeds_before.contains(*profile))
             .map(|profile| format!("{profile}{SEED_START}"))

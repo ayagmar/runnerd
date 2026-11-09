@@ -586,10 +586,7 @@ async fn a_host_too_short_for_the_runner_after_a_full_drain_erects_no_barrier() 
 #[tokio::test]
 async fn a_runner_that_fits_the_slice_but_not_beside_a_seed_container_erects_no_barrier() {
     let mut fixture = Fixture::new(9 * G).await;
-    fixture
-        .engine
-        .reseed_memory
-        .insert("small".to_owned(), 2 * G);
+    fixture.engine.seed_runs("retired", 2 * G);
     fixture.younger_job_after_a_starved_one().await;
     assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
 }

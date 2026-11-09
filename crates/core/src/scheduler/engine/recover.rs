@@ -99,10 +99,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let docker = self.docker.clone();
             let id = container.id.clone();
             let memory = self.running_caps(&container, &profile).await.memory;
-            self.reseed_memory.insert(profile.clone(), memory);
-            self.reseeds.insert(
-                profile,
+            self.upkeep.reseed_started(
+                &profile,
                 tokio::spawn(async move { cache::finish_reseed(&*docker, &id).await }),
+                memory,
             );
         }
     }
