@@ -400,7 +400,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         if let Some(health) = self
             .repositories
-            .get_mut(&occupant.repository)
+            .listed_mut(&occupant.repository)
             .map(|state| state.holds.entry(slot.profile.clone()).or_default())
         {
             let cause = health.runner_left(logged, &occupant.runner_name, beside);
@@ -711,7 +711,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn hold(&mut self, repository: &str, profile: &str, cause: HoldCause, error: String) {
         let Some(hold) = self
             .repositories
-            .get_mut(repository)
+            .listed_mut(repository)
             .map(|state| state.holds.entry(profile.to_owned()).or_default())
             .and_then(|health| health.hold(cause, SystemTime::now()))
         else {

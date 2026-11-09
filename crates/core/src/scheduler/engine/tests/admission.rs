@@ -1090,7 +1090,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     // As if it had waited past the limit already.
     engine
         .repositories
-        .get_mut("o/r")
+        .listed_mut("o/r")
         .and_then(|state| state.waits.get_mut("app"))
         .and_then(|waits| waits.cpu_mut())
         .expect("the build's wait is kept")

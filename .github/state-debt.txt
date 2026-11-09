@@ -5,7 +5,7 @@
 # a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
 # script.
 #
-engine-lifecycle-fields 27
+engine-lifecycle-fields 25
 
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
@@ -16,12 +16,6 @@ C2 captures recaptures
 # Job followed: split. queued_jobs, closing and claims become one map of a job's phase.
 C1 core Claims
 C2 closing queued_jobs
-
-# Repository presence: split. draining folds into repositories, so these false pairs go with it.
-C1 core Drain
-C2 draining repositories
-C2 draining retired
-C2 draining slots
 
 # Repository state: split. Its listing, holds and waits each become one sealed value, the waits last.
 C1 core RepositoryState

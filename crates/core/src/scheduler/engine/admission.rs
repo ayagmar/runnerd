@@ -672,7 +672,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .unwrap_or_default();
                     let queued = self
                         .repositories
-                        .get(&occupant.repository)
+                        .listed(&occupant.repository)
                         .map(|state| state.queued.as_slice())
                         .unwrap_or_default()
                         .iter()
@@ -770,9 +770,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Whether a failure holds `repository`'s pool in `profile` back at `now`.
     pub(super) fn backing_off(&self, repository: &str, profile: &str, now: SystemTime) -> bool {
-        self.repositories[repository]
-            .holds
-            .get(profile)
+        self.repositories
+            .listed(repository)
+            .and_then(|state| state.holds.get(profile))
             .is_some_and(|health| health.holding(now))
     }
 
@@ -815,7 +815,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })
             .collect();
         for (pool, queued, stopped) in pools {
-            let Some(state) = self.repositories.get_mut(&pool.repository) else {
+            let Some(state) = self.repositories.listed_mut(&pool.repository) else {
                 continue;
             };
             let listed = state.listed;

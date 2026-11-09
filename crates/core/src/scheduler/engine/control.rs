@@ -593,11 +593,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         running: RunningJobs,
     ) -> Result<api::Paused, ControlError> {
         let repositories: BTreeSet<String> = match target {
-            Target::Repository(repository) if !self.repositories.contains_key(repository) => {
-                return Err(not_configured(repository, self.repositories.keys()));
+            Target::Repository(repository) if self.repositories.listed(repository).is_none() => {
+                return Err(not_configured(repository, self.repositories.listed_names()));
             }
             Target::Repository(repository) => BTreeSet::from([repository.clone()]),
-            Target::All => self.repositories.keys().cloned().collect(),
+            Target::All => self.repositories.listed_names().cloned().collect(),
         };
         self.take_found();
         let runners: Vec<(SlotRef, Occupant)> = self
@@ -897,7 +897,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut old = std::mem::replace(&mut self.config, config);
         // A pool gone keeps no hold a pool made there later would inherit, and one whose runners change starts again
         // at once: what failed may be what changed.
-        for (name, state) in &mut self.repositories {
+        for (name, state) in self.repositories.iter_listed_mut() {
             let new = &self.config;
             state
                 .holds
@@ -926,24 +926,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .iter()
             .map(|repository| repository.name.clone())
             .collect();
-        let removed: Vec<String> = self
-            .repositories
-            .keys()
-            .filter(|name| !names.contains(*name))
-            .cloned()
-            .collect();
-        // A repository added back stops draining, and one removed again drains from the start.
-        for name in removed {
-            self.draining.entry(name).or_default();
-        }
-        self.draining.retain(|name, _| !names.contains(name));
-        self.repositories.retain(|name, _| names.contains(name));
-        for name in &names {
-            self.repositories.entry(name.clone()).or_default();
-        }
+        self.repositories.reload(&names);
         // A pool gone, or moved to another profile, keeps no wait a pool made there later would inherit.
         let config = &self.config;
-        for (name, state) in &mut self.repositories {
+        for (name, state) in self.repositories.iter_listed_mut() {
             state
                 .waits
                 .retain(|profile, _| config.pool_in(name, profile).is_some());

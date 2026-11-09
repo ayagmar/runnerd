@@ -270,11 +270,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     priced_as: None,
                 });
         }
-        if !self.repositories.contains_key(&occupant.repository) {
-            self.draining
-                .entry(occupant.repository.clone())
-                .or_default();
-        }
+        self.repositories.found_running(&occupant.repository);
     }
 
     /// Adopts the runner and seed containers a previous daemon left running, also those the config no longer has
@@ -339,8 +335,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             {
                 self.keep_draining(&profile, index, &occupant);
             }
-            let known_repository = self.repositories.contains_key(&occupant.repository)
-                || self.draining.contains_key(&occupant.repository);
+            let known_repository = self.repositories.is_known(&occupant.repository);
             let free = index.and_then(|index| {
                 self.slots
                     .get_mut(&profile)?

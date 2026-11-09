@@ -87,8 +87,6 @@ MARKED = {
     "C1 daemon Target": "independent deadlines combined by max (since, sent, retry_at) and the set of insights told; every combination is reached",
     "C1 web Credentials": "two independent kinds of credential behind Sessions' mutex: the dashboard's links and the open pairings",
     "C1 web Links": "the published link file: codes shrink as they are redeemed, the file and bases are fixed",
-    "C2 repositories retired": "not one key: reload's name is a repository in one and a profile in the other",
-    "C2 repositories slots": "not one key: reload's name is a repository in one and a profile in the other",
     "C2 retired slots": "a profile's slots and its config snapshot: a retired profile keeps its config until its slots are empty",
     "C3 hit_cap oom_killed &&": "two facts the kernel reports separately about a finished run, not a state of it",
     "C3 policy trace &&": "two independent settings of one replay: whether it has a trace, and its policy",
