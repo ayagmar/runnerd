@@ -1520,6 +1520,47 @@ async fn a_job_waits_for_a_slot_or_the_hosts_memory_never_both() {
 }
 
 #[tokio::test]
+async fn a_pass_keeps_only_the_waits_of_the_starts_it_did_not_make() {
+    // Catches a pass ending the wait of a job whose planned start it left to the tick, keeping one the plan no longer
+    // has, or leaving a job the plan holds for both in the slot wait where a tick's commits leave it in the host's.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.note_slots(BTreeSet::from([1, 2]));
+    engine.note_host_waits(BTreeSet::from([3, 4, 6]), time::now_ms());
+    let needs_memory = api::Waiting::HostMemory {
+        needs: 1280 * M,
+        free: 0,
+    };
+    let plan = crate::scheduler::Plan {
+        slot_waiting: BTreeSet::from([5, 6]),
+        waiting: BTreeMap::from([(5, needs_memory)]),
+        ..Default::default()
+    };
+
+    engine.note_pass_waits(&plan, &BTreeSet::from([1, 3, 6]));
+
+    assert!(engine.waits_for_a_slot(1), "job 1's start was not made");
+    assert!(!engine.waits_for_a_slot(2), "the plan no longer has job 2");
+    assert!(engine.waits_for_the_host(3), "job 3's start was not made");
+    assert!(
+        !engine.waits_for_the_host(4),
+        "the plan no longer has job 4"
+    );
+    assert!(
+        engine.waits_for_the_host(5) && !engine.waits_for_a_slot(5),
+        "a job the plan holds for both ends in the host's wait"
+    );
+    assert!(
+        engine.waits_for_the_host(6) && !engine.waits_for_a_slot(6),
+        "job 6's start was not made, so it stays in the wait it was in"
+    );
+}
+
+#[tokio::test]
 async fn the_first_runner_into_an_empty_slice_needs_only_the_margin_after_a_wait() {
     let (github, docker, dir) = (
         FakeGithub::default(),

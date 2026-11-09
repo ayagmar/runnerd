@@ -21,6 +21,7 @@ mod exits;
 mod history;
 mod images;
 mod mirror;
+mod open_waits;
 mod records;
 mod recover;
 mod runner_exit;

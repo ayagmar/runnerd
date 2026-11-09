@@ -11,6 +11,7 @@ use crate::admission::{Predictor, host};
 use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
 use crate::scheduler::engine::history::{Capture, Found};
+use crate::scheduler::engine::open_waits::WaitFor;
 use crate::scheduler::engine::upkeep::Due;
 use crate::scheduler::{Hold, Key, Wait, Waits};
 use crate::store::LogPosition;
@@ -230,15 +231,19 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn waits_for_a_slot(&self, job: u64) -> bool {
-        self.measured.slot_waiting.0.contains(&job)
+        self.measured.job_waits.jobs(WaitFor::Slot).contains(&job)
     }
 
     pub(super) fn waits_for_the_host(&self, job: u64) -> bool {
-        self.measured.host_waiting.0.contains(&job)
+        self.measured.job_waits.jobs(WaitFor::Host).contains(&job)
     }
 
     pub(super) fn wait_for_the_host(&mut self, job: u64) {
-        self.measured.host_waiting.0.insert(job);
+        let mut waiting = self.measured.job_waits.jobs(WaitFor::Host);
+        waiting.insert(job);
+        self.measured
+            .job_waits
+            .open_wait(WaitFor::Host, waiting, crate::time::now_ms());
     }
 
     pub(super) fn raise(&mut self, runner: String) {
