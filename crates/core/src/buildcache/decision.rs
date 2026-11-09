@@ -24,7 +24,8 @@ enum DecisionState {
         scopes: Scopes,
     },
     Refused {
-        scopes: Scopes,
+        /// Its repository's default branch's ref, which is all a job that may not write reads by.
+        default: Option<String>,
     },
 }
 
@@ -72,7 +73,9 @@ impl WriteDecision {
         let decided = match writes {
             Writes::Undecided => return None,
             Writes::Allowed => DecisionState::Allowed { scopes },
-            Writes::Refused => DecisionState::Refused { scopes },
+            Writes::Refused => DecisionState::Refused {
+                default: scopes.default,
+            },
         };
         let DecisionState::Undecided { held } = &mut self.state else {
             return None;
@@ -99,9 +102,8 @@ impl WriteDecision {
     pub(super) fn default_branch(&self) -> Option<&String> {
         match &self.state {
             DecisionState::Undecided { .. } => None,
-            DecisionState::Allowed { scopes } | DecisionState::Refused { scopes } => {
-                scopes.default.as_ref()
-            }
+            DecisionState::Allowed { scopes } => scopes.default.as_ref(),
+            DecisionState::Refused { default } => default.as_ref(),
         }
     }
 }
