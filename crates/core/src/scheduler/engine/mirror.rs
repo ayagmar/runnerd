@@ -49,9 +49,10 @@ impl Mirror {
         self.0 = Phase::Down;
     }
 
-    /// Whether a runner about to start must start it first.
+    /// Whether a runner about to start must start it first: unless it is known to run, as starting it asks Docker
+    /// whether it already does.
     pub(super) fn needs_start(self) -> bool {
-        self.0 == Phase::Down
+        !matches!(self.0, Phase::Up { .. })
     }
 
     /// Whether it may run: there may be something to stop or to read.
