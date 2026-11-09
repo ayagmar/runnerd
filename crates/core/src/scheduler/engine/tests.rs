@@ -613,6 +613,8 @@ struct DockerState {
     diag: HashMap<String, Vec<u8>>,
     /// How many reads of a container's files fail next, as when the Engine is busy.
     fail_files: u32,
+    /// How many listings of images fail next, as when the Engine is busy.
+    fail_images: u32,
     /// Where the next reads of a container's files break off in its archive, in bytes, as when Docker stops
     /// sending it.
     cut_files: VecDeque<usize>,
@@ -1337,7 +1339,13 @@ impl DockerApi for FakeDocker {
 
     async fn images(&self, label: &str) -> Result<Vec<docker::Image>, docker::Error> {
         self.outage().await?;
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        if state.fail_images > 0 {
+            state.fail_images -= 1;
+            return Err(docker::Error::IOError {
+                err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            });
+        }
         Ok(state
             .images
             .iter()

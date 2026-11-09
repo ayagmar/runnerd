@@ -96,7 +96,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         // A shell mounts the shared caches.
-        if self.occupied().next().is_some() || !self.records.shells.is_empty() {
+        if self.occupied().next().is_some() || self.records.has_shells() {
             return;
         }
         if self.mirror.may_run() {
@@ -547,7 +547,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .checked_at
                     .elapsed()
                     .is_ok_and(|age| age >= CHECK_EVERY))
-            && self.records.shells.is_empty()
+            && !self.records.has_shells()
             && self.slots.values().all(idle);
         reseed || check
     }

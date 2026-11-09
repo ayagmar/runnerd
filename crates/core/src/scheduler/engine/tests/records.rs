@@ -395,6 +395,7 @@ async fn records_past_max_age_and_those_removed_by_hand_go_unless_a_shell_is_ope
         .await
         .unwrap();
     assert_eq!(removed.jobs, [11]);
+    assert_eq!(removed.bytes, 1 << 30, "the client is told what it freed");
     let removed = engine.remove_records(&RecordSelection::All).await.unwrap();
     assert_eq!(
         removed.jobs,
@@ -423,6 +424,57 @@ async fn records_past_max_age_and_those_removed_by_hand_go_unless_a_shell_is_ope
             (11, api::RecordRemoval::User)
         ]
     );
+}
+
+#[tokio::test]
+async fn records_docker_did_not_list_at_the_start_are_listed_by_a_tick_and_then_expire() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.images = vec![record_image(10, 8 * 86_400), record_image(11, 60)];
+        state.fail_images = 1;
+    }
+    let dir = TestDir::new("listed-late");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    let jobs = |handle: &Handle| -> Vec<u64> {
+        let records = handle.records.borrow();
+        records.records.iter().map(|record| record.job).collect()
+    };
+    engine.recover().await.unwrap();
+    engine.publish();
+    assert_eq!(jobs(&handle), Vec::<u64>::new(), "Docker did not answer");
+
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(jobs(&handle), [10, 11], "the next tick asked again");
+
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(jobs(&handle), [11], "the record past 7 days went");
+}
+
+#[tokio::test]
+async fn idle_upkeep_waits_for_a_shell_open_with_no_runner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell-upkeep");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    while engine.trim.as_ref().is_some_and(|trim| !trim.is_finished()) {
+        tokio::task::yield_now().await;
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(engine.trim.is_none(), "the first idle tick's trim ended");
+
+    let tty = engine.open_shell(10, SIZE).await.unwrap();
+    engine.make_trim_due();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.trim.is_none(), "a shell mounts the shared caches");
+
+    engine.close_shell(&tty.container).await;
+    engine.tick(Shutdown::No).await;
+    assert!(engine.trim.is_some(), "the trim was only held back");
 }
 
 #[tokio::test]

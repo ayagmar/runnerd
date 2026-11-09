@@ -79,17 +79,19 @@ impl std::fmt::Display for Undecided {
     }
 }
 
-/// The records of failed jobs and the shells open in them.
+/// The records of failed jobs and the shells open in them; only its methods write them.
+///
+/// A restart keeps none of it: the list is read again from Docker's images, a recording's container is found as a
+/// leftover and `keep_left_record` takes it up, and recovery removes the shells an earlier daemon left. A reload keeps
+/// all of it.
 #[derive(Debug)]
 pub(super) struct RecordState {
-    /// Oldest first.
-    list: Vec<api::Record>,
-    /// Whether `list` is what Docker has: until Docker lists them, no record is made.
-    pub(super) listed: bool,
+    /// Oldest first; `None` until Docker lists them, and until then no record is made.
+    list: Option<Vec<api::Record>>,
     /// Records being made, by job.
-    pub(super) recordings: BTreeMap<u64, Recording>,
+    recordings: BTreeMap<u64, Recording>,
     /// Shells open in records, by container ID.
-    pub(super) shells: BTreeMap<String, Shell>,
+    shells: BTreeMap<String, Shell>,
     /// Shells opened by this engine, which tells their containers' names apart.
     opened: u64,
     /// What `Handle::records` shows.
@@ -105,8 +107,7 @@ impl RecordState {
         let (status, receiver) = watch::channel(api::Records::default());
         let (done, finished) = mpsc::unbounded_channel();
         let state = RecordState {
-            list: Vec::new(),
-            listed: false,
+            list: None,
             recordings: BTreeMap::new(),
             shells: BTreeMap::new(),
             opened: 0,
@@ -115,6 +116,92 @@ impl RecordState {
             finished,
         };
         (state, receiver)
+    }
+
+    /// Whether the list is what Docker has.
+    fn is_listed(&self) -> bool {
+        self.list.is_some()
+    }
+
+    /// The records known, oldest first: none before Docker listed them.
+    fn kept(&self) -> &[api::Record] {
+        self.list.as_deref().unwrap_or_default()
+    }
+
+    /// The record of `job`, if one is known.
+    fn of_job(&self, job: u64) -> Option<&api::Record> {
+        self.kept().iter().find(|record| record.job == job)
+    }
+
+    /// Takes what Docker listed as the records.
+    fn set_listed(&mut self, records: Vec<api::Record>) {
+        self.list = Some(records);
+    }
+
+    /// Adds a committed record. A record is only made once the list is known.
+    fn keep(&mut self, record: api::Record) {
+        self.list.get_or_insert_default().push(record);
+    }
+
+    /// Forgets `job`'s record, and returns the bytes it took.
+    fn forget(&mut self, job: u64) -> u64 {
+        let Some(list) = self.list.as_mut() else {
+            return 0;
+        };
+        let Some(index) = list.iter().position(|record| record.job == job) else {
+            return 0;
+        };
+        list.remove(index).bytes
+    }
+
+    /// Whether any record is being made.
+    pub(super) fn is_recording(&self) -> bool {
+        !self.recordings.is_empty()
+    }
+
+    /// The disk the records being made are expected to take.
+    fn pending(&self) -> u64 {
+        self.recordings.values().map(|other| other.estimate).sum()
+    }
+
+    /// Notes `job`'s record as being made, at this stage.
+    fn begin(&mut self, job: u64, recording: Recording) {
+        self.recordings.insert(job, recording);
+    }
+
+    /// The jobs whose recording's task finished.
+    fn finished_recordings(&self) -> Vec<u64> {
+        self.recordings
+            .iter()
+            .filter(|(_, recording)| recording.stage.is_finished())
+            .map(|(job, _)| *job)
+            .collect()
+    }
+
+    /// Takes `job`'s recording, to move it on.
+    fn take_recording(&mut self, job: u64) -> Option<Recording> {
+        self.recordings.remove(&job)
+    }
+
+    /// Whether a shell is open in any record.
+    pub(super) fn has_shells(&self) -> bool {
+        !self.shells.is_empty()
+    }
+
+    /// The number of the next shell, which tells its container's name apart.
+    fn next_shell(&mut self) -> u64 {
+        self.opened += 1;
+        self.opened
+    }
+
+    /// Notes a shell opened in `container`.
+    fn shell_opened(&mut self, container: String, shell: Shell) {
+        self.shells.insert(container, shell);
+    }
+
+    /// Forgets the shell of `container`.
+    fn shell_closed(&mut self, container: &str) {
+        self.shells.remove(container);
     }
 }
 
@@ -176,9 +263,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !self.records_failures(&slot.profile) {
             return false;
         }
-        if !self.records.listed {
+        if !self.records.is_listed() {
             self.list_records().await;
-            if !self.records.listed {
+            if !self.records.is_listed() {
                 let why = "Docker did not list the records kept".to_owned();
                 self.skip_record(job, &occupant.repository, why);
                 return false;
@@ -215,7 +302,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let _ = done.send(());
             checked
         });
-        self.records.recordings.insert(
+        self.records.begin(
             job,
             Recording {
                 record,
@@ -238,10 +325,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         slot: &SlotRef,
         occupant: &Occupant,
     ) -> Result<bool, Undecided> {
-        let recorded =
-            |records: &RecordState, job| records.list.iter().any(|record| record.job == job);
         if !self.records_failures(&slot.profile)
-            || occupant.job.is_some_and(|job| recorded(&self.records, job))
+            || occupant
+                .job
+                .is_some_and(|job| self.records.of_job(job).is_some())
         {
             return Ok(false);
         }
@@ -264,7 +351,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             );
             return Ok(false);
         };
-        if recorded(&self.records, job) {
+        if self.records.of_job(job).is_some() {
             return Ok(false);
         }
         let occupant = Occupant {
@@ -314,14 +401,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     ) {
         let job = record.job;
         // Records being committed take their disk too.
-        let pending: u64 = self
-            .records
-            .recordings
-            .values()
-            .map(|other| other.estimate)
-            .sum();
+        let pending = self.records.pending();
         let room = record::make_room(
-            &self.records.list,
+            self.records.kept(),
             &self.shell_jobs(),
             &self.config.records,
             checked.incoming,
@@ -362,7 +444,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let _ = done.send(());
             committed.map_err(|error| error.to_string())
         });
-        self.records.recordings.insert(
+        self.records.begin(
             job,
             Recording {
                 record,
@@ -385,15 +467,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// records, kept within their limits with its real size.
     pub(super) async fn collect_recordings(&mut self) {
         while self.records.finished.try_recv().is_ok() {}
-        let done: Vec<u64> = self
-            .records
-            .recordings
-            .iter()
-            .filter(|(_, recording)| recording.stage.is_finished())
-            .map(|(job, _)| *job)
-            .collect();
-        for job in done {
-            let Some(recording) = self.records.recordings.remove(&job) else {
+        for job in self.records.finished_recordings() {
+            let Some(recording) = self.records.take_recording(job) else {
                 continue;
             };
             let Recording {
@@ -446,7 +521,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ByteSize(bytes)
         );
         let removals = record::make_room(
-            &self.records.list,
+            self.records.kept(),
             &self.shell_jobs(),
             &self.config.records,
             bytes,
@@ -454,7 +529,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             record.created_at,
         );
         self.store.record_made(record.clone());
-        self.records.list.push(record);
+        self.records.keep(record);
         let removals = removals.unwrap_or_else(|_| vec![(job, api::RecordRemoval::Size)]);
         for (old, why) in removals {
             if let Err(error) = self.remove_record(old, why).await {
@@ -479,7 +554,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// A tick's care of the records: lists them until Docker answers, then removes those past `max_age`.
     pub(super) async fn keep_records(&mut self) {
-        if self.records.listed {
+        if self.records.is_listed() {
             self.expire_records().await;
         } else {
             self.list_records().await;
@@ -519,8 +594,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.store.record_made(record.clone());
                     }
                 }
-                self.records.list = records;
-                self.records.listed = true;
+                self.records.set_listed(records);
             }
             Err(error) => warn!("cannot list the records: {error}"),
         }
@@ -529,7 +603,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Removes the records past `max_age`.
     pub(super) async fn expire_records(&mut self) {
         let expired = record::expired(
-            &self.records.list,
+            self.records.kept(),
             &self.shell_jobs(),
             &self.config.records,
             time::now_ms() / 1000,
@@ -547,24 +621,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         job: u64,
         why: api::RecordRemoval,
     ) -> Result<u64, ControlError> {
-        let Some(index) = self
-            .records
-            .list
-            .iter()
-            .position(|record| record.job == job)
-        else {
+        let Some(image) = self.records.of_job(job).map(|record| record.image.clone()) else {
             return Err(ControlError::NotFound(format!(
                 "job {job} has no record; `runnerctl records` lists them"
             )));
         };
-        let image = self.records.list[index].image.clone();
         self.docker.remove_image(&image).await.map_err(|error| {
             ControlError::Failed(format!("cannot remove the record of job {job}: {error}"))
         })?;
-        let removed = self.records.list.remove(index);
+        let bytes = self.records.forget(job);
         info!("removed the record of job {job} ({why})");
         self.store.record_removed(job, time::now_ms(), why);
-        Ok(removed.bytes)
+        Ok(bytes)
     }
 
     /// Removes the selected records, but those with a shell open: one asked for by its job is refused instead.
@@ -583,10 +651,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 vec![*job]
             }
-            RecordSelection::All => self.records.list.iter().map(|record| record.job).collect(),
+            RecordSelection::All => self
+                .records
+                .kept()
+                .iter()
+                .map(|record| record.job)
+                .collect(),
             RecordSelection::OlderThan(age) => self
                 .records
-                .list
+                .kept()
                 .iter()
                 .filter(|record| now.saturating_sub(record.created_at) > age.as_secs())
                 .map(|record| record.job)
@@ -649,7 +722,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn records_status(&self) -> api::Records {
         let limits = &self.config.records;
         api::Records {
-            records: self.records.list.clone(),
+            records: self.records.kept().to_vec(),
             limits: api::RecordLimits {
                 max_total: limits.max_total.0,
                 max_count: limits.max_count,
@@ -667,13 +740,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         job: u64,
         size: TtySize,
     ) -> Result<Tty, ControlError> {
-        let Some(record) = self
-            .records
-            .list
-            .iter()
-            .find(|record| record.job == job)
-            .cloned()
-        else {
+        let Some(record) = self.records.of_job(job).cloned() else {
             return Err(ControlError::NotFound(format!(
                 "job {job} has no record; `runnerctl records` lists them"
             )));
@@ -721,11 +788,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             )));
         }
         let body = self.shell_body(&record, memory, cpus);
-        self.records.opened += 1;
         let name = format!(
             "runnerd-shell-{job}-{}-{}",
             time::now_ms() / 1000,
-            self.records.opened
+            self.records.next_shell()
         );
         let tty = self
             .docker
@@ -733,7 +799,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .await
             .map_err(|error| ControlError::Failed(format!("cannot start a shell: {error}")))?;
         info!("opened a shell in the record of job {job}");
-        self.records.shells.insert(
+        self.records.shell_opened(
             tty.container.clone(),
             Shell {
                 job,
@@ -815,7 +881,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             _ => {
                 info!("closed the shell in the record of job {job}");
-                self.records.shells.remove(container);
+                self.records.shell_closed(container);
             }
         }
     }
