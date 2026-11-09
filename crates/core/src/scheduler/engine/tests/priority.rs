@@ -144,7 +144,7 @@ impl Fixture {
     fn age_by(&mut self, by: Duration) {
         self.engine
             .repositories
-            .get_mut("o/big")
+            .listed_mut("o/big")
             .and_then(|state| state.waits.get_mut("big"))
             .and_then(|waits| waits.memory_mut())
             .expect("o/big's next job waits")

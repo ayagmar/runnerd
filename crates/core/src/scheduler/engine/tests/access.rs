@@ -30,7 +30,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn pool_hold(&self, repository: &str, profile: &str) -> Option<HoldFacts> {
-        let hold = self.repositories.get(repository)?.holds.get(profile)?;
+        let hold = self.repositories.listed(repository)?.holds.get(profile)?;
         Some(HoldFacts {
             held: hold.held(),
             failures: hold.failures(),
@@ -41,7 +41,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     /// Whether a pool holds nothing back and no streak of runners that left is under way.
     pub(super) fn pool_is_quiet(&self, repository: &str, profile: &str, now: SystemTime) -> bool {
         self.repositories
-            .get(repository)
+            .listed(repository)
             .and_then(|state| state.holds.get(profile))
             .is_none_or(|hold| hold.idle_exits() == 0 && !hold.holding(now))
     }
@@ -54,7 +54,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         failures: u32,
         idle_exits: u32,
     ) {
-        let state = self.repositories.get_mut(repository).unwrap();
+        let state = self.repositories.listed_mut(repository).unwrap();
         state
             .holds
             .entry(profile.to_owned())
@@ -90,7 +90,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn set_held(&mut self, repository: &str, profile: &str, held: Hold) {
-        let state = self.repositories.get_mut(repository).unwrap();
+        let state = self.repositories.listed_mut(repository).unwrap();
         state
             .holds
             .entry(profile.to_owned())
@@ -99,7 +99,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn clear_holds(&mut self) {
-        for state in self.repositories.values_mut() {
+        for (_, state) in self.repositories.iter_listed_mut() {
             for hold in state.holds.values_mut() {
                 hold.expire(SystemTime::UNIX_EPOCH);
             }
@@ -107,7 +107,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn expire_holds(&mut self, past: SystemTime) {
-        for state in self.repositories.values_mut() {
+        for (_, state) in self.repositories.iter_listed_mut() {
             for hold in state.holds.values_mut() {
                 hold.expire(past);
             }
@@ -115,11 +115,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn set_queued(&mut self, repository: &str, jobs: Vec<QueuedJob>) {
-        self.repositories.get_mut(repository).unwrap().queued = jobs;
+        self.repositories.listed_mut(repository).unwrap().queued = jobs;
     }
 
     pub(super) fn set_listed(&mut self, repository: &str, jobs: Vec<QueuedJob>) {
-        let state = self.repositories.get_mut(repository).unwrap();
+        let state = self.repositories.listed_mut(repository).unwrap();
         state.queued = jobs;
         state.listed = true;
     }
@@ -127,7 +127,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     /// The jobs each repository whose last listing succeeded has queued, with what its pools keep.
     pub(super) fn listed_repositories(&self) -> Vec<ListedFacts<'_>> {
         self.repositories
-            .iter()
+            .iter_listed()
             .filter(|(_, state)| state.listed)
             .map(|(name, state)| ListedFacts {
                 name,
@@ -138,28 +138,36 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn waits_of(&self, repository: &str, profile: &str) -> Option<Waits> {
-        self.repositories[repository].waits.get(profile).copied()
+        self.repositories
+            .listed(repository)?
+            .waits
+            .get(profile)
+            .copied()
     }
 
     pub(super) fn keeps_no_waits(&self, repository: &str) -> bool {
-        self.repositories[repository].waits.is_empty()
+        self.repositories
+            .listed(repository)
+            .unwrap()
+            .waits
+            .is_empty()
     }
 
     pub(super) fn set_memory_wait(&mut self, repository: &str, profile: &str, wait: Wait) {
-        let state = self.repositories.get_mut(repository).unwrap();
+        let state = self.repositories.listed_mut(repository).unwrap();
         let waits = state.waits.entry(profile.to_owned()).or_default();
         *waits = waits.with_memory(wait);
     }
 
     pub(super) fn set_cpu_wait(&mut self, repository: &str, profile: &str, wait: Wait) {
-        let state = self.repositories.get_mut(repository).unwrap();
+        let state = self.repositories.listed_mut(repository).unwrap();
         let waits = state.waits.entry(profile.to_owned()).or_default();
         *waits = waits.with_cpu(wait);
     }
 
     /// As if every wait began `by` earlier.
     pub(super) fn age_waits(&mut self, by: Duration) {
-        for state in self.repositories.values_mut() {
+        for (_, state) in self.repositories.iter_listed_mut() {
             for waits in state.waits.values_mut() {
                 if let Some(wait) = waits.memory_mut() {
                     wait.since -= by;
@@ -341,8 +349,8 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
             unread: self.leftovers.unread(),
             split_waits: self
                 .repositories
-                .values()
-                .flat_map(|state| state.waits.values())
+                .iter_listed()
+                .flat_map(|(_, state)| state.waits.values())
                 .filter(|waits| {
                     waits
                         .memory()

@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use super::admission::Admitting;
 use super::history::{CAPTURE_DRAIN, Followed};
 use super::pool_health::PoolHealth;
+use super::presence::RunnersListing;
 use super::runners::{Collected, Removal, StartOutcome};
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::{host, pooled};
@@ -289,12 +290,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.
-        let runners = self
-            .repositories
-            .keys()
-            .chain(self.draining.keys())
-            .cloned()
-            .collect();
+        let runners = self.repositories.runners_to_list();
         let queued = match mode {
             Shutdown::No => self.to_list(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Vec::new(),
@@ -316,7 +312,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.refresh_warm().await;
             self.note_queued();
         } else {
-            for state in self.repositories.values_mut() {
+            for (_, state) in self.repositories.iter_listed_mut() {
                 state.listed = false;
             }
         }
@@ -700,7 +696,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let held_since = self
             .repositories
-            .get(&repository)
+            .listed(&repository)
             .and_then(|state| state.waits.get(&slot.profile)?.cpu())
             // The pool's wait for CPU can be another job's, as memory and CPU may each hold a different one.
             .filter(|wait| wait.job == job)
@@ -720,7 +716,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             && !self.backing_off(&repository, &slot.profile, SystemTime::now())
             && let Some(waits) = self
                 .repositories
-                .get_mut(&repository)
+                .listed_mut(&repository)
                 .and_then(|state| state.waits.get_mut(&slot.profile))
             && waits.started()
         {
@@ -743,9 +739,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .config
             .repositories
             .iter()
-            .map(|repository| {
-                let state = &self.repositories[&repository.name];
-                Repository {
+            .filter_map(|repository| {
+                // Every repository of the config is listed: a reload lists them with the config it takes.
+                let state = self.repositories.listed(&repository.name)?;
+                Some(Repository {
                     name: repository.name.clone(),
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
@@ -764,7 +761,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .unwrap_or_default(),
                     usual: None,
                     warm: warm.get(&Pool::from(repository)).copied().unwrap_or(0),
-                }
+                })
             })
             .collect();
         self.usual_runs(&mut repositories, &taken);
@@ -883,8 +880,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// consumed by a claim.
     pub(super) fn listed_unnamed(&self, repository: &str, taken: &BTreeSet<u64>) -> Vec<QueuedJob> {
         let claims = self.claims.get(repository);
-        self.repositories[repository]
-            .queued
+        self.repositories
+            .listed(repository)
+            .map(|state| state.queued.as_slice())
+            .unwrap_or_default()
             .iter()
             .filter(|job| {
                 !taken.contains(&job.id)
@@ -1201,7 +1200,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.claims.remove(&repository);
                 }
             }
-            if let Some(state) = self.repositories.get_mut(&repository) {
+            if let Some(state) = self.repositories.listed_mut(&repository) {
                 // Before the plan: a start for the next job must not read the note of one that left the queue.
                 if listed {
                     for waits in state.waits.values_mut() {
@@ -1233,9 +1232,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Err(github::Error::RateLimited { until }) => {
                     self.github_limited(until);
                     // Not listed: a drain's failure clock starts over.
-                    if let Some(drain) = self.draining.get_mut(&repository) {
-                        drain.failing_since = None;
-                    }
+                    self.repositories
+                        .runners_listed(&repository, RunnersListing::RateLimited);
                     continue;
                 }
                 Err(error) => {
@@ -1287,24 +1285,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             self.registrations.listed(&repository, &listed);
-            if let Some(drain) = self.draining.get_mut(&repository) {
-                drain.failing_since = None;
-                if left {
-                    drain.clean_once = false;
-                } else if drain.clean_once {
-                    self.draining.remove(&repository);
-                } else {
-                    drain.clean_once = true;
-                }
-            }
+            self.repositories
+                .runners_listed(&repository, RunnersListing::Answered { left });
         }
     }
 
     /// Forgets what only a listing of a repository could end, once neither the config nor a drain lists it: a drain
     /// that gave up, or one that ended, leaves no listing to do it.
     fn forget_unlisted(&mut self) {
-        let (repositories, draining) = (&self.repositories, &self.draining);
-        let listed = |name: &str| repositories.contains_key(name) || draining.contains_key(name);
+        let repositories = &self.repositories;
+        let listed = |name: &str| repositories.is_known(name);
         self.registrations.forget_unlisted(listed);
         self.claims.retain(|name, _| listed(name));
     }
@@ -1313,34 +1303,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// the token lost it, or after `DRAIN_FAILING_FOR` of failed listings in a row: this machine's runners still
     /// registered there stay. A 403 waits for the clock, as a secondary rate limit can answer one.
     fn drain_failed(&mut self, repository: &str, error: &github::Error) {
-        let Some(drain) = self.draining.get_mut(repository) else {
-            warn!("{repository}: cannot list runners: {error}");
-            return;
+        let failed = RunnersListing::Failed {
+            gone: error.is_gone(),
         };
-        let since = *drain
-            .failing_since
-            .get_or_insert_with(tokio::time::Instant::now);
-        if !error.is_gone() && since.elapsed() < DRAIN_FAILING_FOR {
+        if self.repositories.runners_listed(repository, failed) {
+            warn!(
+                "{repository}: stops draining, so any of this machine's runners still registered there stay: \
+                 cannot list its runners: {error}"
+            );
+        } else {
             warn!("{repository}: cannot list runners: {error}");
-            return;
         }
-        warn!(
-            "{repository}: stops draining, so any of this machine's runners still registered there stay: \
-             cannot list its runners: {error}"
-        );
-        self.draining.remove(repository);
     }
-}
-
-/// How long a removed repository's runners listings may fail in a row before it stops draining.
-const DRAIN_FAILING_FOR: std::time::Duration = std::time::Duration::from_hours(1);
-
-/// A repository a reload removed, polled until two runners listings in a row have none of this machine's runners: a
-/// runner can go unseen in one listing whose pages shift while they are read.
-#[derive(Debug, Default)]
-pub(super) struct Drain {
-    /// Whether the last runners listing had none of this machine's runners.
-    clean_once: bool,
-    /// Since when its runners listings fail, on Tokio's clock; `None` once one answers.
-    failing_since: Option<tokio::time::Instant>,
 }

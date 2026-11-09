@@ -153,8 +153,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     in_use: self.cpu_in_use(),
                     held: self
                         .repositories
-                        .values()
-                        .flat_map(|state| state.waits.values())
+                        .iter_listed()
+                        .flat_map(|(_, state)| state.waits.values())
                         .any(Waits::cpu_held),
                 }),
         }
@@ -169,7 +169,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         let mut queued: Vec<api::QueuedJob> = self
             .repositories
-            .iter()
+            .iter_listed()
             .flat_map(|(repository, state)| {
                 // Unlisted at the last tick: a failed listing or a shutdown, which the history does not follow.
                 let queued = if state.listed { &state.queued[..] } else { &[] };

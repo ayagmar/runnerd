@@ -8,7 +8,7 @@
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
 //! `leftovers` (the containers still to read or remove once nothing occupies them), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
-//! profile's measures and reseeds are doing and have due), `registrations` (what is remembered of a registration with no slot), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
+//! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
 
@@ -24,6 +24,7 @@ mod leftovers;
 mod mirror;
 mod open_waits;
 mod pool_health;
+mod presence;
 mod records;
 mod recover;
 mod registrations;
@@ -53,6 +54,7 @@ use self::images::Images;
 use self::leftovers::Leftovers;
 use self::mirror::Mirror;
 use self::pool_health::PoolHealth;
+use self::presence::Repositories;
 pub use self::records::RecordSelection;
 use self::registrations::Registrations;
 use self::upkeep::Upkeep;
@@ -464,13 +466,12 @@ pub struct Engine<G = Github, D = Docker> {
     /// The CPUs the slice may use, in millicores, read at start.
     cpus: Option<u64>,
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
-    repositories: BTreeMap<String, RepositoryState>,
+    /// The repositories, listed by the config or draining after a reload removed them.
+    repositories: Repositories,
     /// What each profile's measures and reseeds are doing and have due.
     upkeep: Upkeep,
     /// The pulled images of the config's profiles, and the removal of those no profile runs.
     images: Images,
-    /// Repositories a reload removed, polled until none of this machine's runners is registered on them.
-    draining: BTreeMap<String, tick::Drain>,
     /// The containers still to read or remove once nothing occupies them.
     leftovers: Leftovers,
     /// Profiles a reload removed, kept while their runners or reseed still run.
@@ -596,11 +597,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .iter()
             .map(|(name, profile)| (name.clone(), vec![None; profile.slots as usize]))
             .collect();
-        let repositories = config
-            .repositories
-            .iter()
-            .map(|repository| (repository.name.clone(), RepositoryState::default()))
-            .collect();
+        let repositories = Repositories::new(
+            config
+                .repositories
+                .iter()
+                .map(|repository| repository.name.clone()),
+        );
         let (control, commands) = Control::new(
             config
                 .repositories
@@ -646,7 +648,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             upkeep: Upkeep::default(),
             images: Images::new(),
             retired: BTreeMap::new(),
-            draining: BTreeMap::new(),
             leftovers: Leftovers::default(),
             prepare_failures: BTreeMap::new(),
             ran: BTreeMap::new(),

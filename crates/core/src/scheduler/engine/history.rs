@@ -413,7 +413,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Follows the jobs the last poll listed queued that no runner in `taken` has; the listing recorded them.
     fn follow_listed(&mut self, taken: &BTreeSet<u64>) {
         for repository in &self.config.repositories {
-            let Some(state) = self.repositories.get(&repository.name) else {
+            let Some(state) = self.repositories.listed(&repository.name) else {
                 continue;
             };
             if !state.listed {
@@ -524,7 +524,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let read = !taken.contains(id)
                 && self
                     .repositories
-                    .get(&followed.repository)
+                    .listed(&followed.repository)
                     .is_none_or(|state| {
                         state.listed && !state.queued.iter().any(|job| job.id == *id)
                     });

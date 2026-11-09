@@ -183,7 +183,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn note_queued(&mut self) {
         let mut seen = Vec::new();
         for repository in &self.config.repositories {
-            let Some(state) = self.repositories.get(&repository.name) else {
+            let Some(state) = self.repositories.listed(&repository.name) else {
                 continue;
             };
             seen.extend(
@@ -232,13 +232,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
-        let queued = self.repositories.get(&pool.repository).map_or(0, |state| {
-            state
-                .queued
-                .iter()
-                .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels))
-                .count()
-        });
+        let queued = self
+            .repositories
+            .listed(&pool.repository)
+            .map_or(0, |state| {
+                state
+                    .queued
+                    .iter()
+                    .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels))
+                    .count()
+            });
         let waiting = self
             .occupied()
             .filter(|(slot, occupant)| {

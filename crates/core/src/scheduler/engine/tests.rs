@@ -3358,6 +3358,25 @@ async fn a_restart_keeps_a_job_running_for_a_repository_the_config_no_longer_has
     assert_eq!(github.0.lock().unwrap().runners.len(), 0);
 }
 
+/// The drain a restart rebuilt from a running runner does not end on two listings: that runner is still registered.
+#[tokio::test]
+async fn a_drain_a_restart_rebuilt_goes_on_while_its_runner_is_registered() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/gone", 1, 1);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    for _ in 0..4 {
+        engine.tick(Shutdown::No).await;
+    }
+    let listings = github
+        .calls()
+        .iter()
+        .filter(|call| *call == "runners o/gone")
+        .count();
+    assert_eq!(listings, 4, "every tick lists it while its runner runs");
+}
+
 #[tokio::test]
 async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runner_is_in_one_it_drops()
  {
@@ -5515,7 +5534,7 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     for _ in 0..3 {
         engine
             .repositories
-            .get_mut("o/r")
+            .listed_mut("o/r")
             .unwrap()
             .holds
             .get_mut("app")
@@ -6415,6 +6434,7 @@ mod open_waits;
 mod pacing;
 mod pool_health;
 mod pools;
+mod presence;
 mod priority;
 mod records;
 mod registrations;
