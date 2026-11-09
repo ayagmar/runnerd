@@ -547,6 +547,10 @@ struct DockerState {
     fail_removes: u32,
     /// Containers someone else removed: a `remove` answers 404.
     removed_elsewhere: BTreeSet<String>,
+    /// How many commits fail next.
+    fail_commits: u32,
+    /// Containers whose next `remove` fails, whatever else is removed meanwhile.
+    fail_remove_of: BTreeSet<String>,
     /// Containers someone else is removing: Docker refuses their logs and a second removal, in its own words.
     being_removed: BTreeSet<String>,
     /// `Outage::Refused`: every `remove` fails to connect, as when the Engine goes away while it answers inspects
@@ -1014,6 +1018,12 @@ impl DockerApi for FakeDocker {
                 err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
             });
         }
+        if state.fail_remove_of.remove(container) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
         if state.fail_removes > 0 {
             state.fail_removes -= 1;
             return Err(docker::Error::DockerResponseServerError {
@@ -1341,6 +1351,13 @@ impl DockerApi for FakeDocker {
         };
         let _ = held.wait_for(|held| !held).await;
         let mut state = self.0.lock().unwrap();
+        if state.fail_commits > 0 {
+            state.fail_commits -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
         let bytes = state.written;
         state.images.push(docker::Image {
             reference: reference.to_owned(),
