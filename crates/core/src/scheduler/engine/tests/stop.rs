@@ -294,6 +294,55 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
 }
 
 #[tokio::test]
+async fn a_forced_stop_docker_is_gone_from_ends_as_a_detach() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (engine, handle) = busy_and_idle(&github, &docker, &dir);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    github
+        .until_calls(
+            |calls| calls.iter().any(|call| call.starts_with("runners ")),
+            "asked for its runners",
+        )
+        .await;
+    docker.set_outage(Outage::Refused);
+    handle.control.shutdown(Shutdown::Force);
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("a forced stop with Docker gone must end at once"))
+        .unwrap();
+    assert_eq!(
+        handle.status.borrow().stopping,
+        Some(Stopping::LeavesJobs),
+        "status says what the stop did"
+    );
+}
+
+#[tokio::test]
+async fn docker_gone_with_no_stop_asked_for_stops_nothing() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (mut engine, handle) = busy_and_idle(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    docker.set_outage(Outage::Refused);
+    engine.tick(Shutdown::No).await;
+    docker.set_outage(Outage::None);
+    assert_eq!(
+        handle.control.mode(),
+        Shutdown::No,
+        "an outage with no stop asked for starts no stop"
+    );
+}
+
+#[tokio::test]
 async fn runnerd_stop_tries_again_a_removal_docker_refused_and_leaves_nothing() {
     let (github, docker, dir) = (
         FakeGithub::default(),
