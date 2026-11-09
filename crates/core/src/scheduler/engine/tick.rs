@@ -700,6 +700,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .repositories
             .get(&repository)
             .and_then(|state| state.waits.get(&slot.profile)?.cpu())
+            // The pool's wait for CPU can be another job's, as memory and CPU may each hold a different one.
+            .filter(|wait| wait.job == job)
             .map(|wait| wait.since);
         if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
             cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());

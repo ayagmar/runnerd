@@ -1141,6 +1141,71 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     );
 }
 
+/// A pool's wait for CPU can be another job's: a job that starts says it waited for CPU only if that wait was its own.
+#[tokio::test]
+async fn a_job_started_beside_another_jobs_cpu_wait_does_not_say_it_waited_for_cpu() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = measured().replace(
+        "admission = \"measured\"",
+        "admission = \"measured\"\ncpu_overcommit = 1.0",
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(10 * G);
+    // Room for one build at 1.5 CPUs.
+    engine.cpus = Some(2000);
+    history(&handle.store, G, 0).await;
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE jobs SET cpu_average = 1500", [])
+        .unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    // Job 2 has been waiting for CPU; the older job 1 fits, and starts first.
+    engine.set_cpu_wait(
+        "o/r",
+        "app",
+        crate::scheduler::Wait {
+            job: 2,
+            since: std::time::SystemTime::now() - Duration::from_mins(5),
+        },
+    );
+
+    engine.tick(Shutdown::No).await;
+    let runners = registered(&github.calls())
+        .iter()
+        .map(|call| call.trim_start_matches("register ").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(runners.len(), 1, "job 2 still lacks CPU");
+    handle.store.claimed(1, 1, &runners[0], time::now_ms());
+    handle.store.flush().await;
+    let waited = |admission: Option<api::Admission>| {
+        admission.and_then(|a| a.cpu).and_then(|cpu| cpu.waited)
+    };
+    let admission = handle.store.job(1).await.unwrap().unwrap().admission;
+    assert_eq!(waited(admission), None, "job 1 never waited for CPU");
+
+    // More CPUs arrive: job 2 starts, and says it waited.
+    engine.cpus = Some(4000);
+    engine.tick(Shutdown::No).await;
+    let runners = registered(&github.calls())
+        .iter()
+        .map(|call| call.trim_start_matches("register ").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(runners.len(), 2);
+    handle.store.claimed(2, 1, &runners[1], time::now_ms());
+    handle.store.flush().await;
+    let admission = handle.store.job(2).await.unwrap().unwrap().admission;
+    assert!(
+        waited(admission).is_some(),
+        "job 2 waited for CPU, and its record says so"
+    );
+}
+
 #[tokio::test]
 async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
     let (github, docker, dir) = (
