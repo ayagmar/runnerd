@@ -44,6 +44,16 @@ pub(super) struct NewHold {
     pub(super) first: bool,
 }
 
+/// The last hold of a pool, with how many came in a row. It stays once it has run out, so that the next failure goes on
+/// counting, until a runner takes a job.
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    hold: Hold,
+    /// Holds in a row since a runner took a job or an idle streak started: how long the next lasts, and whether it is
+    /// announced.
+    failures: u32,
+}
+
 /// A pool's runners held back after they failed, as `RepositoryState::holds` keeps them, and the streaks that decide
 /// the next hold. The failure count and the idle streak are separate on purpose: a hold with no failure counted and an
 /// idle streak beside a counted failure both occur.
@@ -52,10 +62,7 @@ pub(super) struct NewHold {
 /// removed or changed: what failed may be what changed.
 #[derive(Debug, Default)]
 pub(super) struct PoolHealth {
-    held: Option<Hold>,
-    /// Holds in a row since a runner took a job or an idle streak started: how long the next lasts, and whether it is
-    /// announced.
-    failures: u32,
+    held: Option<Backoff>,
     idle: IdleStreak,
 }
 
@@ -88,7 +95,9 @@ impl PoolHealth {
         if matches!(self.idle, IdleStreak::Quiet) {
             // A failure before it is over, and the next one is a new streak's first, announced. Not so for the second
             // in a row, a fault of its own.
-            self.failures = 0;
+            if let Some(held) = self.held.as_mut() {
+                held.failures = 0;
+            }
             self.idle = IdleStreak::Once { beside };
             return None;
         }
@@ -102,31 +111,34 @@ impl PoolHealth {
         if self.holding(now) {
             return None;
         }
-        self.failures += 1;
-        let wait = backoff(self.failures);
-        self.held = Some(Hold {
-            until: now + wait,
-            cause,
+        let failures = self.failures() + 1;
+        let wait = backoff(failures);
+        self.held = Some(Backoff {
+            hold: Hold {
+                until: now + wait,
+                cause,
+            },
+            failures,
         });
         Some(NewHold {
             wait,
-            first: self.failures == 1,
+            first: failures == 1,
         })
     }
 
     /// What holds the pool back, or last did: a plan compares it with its own `now`.
     pub(super) fn held(&self) -> Option<Hold> {
-        self.held
+        self.held.map(|held| held.hold)
     }
 
     /// Whether a failure holds the pool back at `now`.
     pub(super) fn holding(&self, now: SystemTime) -> bool {
-        self.held.is_some_and(|held| held.until > now)
+        self.held.is_some_and(|held| held.hold.until > now)
     }
 
-    #[cfg(test)]
+    /// Holds in a row, as `Backoff::failures` counts them.
     pub(super) fn failures(&self) -> u32 {
-        self.failures
+        self.held.map_or(0, |held| held.failures)
     }
 
     /// The idle streak as a count: 0, 1 or 2 for more than one.
@@ -139,11 +151,21 @@ impl PoolHealth {
         }
     }
 
-    /// Sets both streaks as a test names them, none of the idle one's runners beside.
+    /// Sets both streaks as a test names them, none of the idle one's runners beside. Failures counted with no hold
+    /// come with one long over, as they do in a running daemon.
     #[cfg(test)]
     pub(super) fn set_streaks(&mut self, failures: u32, idle_exits: u32) {
         let beside = BTreeSet::new();
-        self.failures = failures;
+        self.held = match (self.held(), failures) {
+            (None, 0) => None,
+            (hold, failures) => Some(Backoff {
+                hold: hold.unwrap_or(Hold {
+                    until: SystemTime::UNIX_EPOCH,
+                    cause: HoldCause::Start,
+                }),
+                failures,
+            }),
+        };
         self.idle = match idle_exits {
             0 => IdleStreak::Quiet,
             1 => IdleStreak::Once { beside },
@@ -151,16 +173,20 @@ impl PoolHealth {
         };
     }
 
+    /// Sets the hold, keeping the count of failures.
     #[cfg(test)]
-    pub(super) fn set_held(&mut self, held: Option<Hold>) {
-        self.held = held;
+    pub(super) fn set_held(&mut self, hold: Hold) {
+        self.held = Some(Backoff {
+            hold,
+            failures: self.failures(),
+        });
     }
 
     /// Ends a hold as of `past`, as if it had run out.
     #[cfg(test)]
     pub(super) fn expire(&mut self, past: SystemTime) {
         if let Some(held) = self.held.as_mut() {
-            held.until = past;
+            held.hold.until = past;
         }
     }
 }

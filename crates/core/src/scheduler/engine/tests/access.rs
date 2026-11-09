@@ -85,13 +85,13 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
             .holds
             .entry(profile.to_owned())
             .or_default()
-            .set_held(Some(held));
+            .set_held(held);
     }
 
     pub(super) fn clear_holds(&mut self) {
         for state in self.repositories.values_mut() {
             for hold in state.holds.values_mut() {
-                hold.set_held(None);
+                hold.expire(SystemTime::UNIX_EPOCH);
             }
         }
     }
