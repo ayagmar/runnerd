@@ -29,7 +29,7 @@ C1 core RepositoryState
 # Pool health: split into one enum.
 C1 core PoolHold
 
-# Measured: split raised (slot occupant) and the wait sets (wait accounting) out; the last of those seals what stays,
-# the predictor and the log memos, with private fields.
+# Measured: split raised out (slot occupant), which seals what stays, the predictor and the log memos, with private
+# fields.
 C1 core crates/core/src/scheduler/engine/admission.rs:Measured
 

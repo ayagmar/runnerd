@@ -58,7 +58,7 @@ const CASES: u64 = 64;
 const EVENTS: usize = 40;
 
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -69,7 +69,7 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         self.next() % n
     }
 
@@ -2116,16 +2116,14 @@ impl Case {
         &mut self,
         status: &api::Status,
     ) -> Result<(), Violation> {
-        let measured = &self.engine.measured;
+        let engine = &self.engine;
         let still: Vec<u64> = status
             .queued
             .iter()
             .filter(|job| job.waiting == Some(api::Waiting::RunnerStarting))
             .map(|job| job.id)
             .inspect(|_| self.seen.runners_starting += 1)
-            .filter(|job| {
-                measured.slot_waiting.0.contains(job) || measured.host_waiting.0.contains(job)
-            })
+            .filter(|job| engine.waits_for_a_slot(*job) || engine.waits_for_the_host(*job))
             .collect();
         if still.is_empty() {
             return Ok(());

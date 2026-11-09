@@ -6342,6 +6342,7 @@ mod build_cache;
 mod exit;
 mod invariants;
 mod occupant;
+mod open_waits;
 mod pacing;
 mod pools;
 mod priority;
