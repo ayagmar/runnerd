@@ -7,11 +7,6 @@
 #
 engine-lifecycle-fields 40
 
-# Two machines the other rules cannot see, as they look at how fields are declared and written, not what values mean.
-# Each gets a change of its own.
-# docker_in_stop is read in five places, and pairs with Control's shutdown mode (Force plus Failed reads as Detach).
-C6 docker_in_stop
-
 # Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
 C1 core Occupant
 C3 busy job &&

@@ -101,7 +101,6 @@ JOB_WRITERS = ("store/write.rs", "store.rs")
 
 # Machines the rules cannot see, by where and how they are written: finding -> (file, pattern on code without comments).
 KNOWN = {
-    "C6 docker_in_stop": ("crates/core/src/scheduler/engine.rs", r"\bdocker_in_stop:\s*DockerInStop\b"),
     "C6 warm.learned": ("crates/core/src/scheduler/engine/warm.rs", r"=\s*SystemTime::UNIX_EPOCH\b"),
 }
 

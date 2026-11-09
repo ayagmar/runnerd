@@ -9,8 +9,8 @@
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
 //! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `mirror` (whether
 //! the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
-//! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the API's commands) and
-//! `status` (what it publishes).
+//! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
+//! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
 
 mod admission;
 mod build_cache;
@@ -25,6 +25,7 @@ mod records;
 mod recover;
 mod runners;
 mod status;
+mod stop;
 mod tick;
 mod warm;
 
@@ -214,15 +215,6 @@ enum Meanwhile {
     Turnover,
     /// Only answers commands: the work must not see a runner start or go, as a trim of the build cache.
     Commands,
-}
-
-/// Whether Docker answers a stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DockerInStop {
-    /// It answers, if with errors, or no stop was asked for.
-    Answers,
-    /// It did not answer a call the stop needed: the stop calls it no more.
-    Failed,
 }
 
 /// A slot's runner and its container.
@@ -453,8 +445,6 @@ pub struct Engine<G = Github, D = Docker> {
     /// unless runners were adopted.
     checked_at: SystemTime,
     mirror: Mirror,
-    /// Whether Docker stopped answering a stop: the stop then leaves the rest to the next start, as a detach does.
-    docker_in_stop: DockerInStop,
     /// Until when GitHub's rate limit is used up, from the last answer that said so: no runner starts before.
     github_limited_until: Option<SystemTime>,
     /// Runners without a container that GitHub still holds busy, already logged.
@@ -630,7 +620,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             trim_due: true,
             trim: None,
             checked_at: SystemTime::now(),
-            docker_in_stop: DockerInStop::Answers,
             github_limited_until: None,
             busy_orphans: BTreeSet::new(),
             ended_busy: BTreeMap::new(),
@@ -733,7 +722,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         ));
         let mut shown = Shutdown::No;
         let mode = loop {
-            let mode = self.stopping();
+            let mode = self.control.mode();
             // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
             // Docker: until then status would show a daemon that is not stopping.
             if mode != shown {
@@ -753,7 +742,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.publish();
             // A stop asked for or changed meanwhile goes on at once, before this one counts as done: a second signal
             // while a detach removed idle runners kills the running jobs, and one Docker failed turns into a detach.
-            if self.stopping() != mode {
+            if self.control.mode() != mode {
                 continue;
             }
             if self.stopped(mode) {
@@ -775,7 +764,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A reseed that finished meanwhile says so; one still running is the next start's (`recover_reseeds`).
         self.collect_reseeds().await;
         self.finish_deletes().await;
-        if self.docker_in_stop == DockerInStop::Failed {
+        if self.control.docker_gone() {
             info!("stopped; the next start removes or adopts what Docker did not answer for");
             return;
         }
@@ -825,7 +814,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(()) = self.records.finished.recv() => {
                     self.collect_recordings().await;
                     self.publish();
-                    if mode != Shutdown::No || self.stopping() != mode {
+                    if mode != Shutdown::No || self.control.mode() != mode {
                         return;
                     }
                 }
@@ -840,20 +829,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     }
                     self.turnover().await;
                     self.publish();
-                    if self.stopping() != mode {
+                    if self.control.mode() != mode {
                         return;
                     }
                 }
             }
-        }
-    }
-
-    /// How the stop goes on: as requested, or as a detach once Docker stopped answering it.
-    fn stopping(&self) -> Shutdown {
-        match self.control.mode() {
-            Shutdown::No => Shutdown::No,
-            _ if self.docker_in_stop == DockerInStop::Failed => Shutdown::Detach,
-            mode => mode,
         }
     }
 
@@ -873,16 +853,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// machine's shutdown, the stop calls it no more and leaves the rest to the next start, which removes or adopts
     /// every container by its labels. An answer that is an error, or a timeout, is tried again as any failed call:
     /// `runnerd stop` must not leave runners behind for one busy moment of Docker's.
-    fn docker_failed(&mut self, error: &docker::Error) {
-        if self.control.mode() != Shutdown::No
-            && self.docker_in_stop == DockerInStop::Answers
-            && docker::is_unreachable(error)
-        {
+    fn docker_failed(&self, error: &docker::Error) {
+        if docker::is_unreachable(error) && self.control.note_docker_gone() {
             warn!("Docker does not answer during the stop; leaving the rest to the next start");
-            self.docker_in_stop = DockerInStop::Failed;
-            // A detach in the control too: its deadline starts, and a later `runnerd stop` answers that it leaves
-            // running jobs.
-            self.control.shutdown(Shutdown::Detach);
         }
     }
 

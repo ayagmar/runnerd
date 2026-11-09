@@ -13,6 +13,7 @@ use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use super::records::RecordSelection;
+use super::stop::Stop;
 use super::{Engine, Occupant};
 use crate::api;
 use crate::cache;
@@ -255,7 +256,7 @@ pub struct Control {
     paused: Mutex<BTreeSet<String>>,
     /// Where `paused` is recorded.
     store: Store,
-    shutdown: watch::Sender<Shutdown>,
+    shutdown: watch::Sender<Stop>,
     pub(super) wake: Notify,
     commands: mpsc::UnboundedSender<Command>,
 }
@@ -281,23 +282,38 @@ impl Control {
             repositories: Mutex::new(repositories),
             paused: Mutex::new(paused),
             store,
-            shutdown: watch::Sender::new(Shutdown::No),
+            shutdown: watch::Sender::new(Stop::none()),
             wake: Notify::new(),
             commands,
         };
         (control, Commands(receiver))
     }
 
-    /// Whether a shutdown was requested, and how.
+    /// Whether the daemon is stopping and how: as requested, or as a detach once Docker stopped answering the stop.
     pub fn mode(&self) -> Shutdown {
-        *self.shutdown.borrow()
+        self.shutdown.borrow().mode()
+    }
+
+    /// Whether Docker stopped answering the stop, which is then left to the next start.
+    pub(super) fn docker_gone(&self) -> bool {
+        self.shutdown.borrow().docker_gone()
+    }
+
+    /// Notes that Docker did not answer a call the stop needed, and returns whether that is news: not without a stop
+    /// under way, nor once noted. Its deadline starts, and a later `runnerd stop` answers that it leaves running jobs.
+    pub(super) fn note_docker_gone(&self) -> bool {
+        let news = self.shutdown.send_if_modified(Stop::note_docker_gone);
+        if news {
+            self.wake.notify_one();
+        }
+        news
     }
 
     /// Resolves once the stop has a deadline: it detaches or is forced.
     pub(super) async fn hurried(&self) {
         let mut mode = self.shutdown.subscribe();
         // `self` holds the sender, so the wait ends only once the mode is reached.
-        let _ = mode.wait_for(|mode| *mode >= Shutdown::Detach).await;
+        let _ = mode.wait_for(|stop| stop.hurried()).await;
     }
 
     /// Pauses or resumes one repository or all, whatever they run, and records it in the store before it answers,
@@ -361,16 +377,12 @@ impl Control {
         *configured = repositories;
     }
 
-    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way. Returns how it
-    /// stops now.
+    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way. Returns the most
+    /// urgent request so far.
     pub fn shutdown(&self, mode: Shutdown) -> Shutdown {
-        self.shutdown.send_if_modified(|shutdown| {
-            let changed = mode > *shutdown;
-            *shutdown = (*shutdown).max(mode);
-            changed
-        });
+        self.shutdown.send_if_modified(|stop| stop.ask(mode));
         self.wake.notify_one();
-        self.mode()
+        self.shutdown.borrow().asked()
     }
 
     /// Whether the repository is paused.

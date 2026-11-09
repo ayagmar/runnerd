@@ -12,7 +12,7 @@ use crate::scheduler::{Plan, SlotRef};
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn publish(&mut self) {
         // As the stop goes on: one Docker no longer answers leaves running jobs.
-        let mode = self.stopping();
+        let mode = self.control.mode();
         // Why jobs wait and which runners are warm, from a plan of the engine as it is now, not as the tick's plan
         // saw it: a start that failed, a runner stopped over budget or a pause since then would make that one wrong.
         // A shutdown starts nothing, so no job says why it waits and no runner is warm.
