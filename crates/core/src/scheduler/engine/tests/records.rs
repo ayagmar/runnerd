@@ -1009,6 +1009,111 @@ async fn a_restart_finds_again_what_the_last_daemon_could_not_read_or_remove() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_left_runners_job_only_the_history_names_is_still_recorded_when_docker_reads_it_late() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let runner = runner_container(2, 8, false);
+    let name = runner.name.clone();
+    {
+        // No diagnostic files: its worker log does not name the job.
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner];
+        state
+            .container_logs
+            .insert("container-2".to_owned(), FAILED.to_owned());
+        state.written = 1 << 30;
+        state.fail_logs = 1;
+    }
+    let dir = TestDir::new("unread-history");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    handle.store.queued(
+        "o/r",
+        &QueuedJob {
+            id: 5,
+            run_id: 5,
+            name: "build".to_owned(),
+            ..QueuedJob::default()
+        },
+        crate::time::now_ms(),
+    );
+    handle.store.runner_started(RunnerRecord {
+        name: name.clone(),
+        repository: "o/r".to_owned(),
+        profile: "app".to_owned(),
+        slot: 2,
+        container: "container-2".to_owned(),
+        started_at: crate::time::now_ms(),
+        memory_cap: None,
+        cpu_cap: None,
+        admission: None,
+        purpose: None,
+    });
+    handle.store.claimed(5, 5, &name, crate::time::now_ms());
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 1, "its log was not read");
+
+    engine.make_unread_due();
+    tokio::task::yield_now().await;
+    for _ in 0..200 {
+        engine.tick(Shutdown::No).await;
+        if engine.state_counts().unread == 0 && engine.no_recordings() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    engine.publish();
+    let jobs: Vec<u64> = handle
+        .records
+        .borrow()
+        .records
+        .iter()
+        .map(|record| record.job)
+        .collect();
+    assert_eq!(jobs, [5], "the retry still knows which job it ran");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_left_runner_read_late_has_its_job_read_from_github_under_its_repository() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    left_runner_docker_cannot_read(&docker);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(5, details(5, "completed", Some("failure")));
+    let dir = TestDir::new("unread-repository");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    handle.store.queued(
+        "o/r",
+        &QueuedJob {
+            id: 5,
+            run_id: 5,
+            name: "build".to_owned(),
+            ..QueuedJob::default()
+        },
+        crate::time::now_ms(),
+    );
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    assert_eq!(engine.state_counts().unread, 1, "its files were not read");
+
+    docker.0.lock().unwrap().fail_files = 0;
+    engine.make_unread_due();
+    let poll = engine.config.host.poll_interval;
+    for _ in 0..8 {
+        engine.tick(Shutdown::No).await;
+        tokio::time::advance(poll).await;
+    }
+    let asked = github.0.lock().unwrap().job_repositories.clone();
+    assert_eq!(
+        asked,
+        BTreeSet::from(["o/r".to_owned()]),
+        "the only one asked"
+    );
+}
+
 #[tokio::test]
 async fn a_left_runner_still_running_with_no_slot_is_removed_without_reading_it_for_a_record() {
     // Read, its log of a failed job would make a record of a container that is still running.

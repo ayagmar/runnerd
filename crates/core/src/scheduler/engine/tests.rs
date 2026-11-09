@@ -134,6 +134,8 @@ struct GithubState {
     listing_latency: Duration,
     /// How much longer a job read takes.
     job_latency: Duration,
+    /// The repositories jobs were read under.
+    job_repositories: BTreeSet<String>,
     /// How many times a job was read, which `calls` leaves out.
     job_reads: usize,
     /// Jobs GitHub answers 404 for, as when their run was deleted. Another job without details fails otherwise.
@@ -421,7 +423,7 @@ impl GithubApi for FakeGithub {
         Ok(Deleted::Deleted)
     }
 
-    async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
+    async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, github::Error> {
         self.wait(|state| &state.held_jobs).await;
         let latency = {
             let state = self.0.lock().unwrap();
@@ -430,6 +432,7 @@ impl GithubApi for FakeGithub {
         tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
         state.job_reads += 1;
+        state.job_repositories.insert(repository.to_owned());
         state.trace.push(format!("job {id}"));
         if let Some(&until) = state.limited_jobs.get(&id) {
             return Err(github::Error::RateLimited { until });
@@ -542,6 +545,8 @@ struct DockerState {
     fail_started_inspects: u32,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
+    /// Containers someone else removed: a `remove` answers 404.
+    removed_elsewhere: BTreeSet<String>,
     /// Containers someone else is removing: Docker refuses their logs and a second removal, in its own words.
     being_removed: BTreeSet<String>,
     /// `Outage::Refused`: every `remove` fails to connect, as when the Engine goes away while it answers inspects
@@ -1015,6 +1020,9 @@ impl DockerApi for FakeDocker {
                 status_code: 500,
                 message: "the Engine is busy".to_owned(),
             });
+        }
+        if state.removed_elsewhere.contains(container) {
+            return Err(not_found());
         }
         if state.being_removed.contains(container) {
             return Err(docker::Error::DockerResponseServerError {
@@ -1787,6 +1795,27 @@ async fn a_measure_an_earlier_run_left_that_docker_fails_to_remove_is_removed_on
     assert!(engine.is_leftover("measure"), "it is tried again");
     engine.tick(Shutdown::No).await;
     assert!(engine.no_leftovers(), "and the next tick removes it");
+}
+
+#[tokio::test]
+async fn a_leftover_docker_says_no_longer_exists_is_no_longer_followed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner_container(2, 8, false)];
+        state.fail_removes = 1;
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    assert!(engine.is_leftover("container-2"), "it is tried again");
+    {
+        // Someone removes it by hand.
+        let mut state = docker.0.lock().unwrap();
+        state.containers.clear();
+        state.removed_elsewhere.insert("container-2".to_owned());
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(engine.no_leftovers(), "Docker's 404 ends the retries");
 }
 
 #[tokio::test]
