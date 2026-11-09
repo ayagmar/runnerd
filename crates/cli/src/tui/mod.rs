@@ -23,6 +23,7 @@ use crate::{Error, now, output, watch};
 
 mod app;
 mod draw;
+mod prompts;
 #[cfg(test)]
 mod tests;
 

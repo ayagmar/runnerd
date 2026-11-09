@@ -11,6 +11,7 @@ use runnerd_core::api::{
     Sizing, Status, Timeline,
 };
 
+use super::prompts::{Prompt, Prompts};
 use crate::watch;
 
 /// Samples kept per running job: ten minutes at the daemon's two seconds.
@@ -421,17 +422,15 @@ pub(crate) struct App {
     pub(crate) history: History,
     pub(crate) job: Option<JobView>,
     pub(crate) flash: Option<Flash>,
-    pub(crate) confirm: Option<Refused>,
+    /// The questions the footer asks.
+    pub(crate) prompts: Prompts,
     /// The records of failed jobs, once read.
     pub(crate) records: Option<Records>,
     pub(crate) record: usize,
-    pub(crate) removal: Option<Removal>,
     /// The sizing advice, once read.
     pub(crate) sizing: Option<Sizing>,
     /// The selected profile of the sizing view.
     pub(crate) sized: usize,
-    /// The change `a` asks to write, waiting for `y`.
-    pub(crate) resize: Option<Resizing>,
     pub(crate) help: bool,
 }
 
@@ -469,13 +468,11 @@ impl App {
             history: History::default(),
             job: None,
             flash: None,
-            confirm: None,
+            prompts: Prompts::default(),
             records: None,
             record: 0,
-            removal: None,
             sizing: None,
             sized: 0,
-            resize: None,
             help: false,
         };
         for sample in host {
@@ -599,7 +596,7 @@ impl App {
             },
             Msg::Done(text) => self.flash(text, Outcome::Done),
             Msg::Failed(text) => self.flash(text, Outcome::Failed),
-            Msg::Busy(refused) => self.confirm = Some(refused),
+            Msg::Busy(refused) => self.prompts.push(Prompt::Force(refused)),
         }
         Vec::new()
     }
@@ -895,7 +892,9 @@ impl App {
             code if self.view == View::History => return self.history_key(code),
             code if self.view == View::Records => self.records_key(code),
             KeyCode::Char('a') if self.view == View::Sizing => {
-                self.resize = self.selected_resize();
+                if let Some(resizing) = self.selected_resize() {
+                    self.prompts.push(Prompt::Resize(resizing));
+                }
             }
             _ => {}
         }
@@ -905,15 +904,13 @@ impl App {
     /// The answer to a question in the footer, which any key ends: `y` does what it asked. `None` when none was asked.
     fn answer(&mut self, code: KeyCode) -> Option<Vec<Effect>> {
         let yes = code == KeyCode::Char('y');
-        let effect = if let Some(refused) = self.confirm.take() {
-            Effect::Pause {
+        let effect = match self.prompts.answer()? {
+            Prompt::Force(refused) => Effect::Pause {
                 repository: refused.repository,
                 force: true,
-            }
-        } else if let Some(removal) = self.removal.take() {
-            Effect::RemoveRecords(removal)
-        } else {
-            Effect::Resize(self.resize.take()?)
+            },
+            Prompt::Remove(removal) => Effect::RemoveRecords(removal),
+            Prompt::Resize(resizing) => Effect::Resize(resizing),
         };
         Some(if yes { vec![effect] } else { Vec::new() })
     }
@@ -931,8 +928,12 @@ impl App {
     fn records_key(&mut self, code: KeyCode) {
         let any = self.records.as_ref().is_some_and(|r| !r.records.is_empty());
         match code {
-            KeyCode::Char('d') => self.removal = self.selected_job().map(Removal::Job),
-            KeyCode::Char('D') if any => self.removal = Some(Removal::All),
+            KeyCode::Char('d') => {
+                if let Some(job) = self.selected_job() {
+                    self.prompts.push(Prompt::Remove(Removal::Job(job)));
+                }
+            }
+            KeyCode::Char('D') if any => self.prompts.push(Prompt::Remove(Removal::All)),
             _ => {}
         }
     }

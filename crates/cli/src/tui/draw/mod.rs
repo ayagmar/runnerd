@@ -14,6 +14,7 @@ use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Connection, Outcome, Pane, Removal, View};
+use super::prompts::Prompt;
 use crate::human::Tone;
 use history::history;
 use job::{drop_least, job};
@@ -185,7 +186,8 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let line = if let Some(refused) = &app.confirm {
+    let prompt = app.prompts.top();
+    let line = if let Some(Prompt::Force(refused)) = prompt {
         let ask = if refused.jobs == 1 {
             " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
         } else {
@@ -200,7 +202,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Span::styled(ask, bold()),
             Span::styled(fit(&refused.message, rest), theme.wait()),
         ])
-    } else if let Some(removal) = app.removal {
+    } else if let Some(Prompt::Remove(removal)) = prompt {
         let ask = match removal {
             Removal::Job(job) => {
                 format!(" y removes the record of job {job}, any other key keeps it")
@@ -208,7 +210,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Removal::All => " y removes every record, any other key keeps them".to_owned(),
         };
         Line::styled(ask, bold())
-    } else if let Some(resizing) = &app.resize {
+    } else if let Some(Prompt::Resize(resizing)) = prompt {
         Line::styled(
             format!(
                 " y writes memory = \"{}\", slots = {} for {} into the daemon's config, any other key keeps it",
