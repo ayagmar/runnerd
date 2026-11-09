@@ -2,75 +2,73 @@
 //! warning about GitHub holding it was already given. It owns that record and must not call GitHub or log: `tick`
 //! deletes the registrations and words what this decides.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A registration with no slot, known for at least one of two reasons: an entry with neither is dropped. They are
-/// independent on purpose: GitHub can refuse to delete a runner this engine ended, and a runner is released while
-/// `remove` deletes its registration in the background.
-#[derive(Debug, Default)]
+/// A registration with no slot that a listing of its repository still shows.
+#[derive(Debug)]
 struct Ended {
-    /// The repository of a runner this engine released or killed, until a listing of it no longer has the runner:
-    /// GitHub holding one busy then is no orphan to warn of.
-    kept: Option<String>,
-    /// Whether GitHub already refused to delete it, so that nothing warns twice.
-    reported: bool,
+    repository: String,
+    /// Whether this engine released or killed the runner, so that GitHub holding it is no orphan to warn of. If not,
+    /// it is an orphan GitHub refused to delete, already warned of.
+    kept: bool,
 }
 
-impl Ended {
-    fn keep(&mut self, repository: &str) {
-        self.kept = Some(repository.to_owned());
-    }
-
-    /// Records GitHub's refusal, and says whether this one is news to warn of.
-    fn refused(&mut self) -> bool {
-        let first = !std::mem::replace(&mut self.reported, true);
-        first && self.kept.is_none()
-    }
-
-    /// Updates it from a listing of `repository`, and says whether it is still worth keeping.
-    fn listed(&mut self, repository: &str, present: bool) -> bool {
-        if !present && self.kept.as_deref() == Some(repository) {
-            self.kept = None;
-        }
-        self.kept.is_some() || self.reported
-    }
-}
-
-/// The registrations with no slot, by runner ID. The background deletes of released runners are not here: `Engine`
-/// holds those tasks, which do not reach it. Nothing survives a restart, as a new engine has ended no runner and
-/// warns again of one GitHub still holds. A reload changes nothing.
+/// The registrations with no slot, by runner ID. An entry ends with the first listing of its repository that leaves
+/// the runner out, or once nothing lists that repository. A listing whose pages shifted can end one early, which costs
+/// a repeated warning at worst. The background deletes of released runners are not here: `Engine` holds those tasks,
+/// which do not reach it. Nothing survives a restart, as a new engine has ended no runner and warns again of one GitHub
+/// still holds. A reload changes nothing by itself: a repository it removes drains, and its listings go on.
 #[derive(Debug, Default)]
 pub(super) struct Registrations(BTreeMap<u64, Ended>);
 
 impl Registrations {
     /// Notes that this engine released or killed `runner`, so GitHub may hold its registration busy a while.
     pub(super) fn ended_here(&mut self, runner: u64, repository: &str) {
-        self.0.entry(runner).or_default().keep(repository);
+        self.0.insert(
+            runner,
+            Ended {
+                repository: repository.to_owned(),
+                kept: true,
+            },
+        );
     }
 
     /// Whether this engine ended `runner`, and no listing of its repository has left it out since.
     pub(super) fn is_ended_here(&self, runner: u64) -> bool {
-        self.0
-            .get(&runner)
-            .is_some_and(|ended| ended.kept.is_some())
+        self.0.get(&runner).is_some_and(|ended| ended.kept)
     }
 
-    /// Notes that GitHub refused to delete `runner` because it holds it busy, and says whether to warn: only of one
-    /// this engine did not end, and only once.
-    pub(super) fn refused(&mut self, runner: u64) -> bool {
-        self.0.entry(runner).or_default().refused()
+    /// Notes that GitHub refused to delete `runner` of `repository` because it holds it busy, and says whether to
+    /// warn: only of one this engine did not end, and only once.
+    pub(super) fn refused(&mut self, runner: u64, repository: &str) -> bool {
+        match self.0.entry(runner) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(entry) => {
+                entry.insert(Ended {
+                    repository: repository.to_owned(),
+                    kept: false,
+                });
+                true
+            }
+        }
     }
 
     /// Takes in a listing of `repository`, which has the runners `present`.
     pub(super) fn listed(&mut self, repository: &str, present: &BTreeSet<u64>) {
         self.0
-            .retain(|runner, ended| ended.listed(repository, present.contains(runner)));
+            .retain(|runner, ended| ended.repository != repository || present.contains(runner));
     }
 
-    /// How many registrations GitHub refused to delete.
+    /// Forgets the registrations of repositories nothing lists any more, whose listings would have ended them.
+    pub(super) fn forget_unlisted(&mut self, listed: impl Fn(&str) -> bool) {
+        self.0.retain(|_, ended| listed(&ended.repository));
+    }
+
+    /// How many orphans GitHub refused to delete.
     #[cfg(test)]
-    pub(super) fn reported(&self) -> usize {
-        self.0.values().filter(|ended| ended.reported).count()
+    pub(super) fn orphans(&self) -> usize {
+        self.0.values().filter(|ended| !ended.kept).count()
     }
 }
 
@@ -112,58 +110,59 @@ mod tests {
     #[test]
     fn an_orphan_github_holds_is_warned_of_once() {
         let mut ledger = Registrations::default();
-        assert!(ledger.refused(RUNNER), "the first refusal is news");
-        assert!(!ledger.refused(RUNNER), "the next says nothing new");
+        assert!(ledger.refused(RUNNER, "o/r"), "the first refusal is news");
+        assert!(!ledger.refused(RUNNER, "o/r"), "the next says nothing new");
+        assert!(!ledger.is_ended_here(RUNNER), "this engine never ran it");
     }
 
     #[test]
     fn github_holding_a_runner_ended_here_warns_of_nothing_and_it_stays_ended_here() {
         let mut ledger = Registrations::default();
         ledger.ended_here(RUNNER, "o/r");
-        assert!(!ledger.refused(RUNNER), "this engine ended it");
+        assert!(!ledger.refused(RUNNER, "o/r"), "this engine ended it");
         assert!(ledger.is_ended_here(RUNNER), "a refusal does not end that");
     }
 
     #[test]
-    fn a_refusal_outlives_the_listing_that_ends_what_this_engine_knew() {
+    fn an_orphan_is_forgotten_with_the_listing_of_its_own_repository_that_leaves_it_out() {
         let mut ledger = Registrations::default();
-        ledger.ended_here(RUNNER, "o/r");
-        ledger.refused(RUNNER);
-        ledger.listed("o/r", &none());
-        assert!(!ledger.is_ended_here(RUNNER), "no longer listed");
-        assert!(
-            !ledger.refused(RUNNER),
-            "shown again by a listing whose pages shifted, it was already seen"
-        );
-        assert_eq!(ledger.reported(), 1);
-    }
+        ledger.refused(RUNNER, "o/r");
 
-    #[test]
-    fn a_runner_ended_here_and_never_refused_leaves_nothing_behind() {
-        let mut ledger = Registrations::default();
-        ledger.ended_here(RUNNER, "o/r");
+        ledger.listed("o/other", &none());
+        assert_eq!(ledger.orphans(), 1, "another repository's listing");
+        ledger.listed("o/r", &only_runner());
+        assert_eq!(ledger.orphans(), 1, "still listed");
+
         ledger.listed("o/r", &none());
-        assert_eq!(ledger.0.len(), 0, "neither reason remains");
+        assert_eq!(ledger.orphans(), 0, "no longer listed");
         assert!(
-            ledger.refused(RUNNER),
-            "forgotten, so one GitHub holds later is news"
+            ledger.refused(RUNNER, "o/r"),
+            "held again, it is news again"
         );
     }
 
     #[test]
-    fn ending_a_runner_keeps_a_refusal_already_seen() {
+    fn nothing_is_left_of_a_repository_nothing_lists_and_the_rest_stays() {
         let mut ledger = Registrations::default();
-        ledger.refused(RUNNER);
-        ledger.ended_here(RUNNER, "o/r");
-        ledger.listed("o/r", &none());
-        assert_eq!(ledger.reported(), 1, "the refusal stays");
+        ledger.ended_here(1, "o/gone");
+        ledger.refused(2, "o/gone");
+        ledger.ended_here(3, "o/r");
+        ledger.refused(4, "o/r");
+
+        ledger.forget_unlisted(|repository| repository == "o/r");
+
+        assert!(!ledger.is_ended_here(1), "ended here, repository gone");
+        assert!(ledger.is_ended_here(3), "its repository is still listed");
+        assert_eq!(ledger.orphans(), 1, "only the listed repository's orphan");
+        assert!(ledger.refused(2, "o/gone"), "forgotten, so news again");
     }
 
     #[test]
     fn a_runner_nothing_is_known_of_is_not_ended_here() {
         let mut ledger = Registrations::default();
         ledger.listed("o/r", &none());
+        ledger.forget_unlisted(|_| false);
         assert!(!ledger.is_ended_here(RUNNER), "never seen");
-        assert_eq!(ledger.reported(), 0);
+        assert_eq!(ledger.orphans(), 0);
     }
 }

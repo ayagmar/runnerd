@@ -320,6 +320,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 state.listed = false;
             }
         }
+        self.forget_unlisted();
         self.take_found();
         let described = self.follow_jobs().await;
         self.count_mirror_bytes().await;
@@ -1270,7 +1271,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         Ok(Deleted::NotFound) => {}
                         Ok(Deleted::Busy) => {
                             left = true;
-                            if self.registrations.refused(runner.id) {
+                            if self.registrations.refused(runner.id, &repository) {
                                 warn!(
                                     "{repository}: {} has no container, but GitHub says it runs a job; \
                                      deleting it once GitHub lets go",
@@ -1297,6 +1298,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+    }
+
+    /// Forgets what only a listing of a repository could end, once neither the config nor a drain lists it: a drain
+    /// that gave up, or one that ended, leaves no listing to do it.
+    fn forget_unlisted(&mut self) {
+        let (repositories, draining) = (&self.repositories, &self.draining);
+        let listed = |name: &str| repositories.contains_key(name) || draining.contains_key(name);
+        self.registrations.forget_unlisted(listed);
+        self.claims.retain(|name, _| listed(name));
     }
 
     /// Warns of a runners listing that failed, and stops draining its repository once GitHub says it is gone, as when
