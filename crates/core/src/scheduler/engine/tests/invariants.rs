@@ -2993,7 +2993,7 @@ fn steps_of(seed: u64) -> Vec<Step> {
         6 => drop(steps.splice(0..0, BAND_RELEASED)),
         _ => {}
     }
-    if seed % 32 == 2 {
+    if seed.is_multiple_of(32) {
         steps.splice(0..0, WAITS_ON_DIFFERENT_JOBS);
     }
     if seed % 2 == 1 {
