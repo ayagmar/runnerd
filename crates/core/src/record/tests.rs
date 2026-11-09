@@ -537,7 +537,7 @@ fn a_failing_step_that_logged_sysboxs_lost_listener_or_failed_injection_is_the_r
 
 #[test]
 fn another_failure_in_the_failing_step_is_the_codes_whatever_it_looks_like() {
-    for output in [
+    let misread: Vec<&str> = [
         // `ENOSYS` from a call that is not a mount, umount or openat2.
         "Error: ENOSYS: function not implemented, copyfile 'a.txt' -> 'b.txt'",
         // A mount refused for another reason, and an unsafe procfs that is not an invalid argument.
@@ -549,9 +549,15 @@ fn another_failure_in_the_failing_step_is_the_codes_whatever_it_looks_like() {
         "Error: ENOSYS: function not implemented, copyfile '/home/runner/work/amount-api/amount-api/a.txt' -> 'b.txt'",
         "[Vue warn]: Error in mounted hook: \"Error: Function not implemented.\"",
         "src/paramount.c:12: error: function not implemented",
-    ] {
-        assert!(!fault_in_output(&[output, ERROR]), "{output}");
-    }
+        // A path or a name that is `mount` itself.
+        "Error: ENOSYS: function not implemented, copyfile '/home/runner/work/mount-api/mount-api/a.txt' -> 'b.txt'",
+        "src/mount.c:12: error: function not implemented",
+        "FAIL test_mount: function not implemented",
+    ]
+    .into_iter()
+    .filter(|output| fault_in_output(&[output, ERROR]))
+    .collect();
+    assert_eq!(misread, Vec::<&str>::new(), "read as the runner's fault");
 }
 
 #[test]

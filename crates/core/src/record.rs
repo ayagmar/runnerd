@@ -363,12 +363,13 @@ const FAULT_CALLS: [&str; 6] = [
 ];
 
 /// Whether a log line is what a runner whose Sysbox lost its seccomp listener, or failed an injection, prints. The
-/// call is a word of its own: a path or a name that holds `mount`, as `amount-api` or `mounted`, is not one.
+/// call is a word of its own, between spaces, colons, brackets, quotes and commas: a path or a name that holds
+/// `mount`, as `amount-api`, `mounted`, `mount-api/a.txt`, `mount.c` or `test_mount`, is not one.
 fn sysbox_fault(text: &str) -> bool {
     let text = text.to_lowercase();
     (text.contains("function not implemented")
         && text
-            .split(|c: char| !c.is_alphanumeric())
+            .split(|c: char| c.is_whitespace() || ":()\"',".contains(c))
             .any(|word| FAULT_CALLS.contains(&word)))
         || (text.contains("unsafe procfs detected") && text.contains("invalid argument"))
 }

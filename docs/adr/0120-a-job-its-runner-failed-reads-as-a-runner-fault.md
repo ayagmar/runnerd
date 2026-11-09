@@ -19,8 +19,15 @@ and 42539128682), and each read as an ordinary `failure`, as a test or a build f
   the environment the runner echoes, not a step that passed or was allowed to fail, and not what follows `Post job
   cleanup.`. A line is the signature when it has `function not implemented` and, as a word of its own, `mount`,
   `umount`, `umount2`, `unmount`, `mounting` or `openat2`, or has `unsafe procfs detected` and `invalid argument`;
-  case does not matter, as glibc capitalises what Go does not. Words that hold `mount` (`amount-api`, `mounted`) do not
-  count.
+  case does not matter, as glibc capitalises what Go does not. A word is what lies between spaces, colons, brackets,
+  quotes and commas, so a path or a name that holds `mount` (`amount-api`, `mounted`, `mount-api/a.txt`, `mount.c`,
+  `test_mount`) does not count.
+- **It is read once, when the job's record is final** (the writer's `close`: GitHub completed it and its runner is
+  removed, so the log is complete) and kept in `jobs.runner_fault` (schema 20, `0` in older rows, which are not read
+  again). `JobSummary::runner_fault` carries it; the field defaults to `false`, so the previous release and this one
+  read each other's JSON. The database is not read both ways: a 0.0.29 daemon refuses a schema 20 history (`run a
+  newer runnerd or move the database aside`), as it does after every migration, so a rollback needs the history moved
+  aside.
 - **Core words and classes it.** `JobSummary::outcome` returns `runner fault` with `OutcomeKind::RunnerFault` for a
   job that concluded `failure` or `timed_out` and has the field. Clients only draw it, in the colour of a warning: the
   dashboard's `warn` badge, the terminal's yellow.
@@ -36,5 +43,9 @@ and 42539128682), and each read as an ordinary `failure`, as a test or a build f
   found in the log: one named by its author whose section the exit code or its place does not give, or one that prints
   its own `::group::Run …` line before the signature, which ends its output there. A job that concluded `timed_out`
   with no step reported as `failure` reads as it did.
+- The step is found as the record's shell finds it (`section_of`), so its limits are shared: of two steps with the
+  same title the first section is read, a step named by its author is the last one that ended with an exit code when
+  nothing else gives it, which a later `if: failure()` step can be, and a fault inside a composite action's own
+  `Run` group reads `failure`.
 - A step allowed to fail (`continue-on-error`) is skipped only if GitHub reports it as other than `failure`.
 - The check is by words: another tool that prints them in the failed step is read as the runner's fault too.
