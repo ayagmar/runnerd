@@ -348,6 +348,22 @@ async fn docker_gone_with_no_stop_asked_for_stops_nothing() {
 }
 
 #[tokio::test]
+async fn a_less_urgent_stop_does_not_undo_a_more_urgent_one() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (_engine, handle) = busy_and_idle(&github, &docker, &dir);
+    assert_eq!(handle.shutdown(Shutdown::Force), Some(Stopping::KillsJobs));
+    assert_eq!(
+        handle.shutdown(Shutdown::Graceful),
+        Some(Stopping::KillsJobs),
+        "a later `runnerd stop` keeps the force"
+    );
+}
+
+#[tokio::test]
 async fn runnerd_stop_tries_again_a_removal_docker_refused_and_leaves_nothing() {
     let (github, docker, dir) = (
         FakeGithub::default(),
