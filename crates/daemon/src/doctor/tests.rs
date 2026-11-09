@@ -9,8 +9,8 @@ use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
 use super::{
-    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, READS_AT_ONCE, SYSBOX_DAEMONS,
-    Slice, Status, SysboxDaemon, checks, process_runs, read_each,
+    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, Kernel, READS_AT_ONCE,
+    SYSBOX_DAEMONS, Slice, Status, SysboxDaemon, checks, process_runs, read_each,
 };
 use crate::testdir::Dir;
 
@@ -88,6 +88,10 @@ fn ready_host(os_release: &str) -> Host {
         sysbox_daemons: daemons(|_| DaemonState::Unit),
         sysbox_unit: true,
         kvm: true,
+        kernel: Some(Kernel {
+            release: "7.2.14-arch1-1".to_owned(),
+            modules: true,
+        }),
         memory: Some(api::HostMemory {
             at: 0,
             total: 64 << 30,
@@ -134,6 +138,7 @@ fn a_ready_host_passes_every_check() {
             "cgroups",
             "isolation",
             "sysbox",
+            "kernel modules",
             "slice",
             "config",
             "config file",
@@ -159,6 +164,36 @@ fn a_ready_host_passes_every_check() {
             "served from the build cache on this host, in place of GitHub's"
         ),
         "on by default, and only said"
+    );
+}
+
+#[test]
+fn removed_kernel_modules_fail_the_sysbox_host_and_say_to_reboot() {
+    let mut host = ready_host(ARCH);
+    host.kernel = Some(Kernel {
+        release: "7.2.11-arch1-1".to_owned(),
+        modules: false,
+    });
+    let sysbox = checks(&host, Some(&config("sysbox")));
+    assert_eq!(failed(&sysbox), ["kernel modules"]);
+    let check = sysbox
+        .iter()
+        .find(|check| check.name == "kernel modules")
+        .unwrap();
+    assert!(
+        check.detail.contains("/lib/modules/7.2.11-arch1-1"),
+        "{check:?}"
+    );
+    assert_eq!(
+        check.fix.as_deref(),
+        Some("reboot to run the installed kernel")
+    );
+    let unsafe_dind = checks(&host, Some(&config("unsafe-dind")));
+    assert!(
+        unsafe_dind
+            .iter()
+            .all(|check| check.name != "kernel modules"),
+        "only sysbox mounts the modules into a runner"
     );
 }
 

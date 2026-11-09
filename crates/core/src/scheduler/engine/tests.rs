@@ -549,6 +549,8 @@ struct DockerState {
     remove_outage: Outage,
     /// How many runner `start`s fail next, as when the Engine is busy, before making anything.
     fail_starts: u32,
+    /// What Docker says when it refuses a start `fail_starts` counts; the Engine being busy when `None`.
+    refusal: Option<String>,
     /// How the next runner starts that fail after making their container go, in order.
     late_failures: VecDeque<LateFailure>,
     /// The containers those starts made, by ID, with the job GitHub gave each one's runner meanwhile.
@@ -886,7 +888,10 @@ impl DockerApi for FakeDocker {
             state.fail_starts -= 1;
             return refused(docker::Error::DockerResponseServerError {
                 status_code: 500,
-                message: "the Engine is busy".to_owned(),
+                message: state
+                    .refusal
+                    .clone()
+                    .unwrap_or_else(|| "the Engine is busy".to_owned()),
             });
         }
         if state.missing_images.contains(&spec.image) {
@@ -5475,6 +5480,42 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
         failures[0].error
     );
     assert_eq!(failures[0].held_for, 30);
+}
+
+#[tokio::test]
+async fn a_start_refused_for_missing_kernel_modules_is_announced_as_that_with_a_reboot() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.fail_starts = 1;
+        // What Docker answered on 2026-11-08 once pacman had removed the running kernel's modules.
+        state.refusal = Some("failed to create task for container: failed to create shim task: OCI runtime create failed: failed to create lib container mount: failed to stat mount source at /lib/modules/7.2.11-arch1-1: stat /lib/modules/7.2.11-arch1-1: no such file or directory".to_owned());
+    }
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let failures: Vec<api::RunnerFailure> = handle
+        .store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|envelope| match envelope.event {
+            api::Event::RunnerFailed { failure } => Some(failure),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures.len(), 1, "{failures:#?}");
+    assert!(
+        failures[0]
+            .error
+            .contains("the running kernel's modules are gone")
+            && failures[0].error.contains("reboot"),
+        "{}",
+        failures[0].error
+    );
 }
 
 #[tokio::test]
