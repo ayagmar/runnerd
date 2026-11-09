@@ -857,7 +857,7 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     let config = warm_config().replace("slots = 2", "slots = 1");
-    let (mut engine, _handle, _dir) = active(&github, &docker, &config).await;
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
     engine.recover().await.unwrap();
     docker.0.lock().unwrap().runner_log = Some("Listening for Jobs".to_owned());
     for exits in 1..=2 {
@@ -877,6 +877,26 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
         );
     }
     assert_eq!(registered(&github.calls()).len(), 2, "no third");
+    assert_eq!(
+        announced_errors(&handle).await,
+        ["its runners end without a job after waiting for one"]
+    );
+}
+
+/// What each `runner.failed` so far says went wrong.
+async fn announced_errors(handle: &Handle) -> Vec<String> {
+    handle.store.flush().await;
+    handle
+        .store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|envelope| match envelope.event {
+            api::Event::RunnerFailed { failure } => Some(failure.error),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A slot's worth of `count` jobs queued in `o/r`, each started, then all their runners connected and left: their
@@ -961,7 +981,7 @@ async fn a_runner_that_never_connected_still_holds_its_pool_on_its_first_exit() 
     // Catches the rule for runners that connected reaching runners that could not.
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let dir = TestDir::new("engine");
-    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
     engine.recover().await.unwrap();
     github.0.lock().unwrap().queued = vec![job(1)];
     engine.tick(Shutdown::No).await;
@@ -971,9 +991,14 @@ async fn a_runner_that_never_connected_still_holds_its_pool_on_its_first_exit() 
             Some("Failed to create a session. The runner registration has been deleted".to_owned());
         state.containers[0].running = false;
     }
+    let runner = engine.occupants_mut().next().unwrap().runner_name.clone();
     engine.tick(Shutdown::No).await;
     let held = engine.pool_hold("o/r", "app").unwrap().held;
     assert_eq!(held.map(|held| held.cause), Some(HoldCause::NoJob));
+    assert_eq!(
+        announced_errors(&handle).await,
+        [format!("{runner} ended without taking a job")]
+    );
 }
 
 #[tokio::test]
