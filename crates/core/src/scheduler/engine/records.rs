@@ -40,8 +40,17 @@ pub(super) struct Recording {
 enum Stage {
     /// Its changes checked for secrets, and its size and Docker's free disk measured.
     Checking(JoinHandle<Result<Checked, String>>),
-    /// The commit, then the container's removal; the record's size.
-    Committing(JoinHandle<Result<u64, String>>),
+    /// The commit, then the container's removal.
+    Committing(JoinHandle<Committed>),
+}
+
+/// What a commit's task came to.
+#[derive(Debug)]
+struct Committed {
+    /// The record's size, or why Docker did not commit it.
+    bytes: Result<u64, String>,
+    /// Docker did not remove the container after it, so a tick has to.
+    left: bool,
 }
 
 impl Stage {
@@ -435,14 +444,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let committed_container = container.clone();
         let commit = tokio::spawn(async move {
             let container = committed_container;
-            let committed = docker.commit(&container, &image, labels).await;
-            if let Err(error) = docker.remove(&container).await
-                && !is_not_found(&error)
-            {
-                warn!("cannot remove {container}: {error}");
-            }
+            let bytes = docker
+                .commit(&container, &image, labels)
+                .await
+                .map_err(|error| error.to_string());
+            let left = match docker.remove(&container).await {
+                Err(error) if !is_not_found(&error) => {
+                    warn!("cannot remove {container}: {error}");
+                    true
+                }
+                _ => false,
+            };
             let _ = done.send(());
-            committed.map_err(|error| error.to_string())
+            Committed { bytes, left }
         });
         self.records.begin(
             job,
@@ -455,11 +469,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         );
     }
 
-    async fn remove_container(&self, container: &str) {
+    /// Removes a container no record came of; each tick tries again if Docker does not.
+    async fn remove_container(&mut self, container: &str) {
         if let Err(error) = self.docker.remove(container).await
             && !is_not_found(&error)
         {
             warn!("cannot remove {container}: {error}");
+            self.leftovers
+                .removing(container.to_owned(), container.to_owned());
         }
     }
 
@@ -494,11 +511,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 Stage::Committing(task) => task,
             };
-            match task
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|committed| committed)
-            {
+            let bytes = match task.await {
+                Ok(Committed { bytes, left }) => {
+                    if left {
+                        self.leftovers.removing(container.clone(), container);
+                    }
+                    bytes
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            match bytes {
                 Ok(bytes) => self.keep_record(record, bytes).await,
                 Err(error) => self.skip_record(
                     job,

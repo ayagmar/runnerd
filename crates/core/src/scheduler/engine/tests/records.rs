@@ -902,6 +902,11 @@ fn left_runner_docker_cannot_read(docker: &FakeDocker) {
     state.fail_files = u32::MAX;
 }
 
+fn has_container(docker: &FakeDocker, id: &str) -> bool {
+    let state = docker.0.lock().unwrap();
+    state.containers.iter().any(|container| container.id == id)
+}
+
 fn removals_of(docker: &FakeDocker, container: &str) -> usize {
     let call = format!("remove {container}");
     docker.calls().iter().filter(|made| **made == call).count()
@@ -1176,6 +1181,147 @@ async fn docker_going_away_while_a_left_runner_is_read_during_a_stop_ends_the_st
     engine.collect_finished().await;
     assert!(engine.control.docker_gone(), "the stop stops asking Docker");
     assert_eq!(engine.state_counts().unread, 1, "it stays to read");
+}
+
+#[tokio::test]
+async fn a_record_container_docker_would_not_remove_after_its_commit_goes_without_a_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record-retried");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .fail_remove_of
+        .insert("container-1".to_owned());
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+    assert_eq!(
+        handle.records.borrow().records.len(),
+        1,
+        "the record is made whatever becomes of its container"
+    );
+    assert_eq!(removals_of(&docker, "container-1"), 2, "asked again");
+    assert!(
+        !has_container(&docker, "container-1"),
+        "the second removal took it"
+    );
+    assert!(engine.no_leftovers(), "and nothing is left to remove");
+}
+
+#[tokio::test]
+async fn a_container_docker_would_neither_commit_nor_remove_goes_without_a_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("commit-failed");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.fail_commits = 1;
+        state.fail_remove_of.insert("container-1".to_owned());
+    }
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+    assert!(
+        handle.records.borrow().records.is_empty(),
+        "no record came of it"
+    );
+    assert_eq!(removals_of(&docker, "container-1"), 2, "asked again");
+    assert!(
+        !has_container(&docker, "container-1"),
+        "the second removal took it"
+    );
+}
+
+#[tokio::test]
+async fn a_container_refused_a_record_that_docker_would_not_remove_goes_without_a_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("refused-retried");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.changed = vec!["/home/runner/.credentials".to_owned()];
+        state.fail_remove_of.insert("container-1".to_owned());
+    }
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+    assert_eq!(removals_of(&docker, "container-1"), 2, "asked again");
+    assert!(
+        !has_container(&docker, "container-1"),
+        "the second removal took it"
+    );
+    assert!(engine.no_leftovers(), "and nothing is left to remove");
+}
+
+#[tokio::test]
+async fn a_record_container_docker_is_already_removing_stays_followed_until_it_is_gone() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record-under-way");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    docker.0.lock().unwrap().commits_held.send_replace(true);
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    let commit = "commit container-1 runnerd-record:1".to_owned();
+    for _ in 0..200 {
+        engine.tick(Shutdown::No).await;
+        if docker.calls().contains(&commit) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    {
+        // Docker takes it over only now: its logs were still to read.
+        let mut state = docker.0.lock().unwrap();
+        state.being_removed.insert("container-1".to_owned());
+        state.commits_held.send_replace(false);
+    }
+    until_recorded(&mut engine).await;
+    assert!(
+        engine.is_leftover("container-1"),
+        "Docker's removal can fail"
+    );
+    docker.0.lock().unwrap().being_removed.clear();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.no_leftovers(), "the next tick saw it through");
+    assert!(!has_container(&docker, "container-1"), "and it is gone");
+}
+
+#[tokio::test]
+async fn a_restart_removes_a_committed_records_container_and_does_not_record_it_again() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record-restarted");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .fail_remove_of
+        .insert("container-1".to_owned());
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    // The daemon stops before a tick retries the removal: the commit's task is done, the recording not yet collected.
+    let removal = "remove container-1".to_owned();
+    for _ in 0..200 {
+        engine.tick(Shutdown::No).await;
+        if docker.calls().contains(&removal) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    handle.store.flush().await;
+    drop(engine);
+    assert!(has_container(&docker, "container-1"), "Docker kept it");
+
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    let commits = docker
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("commit container-1"))
+        .count();
+    assert_eq!(commits, 1, "its record exists");
+    assert!(
+        !has_container(&docker, "container-1"),
+        "and the new daemon removed its container"
+    );
+    assert!(engine.no_recordings(), "without starting another record");
 }
 
 /// A job queued in the history whose runner stopped while no daemon ran, as an idle runner that took it during a
