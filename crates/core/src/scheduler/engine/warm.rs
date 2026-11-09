@@ -86,6 +86,12 @@ impl Warm {
 
 #[cfg(test)]
 impl Warm {
+    /// Whether what was learned counts `repository` active at `now` (ms).
+    pub(super) fn testing_active(&self, repository: &str, now: u64) -> bool {
+        self.learned()
+            .is_some_and(|learned| learned.active(repository, now))
+    }
+
     /// As if the history had just been read and taught exactly `learned`.
     pub(super) fn testing_learned(&mut self, learned: Learned) {
         self.read = Some(HistoryRead {
@@ -224,7 +230,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         });
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         let queued = self.repositories.get(&pool.repository).map_or(0, |state| {
             state
@@ -238,8 +244,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|(slot, occupant)| {
                 slot.profile == pool.profile
                     && occupant.repository == pool.repository
-                    && !occupant.busy
-                    && occupant.job.is_none()
+                    && occupant.idle()
             })
             .count();
         if waiting.saturating_sub(queued) < configured {

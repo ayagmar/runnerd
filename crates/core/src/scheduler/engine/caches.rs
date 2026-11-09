@@ -169,9 +169,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .and_then(|slots| slots.first())
                     .is_some_and(|slot| {
                         slot.as_ref().is_none_or(|occupant| {
-                            !occupant.busy
-                                && occupant.job.is_none()
-                                && occupant.started_at < tick_began
+                            occupant.idle() && occupant.started_at < tick_began
                         })
                     })
             })
@@ -528,12 +526,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// (`CHECK_EVERY` after the last, or running), which waits for every profile's runners. Its warm runners then
     /// stop and none starts.
     pub(super) fn upkeep_waits_for_warm(&self, profile: &str) -> bool {
-        let idle = |slots: &Vec<Option<Occupant>>| {
-            slots
-                .iter()
-                .flatten()
-                .all(|occupant| !occupant.busy && occupant.job.is_none())
-        };
+        let idle = |slots: &Vec<Option<Occupant>>| slots.iter().flatten().all(Occupant::idle);
         // A shell holds back the reseed until it closes, so runners keep serving meanwhile. So does a due reseed
         // with no room for its seed even once they stop: it is not asked for, and may wait long.
         let reseed = (self.reseed_requested.contains(profile)

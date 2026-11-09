@@ -627,7 +627,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             decisions: self
                 .occupied()
                 .filter(|(_, occupant)| {
-                    mode == Shutdown::Force || mode == Shutdown::Graceful && !occupant.busy
+                    mode == Shutdown::Force || mode == Shutdown::Graceful && !occupant.listed_busy()
                 })
                 .map(|(slot, _)| Decision::Stop {
                     slot,
@@ -735,7 +735,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn plan(&self) -> (Plan, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         let warm = self.warm_targets();
         let mut repositories: Vec<Repository> = self
@@ -789,8 +789,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         plan.decisions.extend(
             self.occupied()
                 .filter(|(slot, occupant)| {
-                    !occupant.busy
-                        && occupant.job.is_none()
+                    occupant.idle()
                         && (occupant.other_spec()
                             || !self.config.repositories.iter().any(|repository| {
                                 repository.name == occupant.repository
@@ -857,9 +856,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|occupant| {
-                occupant.repository == pool.name && occupant.newly_busy && occupant.job.is_none()
-            })
+            .filter(|occupant| occupant.repository == pool.name && occupant.claims_a_listed_job())
             .count();
         let gone = claims
             .into_iter()
@@ -993,7 +990,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(occupant) => Slot::Runner(RunnerSlot {
                     repository: occupant.repository.clone(),
                     // Its capture named its job before a listing showed it busy: it waits for none of those queued.
-                    busy: occupant.busy || occupant.job.is_some(),
+                    busy: occupant.engaged(),
                     started_at: occupant.started_at,
                     memory: self.takes(occupant),
                     cpu: self.reserves_cpu(occupant),
@@ -1124,13 +1121,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|(_, occupant)| {
                 let held = self.held_by(occupant);
                 pooled::Runner {
-                    key: occupant.key.as_ref(),
+                    key: occupant.key(),
                     takes: held.takes,
                     used: held.used,
                     // An adopted runner's job started under another daemon.
                     ran: occupant
-                        .job_started
-                        .filter(|_| occupant.purpose.is_some())
+                        .job_found_here()
                         .and_then(|started| now.duration_since(started).ok()),
                     basis: occupant.admission.map(|admission| admission.basis),
                 }
@@ -1172,7 +1168,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn apply_queued(&mut self, listings: Vec<Listed>, listing: u64) {
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         for Listed {
             repository,

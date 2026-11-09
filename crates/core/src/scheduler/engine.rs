@@ -302,6 +302,81 @@ impl Occupant {
             .map_or(self.cpus, |cpu| cpu.reserved)
     }
 
+    /// Whether GitHub's last runners listing showed it busy, or GitHub said so since. Alone it says what the listing
+    /// says, which lags a capture that named a job: `engaged` is whether it holds one.
+    fn listed_busy(&self) -> bool {
+        self.busy
+    }
+
+    /// The job its capture or its history row named; a listing that shows it idle does not unname it.
+    fn named_job(&self) -> Option<u64> {
+        self.job
+    }
+
+    /// Whether `job` is the one named for it.
+    fn runs(&self, job: u64) -> bool {
+        self.job == Some(job)
+    }
+
+    /// Whether it holds a job as far as this daemon knows: the listing shows it busy, or a capture named its job
+    /// first.
+    fn engaged(&self) -> bool {
+        self.busy || self.job.is_some()
+    }
+
+    /// Whether it waits for a job: not `engaged`.
+    fn idle(&self) -> bool {
+        !self.engaged()
+    }
+
+    /// Whether it may be running one of its pool's listed jobs that no capture named yet: the listing that first
+    /// showed it busy can still show that job queued. A listing clears this (`apply_runners`), so a pass between two
+    /// listings keeps counting it.
+    fn claims_a_listed_job(&self) -> bool {
+        self.newly_busy && self.job.is_none()
+    }
+
+    /// Whether a detaching stop removes it: no job named and either listed idle or adopted, as adoption counts a
+    /// runner busy until a listing says otherwise. One started here that a listing shows busy is left to its job.
+    fn goes_when_detaching(&self) -> bool {
+        self.job.is_none() && (!self.busy || !self.was_started_here())
+    }
+
+    /// Whether this daemon started it: a restart adopted it otherwise.
+    fn was_started_here(&self) -> bool {
+        self.purpose.is_some()
+    }
+
+    /// Why this daemon started it; `None` for one a restart adopted.
+    fn purpose(&self) -> Option<Purpose> {
+        self.purpose
+    }
+
+    /// When this daemon's capture found its job; `None` for an adopted runner, whose job started under another daemon.
+    fn job_found_here(&self) -> Option<SystemTime> {
+        self.job_started.filter(|_| self.was_started_here())
+    }
+
+    /// Its job as admission tells jobs apart, once the history had its record.
+    fn key(&self) -> Option<&Key> {
+        self.key.as_ref()
+    }
+
+    /// Whether admission can tell its job apart yet. A job named with no record yet has no key.
+    fn has_key(&self) -> bool {
+        self.key.is_some()
+    }
+
+    /// Whether it holds a job admission cannot tell apart yet, as when its log capture failed.
+    fn runs_unknown_job(&self) -> bool {
+        self.engaged() && !self.has_key()
+    }
+
+    /// Whether `observe` watches it. Not while Docker fails to inspect its container.
+    fn is_observed(&self) -> bool {
+        self.observed
+    }
+
     fn running_job(&self) -> api::RunningJob {
         api::RunningJob {
             repository: self.repository.clone(),

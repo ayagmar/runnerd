@@ -53,7 +53,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             name: occupant.runner_name.clone(),
                             runner_id: occupant.runner_id,
                             container: occupant.container.clone(),
-                            busy: occupant.busy || occupant.job.is_some(),
+                            busy: occupant.engaged(),
                             started_at: unix_secs(occupant.started_at),
                             reserved: self.takes(occupant),
                             warm: plan.warm.contains(&SlotRef {
@@ -164,7 +164,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn queued(&self, waiting: &BTreeMap<u64, api::Waiting>) -> Vec<api::QueuedJob> {
         let taken: BTreeSet<u64> = self
             .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
+            .filter_map(|(_, occupant)| occupant.named_job())
             .collect();
         let mut queued: Vec<api::QueuedJob> = self
             .repositories
