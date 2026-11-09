@@ -518,6 +518,28 @@ async fn an_idle_runner_adopted_after_a_restart_stays_as_the_warm_runner() {
 }
 
 #[tokio::test]
+async fn a_warm_runner_keeps_waiting_while_an_open_shell_holds_back_the_caches_check() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().images = vec![records::record_image(10, 60)];
+    let config = warm_config().replace("slots = 2", "slots = 2\nrecord_failures = true");
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+
+    let size = docker::TtySize { cols: 80, rows: 24 };
+    engine.open_shell(10, size).await.unwrap();
+    // The check is due, but cannot run under the shell: stopping the runner for it would leave no runner, for nothing.
+    engine.checked_at -= Duration::from_secs(3600);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert!(engine.trim.is_none(), "no check under an open shell");
+}
+
+#[tokio::test]
 async fn the_shared_caches_are_checked_hourly_though_a_warm_runner_always_waits() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
