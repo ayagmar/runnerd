@@ -65,6 +65,15 @@ impl tracing::Subscriber for LogLines {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+/// Installs `lines` on this thread. A second live dispatcher is held because with only one, `tracing-core` computes a
+/// callsite's interest from the thread that reaches it first, and a parallel test with no subscriber caches "never".
+fn logging(lines: &LogLines) -> tracing::subscriber::DefaultGuard {
+    static SECOND: std::sync::LazyLock<tracing::Dispatch> =
+        std::sync::LazyLock::new(|| tracing::Dispatch::new(LogLines::default()));
+    std::sync::LazyLock::force(&SECOND);
+    tracing::subscriber::set_default(lines.clone())
+}
+
 /// Takes an event's message into the lines it borrows.
 struct Message<'lines>(&'lines Mutex<Vec<String>>);
 
@@ -162,7 +171,7 @@ async fn an_orphan_github_holds_is_warned_of_at_its_first_refusal_and_never_agai
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
     let lines = LogLines::default();
-    let _logging = tracing::subscriber::set_default(lines.clone());
+    let _logging = logging(&lines);
     orphan_listed(&github, 2);
 
     engine.tick(Shutdown::No).await;
@@ -177,7 +186,7 @@ async fn deleting_a_registration_github_held_past_a_release_raises_no_false_alar
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, _handle, _dir) = adopted(&github, &docker).await;
     let lines = LogLines::default();
-    let _logging = tracing::subscriber::set_default(lines.clone());
+    let _logging = logging(&lines);
     released_while_github_holds_it(&mut engine, &github, &docker).await;
 
     engine.tick(Shutdown::No).await;
