@@ -137,6 +137,12 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         *waits = waits.with_memory(wait);
     }
 
+    pub(super) fn set_cpu_wait(&mut self, repository: &str, profile: &str, wait: Wait) {
+        let state = self.repositories.get_mut(repository).unwrap();
+        let waits = state.waits.entry(profile.to_owned()).or_default();
+        *waits = waits.with_cpu(wait);
+    }
+
     /// As if every wait began `by` earlier.
     pub(super) fn age_waits(&mut self, by: Duration) {
         for state in self.repositories.values_mut() {
