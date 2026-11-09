@@ -268,7 +268,12 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
             Some(Stopping::LeavesJobs),
             "a second `runnerd stop` says what the first does once Docker stopped answering (Docker gone: {gone})"
         );
-        assert_eq!(handle.shutdown(Shutdown::Force), Some(Stopping::KillsJobs));
+        assert_eq!(
+            handle.shutdown(Shutdown::Force),
+            handle.status.borrow().stopping,
+            "`runnerd stop --force` answers what status says, as Docker cannot kill anything (Docker gone: {gone})"
+        );
+        assert_eq!(handle.status.borrow().stopping, Some(Stopping::LeavesJobs));
         let calls = github.calls();
         for id in [7, 8] {
             let deletes = calls
@@ -339,6 +344,22 @@ async fn docker_gone_with_no_stop_asked_for_stops_nothing() {
         handle.control.mode(),
         Shutdown::No,
         "an outage with no stop asked for starts no stop"
+    );
+}
+
+#[tokio::test]
+async fn a_less_urgent_stop_does_not_undo_a_more_urgent_one() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (_engine, handle) = busy_and_idle(&github, &docker, &dir);
+    assert_eq!(handle.shutdown(Shutdown::Force), Some(Stopping::KillsJobs));
+    assert_eq!(
+        handle.shutdown(Shutdown::Graceful),
+        Some(Stopping::KillsJobs),
+        "a later `runnerd stop` keeps the force"
     );
 }
 

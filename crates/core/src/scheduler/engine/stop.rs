@@ -12,9 +12,9 @@ pub(super) struct Stop(Phase);
 enum Phase {
     /// Docker answers, if with errors, or no stop was asked for: `Shutdown::No` until one is.
     Asked(Shutdown),
-    /// Docker did not answer a call the stop needed. The stop calls it no more and goes on as a detach, whatever
-    /// `asked`, the most urgent request so far and at least a detach, says.
-    DockerGone { asked: Shutdown },
+    /// Docker did not answer a call the stop needed. The stop calls it no more and goes on as a detach, whatever was
+    /// asked for or is asked for later.
+    DockerGone,
 }
 
 impl Stop {
@@ -26,11 +26,13 @@ impl Stop {
     /// A request to stop in `mode`: a more urgent one overrides a less urgent one, never the other way. Returns whether
     /// that changed anything.
     pub(super) fn ask(&mut self, mode: Shutdown) -> bool {
-        let before = *self;
         match &mut self.0 {
-            Phase::Asked(asked) | Phase::DockerGone { asked } => *asked = (*asked).max(mode),
+            Phase::Asked(asked) if mode > *asked => {
+                *asked = mode;
+                true
+            }
+            Phase::Asked(_) | Phase::DockerGone => false,
         }
-        *self != before
     }
 
     /// Docker did not answer a call the stop needed. Returns whether that is news: not without a stop under way, nor
@@ -38,12 +40,10 @@ impl Stop {
     pub(super) fn note_docker_gone(&mut self) -> bool {
         match self.0 {
             Phase::Asked(asked) if asked != Shutdown::No => {
-                self.0 = Phase::DockerGone {
-                    asked: asked.max(Shutdown::Detach),
-                };
+                self.0 = Phase::DockerGone;
                 true
             }
-            Phase::Asked(_) | Phase::DockerGone { .. } => false,
+            Phase::Asked(_) | Phase::DockerGone => false,
         }
     }
 
@@ -51,25 +51,18 @@ impl Stop {
     pub(super) fn mode(self) -> Shutdown {
         match self.0 {
             Phase::Asked(asked) => asked,
-            Phase::DockerGone { .. } => Shutdown::Detach,
-        }
-    }
-
-    /// The most urgent request so far, which is what a request is answered with.
-    pub(super) fn asked(self) -> Shutdown {
-        match self.0 {
-            Phase::Asked(asked) | Phase::DockerGone { asked } => asked,
+            Phase::DockerGone => Shutdown::Detach,
         }
     }
 
     /// Whether Docker stopped answering the stop: it is left to the next start, which removes or adopts every
     /// container by its labels.
     pub(super) fn docker_gone(self) -> bool {
-        matches!(self.0, Phase::DockerGone { .. })
+        self.0 == Phase::DockerGone
     }
 
     /// Whether the stop has a deadline: it detaches or is forced.
     pub(super) fn hurried(self) -> bool {
-        self.asked() >= Shutdown::Detach
+        self.mode() >= Shutdown::Detach
     }
 }
