@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::history::{CAPTURE_DRAIN, Capture};
-use super::{DockerInStop, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
+use super::{Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
@@ -175,7 +175,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (slot, occupant) in occupied {
             // Docker said it stopped: a pass reaps it while this tick waits for GitHub, and starts the next runner
             // into its room from the last listing, rather than after this tick's (ADR 0095).
-            if self.stopping() == Shutdown::No && self.exits.noted_stopped(&occupant.container) {
+            if self.control.mode() == Shutdown::No && self.exits.noted_stopped(&occupant.container)
+            {
                 continue;
             }
             if self.reap(&slot, &occupant).await {
@@ -523,7 +524,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Removes a slot's runner, busy or not, and kills its job. Nothing once Docker stopped answering a stop: the
     /// next start finds the runners as the stop left them.
     pub(super) async fn kill(&mut self, slot: &SlotRef) {
-        if self.docker_in_stop == DockerInStop::Failed {
+        if self.control.docker_gone() {
             return;
         }
         let Some(occupant) = self
@@ -602,7 +603,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// deregistration, logs or removal fails: its slot and reservation stay its until a removal is confirmed
     /// (ADR 0076). Nothing once Docker stopped answering a stop.
     pub(super) async fn remove_idle(&mut self, stops: Vec<(SlotRef, StopReason)>) {
-        if self.docker_in_stop == DockerInStop::Failed {
+        if self.control.docker_gone() {
             return;
         }
         // A slot twice in `stops` is removed once.
@@ -870,7 +871,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         };
         // A stop asked for while GitHub registered it: its runner would take a job no daemon watches.
-        if self.stopping() != Shutdown::No {
+        if self.control.mode() != Shutdown::No {
             info!("{repository}: stopping; deleting {name} before it starts");
             if let Err(error) = self.github.delete_runner(repository, runner.id).await {
                 warn!("{repository}: cannot delete {name}: {error}");

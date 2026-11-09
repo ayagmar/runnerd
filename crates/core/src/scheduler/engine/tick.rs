@@ -341,7 +341,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // holding back every later start of the plan until the next poll. A plan again only after one that did
         // something, so a start that keeps not fitting costs one more plan, not a loop. Not once a stop is asked for.
         let mut plans = 1;
-        while self.stopping() == Shutdown::No
+        while self.control.mode() == Shutdown::No
             && applied.deferred > 0
             && applied.acted
             && plans < MAX_PLANS
@@ -370,7 +370,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         // A stop asked during the starts reads the jobs in its own tick, or leaves them to the next start's: its
         // idle runners are removed first (ADR 0091).
-        if self.stopping() == mode {
+        if self.control.mode() == mode {
             self.follow_running(described).await;
         }
         self.idle_caches(mode, began).await;
@@ -431,7 +431,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Some(Err(_)) | None => {}
                 },
                 // Once a stop is asked for, the tick releases what stopped since.
-                () = exits.noted(), if join && self.stopping() == Shutdown::No => {
+                () = exits.noted(), if join && self.control.mode() == Shutdown::No => {
                     let more = self.begin_releases(&mut releases).await;
                     if more > 0 {
                         freed += more;
@@ -490,7 +490,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
     pub(super) async fn refill(&mut self) -> usize {
-        if self.stopping() != Shutdown::No || self.github_limit().is_some() {
+        if self.control.mode() != Shutdown::No || self.github_limit().is_some() {
             return 0;
         }
         // The jobs captures named since: their runners are busy, and their jobs no longer queued.
@@ -522,7 +522,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 continue;
             };
             // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-            if !replacing.is_empty() || self.stopping() != Shutdown::No {
+            if !replacing.is_empty() || self.control.mode() != Shutdown::No {
                 continue;
             }
             match self.apply_start(decision.clone(), &mut admitting).await {
@@ -601,7 +601,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match decision {
                 Decision::Stop { .. } => {}
                 // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-                Decision::Start { .. } if self.stopping() != Shutdown::No => {}
+                Decision::Start { .. } if self.control.mode() != Shutdown::No => {}
                 // GitHub registers no runner before its rate limit resets.
                 Decision::Start { .. } if self.github_limit().is_some() => {}
                 Decision::Start { .. } if applied.deferred > 0 => applied.deferred += 1,

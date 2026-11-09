@@ -125,7 +125,7 @@ client → transport → principal → handler → core
    `caches` (reseeds, the mirror, the shared caches), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
    whether its job may write), `records` (records of failed jobs and the shells in them),
    `history` (what the store records), `admission` (what a new runner reserves), `warm` (how many warm runners each
-   repository wants, from `scheduler::warm`), `control` (`Control` and the commands) and `status` (what it
+   repository wants, from `scheduler::warm`), `control` (`Control` and the commands), `stop` (how far the daemon's stop has got) and `status` (what it
    publishes).
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
