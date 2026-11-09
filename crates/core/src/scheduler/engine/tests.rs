@@ -1767,6 +1767,29 @@ async fn a_restart_adopts_running_runners_and_reseeds_and_removes_stopped_runner
 }
 
 #[tokio::test]
+async fn a_measure_an_earlier_run_left_that_docker_fails_to_remove_is_removed_on_a_later_tick() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![Container {
+            id: "measure".to_owned(),
+            name: Names::new("runnerd").measure("app"),
+            running: true,
+            labels: HashMap::from([
+                ("runnerd.seed".to_owned(), String::new()),
+                ("runnerd.profile".to_owned(), "app".to_owned()),
+            ]),
+        }];
+        state.fail_removes = 1;
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    assert!(engine.is_leftover("measure"), "it is tried again");
+    engine.tick(Shutdown::No).await;
+    assert!(engine.no_leftovers(), "and the next tick removes it");
+}
+
+#[tokio::test]
 async fn a_restart_removes_the_measure_of_slot_1_an_earlier_run_left_and_starts_runners() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

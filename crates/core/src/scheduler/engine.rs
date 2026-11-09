@@ -7,7 +7,7 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
+//! `leftovers` (the containers still to read or remove once nothing occupies them), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
 //! profile's measures and reseeds are doing and have due), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
@@ -20,6 +20,7 @@ mod control;
 mod exits;
 mod history;
 mod images;
+mod leftovers;
 mod mirror;
 mod open_waits;
 mod pool_health;
@@ -48,6 +49,7 @@ pub use self::control::{
 };
 use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
+use self::leftovers::Leftovers;
 use self::mirror::Mirror;
 use self::pool_health::PoolHealth;
 pub use self::records::RecordSelection;
@@ -466,12 +468,8 @@ pub struct Engine<G = Github, D = Docker> {
     images: Images,
     /// Repositories a reload removed, polled until none of this machine's runners is registered on them.
     draining: BTreeMap<String, tick::Drain>,
-    /// The runner and shell containers an earlier run left that recovery failed to remove, by ID with their names:
-    /// each tick tries again.
-    leftover: BTreeMap<String, String>,
-    /// The stopped runner containers an earlier run left that Docker could not tell recovery whether to keep as their
-    /// failed jobs' records: the first tick after each one's backoff tries again.
-    unread: Vec<recover::Left>,
+    /// The containers still to read or remove once nothing occupies them.
+    leftovers: Leftovers,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
     /// The slots whose last start failed preparing its caches. Not kept over a restart.
@@ -649,8 +647,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             images: Images::new(),
             retired: BTreeMap::new(),
             draining: BTreeMap::new(),
-            leftover: BTreeMap::new(),
-            unread: Vec::new(),
+            leftovers: Leftovers::default(),
             prepare_failures: BTreeMap::new(),
             ran: BTreeMap::new(),
             docker_disk,
