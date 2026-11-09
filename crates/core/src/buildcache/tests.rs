@@ -783,6 +783,23 @@ async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
 }
 
 #[tokio::test]
+async fn an_undecided_job_holds_at_most_max_held_uploads() {
+    // Room for that many empty uploads, each counted at its least charge.
+    let Cache { cache, _dir } = open("held-count", 1 << 32);
+    let early = cache.attach("early", "o/app", ActionsCache::Off).unwrap();
+    for key in 0..MAX_HELD {
+        let path = format!("/gradle/{key}");
+        assert_eq!(request(&early, "PUT", &path, b"").await.0, 200);
+    }
+    assert_eq!(waiting(&cache), MAX_HELD, "the last place is an upload's");
+    assert_eq!(request(&early, "PUT", "/gradle/more", b"").await.0, 200);
+    assert_eq!(waiting(&cache), MAX_HELD, "the one past it is not kept");
+    cache.decide("early", Writes::Allowed, Scopes::default());
+    assert_eq!(cache.size().entries, MAX_HELD as u64);
+    assert_eq!(cache.detach("early").unwrap().refused, 1);
+}
+
+#[tokio::test]
 async fn an_entry_over_a_quarter_of_the_limit_or_past_twice_it_is_refused() {
     let Cache { cache, _dir } = open("limits", 4 * ENTRY as u64);
     let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
