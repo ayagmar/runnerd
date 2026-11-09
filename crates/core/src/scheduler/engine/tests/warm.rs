@@ -391,7 +391,7 @@ async fn warm_runners_stop_once_the_repository_is_quiet_and_do_not_come_back() {
     assert_eq!(registered(&github.calls()).len(), 1);
 
     // An hour and more later: no job since, and the runner waited past IDLE_TIMEOUT.
-    engine.warm.learned = Some((Learned::default(), SystemTime::now()));
+    engine.warm.testing_learned(Learned::default());
     for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;
     }
@@ -656,7 +656,7 @@ async fn a_warm_runner_leaving_slot_1_without_a_job_needs_no_reseed() {
     let (mut engine, _handle, _dir) = active(&github, &docker, &warm_config()).await;
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
-    engine.warm.learned = Some((Learned::default(), SystemTime::now()));
+    engine.warm.testing_learned(Learned::default());
     for occupant in engine.occupants_mut() {
         occupant.started_at -= IDLE_TIMEOUT;
     }

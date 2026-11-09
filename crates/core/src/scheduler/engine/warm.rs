@@ -18,39 +18,99 @@ use crate::time;
 /// How often the history is read again.
 const REREAD: Duration = Duration::from_secs(300);
 
-/// What warm runners keep between ticks.
+/// What warm runners keep between ticks; only its methods change what the history taught. A restart keeps none of it,
+/// and the first tick reads the history. A reload marks the read stale, and the next tick reads it again.
 #[derive(Debug, Default)]
 pub(super) struct Warm {
-    /// What the history taught, and when it was read; `None` before the first read, when no repository wants any.
-    pub(super) learned: Option<(Learned, SystemTime)>,
+    /// `None` before the first read, when no repository wants any.
+    read: Option<HistoryRead>,
     /// The workflow runs seen lately.
     runs: Runs,
+}
+
+/// What the history taught, and whether to read it again.
+#[derive(Debug)]
+struct HistoryRead {
+    learned: Learned,
+    freshness: Freshness,
+}
+
+/// When the history is due to be read again.
+#[derive(Debug, Clone, Copy)]
+enum Freshness {
+    /// Read at this time: due once `REREAD` old.
+    ReadAt(SystemTime),
+    /// Due at the next tick.
+    Stale,
+}
+
+impl Warm {
+    /// Whether the last read still stands.
+    fn is_fresh(&self) -> bool {
+        self.read.as_ref().is_some_and(|read| match read.freshness {
+            Freshness::ReadAt(at) => at.elapsed().is_ok_and(|age| age < REREAD),
+            Freshness::Stale => false,
+        })
+    }
+
+    /// What the history taught, once it was read.
+    fn learned(&self) -> Option<&Learned> {
+        self.read.as_ref().map(|read| &read.learned)
+    }
+
+    /// Takes a read of the history made now, keeping what was noted since the last.
+    fn took_in(&mut self, mut learned: Learned) {
+        if let Some(older) = self.learned() {
+            learned.absorb(older);
+        }
+        self.read = Some(HistoryRead {
+            learned,
+            freshness: Freshness::ReadAt(SystemTime::now()),
+        });
+    }
+
+    /// Has the next tick read the history again.
+    fn mark_stale(&mut self) {
+        if let Some(read) = &mut self.read {
+            read.freshness = Freshness::Stale;
+        }
+    }
+
+    /// Notes that `repository` was active at `at` (ms).
+    fn note_active(&mut self, repository: &str, at: u64) {
+        if let Some(read) = &mut self.read {
+            read.learned.note(repository, at);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Warm {
+    /// As if the history had just been read and taught exactly `learned`.
+    pub(super) fn testing_learned(&mut self, learned: Learned) {
+        self.read = Some(HistoryRead {
+            learned,
+            freshness: Freshness::ReadAt(SystemTime::now()),
+        });
+    }
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Reads the history again once the last read is `REREAD` old. A read that fails keeps the last one.
     pub(super) async fn refresh_warm(&mut self) {
-        if self
-            .warm
-            .learned
-            .as_ref()
-            .is_some_and(|(_, read_at)| read_at.elapsed().is_ok_and(|age| age < REREAD))
-        {
+        if self.warm.is_fresh() {
             return;
         }
         let now = time::now_ms();
         match self.store.warm(now.saturating_sub(warm::LOOKBACK)).await {
             Ok(seen) => {
                 let config = &self.config;
-                let mut learned = Learned::new(&seen, now, |seen| {
+                let learned = Learned::new(&seen, now, |seen| {
                     config
                         .pool(&seen.repository, &seen.labels)
                         .map(|pool| pool.profile.clone())
                 });
-                if let Some((older, _)) = &self.warm.learned {
-                    learned.absorb(older);
-                }
-                self.warm.learned = Some((learned, SystemTime::now()));
+                self.warm.took_in(learned);
             }
             Err(error) => warn!("cannot read the job history for warm runners: {error}"),
         }
@@ -60,16 +120,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Reads the history again at the next tick, as a reload may have moved labels to other pools. What was noted
     /// since the last read is kept (`Learned::absorb`).
     pub(super) fn reread_warm(&mut self) {
-        if let Some((_, read_at)) = &mut self.warm.learned {
-            *read_at = SystemTime::UNIX_EPOCH;
-        }
+        self.warm.mark_stale();
     }
 
     /// Notes that a job of `repository` finished now: the repository stays active `warm::ACTIVE_AFTER` past it.
     pub(super) fn note_finished(&mut self, repository: &str) {
-        if let Some((learned, _)) = &mut self.warm.learned {
-            learned.note(repository, time::now_ms());
-        }
+        self.warm.note_active(repository, time::now_ms());
     }
 
     /// Notes a job for `pool` queued or taken at `at` (ms), of `attempt`, with its workflow when known.
@@ -81,9 +137,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         workflow: Option<&str>,
         at: u64,
     ) {
-        if let Some((learned, _)) = &mut self.warm.learned {
-            learned.note(&pool.repository, at);
-        }
+        self.warm.note_active(&pool.repository, at);
         self.warm.runs.note(pool, attempt, job, workflow, at);
     }
 
@@ -154,7 +208,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         else {
             return Purpose::Burst;
         };
-        let configured = self.warm.learned.as_ref().map_or(0, |(learned, _)| {
+        let configured = self.warm.learned().map_or(0, |learned| {
             warm::target(
                 repository.warm,
                 learned.active(&repository.name, time::now_ms()),
@@ -190,7 +244,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// How many warm runners each pool wants now.
     pub(super) fn warm_targets(&self) -> BTreeMap<Pool, usize> {
-        let Some((learned, _)) = &self.warm.learned else {
+        let Some(learned) = self.warm.learned() else {
             return BTreeMap::new();
         };
         let now = time::now_ms();
