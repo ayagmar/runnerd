@@ -36,7 +36,10 @@ enum Adoption {
 enum Listed {
     /// Idle: the last listing showed it waiting for a job.
     Idle,
-    /// Busy, as the listing before the last already showed it, or as adoption counts it.
+    /// Adopted, and no listing answered for it yet. It counts as busy, but no listing showed it so: the first that
+    /// does may still show the job it took queued. Only `adopted` makes it.
+    Unlisted,
+    /// Busy, as the listing before the last already showed it.
     Busy,
     /// Busy since the last listing, or since GitHub said so after it: the queued jobs listing after it may still show
     /// the job it took, as GitHub lists one queued for a few seconds after.
@@ -57,9 +60,9 @@ struct TakenJob {
 /// job, and a capture lags a listing that shows the runner busy. The key is beside the job, not in it: admission keys
 /// a job by the history's record, which a capture that names the job again does not change.
 ///
-/// A restart rebuilds it in `adopted`: adopted, counted busy until a listing says otherwise, with the job its history
-/// row names and no key until `find_keys` reads its record. Whether a listing showed it newly busy or waiting, when
-/// its job was found and a forced pause's deadline are lost. A reload does not touch it.
+/// A restart rebuilds it in `adopted`: adopted and not yet listed, counted busy until a listing says otherwise, with
+/// the job its history row names and no key until `find_keys` reads its record. Whether a listing showed it newly
+/// busy or waiting, when its job was found and a forced pause's deadline are lost. A reload does not touch it.
 #[derive(Debug, Clone)]
 pub(super) struct Engagement {
     origin: Origin,
@@ -90,7 +93,7 @@ impl Engagement {
     pub(super) fn adopted(job: Option<u64>) -> Self {
         Self {
             origin: Origin::Adopted(Adoption::Unknown),
-            listing: Listed::Busy,
+            listing: Listed::Unlisted,
             job: job.map(|id| TakenJob { id, found_at: None }),
             key: None,
             cancel_by: None,
@@ -105,11 +108,13 @@ impl Engagement {
         }
     }
 
-    /// A runners listing showed it busy or idle. Called after `runners_listed`, for the runners it answered for.
+    /// A runners listing showed it busy or idle. Called after `runners_listed`, for the runners it answered for. The
+    /// first listing that shows an adopted runner busy shows it newly busy, though adoption counted it busy already.
+    /// One that shows an adopted runner waiting with no job named says its next job starts under this daemon.
     pub(super) fn listed(&mut self, busy: bool) {
         self.listing = match (busy, self.listing) {
             (false, _) => Listed::Idle,
-            (true, Listed::Idle | Listed::NewlyBusy) => Listed::NewlyBusy,
+            (true, Listed::Idle | Listed::Unlisted | Listed::NewlyBusy) => Listed::NewlyBusy,
             (true, Listed::Busy) => Listed::Busy,
         };
         if let Origin::Adopted(adoption) = &mut self.origin
@@ -120,11 +125,13 @@ impl Engagement {
         }
     }
 
-    /// GitHub said it took a job, as a removal of it refused: newly busy unless a listing showed it busy already.
+    /// GitHub said it took a job, as a removal of it refused: newly busy unless a listing showed it busy already. One
+    /// no listing answered for yet stays so, for the first that shows it busy to mark it newly busy.
     pub(super) fn kept_busy(&mut self) {
         self.listing = match self.listing {
             Listed::Idle => Listed::NewlyBusy,
             Listed::Busy | Listed::NewlyBusy => Listed::Busy,
+            Listed::Unlisted => Listed::Unlisted,
         };
     }
 
@@ -156,8 +163,9 @@ impl Engagement {
         self.cancel_by = Some(deadline);
     }
 
-    /// Whether GitHub's last runners listing showed it busy, or GitHub said so since. Alone it says what the listing
-    /// says, which lags a capture that named a job: `engaged` is whether it holds one.
+    /// Whether GitHub's last runners listing showed it busy, or GitHub said so since; an adopted runner no listing
+    /// answered for yet counts as busy. Alone it says what the listing says, which lags a capture that named a job:
+    /// `engaged` is whether it holds one.
     pub(super) fn listed_busy(&self) -> bool {
         self.listing != Listed::Idle
     }

@@ -2741,6 +2741,70 @@ async fn a_waiting_runner_a_restart_adopts_counts_in_full_once_it_takes_a_job() 
     );
 }
 
+/// As `a_waiting_runner_a_restart_adopts_counts_in_full_once_it_takes_a_job`, while no runners listing answers.
+#[tokio::test]
+async fn a_runner_a_restart_adopts_whose_runners_listing_fails_does_not_count_its_job_as_started_here()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    history_of(&handle.store, "build", 1000, 3 * G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        job(1),
+        QueuedJob {
+            name: "e2e".to_owned(),
+            ..job(2)
+        },
+    ];
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    handle.store.flush().await;
+    // The last capture started may not have run yet, and would read the job as this daemon's.
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    // Each takes its job while no daemon runs.
+    for slot in 1..=2 {
+        let capture = format!("@@job {slot} {slot}\n");
+        docker.0.lock().unwrap().slot_captures.insert(slot, capture);
+    }
+    // No runners listing answers after the restart: the adopted runners stay unlisted.
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_runners
+        .insert("o/r".to_owned(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(&github, &handle.store, 512 * M);
+    let found = engine
+        .occupied()
+        .filter(|(_, occupant)| occupant.job_found_at().is_some() && occupant.has_key())
+        .count();
+    assert_eq!(found, 2, "this daemon found both jobs");
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.pooled,
+        None,
+        "their runners are not known to have started as predicted"
+    );
+}
+
 #[tokio::test]
 async fn a_host_that_stalls_or_runs_short_takes_the_credit_back_and_holds_the_start() {
     let (github, docker, dir) = (

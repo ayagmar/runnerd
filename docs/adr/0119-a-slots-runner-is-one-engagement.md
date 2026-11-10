@@ -26,6 +26,10 @@ keyed by runner name and swept each tick against the slots. A found time without
 - An adopted runner's job counts as started here once a listing showed the runner waiting with no job named since
   its adoption (`Adoption::Waited`). A listing that shows it idle after a capture named its job does not count: the
   listing lags the capture, so the job may have started while no daemon ran.
+- An adopted runner counts as busy until a listing answers for it (`Listed::Unlisted`, which only adoption makes), and
+  the first listing that shows it busy shows it newly busy: it may have taken a job GitHub still lists queued. A
+  runner that was busy before the restart pays for this: it holds back one listed job of its pool until the next
+  listing.
 - `Occupant` keeps what does not change once it is placed: its names, container, limits, labels, image and spec. It
   also keeps `admission`, which `rereserve` writes. Its readers delegate to `Engagement`.
 
@@ -37,6 +41,5 @@ touch the value.
 ## Consequences
 
 Engine has one lifecycle field fewer. An adopted runner that took its job under this daemon earns pooled credit
-once its job settles, as one this daemon started does. The known gaps of an adopted runner are now explicit in one
-type: it gets no claim if it takes a job before the first listing, and its cancel deadline does not outlive a
-restart. Each is fixed on `Origin::Adopted` or the runner's row in its own change.
+once its job settles, as one this daemon started does, and one that took a job before the first listing gets no
+twin for it. What an adopted runner still lacks is explicit in one type: its cancel deadline does not outlive a restart.
