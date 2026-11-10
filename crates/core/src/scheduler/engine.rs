@@ -36,6 +36,7 @@ mod repository_state;
 mod runner_exit;
 mod runners;
 mod running_reads;
+mod slot;
 mod status;
 mod stop;
 mod tick;
@@ -67,6 +68,7 @@ use self::presence::Repositories;
 pub use self::records::RecordSelection;
 use self::registrations::Registrations;
 use self::repository_state::RepositoryState;
+use self::slot::Slot;
 use self::upkeep::Upkeep;
 use self::watches::Watches;
 use super::SlotRef;
@@ -406,7 +408,7 @@ pub struct Engine<G = Github, D = Docker> {
     memory_max: Option<u64>,
     /// The CPUs the slice may use, in millicores, read at start.
     cpus: Option<u64>,
-    slots: BTreeMap<String, Vec<Option<Occupant>>>,
+    slots: BTreeMap<String, Vec<Slot>>,
     /// The repositories, listed by the config or draining after a reload removed them.
     repositories: Repositories,
     /// What each profile's measures and reseeds are doing and have due.
@@ -534,7 +536,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let slots = config
             .profiles
             .iter()
-            .map(|(name, profile)| (name.clone(), vec![None; profile.slots as usize]))
+            .map(|(name, profile)| {
+                let mut slots = Vec::new();
+                slots.resize_with(profile.slots as usize, Slot::default);
+                (name.clone(), slots)
+            })
             .collect();
         let repositories = Repositories::new(
             config
@@ -813,7 +819,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Whether a stop in `mode` is done: what it waits for has ended. A record being made is waited for; a reseed and
     /// a check of the caches are not, as the next start adopts the reseed and checks the caches first.
     fn stopped(&self, mode: Shutdown) -> bool {
-        let idle = self.slots.values().flatten().all(Option::is_none);
+        let idle = self.slots.values().flatten().all(Slot::is_free);
         let recorded = !self.records.is_recording();
         match mode {
             Shutdown::No => false,
@@ -887,7 +893,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn occupied(&self) -> impl Iterator<Item = (SlotRef, &Occupant)> {
         self.slots.iter().flat_map(|(profile, slots)| {
             slots.iter().enumerate().filter_map(|(index, slot)| {
-                slot.as_ref().map(|occupant| {
+                slot.occupant().map(|occupant| {
                     (
                         SlotRef {
                             profile: profile.clone(),
@@ -905,7 +911,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.slots
             .get(&slot.profile)
             .and_then(|slots| slots.get(slot.index))
-            .and_then(Option::as_ref)
+            .and_then(Slot::occupant)
     }
 
     /// Drops the free slots past each profile's configured number, and the profiles a reload removed once nothing
@@ -917,7 +923,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .profiles
                 .get(name)
                 .map_or(0, |profile| profile.slots as usize);
-            while slots.len() > count && slots.last().is_some_and(Option::is_none) {
+            while slots.len() > count && slots.last().is_some_and(Slot::is_free) {
                 slots.pop();
             }
         }

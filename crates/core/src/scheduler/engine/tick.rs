@@ -832,7 +832,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .get(&pool.profile)
             .into_iter()
             .flatten()
-            .flatten()
+            .filter_map(super::Slot::occupant)
             .filter(|occupant| occupant.repository == pool.name && occupant.claims_a_listed_job())
             .count();
         let gone = self.claims.unnamed(&pool.name, &pool.profile);
@@ -948,11 +948,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let slots = &self.slots[name];
         // A reload may have left fewer slots than runners: free slots count only up to the configured number.
         let mut free = (profile.slots as usize)
-            .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
+            .saturating_sub(slots.iter().filter(|slot| !slot.is_free()).count());
         let slots_len = slots.len();
         let slots = slots
             .iter()
-            .map(|slot| match slot {
+            .map(|slot| match slot.occupant() {
                 None if free > 0 => {
                     free -= 1;
                     Slot::Free
@@ -1009,7 +1009,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.slots
             .get(&slot.profile)
             .and_then(|slots| slots.get(slot.index))
-            .is_some_and(Option::is_some)
+            .is_some_and(|slot| !slot.is_free())
     }
 
     /// The part of the plain count no runner's end gives back: the seed containers and the room waiting ones hold, the
@@ -1182,7 +1182,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Updates each runner's busy flag from the listings and deletes this host's runners that no slot holds.
     async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>) {
-        for occupant in self.slots.values_mut().flatten().flatten() {
+        for occupant in self
+            .slots
+            .values_mut()
+            .flatten()
+            .filter_map(super::Slot::occupant_mut)
+        {
             occupant.engagement.runners_listed();
         }
         for (repository, answer) in listings {
@@ -1208,7 +1213,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .slots
                     .values_mut()
                     .flatten()
-                    .flatten()
+                    .filter_map(super::Slot::occupant_mut)
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
                     Some(occupant) => {

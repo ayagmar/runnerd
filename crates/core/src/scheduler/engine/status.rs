@@ -39,7 +39,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .enumerate()
                     // Slots a reload removed show while their runner runs.
                     .filter(|(index, slot)| {
-                        slot.is_some()
+                        !slot.is_free()
                             || self
                                 .config
                                 .profiles
@@ -48,7 +48,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     })
                     .map(|(index, slot)| api::SlotStatus {
                         slot: index + 1,
-                        runner: slot.as_ref().map(|occupant| api::RunnerStatus {
+                        runner: slot.occupant().map(|occupant| api::RunnerStatus {
                             repository: occupant.repository.clone(),
                             name: occupant.runner_name.clone(),
                             runner_id: occupant.runner_id,

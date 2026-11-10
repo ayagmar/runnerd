@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::ledger::{ReadFailure, Unanswered, Wait};
 use super::tick::CONCURRENT_REQUESTS;
-use super::{Engine, Meanwhile, Occupant, watches};
+use super::{Engine, Meanwhile, Occupant, Slot, watches};
 use crate::admission::Key;
 use crate::docker::{DockerApi, is_declined, is_log_gone, is_not_found, is_not_running};
 use crate::github::{self, GithubApi, JobDetails};
@@ -277,7 +277,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
             slots
                 .iter_mut()
-                .flatten()
+                .filter_map(Slot::occupant_mut)
                 .find(|occupant| occupant.runner_name == found.runner)
                 .map(|occupant| (profile, occupant))
         }) else {
@@ -332,7 +332,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             workflow: details.workflow_name.clone(),
             name: details.name.clone(),
         };
-        for occupant in self.slots.values_mut().flatten().flatten() {
+        for occupant in self
+            .slots
+            .values_mut()
+            .flatten()
+            .filter_map(Slot::occupant_mut)
+        {
             if occupant.runs(details.id) {
                 occupant.engagement.keyed(key.clone());
             }

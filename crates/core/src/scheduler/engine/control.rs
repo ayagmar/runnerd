@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use super::records::RecordSelection;
 use super::stop::Stop;
-use super::{Engine, Occupant};
+use super::{Engine, Occupant, Slot};
 use crate::api;
 use crate::cache;
 use crate::config::{ByteSize, Config};
@@ -657,7 +657,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .slots
                     .values_mut()
                     .flatten()
-                    .flatten()
+                    .filter_map(Slot::occupant_mut)
                     .find(|candidate| candidate.runner_name == occupant.runner_name)
                 {
                     cancelled
@@ -882,7 +882,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .iter()
                 .enumerate()
                 .skip(kept)
-                .find(|(_, slot)| slot.is_some())
+                .find(|(_, slot)| !slot.is_free())
                 .map(|(index, _)| {
                     format!(
                         "{name}'s slot {} has a runner, and the new config keeps {kept} slots",
@@ -910,7 +910,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (name, profile) in &self.config.profiles {
             let slots = self.slots.entry(name.clone()).or_default();
             if slots.len() < profile.slots as usize {
-                slots.resize(profile.slots as usize, None);
+                slots.resize_with(profile.slots as usize, Slot::default);
             }
             self.retired.remove(name);
         }

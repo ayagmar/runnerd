@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use super::leftovers::Unread;
 use super::records::Undecided;
-use super::{Engagement, Engine, Occupant};
+use super::{Engagement, Engine, Occupant, Slot};
 use crate::api;
 use crate::cache;
 use crate::docker::{self, DockerApi, is_being_removed, is_not_found};
@@ -254,7 +254,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn keep_draining(&mut self, profile: &str, index: usize, occupant: &Occupant) {
         let slots = self.slots.entry(profile.to_owned()).or_default();
         if slots.len() <= index {
-            slots.resize(index + 1, None);
+            slots.resize_with(index + 1, Slot::default);
         }
         if !self.config.profiles.contains_key(profile) {
             self.retired
@@ -341,7 +341,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.slots
                     .get_mut(&profile)?
                     .get_mut(index)
-                    .filter(|slot| slot.is_none())
+                    .filter(|slot| slot.is_free())
             });
             match free {
                 Some(slot) if container.running && known_repository => {
@@ -350,7 +350,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         occupant.runner_name,
                         index.map_or(0, |index| index + 1)
                     );
-                    *slot = Some(occupant.clone());
+                    slot.place(occupant.clone());
                     running.insert(occupant.runner_name.clone());
                     // Its socket back in the directory its container mounts, if it does; its job's writes are
                     // decided again.
