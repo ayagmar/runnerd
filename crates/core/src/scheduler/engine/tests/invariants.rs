@@ -4779,3 +4779,32 @@ async fn a_start_fits_a_reading_taken_while_its_launch_waited() {
     ];
     assert_eq!(broken(&steps).await, None);
 }
+
+/// Shrunk from seeds 159 and 143. Job 2's runner goes while GitHub still lists it, so the listing after the restart
+/// has it after job 4. The tick starts a runner for each, oldest first, and job 2's wait ends; the next plan must name
+/// the idle runner for job 2 as well, not for job 4, which still waits for a slot.
+#[tokio::test]
+async fn an_idle_runner_is_named_for_the_oldest_job_whatever_order_the_listing_gives() {
+    let heavy = |second| Step::Queue {
+        second,
+        labels: Labels::Heavy,
+    };
+    let steps = [
+        heavy(false),
+        heavy(true),
+        Step::Tick,
+        Step::Assign(0),
+        Step::Assign(0),
+        heavy(false),
+        heavy(true),
+        Step::Reload(Change::HeavyMemory),
+        Step::Reseed { light: false },
+        Step::RunnerGoesStillListed(7),
+        Step::Reload(Change::PooledHost),
+        Step::Finish(3),
+        Step::Elapse,
+        Step::Reload(Change::PooledCount),
+        Step::RestartInspectFails(2),
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
