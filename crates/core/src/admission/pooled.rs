@@ -45,14 +45,20 @@ pub const GROWTH_JOBS: usize = 3;
 /// The least room the growth count keeps for growth: 6G, as `HOST_RESERVE_FLOOR`.
 pub const GROWTH_FLOOR: u64 = 6 << 30;
 
+/// The most the growth count's credits take off the plain count: 14G. On the replay it bound a few moments and cost no
+/// waiting; 20G bound none, and 10G spent longer with the host under 6.2G available (ADR 0130). It bounds what
+/// `MemoryMax` and the host's limit are passed by if every runner reaches its take at once.
+pub const GROWTH_CEILING: u64 = 14 << 30;
+
 /// The growth count the daemon counts by (ADR 0130): room for the three largest growths and every young runner's,
-/// within 0099's bounds, and the credits below the guard's line.
+/// within 0099's bounds and `GROWTH_CEILING`, and the credits below the guard's line.
 pub const GROWTH: Growth = Growth {
     jobs: GROWTH_JOBS,
     bound: Bound::HighWater,
     young: Young::Covered,
     below: Below::Credits,
     hold: Hold::Free,
+    ceiling: Some(GROWTH_CEILING),
 };
 
 /// How the growth count counts (ADR 0130): one value for the daemon, `GROWTH`, and the variants `simulate` compares
@@ -69,6 +75,9 @@ pub struct Growth {
     pub below: Below,
     /// Whether the brake holds the growth count back now.
     pub hold: Hold,
+    /// The most each credit takes off the plain count, if a fixed figure bounds it: what `MemoryMax` and the host's
+    /// limit may be passed by if every runner reaches its take at once.
+    pub ceiling: Option<u64>,
 }
 
 impl Growth {
@@ -81,6 +90,7 @@ impl Growth {
             young: Young::Ranked,
             below: Below::Plain,
             hold: Hold::Free,
+            ceiling: None,
         }
     }
 
@@ -355,7 +365,8 @@ fn used(runners: &[Runner<'_>]) -> u64 {
 /// stale   = runners whose samples say nothing, at their take
 /// room    = max(floor, the `jobs` largest g_i, with Young::Covered the sum of every young runner's g_i)
 /// count   = committed + sum use_i + sum stale + min(sum g_i, room)
-/// credit  = plain - count; with Bound::HighWater, MemoryMax's at most `slice_room` and both at most `host_room`
+/// credit  = plain - count; with Bound::HighWater, MemoryMax's at most `slice_room` and both at most `host_room`;
+///           with a ceiling, both at most it
 /// ```
 ///
 /// Below the guard's line, and while the brake holds it, `growth.below` counts: without a recent slice sample or host
@@ -366,9 +377,15 @@ fn grown(snapshot: &Snapshot<'_>, plain: u64, growth: Growth) -> Count {
     let used = used(snapshot.runners);
     // With no runner starting, the count is lowest once every runner uses nothing: its take is then all headroom.
     let takes: Vec<u64> = snapshot.runners.iter().map(|runner| runner.takes).collect();
+    // A ceiling keeps it from falling past the plain count less the ceiling.
     let lowest = snapshot
         .committed
-        .saturating_add(takes.iter().sum::<u64>().min(room(&takes, growth.jobs)));
+        .saturating_add(takes.iter().sum::<u64>().min(room(&takes, growth.jobs)))
+        .max(
+            growth
+                .ceiling
+                .map_or(0, |ceiling| plain.saturating_sub(ceiling)),
+        );
     let low = snapshot
         .host
         .is_none_or(|host| host.stalled || host.available < host.keeps);
@@ -412,6 +429,10 @@ fn grown(snapshot: &Snapshot<'_>, plain: u64, growth: Growth) -> Count {
             (credit.min(slice).min(host), credit.min(host))
         }
         Bound::Open => (credit, credit),
+    };
+    let (credit, host_credit) = match growth.ceiling {
+        Some(ceiling) => (credit.min(ceiling), host_credit.min(ceiling)),
+        None => (credit, host_credit),
     };
     let count = Count {
         plain,

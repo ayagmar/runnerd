@@ -61,6 +61,26 @@ fn growth_past_the_room_a_look_kept_engages_the_brake_until_its_time_is_up() {
 }
 
 #[test]
+fn growth_of_exactly_the_room_kept_takes_no_brake_and_a_byte_past_it_does() {
+    let mut growth = Growth::default();
+    growth.look(at(0), using([1, 1, 1]), 3 * G, Guard::Clear);
+    growth.look(at(60), using([2, 2, 2]), 3 * G, Guard::Clear);
+    assert_eq!(growth.braked(at(60)), None, "3G grew, as much as was kept");
+    let mut past = using([2, 2, 2]);
+    past[0].memory += 1;
+    growth.look(at(120), past, 3 * G, Guard::Clear);
+    assert_eq!(
+        growth.braked(at(120)),
+        Some(Braked::Grew {
+            until: at(120) + BRAKE_FOR,
+            grew: 3 * G + 1,
+            kept: 3 * G,
+        }),
+        "one byte past the room kept"
+    );
+}
+
+#[test]
 fn growth_counts_only_looks_inside_the_window_and_runners_present_at_both() {
     let mut growth = Growth::default();
     growth.look(at(0), using([1, 1, 1]), 2 * G, Guard::Clear);
@@ -145,5 +165,35 @@ fn growth_during_a_restart_brakes_for_the_whole_time() {
     assert_eq!(
         growth.braked(at(60)).map(Braked::until),
         Some(at(60) + BRAKE_FOR)
+    );
+}
+
+#[test]
+fn beginning_again_rests_as_a_restart_unless_a_brake_stands_longer() {
+    let mut growth = Growth::default();
+    growth.look(at(0), using([1, 1, 1]), G, Guard::Clear);
+    growth.look(at(60), using([2, 2, 2]), G, Guard::Clear);
+    let grew = growth.braked(at(60));
+    growth.begin_again(at(360));
+    assert_eq!(
+        growth.braked(at(360)),
+        grew,
+        "the brake ends 25 minutes on, past the restart's 10"
+    );
+
+    let late = 60 + BRAKE_FOR.as_secs() - 60;
+    growth.begin_again(at(late));
+    assert_eq!(
+        growth.braked(at(late)),
+        Some(Braked::Restarted {
+            until: at(late) + GROWTH_WINDOW
+        }),
+        "a minute left of the brake: the restart's rest is the longer"
+    );
+    growth.look(at(late + 60), using([5, 5, 5]), G, Guard::Clear);
+    assert_eq!(
+        growth.braked(at(late + 60)).map(Braked::until),
+        Some(at(late) + GROWTH_WINDOW),
+        "the looks before it are gone: no growth since them"
     );
 }

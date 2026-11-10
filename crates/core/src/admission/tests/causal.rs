@@ -517,6 +517,7 @@ const TOP3: GrowthCount = GrowthCount {
         young: pooled::Young::Ranked,
         below: pooled::Below::Plain,
         hold: pooled::Hold::Free,
+        ceiling: None,
     },
     brake: Brake::Off,
     guard: GuardHold::Off,

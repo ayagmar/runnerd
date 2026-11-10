@@ -3315,8 +3315,8 @@ impl Case {
     /// Part of invariant 11 (ADR 0130): the growth count, which `kept` the room for growth, counts only beside a fresh
     /// reading of the slice and of a host with its margins to spare and no stall. Both counts read at least what
     /// runners with a fresh sample use, beside the rest in full and at least the 6G floor of the sampled ones' headroom,
-    /// or all of it; and both credits stay under the host's room past its margins, `MemoryMax`'s under the slice's room
-    /// below its high-water mark.
+    /// or all of it; and both credits stay under the host's room past its margins and `GROWTH_CEILING`, `MemoryMax`'s
+    /// under the slice's room below its high-water mark.
     fn the_growth_count_keeps_its_bounds(
         &mut self,
         budget: &api::Budget,
@@ -3381,9 +3381,10 @@ impl Case {
         let slice_room = (MEMORY_MAX * 90 / 100)
             .saturating_sub(slice)
             .saturating_sub(pooled::HIGH_WATER_RESERVE);
-        if credit.max(host_credit) > host_room || credit > slice_room {
+        if credit.max(host_credit) > host_room.min(pooled::GROWTH_CEILING) || credit > slice_room {
             let detail = format!(
-                "credits of {credit} and {host_credit} beside the host's {host_room} and the slice's {slice_room}"
+                "credits of {credit} and {host_credit} beside the host's {host_room}, the slice's {slice_room} and the \
+                 ceiling"
             );
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
@@ -4924,7 +4925,7 @@ async fn an_idle_runner_is_named_for_the_oldest_job_whatever_order_the_listing_g
         Step::Reload(Change::HeavyMemory),
         Step::Reseed { light: false },
         Step::RunnerGoesStillListed(7),
-        Step::Reload(Change::PooledHost),
+        Step::Reload(Change::PooledCount),
         Step::Finish(3),
         Step::Elapse,
         Step::Reload(Change::PooledCount),

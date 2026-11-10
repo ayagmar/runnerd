@@ -5,7 +5,7 @@
 //! slot's runner is `runners`. It lists the repositories due at once, a few requests at a time, and answers the API's
 //! commands while it waits for the listings (ADR 0026).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 

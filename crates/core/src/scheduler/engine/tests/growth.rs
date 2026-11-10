@@ -266,6 +266,33 @@ async fn a_reload_rests_the_count_only_when_it_changes_what_the_count_reads() {
 }
 
 #[tokio::test]
+async fn a_reload_that_rests_the_count_keeps_a_brake_that_ends_later() {
+    // Catches a reload that cuts a half-hour brake to a restart's ten minutes: a reload adopts no runner again, so the
+    // runners that grew past the room are still ranked as they were.
+    let (github, docker, dir) = fakes();
+    let (mut engine, handle) = four_settled_jobs(&github, &docker, &dir, &measured()).await;
+    window_passes(&mut engine, &github, &handle, 512 * M).await;
+    runners_use(&github, &handle.store, 3 * G);
+    engine.tick(Shutdown::No).await;
+    let brake = counted(&mut engine, &handle)
+        .0
+        .and_then(|shown| shown.brake);
+    assert!(
+        matches!(brake, Some(api::CountBrake::Grew { .. })),
+        "{brake:?}"
+    );
+
+    engine.reload(Config::parse(&measured()).unwrap(), Some(30 * G), None);
+    assert_eq!(
+        counted(&mut engine, &handle)
+            .0
+            .and_then(|shown| shown.brake),
+        brake,
+        "a new MemoryMax keeps the brake to its end"
+    );
+}
+
+#[tokio::test]
 async fn runners_a_restart_adopts_count_in_full_until_the_window_and_keep_all_their_room_after() {
     // Catches a restart that counts at once (challenge finding 3), and adopted runners ranked with the rest for the
     // room kept, as if this daemon had seen their jobs start and knew how far they had grown.

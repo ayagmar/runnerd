@@ -99,9 +99,10 @@ impl Measured {
         self.growth.look(now, used, room, guard);
     }
 
-    /// The growth count's looks were taken by other rules, or none were taken: it is held as after a restart at `now`.
+    /// The growth count's looks were taken by other rules, or none were taken: it is held as after a restart at `now`,
+    /// or until a brake already standing ends if that is later (`growth::Growth::begin_again`).
     pub(super) fn restart_growth(&mut self, now: SystemTime) {
-        self.growth = growth::Growth::restarted(now);
+        self.growth.begin_again(now);
     }
 
     /// The growth count's looks and brake, `by` older.

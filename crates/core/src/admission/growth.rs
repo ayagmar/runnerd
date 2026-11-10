@@ -87,8 +87,8 @@ struct Look<Id> {
 
 /// The looks of the last `GROWTH_WINDOW` and the brake they set. Nothing of it is stored: a daemon's restart begins at
 /// `restarted`, a replay at `default`. A reload keeps it, unless it turns the growth count on or changes what the
-/// count's guard reads (`MemoryMax`, the host's ceiling), which begins it again at `restarted`: its looks were taken
-/// by other rules.
+/// count's guard reads (`MemoryMax`, the host's ceiling), which begins it again (`begin_again`): its looks were taken
+/// by other rules, and a brake standing past the restart's rest stands.
 #[derive(Debug, Clone)]
 pub struct Growth<Id> {
     looks: VecDeque<Look<Id>>,
@@ -114,6 +114,21 @@ impl<Id: Ord> Growth<Id> {
                 until: now + GROWTH_WINDOW,
             }),
         }
+    }
+
+    /// Begins again at `now`, for a reload that turned the growth count on or changed what its guard reads: the looks
+    /// go, taken by other rules, and the count rests as after a restart, or until a brake already standing ends if
+    /// that is later. A reload re-adopts no runner, so the runners that engaged a brake are still ranked as they were.
+    pub fn begin_again(&mut self, now: SystemTime) {
+        let restarted = Braked::Restarted {
+            until: now + GROWTH_WINDOW,
+        };
+        self.looks.clear();
+        self.braked = Some(
+            self.braked(now)
+                .filter(|standing| standing.until() > restarted.until())
+                .unwrap_or(restarted),
+        );
     }
 
     /// Takes a plan's look at `now`: what each runner `used`, the `room` the count keeps for growth and whether it was

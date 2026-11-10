@@ -350,6 +350,43 @@ fn the_growth_count_keeps_at_least_its_floor_and_at_most_every_growth() {
 }
 
 #[test]
+fn the_daemons_growth_credits_stop_at_its_ceiling() {
+    // Twelve copies of a matrix job, each taking 6G and using 1G, beside a roomy slice and host: 72G of takes count
+    // 12G used and 15G for the three largest growths, 45G less, past what the replay ever credited.
+    let matrix = key("o/r", "matrix");
+    let copies: Vec<Runner<'_>> = (0..12).map(|_| settled(&matrix, 6 * G, G)).collect();
+    let count_by = |growth| {
+        count(&Snapshot {
+            runners: &copies,
+            committed: 0,
+            slice: Some(Slice {
+                memory: 0,
+                memory_max: Some(100 * G),
+            }),
+            host: Some(Host {
+                available: 100 * G,
+                keeps: 0,
+                stalled: false,
+            }),
+            most: MOST_CREDIT,
+            host_reserve: true,
+            growth: Some(growth),
+        })
+    };
+    let open = count_by(Growth {
+        ceiling: None,
+        ..GROWTH
+    });
+    assert_eq!((open.credit, open.host_credit), (45 * G, 45 * G));
+    let daemon = count_by(GROWTH);
+    assert_eq!(
+        (daemon.credit, daemon.host_credit),
+        (GROWTH_CEILING, GROWTH_CEILING)
+    );
+    assert_eq!(daemon.pooled(), 72 * G - GROWTH_CEILING);
+}
+
+#[test]
 fn below_the_guards_line_the_growth_count_is_plain() {
     let night_jobs = Night::new();
     let runners = night_jobs.runners();
@@ -922,6 +959,7 @@ mod generated {
             } else {
                 Hold::Free
             },
+            ceiling: (rng.below(3) == 0).then(|| rng.below(20 * G)),
         };
         Snapshot {
             growth: Some(growth),
@@ -931,7 +969,8 @@ mod generated {
 
     /// The growth count, under the guard's line or over it, by every rule: never past the plain count; over the line
     /// and free, what counts in full with the room it keeps, which is at least the floor and with `Young::Covered`
-    /// every young runner's growth, at most all of it, both budgets reading that unbounded and at least that bounded;
+    /// every young runner's growth, at most all of it, and at least the plain count less any ceiling, both budgets
+    /// reading that unbounded and at least that bounded;
     /// otherwise what `Below` says. A runner leaving frees at most its take; a start adds at most its own.
     #[test]
     fn the_growth_count_keeps_its_bounds_on_every_snapshot() {
@@ -965,7 +1004,12 @@ mod generated {
                         Reading::Stale => runner.takes,
                     })
                     .sum();
-                let growth_count = view.committed + full + kept;
+                // A ceiling keeps each credit at most it, and so each count at least the plain count less it.
+                let growth_count = (view.committed + full + kept).max(
+                    growth
+                        .ceiling
+                        .map_or(0, |ceiling| now.plain.saturating_sub(ceiling)),
+                );
                 match growth.bound {
                     Bound::Open => assert!(
                         now.pooled() == growth_count && now.hosted() == growth_count,

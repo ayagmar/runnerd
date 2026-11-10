@@ -377,6 +377,9 @@ struct Rules {
     /// guard's line, and again from the first plan after that still below it.
     #[arg(long, requires = "brake")]
     guard_hold: bool,
+    /// With --causal, keep the top2 and top3 rows' credits, MemoryMax's and the host's, at most this.
+    #[arg(long, requires = "causal")]
+    ceiling: Option<ByteSize>,
 }
 
 impl Rules {
@@ -404,11 +407,13 @@ impl Rules {
             } else {
                 GuardHold::Off
             },
+            ceiling: self.ceiling.map(|ceiling| ceiling.0),
         }
     }
 }
 
-/// The rules `--brake`, `--bound`, `--young`, `--credits-below` and `--guard-hold` give the top2 and top3 rows.
+/// The rules `--brake`, `--bound`, `--young`, `--credits-below`, `--guard-hold` and `--ceiling` give the top2 and top3
+/// rows.
 #[derive(Debug, Clone, Copy)]
 struct Variant {
     brake: Brake,
@@ -416,6 +421,7 @@ struct Variant {
     young: pooled::Young,
     below: pooled::Below,
     guard: GuardHold,
+    ceiling: Option<u64>,
 }
 
 /// The rows `--credit`, `--count` and the rules of `variant` ask `runnerd simulate --causal` for: each `plain` a row for
@@ -451,6 +457,7 @@ fn rows(
                         bound: variant.bound,
                         young: variant.young,
                         below: variant.below,
+                        ceiling: variant.ceiling,
                         ..pooled::Growth::top(if *count == CountArg::Top2 { 2 } else { 3 })
                     },
                     brake: variant.brake,
@@ -462,13 +469,14 @@ fn rows(
     let varies = variant.brake == Brake::On
         || variant.bound == pooled::Bound::HighWater
         || variant.young == pooled::Young::Covered
-        || variant.below == pooled::Below::Credits;
+        || variant.below == pooled::Below::Credits
+        || variant.ceiling.is_some();
     let tops = counts
         .iter()
         .any(|count| matches!(count, CountArg::Top2 | CountArg::Top3));
     if varies && !tops {
         return Err(fail(
-            &"--brake, --bound, --young and --credits-below need --count top2 or top3",
+            &"--brake, --bound, --young, --credits-below and --ceiling need --count top2 or top3",
         ));
     }
     Ok(rows)
@@ -1007,6 +1015,7 @@ mod tests {
             young: pooled::Young::Covered,
             below: pooled::Below::Credits,
             guard: GuardHold::On,
+            ceiling: pooled::GROWTH.ceiling,
         };
         let none = Variant {
             brake: Brake::Off,
@@ -1014,6 +1023,7 @@ mod tests {
             young: pooled::Young::Ranked,
             below: pooled::Below::Plain,
             guard: GuardHold::Off,
+            ceiling: None,
         };
         assert_eq!(
             rows(&[], &[CountArg::Top3], every).ok(),

@@ -229,7 +229,7 @@ pub(crate) enum Counting {
 
 impl Counting {
     /// The row's name: `6G`; `growth`, the daemon's growth count; or a variant of it, such as `top3`, `top3+brake` or
-    /// `top3+brake+bound+young+credits+hold`, a suffix for each of its rules on.
+    /// `top3+brake+bound+young+credits+hold+ceil10G`, a suffix for each of its rules on.
     fn name(self) -> String {
         match self {
             Counting::Credit(credit) => ByteSize(credit).to_string(),
@@ -246,10 +246,14 @@ impl Counting {
                     (growth.below == pooled::Below::Credits, "+credits"),
                     (guard == GuardHold::On, "+hold"),
                 ];
-                rules
+                let name = rules
                     .iter()
                     .filter(|(on, _)| *on)
-                    .fold(format!("top{}", growth.jobs), |name, (_, rule)| name + rule)
+                    .fold(format!("top{}", growth.jobs), |name, (_, rule)| name + rule);
+                match growth.ceiling {
+                    Some(ceiling) => format!("{name}+ceil{}", ByteSize(ceiling)),
+                    None => name,
+                }
             }
         }
     }
@@ -384,7 +388,7 @@ fn causal_intro(
          past that room within {}; +bound: MemoryMax's credit at most the slice's room under its high-water mark less \
          2G, both at most what the host has past what it keeps; +young: the room at least every young runner's \
          growth; +credits: the daemon's credits instead of the plain count; +hold: and for {} after a plan below the \
-         line. growth: the daemon's count, top3 with every rule (ADR 0130). RECORDED: what the same jobs did as they \
+         line; +ceilN: both credits at most N. growth: the daemon's count, top3 with every rule (ADR 0130). RECORDED: what the same jobs did as they \
          ran; VS REC: each row's waits against it, the replay's error.\n",
         comparison.jobs.len(),
         ByteSize(trace.overhead),

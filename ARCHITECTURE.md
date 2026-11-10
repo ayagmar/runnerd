@@ -480,10 +480,11 @@ always returns, so the daemon closes and flushes the history.
   `over_budget`, reseeds, shells and the status, and by the replay) is what both `MemoryMax` and the host's limit read:
   what every runner uses, every stale runner's take, committed memory, and room for growth, the three largest
   headrooms or every young runner's, at least 6G. Each budget's credit, the plain count less that, stays within what
-  the slice has under the high-water mark less 2G and what the host has past its margin and a quarter of its memory
+  the slice has under the high-water mark less 2G, what the host has past its margin and a quarter of its memory, and
+  14G (`GROWTH_CEILING`)
   ([ADR 0130](docs/adr/0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md)). Below that
-  line, for 10 minutes after a start or a reload that changes what it reads, and for 30 after what runs grew past the
-  room it kept, it rests on 0099's credit of at most 6G for settled runners of different jobs and 0108's host credit of
+  line, for 10 minutes after a start or a reload that changes what it reads (or to the end of a longer brake), and for
+  30 after what runs grew past the room it kept, it rests on 0099's credit of at most 6G for settled runners of different jobs and 0108's host credit of
   their room less the two largest jobs'
   ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md),
   [ADR 0108](docs/adr/0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md)).
