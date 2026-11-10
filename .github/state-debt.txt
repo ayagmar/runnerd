@@ -1,8 +1,0 @@
-# What check-state.py still finds on main, and what removes each line. See CLAUDE.md, State, and ADR 0114.
-#
-# Every pull request that fixes a finding deletes its lines. Lines may only leave: a new one, or a higher limit, fails
-# CI. Only a line tagged "# may become a marker" may leave by becoming a marker in the script's MARKED, with its reason;
-# a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
-# script.
-#
-engine-lifecycle-fields 19

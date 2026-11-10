@@ -322,7 +322,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/taplo"
           "$RUNNER_TEMP/taplo" fmt --check
 
-  # `text`'s filter is any file, so a pull request that edits only the debt file or the script runs this.
+  # `text`'s filter is any file, so a pull request that edits only the script runs this.
   state:
     name: state
     needs: changes

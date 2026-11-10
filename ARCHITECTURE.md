@@ -280,7 +280,7 @@ always returns, so the daemon closes and flushes the history.
 ## Invariants
 
 - A lifecycle is one value with one owner, written only by that owner's methods in its leaf file. `check-state.py`
-  checks it, and lists what still breaks it in `.github/state-debt.txt`
+  checks it, with the exceptions that stay in its `MARKED`
   ([ADR 0114](docs/adr/0114-a-lifecycle-is-one-value-with-one-owner.md)).
 - API types live only in `runnerd-core::api`. Clients deserialize the same types the daemon serializes.
 - The previous release reads what this version writes, and this version what it wrote, unless an ADR accepts the
