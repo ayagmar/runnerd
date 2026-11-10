@@ -854,12 +854,154 @@ impl Burst {
     }
 }
 
+/// `p50 6.9s, p90 13.4s, max 14.9s over 100`.
+fn figures(mut durations: Vec<Duration>) -> String {
+    durations.sort();
+    let at = |percent: usize| {
+        durations[(durations.len() * percent / 100).min(durations.len() - 1)].as_secs_f64()
+    };
+    format!(
+        "p50 {:.1}s, p90 {:.1}s, max {:.1}s over {}",
+        at(50),
+        at(90),
+        at(100),
+        durations.len()
+    )
+}
+
+/// How long after the first listing that showed them each of a burst of `jobs` jobs, queued together, got its
+/// container, shortest first, with 16 free slots: the staircase a start's own time makes of a queue, one place at a
+/// time.
+async fn staircase(jobs: u64) -> Vec<Duration> {
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    let dir = TestDir::new("staircase");
+    let config = CONFIG.replace("slots = 2", "slots = 16");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.run = Duration::from_hours(1);
+    burst.queue(jobs);
+    let queued = Instant::now();
+    let run = tokio::spawn(engine.run());
+    let all = usize::try_from(jobs).unwrap();
+    play(&mut burst, |burst, _| burst.seen.taken == all).await;
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+    let listed = burst.listed_at[0];
+    let mut places: Vec<Duration> = burst
+        .seen
+        .waits
+        .iter()
+        .map(|wait| (queued + *wait).saturating_duration_since(listed))
+        .collect();
+    places.sort();
+    places
+}
+
+/// What a quiet three-repository host asks of GitHub and how soon it sees a job: `o/r` has four long jobs running,
+/// `o/s` and `o/t` nothing, and 100 short jobs of `o/r` queue 31.7 s apart, so their moments fall evenly across the
+/// 15 s poll. Prints from the job's queueing to the `o/r` listing that showed it, and to its container's start, and
+/// what the engine asked per hour.
+#[allow(clippy::print_stdout, reason = "the figures are its output")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "counts per hour, far below 2^52"
+)]
+async fn three_repositories() {
+    const JOBS: u64 = 100;
+    const SPACING: Duration = Duration::from_millis(31_700);
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    let dir = TestDir::new("three-repositories");
+    let config = format!(
+        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\nwarm = 0\n",
+        two_repositories().replace("slots = 2", "slots = 8")
+    );
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.run = Duration::from_hours(1);
+    burst.queue(4);
+    let run = tokio::spawn(engine.run());
+    let settled = Instant::now() + Duration::from_mins(2);
+    play(&mut burst, |_, now| now >= settled).await;
+    assert_eq!(burst.running.len(), 4, "four jobs run: {:?}", burst.seen);
+
+    burst.run = Duration::from_secs(10);
+    let listings = |github: &FakeGithub| {
+        github
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("queued o/r"))
+            .count()
+    };
+    let before = github.calls();
+    let reads = github.0.lock().unwrap().job_reads;
+    let began = Instant::now();
+    let mut queued = Vec::new();
+    // The times of the `o/r` listings, as the world sees them.
+    let answered = std::cell::RefCell::new((listings(&github), Vec::new()));
+    for _ in 0..JOBS {
+        burst.queue(1);
+        queued.push(Instant::now());
+        let next = Instant::now() + SPACING;
+        play(&mut burst, |_, now| {
+            let mut answered = answered.borrow_mut();
+            let seen = listings(&github);
+            if seen > answered.0 {
+                answered.0 = seen;
+                answered.1.push(now);
+            }
+            now >= next
+        })
+        .await;
+    }
+    let hours = began.elapsed().as_secs_f64() / 3600.0;
+    let played = github.calls();
+    let reads = github.0.lock().unwrap().job_reads - reads;
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    let answered = answered.into_inner().1;
+    let to_listing: Vec<Duration> = queued
+        .iter()
+        .filter_map(|queued| {
+            answered
+                .iter()
+                .find(|at| **at >= *queued)
+                .map(|at| *at - *queued)
+        })
+        .collect();
+    let to_container: Vec<Duration> = burst.seen.waits[4..].to_vec();
+    let per_hour = |prefix: &str| {
+        let count = |calls: &[String]| calls.iter().filter(|call| call.starts_with(prefix)).count();
+        (count(&played) - count(&before)) as f64 / hours
+    };
+    println!(
+        "three repositories, o/r with 4 running jobs and o/s, o/t idle, {JOBS} jobs 31.7 s apart, poll_interval 15s:"
+    );
+    println!(
+        "  queued to the listing that showed it: {}",
+        figures(to_listing)
+    );
+    println!("  queued to container start: {}", figures(to_container));
+    println!(
+        "  GitHub per hour: {:.0} o/r, {:.0} o/s and {:.0} o/t queued listings, {:.0} runner listings, {:.0} job \
+         reads, {:.0} registrations, {:.0} deletes",
+        per_hour("queued o/r"),
+        per_hour("queued o/s"),
+        per_hour("queued o/t"),
+        per_hour("runners "),
+        reads as f64 / hours,
+        per_hour("register "),
+        per_hour("delete ")
+    );
+}
+
 /// A burst for the figures ADR 0092 and 0095 give, with the latencies the owner's host shows: `BURSTS` bursts of
 /// `JOBS` short jobs of `o/r` every `PERIOD`, more than its 8 slots take, through the engine's own loop. Prints how
 /// long jobs waited from their queueing to their runner's container start, how long a slot whose job ended waited
 /// for its next runner while listed jobs waited, and what the engine asked GitHub per hour; first with Docker's
 /// events not followed, as before them, then followed, then followed with something waking the engine every 5 s, as
-/// a tick a third of `poll_interval` would (ADR 0124).
+/// a tick a third of `poll_interval` would (ADR 0124). Then, for the cadence work, the staircase of a burst's starts
+/// by place in the queue, and a quiet three-repository host's cadence.
 #[tokio::test(start_paused = true)]
 #[ignore = "prints a workload's figures; run with --ignored --nocapture"]
 #[allow(clippy::print_stdout, reason = "the figures are its output")]
@@ -905,19 +1047,6 @@ async fn workload_figures() {
         handle.shutdown(Shutdown::Force);
         run.await.unwrap();
 
-        let figures = |mut durations: Vec<Duration>| {
-            durations.sort();
-            let at = |percent: usize| {
-                durations[(durations.len() * percent / 100).min(durations.len() - 1)].as_secs_f64()
-            };
-            format!(
-                "p50 {:.1}s, p90 {:.1}s, max {:.1}s over {}",
-                at(50),
-                at(90),
-                at(100),
-                durations.len()
-            )
-        };
         let seen = &burst.seen;
         println!(
             "Docker's events {}{}:",
@@ -950,6 +1079,18 @@ async fn workload_figures() {
             per_hour("delete ")
         );
     }
+    for jobs in [4, 8, 12, 16] {
+        let places: Vec<String> = staircase(jobs)
+            .await
+            .iter()
+            .map(|place| format!("{:.1}", place.as_secs_f64()))
+            .collect();
+        println!(
+            "a burst of {jobs} jobs into 16 free slots, the listing that showed them to each one's container, in seconds: {}",
+            places.join(", ")
+        );
+    }
+    three_repositories().await;
 }
 
 /// Stops a runner container and says so in Docker's events.

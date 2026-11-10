@@ -1,7 +1,8 @@
 //! The GitHub REST API as the scheduler and the history need it: queued jobs, a job's steps, just-in-time runner
 //! configs, repository runners and cancelling a run. Owns the token, the pages of a listing, conditional requests and
-//! the answers kept for them, and rate-limit backoff. It must never put the token in a log line, a `Debug` output or
-//! an error, nor send it anywhere but its base URL, and it decides nothing about scheduling.
+//! the answers kept for them, rate-limit backoff, and the count of what it asks and the limit it last read. It must
+//! never put the token in a log line, a `Debug` output or an error, nor send it anywhere but its base URL, and it
+//! decides nothing about scheduling.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -12,11 +13,17 @@ use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use tracing::info;
 
 use crate::api;
 use crate::docker::JitConfig;
 use crate::sync::lock;
 use crate::time;
+
+mod requests;
+
+use requests::Counter;
+pub use requests::{Class, RateLimit, Report, Tally};
 
 /// The public API's address.
 pub const API_URL: &str = "https://api.github.com";
@@ -376,6 +383,18 @@ pub struct Github {
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
     etags: Mutex<Conditional>,
     blocked_until: Mutex<Option<SystemTime>>,
+    /// What was asked of GitHub: logged hourly and when the client goes.
+    requests: Mutex<Counter>,
+}
+
+impl Drop for Github {
+    /// The last window's line, as the daemon stops.
+    fn drop(&mut self) {
+        let report = lock(&self.requests).take(Instant::now());
+        if !report.is_empty() {
+            info!("{}", report.line(SystemTime::now()));
+        }
+    }
 }
 
 impl fmt::Debug for Github {
@@ -571,7 +590,25 @@ impl Github {
             token: tokio::sync::Mutex::new(None),
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
             blocked_until: Mutex::new(None),
+            requests: Mutex::new(Counter::new(Instant::now(), requests::WINDOW)),
         })
+    }
+
+    /// What the requests of this client counted since its last line was logged, and the rate limit as last read.
+    pub fn requests(&self) -> Report {
+        lock(&self.requests).peek(Instant::now())
+    }
+
+    /// Counts a response, and logs the window's line if its hour is over.
+    fn count(&self, class: Class, status: StatusCode, headers: &HeaderMap) {
+        let due = {
+            let mut requests = lock(&self.requests);
+            requests.record(class, status, headers);
+            requests.due(Instant::now())
+        };
+        if let Some(report) = due {
+            info!("{}", report.line(SystemTime::now()));
+        }
     }
 
     /// When the next request may be sent: `None` now, otherwise when the rate limit resets.
@@ -658,6 +695,7 @@ impl Github {
         if let Some(until) = self.blocked_until() {
             return Err(Error::RateLimited { until });
         }
+        let class = Class::of(&method, path);
         // The token GitHub refused, once it did.
         let mut refused: Option<Token> = None;
         loop {
@@ -680,6 +718,7 @@ impl Github {
                 source: source.without_url(),
             })?;
             let status = response.status();
+            self.count(class, status, response.headers());
             if status == StatusCode::UNAUTHORIZED && refused.is_none() {
                 refused = Some(token);
                 continue;
@@ -1091,6 +1130,14 @@ fn decode<T: DeserializeOwned>(path: &str, bytes: &[u8]) -> Result<T, Error> {
     })
 }
 
+/// The number a response header carries, if it has the header and it is one.
+fn header_number(headers: &HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+}
+
 /// When requests may resume, if this response says the rate limit is used up: the primary limit's reset time, or
 /// a secondary limit's `retry-after`.
 fn rate_limited_until(
@@ -1098,12 +1145,7 @@ fn rate_limited_until(
     headers: &HeaderMap,
     now: SystemTime,
 ) -> Option<SystemTime> {
-    let number = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok())
-    };
+    let number = |name: &str| header_number(headers, name);
     if number("x-ratelimit-remaining") == Some(0)
         && let Some(reset) = number("x-ratelimit-reset")
     {
