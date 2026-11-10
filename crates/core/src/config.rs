@@ -74,15 +74,11 @@ pub struct Host {
     /// (ADR 0084). Absent, or not above `MemTotal`, the host is the memory it has now.
     #[serde(default)]
     pub memory_ceiling: Option<ByteSize>,
-    /// Under measured admission, whether the budget counts what runners reserve as jobs that do not all peak at once,
-    /// up to a bounded credit (ADR 0099). Default on; off, it adds every runner's worst case.
+    /// Under measured admission, whether `MemoryMax` and the host's limit count what runs uses and keep room for its
+    /// growth (ADR 0099, 0108, 0130) rather than every runner's worst case. Default on; off, both add every runner's
+    /// take, the way back if a host meets what the count did not foresee.
     #[serde(default = "default_on")]
     pub pooled_count: bool,
-    /// Under measured admission, whether the host's limit counts what eligible runners use, keeping room for the two
-    /// largest growths they may still make, rather than every reservation (ADR 0108). Default on; off, the host's
-    /// limit reads every runner's worst case. Apart from `pooled_count`, which is `MemoryMax`'s.
-    #[serde(default = "default_on")]
-    pub pooled_host: bool,
 }
 
 impl Host {

@@ -255,8 +255,9 @@ pub struct Hazard {
     pub in_band: u64,
     /// How long a runner ran, in ms: what those two are shares of.
     pub active: u64,
-    /// The least the host had available with a runner running, in bytes.
-    pub lowest_available: Option<u64>,
+    /// The least the host had available with a runner running, in bytes: negative by how far what the slice and the
+    /// host's other programs held passed its memory, which a real host meets with swap, reclaim or a kill.
+    pub lowest_available: Option<i64>,
     /// How many times the credit fell.
     pub credit_falls: u64,
     /// How many of those, and of the host's credit's falls, alone took the count past a budget it was within at the

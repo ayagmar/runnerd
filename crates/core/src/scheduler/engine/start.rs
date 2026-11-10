@@ -18,7 +18,7 @@ use super::admission::Admitting;
 use super::control::Control;
 use super::runners::THIS_SPEC;
 use super::slot::Slot;
-use super::{Engagement, Engine, Footprint, Occupant, Purpose, Shutdown, unix_secs};
+use super::{Engagement, Engine, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs};
 use crate::api::{self, Basis, HoldCause};
 use crate::docker::{DockerApi, RunnerSpec, RunnerState};
 use crate::github::{self, GithubApi, Runner};
@@ -91,6 +91,7 @@ impl Starting {
             key: None,
             job_found_here: None,
             basis: Some(self.admission.basis),
+            stage: Stage::InFlight,
         }
     }
 

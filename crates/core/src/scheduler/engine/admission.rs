@@ -12,7 +12,8 @@
 //! slot.
 //! Under either policy the same predictor gives each pool and each running runner its usual run time, which says what
 //! may start behind a barrier (ADR 0097).
-//! Measured, what runs counts as `admission::pooled` adds it up (ADR 0099).
+//! Measured, what runs counts as `admission::pooled` adds it up (ADR 0099, 0130), its growth brake one of what admission
+//! keeps between plans.
 //! It reads the store and the latest host sample and reading; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +23,7 @@ use tracing::{info, warn};
 
 use super::open_waits::{OpenWaits, WaitFor, Waited};
 use super::{Engine, Slot};
-use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor, host};
+use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor, growth, host};
 use crate::api::{self, AdmissionPolicy, Basis};
 use crate::config::Admission;
 use crate::docker::DockerApi;
@@ -42,9 +43,10 @@ const HISTORY: u64 = 30 * 24 * 3600 * 1000;
 /// What admission keeps between plans. Its fields are independent, each written only by its own method here.
 ///
 /// Nothing of it survives a restart: the first plan reads the host and the history afresh, and the jobs it finds
-/// waiting start their waits then. A reload keeps it all; the next `rereserve` drops the raises if the reload turned
-/// measured admission off.
-#[derive(Debug, Default)]
+/// waiting start their waits then; the growth count's brake starts held (`growth::Growth::restarted`). A reload keeps
+/// it all; the next `rereserve` drops the raises if the reload turned measured admission off, and a reload that turns
+/// the growth count on or changes what its guard reads begins its brake again (`restart_growth`).
+#[derive(Debug)]
 pub(super) struct Measured {
     /// What the last plan saw of the host's memory.
     host: host::HostBand,
@@ -61,9 +63,54 @@ pub(super) struct Measured {
     barrier: Option<u64>,
     /// What the host's limit held at the last plan, so the change is logged once.
     host_holds: HostHolds,
+    /// The growth count's brake, its looks by runner name (ADR 0130).
+    growth: growth::Growth<String>,
 }
 
 impl Measured {
+    /// What a daemon starts with at `now`: nothing known, and the growth count held until it has a window of looks.
+    pub(super) fn new(now: SystemTime) -> Self {
+        Self {
+            host: host::HostBand::default(),
+            job_waits: OpenWaits::default(),
+            predictor: None,
+            high_water: false,
+            raised: Vec::new(),
+            barrier: None,
+            host_holds: HostHolds::default(),
+            growth: growth::Growth::restarted(now),
+        }
+    }
+
+    /// The growth count's brake in force at `now`, if any.
+    pub(super) fn braked(&self, now: SystemTime) -> Option<growth::Braked> {
+        self.growth.braked(now)
+    }
+
+    /// A tick's look at what each runner `used`, the `room` the growth count keeps and whether it was above its
+    /// `guard`'s line, at `now`.
+    pub(super) fn look_at_growth(
+        &mut self,
+        now: SystemTime,
+        used: Vec<growth::Use<String>>,
+        room: u64,
+        guard: growth::Guard,
+    ) {
+        self.growth.look(now, used, room, guard);
+    }
+
+    /// The growth count's looks were taken by other rules, or none were taken: it is held as after a restart at `now`,
+    /// or until a brake already standing ends if that is later (`growth::Growth::begin_again`).
+    pub(super) fn restart_growth(&mut self, now: SystemTime) {
+        self.growth.begin_again(now);
+    }
+
+    /// The growth count's looks and brake, `by` older.
+    #[cfg(test)]
+    pub(super) fn age_growth(&mut self, by: Duration) {
+        self.growth.age(by);
+    }
+
     /// What the last plan saw of the host's memory.
     pub(super) fn host(&self) -> host::HostBand {
         self.host
@@ -855,7 +902,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some(max) = self.memory_max else {
             return Vec::new();
         };
-        let mut in_use = self.count(self.host_remembered()).pooled();
+        // Counted again after each stop: under the growth count a stop frees what it changes of the room kept.
+        let mut tally = self.tally(self.host_remembered());
+        let mut in_use = tally.count().pooled();
         let mut stops = Vec::new();
         for (slot, occupant) in self.occupied() {
             if in_use <= max {
@@ -873,7 +922,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 occupant.runner_name,
                 crate::config::ByteSize(occupant.reserved())
             );
-            in_use = in_use.saturating_sub(self.takes(occupant));
+            tally.stop(&slot);
+            in_use = tally.count().pooled();
             stops.push(Decision::Stop {
                 slot,
                 reason: StopReason::OverBudget,

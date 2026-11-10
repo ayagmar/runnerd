@@ -6,9 +6,10 @@
 //! runner: its reservation, what it learns from and what is stored of it stay as they are. `count` is the one
 //! implementation: the engine and `admission::simulate` build a `Snapshot` and call it. Pure: no I/O, no clock.
 //!
-//! It also has the growth count the density study proposes, for `simulate --count` before the daemon reads it: what
-//! every runner uses, with room for its few largest growths, in place of both credits; the plain count below the
-//! guard's line. `growth::Growth` is its brake.
+//! It also has the growth count (ADR 0130), which both budgets read in place of those credits while it holds: what every
+//! runner uses, with room for its three largest growths and every young runner's, both credits bounded as 0099 bounds
+//! `MemoryMax`'s; below the guard's line, or while its brake (`growth::Growth`) holds, the credits above. `simulate
+//! --count` replays it and the variants it was chosen from.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -44,6 +45,103 @@ pub const GROWTH_JOBS: usize = 3;
 /// The least room the growth count keeps for growth: 6G, as `HOST_RESERVE_FLOOR`.
 pub const GROWTH_FLOOR: u64 = 6 << 30;
 
+/// The most the growth count's credits take off the plain count: 14G. On the replay it bound a few moments and cost no
+/// waiting; 20G bound none, and 10G spent longer with the host under 6.2G available (ADR 0130). It bounds what
+/// `MemoryMax` and the host's limit are passed by if every runner reaches its take at once.
+pub const GROWTH_CEILING: u64 = 14 << 30;
+
+/// The growth count the daemon counts by (ADR 0130): room for the three largest growths and every young runner's,
+/// within 0099's bounds and `GROWTH_CEILING`, and the credits below the guard's line.
+pub const GROWTH: Growth = Growth {
+    jobs: GROWTH_JOBS,
+    bound: Bound::HighWater,
+    young: Young::Covered,
+    below: Below::Credits,
+    hold: Hold::Free,
+    ceiling: Some(GROWTH_CEILING),
+};
+
+/// How the growth count counts (ADR 0130): one value for the daemon, `GROWTH`, and the variants `simulate` compares
+/// it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Growth {
+    /// How many runners' growth it keeps room for, the largest.
+    pub jobs: usize,
+    /// What bounds the credit it gives.
+    pub bound: Bound,
+    /// Whether the room it keeps covers every young runner's growth.
+    pub young: Young,
+    /// What counts below the guard's line, and while the brake holds.
+    pub below: Below,
+    /// Whether the brake holds the growth count back now.
+    pub hold: Hold,
+    /// The most each credit takes off the plain count, if a fixed figure bounds it: what `MemoryMax` and the host's
+    /// limit may be passed by if every runner reaches its take at once.
+    pub ceiling: Option<u64>,
+}
+
+impl Growth {
+    /// The count of the density study, as PR 1's replay had it: room for the `jobs` largest growths, unbounded, the
+    /// plain count below the guard's line.
+    pub fn top(jobs: usize) -> Self {
+        Self {
+            jobs,
+            bound: Bound::Open,
+            young: Young::Ranked,
+            below: Below::Plain,
+            hold: Hold::Free,
+            ceiling: None,
+        }
+    }
+
+    /// This count with its brake holding it back.
+    #[must_use]
+    pub fn held(self) -> Self {
+        Self {
+            hold: Hold::Held,
+            ..self
+        }
+    }
+}
+
+/// What bounds the growth count's credit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// 0099's bounds: `MemoryMax`'s credit at most the slice's room under the high-water mark less 2G, and both at most
+    /// what the host has available past what it keeps.
+    HighWater,
+    /// Only the room kept for growth.
+    Open,
+}
+
+/// Whether the room the growth count keeps covers every young runner's growth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Young {
+    /// It keeps at least the headroom of every runner whose job this daemon has not seen run `POOL_AFTER` yet: what a
+    /// burst of starts may grow by together is counted, not only the largest few.
+    Covered,
+    /// A young runner's headroom is ranked with the others'.
+    Ranked,
+}
+
+/// What counts where the growth count does not: below the guard's line and while the brake holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Below {
+    /// 0099's and 0108's credits, as `Snapshot::most` and `Snapshot::host_reserve` allow.
+    Credits,
+    /// The plain count.
+    Plain,
+}
+
+/// Whether the brake (`growth::Growth`) holds the growth count back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// It counts, above the guard's line.
+    Free,
+    /// What `Growth::below` says counts.
+    Held,
+}
+
 /// What a runner holds of the count.
 #[derive(Debug, Clone, Copy)]
 pub struct Runner<'run> {
@@ -73,6 +171,13 @@ impl Runner<'_> {
         let settled = self.ran.is_some_and(|ran| ran >= POOL_AFTER);
         self.sampled()
             .filter(|_| predicted && settled && self.key.is_some())
+    }
+
+    /// Whether the growth count keeps room for all of its growth (`Young::Covered`): its first sample is still to
+    /// come, or this daemon has not seen its job run `POOL_AFTER`, as a runner waiting for a job, one it adopted, or
+    /// one just started.
+    fn young(&self) -> bool {
+        matches!(self.used, Reading::NotYet) || self.ran.is_none_or(|ran| ran < POOL_AFTER)
     }
 
     /// What its fresh sample says it uses, at most what it takes.
@@ -128,12 +233,11 @@ pub struct Snapshot<'run> {
     pub host: Option<Host>,
     /// The most the credit may be: `MOST_CREDIT`; 0 with pooling off and under caps admission.
     pub most: u64,
-    /// Whether the host's limit may take its credit (ADR 0108): measured admission with `[host] pooled_host`, apart
-    /// from `most`.
+    /// Whether the host's limit may take its credit (ADR 0108), apart from `most`.
     pub host_reserve: bool,
-    /// With `Some(jobs)`, the growth count instead of both credits: what runs uses with room for its `jobs` largest
-    /// growths (`GROWTH_JOBS`), `most` and `host_reserve` unread. Only `simulate --count` asks for it yet.
-    pub largest: Option<usize>,
+    /// With `Some`, the growth count instead of both credits (ADR 0130), which go by `most` and `host_reserve` only
+    /// where it says (`Growth::below`).
+    pub growth: Option<Growth>,
 }
 
 /// The aggregate count.
@@ -149,9 +253,13 @@ pub struct Count {
     pub host_credit: u64,
     /// What the runners use, by their recent samples: the part of `hosted` that is no room for growth.
     pub used: u64,
-    /// How much more `host_credit` could be with no runner starting: what `Backfill` expects of it.
+    /// How much more `credit` could be with no runner starting: what `Backfill` expects of it. While the growth
+    /// count may count, as much as it could take off once every runner used nothing, braked or not.
+    pub credit_room: u64,
+    /// How much more `host_credit` could be with no runner starting, as `credit_room`.
     pub host_credit_room: u64,
-    /// What the growth count kept for growth, when it counted; `None` under the credits or below the guard's line.
+    /// What the growth count kept for growth, when it counted; `None` under the credits, below the guard's line and
+    /// while its brake holds.
     pub kept: Option<u64>,
 }
 
@@ -186,13 +294,20 @@ impl Count {
 /// ```
 ///
 /// A runner a plan starts is never eligible, so it raises `P` and `Q` alike, and both credits stay: a plan's starts
-/// take from what is left byte for byte. So does a warm runner's stop.
+/// take from what is left byte for byte. So does a warm runner's stop. Not under the growth count (`Snapshot::growth`):
+/// a start or a stop moves it by what it changes of the room kept, so a plan counts again after each (`Tally`).
 pub fn count(snapshot: &Snapshot<'_>) -> Count {
     let takes: u64 = snapshot.runners.iter().map(|runner| runner.takes).sum();
     let plain = takes.saturating_add(snapshot.committed);
-    if let Some(jobs) = snapshot.largest {
-        return grown(snapshot, plain, jobs);
+    match snapshot.growth {
+        Some(growth) => grown(snapshot, plain, growth),
+        None => credits(snapshot, plain),
     }
+}
+
+/// The count of `snapshot` by 0099's and 0108's credits, whose plain count is `plain`.
+fn credits(snapshot: &Snapshot<'_>, plain: u64) -> Count {
+    let takes = plain.saturating_sub(snapshot.committed);
     let mut room: BTreeMap<&Key, u64> = BTreeMap::new();
     let mut runners = 0;
     for runner in snapshot.runners {
@@ -224,6 +339,7 @@ pub fn count(snapshot: &Snapshot<'_>) -> Count {
         runners: if credit > 0 { runners } else { 0 },
         host_credit,
         used,
+        credit_room: snapshot.most.saturating_sub(credit),
         // A job's headroom is at most its takes, so the host's credit is at most every take less the floor, whatever
         // the runners use later: a runner that shrinks raises it with no end.
         host_credit_room: if snapshot.host_reserve {
@@ -242,34 +358,54 @@ fn used(runners: &[Runner<'_>]) -> u64 {
     runners.iter().filter_map(Runner::sampled).sum()
 }
 
-/// The growth count of `snapshot`, whose plain count is `plain`, keeping room for `jobs` growths:
+/// The growth count of `snapshot`, whose plain count is `plain`, as `growth` counts:
 ///
 /// ```text
 /// use_i   = runner i's fresh sample; g_i = its take less that, its whole take before its first sample
 /// stale   = runners whose samples say nothing, at their take
-/// count   = committed + sum use_i + sum stale + min(sum g_i, room(jobs))
+/// room    = max(floor, the `jobs` largest g_i, with Young::Covered the sum of every young runner's g_i)
+/// count   = committed + sum use_i + sum stale + min(sum g_i, room)
+/// credit  = plain - count; with Bound::HighWater, MemoryMax's at most `slice_room` and both at most `host_room`;
+///           with a ceiling, both at most it
 /// ```
 ///
-/// Below the guard's line it is the plain count: without a recent slice sample or host reading, while the host stalls,
-/// or while what the host has available is under what it keeps, the margin in force and a quarter of its memory, 0099's
-/// line. Both budgets read it: `credit` and `host_credit` are each `plain` less it. A start adds its whole take as
-/// headroom, so it raises the count only if it is among the `jobs` largest.
-fn grown(snapshot: &Snapshot<'_>, plain: u64, jobs: usize) -> Count {
+/// Below the guard's line, and while the brake holds it, `growth.below` counts: without a recent slice sample or host
+/// reading, while the host stalls, or while what the host has available is under what it keeps, the margin in force
+/// and a quarter of its memory, 0099's line. A start adds its whole take as headroom: it raises the count only past
+/// what the room already kept, by all of it while the young runners' growth sets the room.
+fn grown(snapshot: &Snapshot<'_>, plain: u64, growth: Growth) -> Count {
     let used = used(snapshot.runners);
     // With no runner starting, the count is lowest once every runner uses nothing: its take is then all headroom.
     let takes: Vec<u64> = snapshot.runners.iter().map(|runner| runner.takes).collect();
+    // A ceiling keeps it from falling past the plain count less the ceiling.
     let lowest = snapshot
         .committed
-        .saturating_add(takes.iter().sum::<u64>().min(room(&takes, jobs)));
+        .saturating_add(takes.iter().sum::<u64>().min(room(&takes, growth.jobs)))
+        .max(
+            growth
+                .ceiling
+                .map_or(0, |ceiling| plain.saturating_sub(ceiling)),
+        );
     let low = snapshot
         .host
         .is_none_or(|host| host.stalled || host.available < host.keeps);
-    if snapshot.slice.is_none() || low {
+    if growth.hold == Hold::Held || snapshot.slice.is_none() || low {
+        let below = match growth.below {
+            Below::Credits => credits(snapshot, plain),
+            Below::Plain => Count {
+                plain,
+                used,
+                ..Count::default()
+            },
+        };
+        // Held, it may fall by the credits' own room, or as far as the growth count's lowest once it counts again.
         return Count {
-            plain,
-            used,
-            host_credit_room: plain.saturating_sub(lowest),
-            ..Count::default()
+            credit_room: below.credit_room.max(below.pooled().saturating_sub(lowest)),
+            host_credit_room: below
+                .host_credit_room
+                .max(below.hosted().saturating_sub(lowest)),
+            kept: None,
+            ..below
         };
     }
     let stale: u64 = snapshot
@@ -278,34 +414,157 @@ fn grown(snapshot: &Snapshot<'_>, plain: u64, jobs: usize) -> Count {
         .filter(|runner| runner.headroom().is_none())
         .map(|runner| runner.takes)
         .sum();
-    let headroom: Vec<u64> = snapshot
-        .runners
-        .iter()
-        .filter_map(Runner::headroom)
-        .collect();
-    let kept = headroom.iter().sum::<u64>().min(room(&headroom, jobs));
+    let headroom: u64 = snapshot.runners.iter().filter_map(Runner::headroom).sum();
+    let kept = headroom.min(growth_room(snapshot.runners, growth));
     let counted = snapshot
         .committed
         .saturating_add(used)
         .saturating_add(stale)
         .saturating_add(kept);
     let credit = plain.saturating_sub(counted);
-    Count {
+    let (credit, host_credit) = match growth.bound {
+        Bound::HighWater => {
+            let host = snapshot.host.map_or(0, host_room);
+            let slice = snapshot.slice.map_or(0, slice_room);
+            (credit.min(slice).min(host), credit.min(host))
+        }
+        Bound::Open => (credit, credit),
+    };
+    let (credit, host_credit) = match growth.ceiling {
+        Some(ceiling) => (credit.min(ceiling), host_credit.min(ceiling)),
+        None => (credit, host_credit),
+    };
+    let count = Count {
         plain,
         credit,
-        runners: headroom.len(),
-        host_credit: credit,
+        runners: snapshot
+            .runners
+            .iter()
+            .filter(|runner| runner.headroom().is_some())
+            .count(),
+        host_credit,
         used,
-        host_credit_room: counted.saturating_sub(lowest),
+        credit_room: 0,
+        host_credit_room: 0,
         kept: Some(kept),
+    };
+    Count {
+        credit_room: count.pooled().saturating_sub(lowest),
+        host_credit_room: count.hosted().saturating_sub(lowest),
+        ..count
     }
 }
 
-/// The room the growth count keeps for `runners`' growth, keeping it for `jobs` of them: their `jobs` largest
-/// headrooms added up, at least `GROWTH_FLOOR`. Their growth together past this is what `growth::Growth` brakes on.
-pub fn growth_room(runners: &[Runner<'_>], jobs: usize) -> u64 {
+/// A `Snapshot` a plan owns and counts again after each start and stop (ADR 0130), each runner known by `Id`, such as
+/// its slot. Under 0099's and 0108's credits a start or a stop moves the count by its take; under the growth count by
+/// what it changes of the room kept, which only counting again tells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tally<Id> {
+    runners: Vec<Tallied<Id>>,
+    committed: u64,
+    slice: Option<Slice>,
+    host: Option<Host>,
+    most: u64,
+    host_reserve: bool,
+    growth: Option<Growth>,
+}
+
+/// One runner of a `Tally`, as `Runner` owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Tallied<Id> {
+    /// `None` for a start the plan made.
+    id: Option<Id>,
+    key: Option<Key>,
+    takes: u64,
+    used: Reading,
+    ran: Option<Duration>,
+    basis: Option<Basis>,
+}
+
+impl<Id: PartialEq> Tally<Id> {
+    /// What `snapshot` counts, its runners known by `ids`, in their order.
+    pub fn new(snapshot: &Snapshot<'_>, ids: impl IntoIterator<Item = Id>) -> Self {
+        Self {
+            runners: snapshot
+                .runners
+                .iter()
+                .zip(ids)
+                .map(|(runner, id)| Tallied {
+                    id: Some(id),
+                    key: runner.key.cloned(),
+                    takes: runner.takes,
+                    used: runner.used,
+                    ran: runner.ran,
+                    basis: runner.basis,
+                })
+                .collect(),
+            committed: snapshot.committed,
+            slice: snapshot.slice,
+            host: snapshot.host,
+            most: snapshot.most,
+            host_reserve: snapshot.host_reserve,
+            growth: snapshot.growth,
+        }
+    }
+
+    /// The count now.
+    pub fn count(&self) -> Count {
+        let runners: Vec<Runner<'_>> = self
+            .runners
+            .iter()
+            .map(|runner| Runner {
+                key: runner.key.as_ref(),
+                takes: runner.takes,
+                used: runner.used,
+                ran: runner.ran,
+                basis: runner.basis,
+            })
+            .collect();
+        count(&Snapshot {
+            runners: &runners,
+            committed: self.committed,
+            slice: self.slice,
+            host: self.host,
+            most: self.most,
+            host_reserve: self.host_reserve,
+            growth: self.growth,
+        })
+    }
+
+    /// A runner starts taking `takes`: one just started, with no job and no sample yet.
+    pub fn start(&mut self, takes: u64) {
+        self.runners.push(Tallied {
+            id: None,
+            key: None,
+            takes,
+            used: Reading::NotYet,
+            ran: Some(Duration::ZERO),
+            basis: None,
+        });
+    }
+
+    /// The runner `id` stops.
+    pub fn stop(&mut self, id: &Id) {
+        self.runners.retain(|runner| runner.id.as_ref() != Some(id));
+    }
+}
+
+/// The room the growth count keeps for `runners`' growth, as `growth` keeps it: their `jobs` largest headrooms added
+/// up, at least `GROWTH_FLOOR`, and with `Young::Covered` at least every young runner's headroom. Their growth together
+/// past this is what `growth::Growth` brakes on.
+pub fn growth_room(runners: &[Runner<'_>], growth: Growth) -> u64 {
     let headroom: Vec<u64> = runners.iter().filter_map(Runner::headroom).collect();
-    room(&headroom, jobs)
+    let largest = room(&headroom, growth.jobs);
+    match growth.young {
+        Young::Covered => largest.max(
+            runners
+                .iter()
+                .filter(|runner| runner.young())
+                .filter_map(Runner::headroom)
+                .sum(),
+        ),
+        Young::Ranked => largest,
+    }
 }
 
 /// The `jobs` largest of `headroom` added up, at least `GROWTH_FLOOR`.

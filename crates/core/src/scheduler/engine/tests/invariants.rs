@@ -106,8 +106,6 @@ struct Shape {
     second_repository: bool,
     /// `[host] pooled_count`.
     pooled_count: bool,
-    /// `[host] pooled_host`.
-    pooled_host: bool,
     /// The `heavy` profile's memory, in gigabytes.
     heavy_memory: u64,
     /// `[caches] mirror`'s `enabled`.
@@ -134,7 +132,6 @@ impl Shape {
         light_pool: true,
         second_repository: true,
         pooled_count: true,
-        pooled_host: true,
         heavy_memory: 4,
         mirror: false,
         record_failures: false,
@@ -180,9 +177,6 @@ impl Shape {
         }
         if !self.pooled_count {
             host.push_str("pooled_count = false\n");
-        }
-        if !self.pooled_host {
-            host.push_str("pooled_host = false\n");
         }
         let mut config = format!(
             r#"
@@ -302,7 +296,6 @@ enum Change {
     Policy,
     CpuOvercommit,
     PooledCount,
-    PooledHost,
     HeavyMemory,
     Mirror,
     RecordFailures,
@@ -397,6 +390,12 @@ enum Step {
     },
     /// Time passes: idle runners waited `IDLE_TIMEOUT`, holds after failures ran out.
     Elapse,
+    /// The growth count's window passes with the sampler reading all along (ADR 0130): the brake a restart, a reload
+    /// or the guard set lets go at the next look, a brake for growth only after more windows, and the readings are fresh
+    /// at `percent` of each runner's cap.
+    GrowthWindow {
+        percent: u64,
+    },
     /// Running jobs pass their first minute, and the predictor says what each reservation goes by from here on.
     Settle,
     /// Each repository's `build` has runs behind it in the heavy pool, so its prediction goes by them.
@@ -522,22 +521,14 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 available: [3, 6, 8, 9, 20, 50][rng.index() % 6],
                 stalled: rng.below(5) == 0,
             },
-            55..=62 => Step::Reload(match rng.below(10) {
-                0 => Change::HeavySlots(1 + u32::try_from(rng.below(3)).unwrap()),
-                1 => Change::LightSlots(1 + u32::try_from(rng.below(3)).unwrap()),
-                2 => Change::LightPool,
-                3 => Change::SecondRepository,
-                4 => Change::LightProfile,
-                5 => Change::Policy,
-                6 => Change::PooledCount,
-                7 => Change::HeavyMemory,
-                8 => Change::PooledHost,
-                _ => Change::CpuOvercommit,
-            }),
+            55..=62 => Step::Reload(reload(rng)),
             63..=64 => Step::Restart,
             65 => Step::RestartThenStop,
             66..=67 => Step::RestartInspectFails(rng.index()),
             68..=71 => Step::Elapse,
+            97..=98 => Step::GrowthWindow {
+                percent: [10, 50, 90][rng.index() % 3],
+            },
             72..=73 => Step::Reseed {
                 light: rng.below(2) == 0,
             },
@@ -592,6 +583,21 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             _ => Step::Tick,
         })
         .collect()
+}
+
+/// A change of config, as `generate` drew a reload.
+fn reload(rng: &mut Rng) -> Change {
+    match rng.below(10) {
+        0 => Change::HeavySlots(1 + u32::try_from(rng.below(3)).unwrap()),
+        1 => Change::LightSlots(1 + u32::try_from(rng.below(3)).unwrap()),
+        2 => Change::LightPool,
+        3 => Change::SecondRepository,
+        4 => Change::LightProfile,
+        5 => Change::Policy,
+        6 => Change::PooledCount,
+        7 => Change::HeavyMemory,
+        _ => Change::CpuOvercommit,
+    }
 }
 
 /// A fault in the middle of a batch of starts, as `generate` drew `fault` from 112 to 118.
@@ -752,6 +758,8 @@ struct Seen {
     credits: usize,
     /// Checks that found the host's credit standing (ADR 0108).
     host_credits: usize,
+    /// Checks of the growth count while it counts.
+    growth_counts: usize,
     /// Ticks that left the larger margin standing with waiters, none fitting the plain one.
     bands: usize,
     /// Ticks that gave it up for a job that fits the plain one, which the next plan starts.
@@ -835,12 +843,14 @@ impl Seen {
         self.slow_starts += case.slow_starts;
         self.stalls_during_start += case.stalls_during_start;
         self.aborts_mid_batch += case.aborts_mid_batch;
+        self.growth_counts += case.growth_counts;
     }
 
     /// The states no generated case reached, so nothing checks them.
     fn unreached(&self) -> Vec<&'static str> {
         [
             ("a barrier", self.barriers),
+            ("the growth count counting", self.growth_counts),
             ("a runner that left without a job", self.exits_freed),
             ("a runner started before its job", self.runners_starting),
             ("a job whose runner went, still open", self.closing),
@@ -1017,6 +1027,8 @@ impl Case {
             engine_with(github, docker, dir, &shape.toml())
         };
         engine.clock = clock;
+        // A daemon's start, by the clock it reads.
+        engine.measured.restart_growth(engine.now());
         engine.memory_max = Some(MEMORY_MAX);
         engine.cpus = Some(SLICE_CPUS);
         (engine, handle)
@@ -1361,6 +1373,24 @@ impl Case {
                 self.a_restart_takes_the_host_credit_back()?;
             }
             Step::Elapse => self.elapse(),
+            Step::GrowthWindow { percent } => {
+                // Not by the clock, which a start does not read: its runners would read old at once.
+                self.engine
+                    .measured
+                    .age_growth(api::GROWTH_WINDOW + Duration::from_secs(1));
+                let docker = self.docker.0.lock().unwrap();
+                let reading = sample(
+                    &docker,
+                    &self.handle.store,
+                    &self.took_job,
+                    self.clock.now_ms(),
+                    percent,
+                    50,
+                    false,
+                );
+                drop(docker);
+                self.host = Some(reading);
+            }
             Step::Settle => self.settle(),
             Step::PastRuns => {
                 self.past_runs(&[("o/r", "build", "heavy", G), ("o/s", "build", "heavy", G)])
@@ -2392,7 +2422,6 @@ impl Case {
             }
             Change::CpuOvercommit => shape.cpu_overcommit = !shape.cpu_overcommit,
             Change::PooledCount => shape.pooled_count = !shape.pooled_count,
-            Change::PooledHost => shape.pooled_host = !shape.pooled_host,
             // Down and back: a restart whose inspect fails must still count a runner at the cap it started with.
             Change::HeavyMemory => shape.heavy_memory = if shape.heavy_memory == 4 { 2 } else { 4 },
             Change::Mirror => shape.mirror = !shape.mirror,
@@ -3173,26 +3202,31 @@ impl Case {
         Ok(())
     }
 
-    /// Invariant 11 (ADR 0099, 0108): both credits stay in their bounds through restarts, reloads, stale readings,
-    /// stalls and lost runners. What the status shows is what a plan goes by; neither count reads under what eligible
-    /// runners use with all the rest in full, and the host's keeps at least the 6G floor of their headroom, or all of it;
-    /// the host's credit stands only with `pooled_host`, a fresh reading of the slice and the host, and no stall; and
-    /// what a drain leaves reads neither credit.
+    /// Invariant 11 (ADR 0099, 0108, 0130): both credits stay in their bounds through restarts, reloads, stale
+    /// readings, stalls and lost runners. What the status shows is what a plan goes by; credits and the growth count
+    /// stand only with `pooled_count` under measured admission. Under 0099's and 0108's credits neither count reads
+    /// under what eligible runners use with all the rest in full, and the host's keeps at least the 6G floor of their
+    /// headroom, or all of it; the host's credit stands only with a fresh reading of the slice and the host, and no
+    /// stall. The growth count's bounds are `the_growth_count_keeps_its_bounds`. What a drain leaves reads neither
+    /// credit.
     fn the_count_keeps_its_bounds(&mut self, status: &api::Status) -> Result<(), Violation> {
         let budget = &status.budget;
         let credit = budget.pooled.map_or(0, |pooled| pooled.credit);
         let host_credit = host_credit(budget);
-        let measured = self.shape.admission == Admission::Measured;
-        if credit > pooled::MOST_CREDIT || (credit > 0 && !(measured && self.shape.pooled_count)) {
+        let pools = self.shape.admission == Admission::Measured && self.shape.pooled_count;
+        if budget.counted.is_some() != pools || ((credit > 0 || host_credit > 0) && !pools) {
             let detail = format!("{budget:?} under {:?}", self.shape);
-            return violation(self, "the_count_keeps_its_bounds", detail);
-        }
-        if host_credit > 0 && !(measured && self.shape.pooled_host) {
-            let detail = format!("a host credit of {host_credit} under {:?}", self.shape);
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
         self.plans_read_the_count(budget, host_credit)?;
         let committed = self.engine.committed_memory();
+        if let Some(kept) = budget.counted.as_ref().and_then(|counted| counted.kept) {
+            return self.the_growth_count_keeps_its_bounds(budget, kept, committed);
+        }
+        if credit > pooled::MOST_CREDIT {
+            let detail = format!("{budget:?} under {:?}", self.shape);
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
         let hosted = budget.memory_in_use - host_credit;
         if credit == 0 && host_credit == 0 {
             return Ok(());
@@ -3273,6 +3307,85 @@ impl Case {
         });
         if room.is_none_or(|room| credit > room) {
             let detail = format!("{credit} of credit beside the slice's {slice:?}");
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        Ok(())
+    }
+
+    /// Part of invariant 11 (ADR 0130): the growth count, which `kept` the room for growth, counts only beside a fresh
+    /// reading of the slice and of a host with its margins to spare and no stall. Both counts read at least what
+    /// runners with a fresh sample use, beside the rest in full and at least the 6G floor of the sampled ones' headroom,
+    /// or all of it; and both credits stay under the host's room past its margins and `GROWTH_CEILING`, `MemoryMax`'s
+    /// under the slice's room below its high-water mark.
+    fn the_growth_count_keeps_its_bounds(
+        &mut self,
+        budget: &api::Budget,
+        kept: u64,
+        committed: u64,
+    ) -> Result<(), Violation> {
+        self.seen.growth_counts += 1;
+        let read = self
+            .host
+            .filter(|reading| reading.fresh(self.clock.now_ms()));
+        let fresh_after = self
+            .clock
+            .now_ms()
+            .saturating_sub(3000 * api::SAMPLE_INTERVAL);
+        let slice = self
+            .handle
+            .store
+            .latest_host_sample()
+            .filter(|sample| sample.at * 1000 >= fresh_after)
+            .map(|sample| sample.memory);
+        let keeps = HOST_MARGIN + HOST_TOTAL / 4;
+        let host = budget.host.as_ref();
+        let (Some(slice), Some(host), Some(_)) = (slice, host, read) else {
+            let detail = format!(
+                "{budget:?} counts growth beside the reading {read:?} and the slice's {slice:?}"
+            );
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        };
+        if host.stalled || host.memory.available < keeps {
+            let detail = format!("{budget:?} counts growth beside the host's {host:?}");
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        let mut used = committed;
+        let mut unsampled = 0;
+        let mut headroom = 0;
+        for (_, occupant) in self.engine.occupied() {
+            let takes = self.engine.takes(occupant);
+            match self
+                .handle
+                .store
+                .latest_sample(&occupant.runner_name)
+                .filter(|sample| sample.at >= fresh_after)
+            {
+                Some(sample) => {
+                    used += sample.memory.min(takes);
+                    headroom += takes.saturating_sub(sample.memory);
+                }
+                None => unsampled += takes,
+            }
+        }
+        let credit = budget.pooled.map_or(0, |pooled| pooled.credit);
+        let host_credit = host_credit(budget);
+        let hosted = budget.memory_in_use - host_credit;
+        let least = (used + unsampled).max(used + headroom.min(pooled::GROWTH_FLOOR));
+        if kept < headroom.min(pooled::GROWTH_FLOOR) || budget.counted().min(hosted) < least {
+            let detail = format!(
+                "{budget:?} counts under {used} used, {unsampled} unsampled and {headroom} of headroom"
+            );
+            return violation(self, "the_count_keeps_its_bounds", detail);
+        }
+        let host_room = host.memory.available - keeps;
+        let slice_room = (MEMORY_MAX * 90 / 100)
+            .saturating_sub(slice)
+            .saturating_sub(pooled::HIGH_WATER_RESERVE);
+        if credit.max(host_credit) > host_room.min(pooled::GROWTH_CEILING) || credit > slice_room {
+            let detail = format!(
+                "credits of {credit} and {host_credit} beside the host's {host_room}, the slice's {slice_room} and the \
+                 ceiling"
+            );
             return violation(self, "the_count_keeps_its_bounds", detail);
         }
         Ok(())
@@ -4812,7 +4925,7 @@ async fn an_idle_runner_is_named_for_the_oldest_job_whatever_order_the_listing_g
         Step::Reload(Change::HeavyMemory),
         Step::Reseed { light: false },
         Step::RunnerGoesStillListed(7),
-        Step::Reload(Change::PooledHost),
+        Step::Reload(Change::PooledCount),
         Step::Finish(3),
         Step::Elapse,
         Step::Reload(Change::PooledCount),

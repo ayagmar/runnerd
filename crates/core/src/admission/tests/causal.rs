@@ -4,7 +4,7 @@
 use super::*;
 use crate::admission::pooled::{self, MOST_CREDIT};
 use crate::admission::trace::{Outside, Point, Reading, RunId, RunTrace, STEP, Trace};
-use crate::admission::{Brake, GrowthCount};
+use crate::admission::{Brake, GrowthCount, GuardHold};
 
 /// A slice with 1.5G left of two 3.5G reservations and the 512M mirror, under the mark with room for what the credit
 /// adds; a host with memory to spare.
@@ -170,7 +170,7 @@ fn a_pooled_replay_starts_what_only_the_pooled_count_fits() {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
-        largest: None,
+        growth: None,
     });
     assert_eq!(
         pooled.hazard.most_credit, direct.credit,
@@ -511,13 +511,21 @@ fn replay_counted(
 }
 
 const TOP3: GrowthCount = GrowthCount {
-    jobs: 3,
+    growth: pooled::Growth {
+        jobs: 3,
+        bound: pooled::Bound::Open,
+        young: pooled::Young::Ranked,
+        below: pooled::Below::Plain,
+        hold: pooled::Hold::Free,
+        ceiling: None,
+    },
     brake: Brake::Off,
+    guard: GuardHold::Off,
 };
 
 const TOP3_BRAKED: GrowthCount = GrowthCount {
-    jobs: 3,
     brake: Brake::On,
+    ..TOP3
 };
 
 /// Four `check` runners and four `site` runners from `NOW` for `minutes`, 3.5G reserved each, and `page`, 2.5G, from

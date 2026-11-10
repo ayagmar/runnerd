@@ -57,9 +57,9 @@ flowchart TB
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
   aggregate count of what runs, which the engine and a replay by `admission::trace` both call
-  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)), and has the density study's growth
-  count beside it, whose brake is `admission::growth`, a leaf only its own methods write; only `simulate` reads either
-  yet; `admission::recent` reads
+  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md),
+  [ADR 0130](docs/adr/0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md)); its growth
+  count's brake is `admission::growth`, a leaf only its own methods write; `admission::recent` reads
   each job's recent runs, the one window both admission and sizing read memory from
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)); `sizing` turns the history into advice,
   `sizing::memory` says what a raise and a lowering of `memory` read and which lowering went too far, and
@@ -476,16 +476,22 @@ always returns, so the daemon closes and flushes the history.
   once its reservation paid the host's deficit, and a seed container starts only where its cap fits the slice, the
   host with the plain margin and, under measured admission, the high-water mark; a requested reseed's cap counts in the budget once its
   profile drained ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
-- Under measured admission one aggregate count (`admission::pooled::count`, called by `Engine::count` for plans,
-  `over_budget`, reseeds, shells and the status, and by the replay) gives every runner's take and a credit of at most 6G
-  for settled runners of different jobs that will not all peak at once, within what the slice has under the high-water
-  mark less 2G and what the host has past its margin and a quarter of its memory. `MemoryMax` reads the count less the
-  credit. Reservations, learning and stored data stay per runner; `[host] pooled_count = false` turns the credit off
-  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)). The same count gives the host's
-  limit its own credit, the same runners' room less the two largest jobs' and at least 6G, which `Left.host`, the last
-  check before a start, a reseed's host check and the larger margin read; `Backfill` bounds what it can still grow by
-  every running runner's take, and `Drained` reads neither credit. `[host] pooled_host = false` turns it off
-  ([ADR 0108](docs/adr/0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md)).
+- Under measured admission one aggregate count (`admission::pooled::count`, called through `Engine::tally` for plans,
+  `over_budget`, reseeds, shells and the status, and by the replay) is what both `MemoryMax` and the host's limit read:
+  what every runner uses, every stale runner's take, committed memory, and room for growth, the three largest
+  headrooms or every young runner's, at least 6G. Each budget's credit, the plain count less that, stays within what
+  the slice has under the high-water mark less 2G, what the host has past its margin and a quarter of its memory, and
+  14G (`GROWTH_CEILING`)
+  ([ADR 0130](docs/adr/0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md)). Below that
+  line, for 10 minutes after a start or a reload that changes what it reads (or to the end of a longer brake), and for
+  30 after what runs grew past the room it kept, it rests on 0099's credit of at most 6G for settled runners of different jobs and 0108's host credit of
+  their room less the two largest jobs'
+  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md),
+  [ADR 0108](docs/adr/0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md)).
+  `Measured::growth` keeps the brake. A plan carries the count as a `scheduler::Recount` and reads it again after
+  each start and stop, `Backfill` bounds how far it can still fall by `credit_room` and `host_credit_room`, and
+  `Drained` reads no credit. Reservations, learning and stored data stay per runner; `[host] pooled_count = false`
+  counts every reservation for both budgets.
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no

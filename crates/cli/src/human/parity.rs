@@ -66,12 +66,14 @@ fn status_states_a_host_credit_and_the_growth_a_held_job_waits_for_as_core_does(
     let daemon = runnerd_fixtures::host_credit();
     let facts = facts(&daemon);
     assert!(
-        facts.host.contains("keeps 6.75G for growth"),
-        "the fixture's host line words its credit: {}",
-        facts.host
+        facts.budget.ends_with("keeps 6.75G for its growth"),
+        "the fixture's budget line words the growth count: {}",
+        facts.budget
     );
     let text = status(&daemon.status, NOW, PLAIN);
-    assert!(text.contains(&facts.host), "{}: {text}", facts.host);
+    for line in [&facts.budget, &facts.host] {
+        assert!(text.contains(line.as_str()), "{line}: {text}");
+    }
     for wait in &facts.waits {
         let row = line_of(&text, &[&wait.job.to_string()]);
         assert!(row.ends_with(&wait.reason), "{}: {row}", wait.reason);

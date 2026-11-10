@@ -5,7 +5,7 @@
 //! slot's runner is `runners`. It lists the repositories due at once, a few requests at a time, and answers the API's
 //! commands while it waits for the listings (ADR 0026).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -21,17 +21,17 @@ use super::presence::RunnersListing;
 use super::runners::{Collected, Removal};
 use super::slot::Holder;
 use super::start::{Carried, StartOutcome};
-use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown, TICK_REST};
+use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown, Stage, TICK_REST};
 use crate::admission::trace::Reading;
-use crate::admission::{host, pooled};
+use crate::admission::{growth, host, pooled};
 use crate::api::AdmissionPolicy;
 use crate::config::Admission;
 use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Budget, Decision, Demand, Drained, Left, Plan, Pool, Preparing, Profile, Repository,
-    RunnerSlot, Slot, SlotRef, StartFor, StopReason, plan,
+    Barrier, Budget, Decision, Demand, Drained, HostLimit, Left, Plan, Pool, Preparing, Profile,
+    Recount, Repository, RunnerSlot, Slot, SlotRef, StartFor, StopReason, plan,
 };
 use crate::store::Store;
 use crate::time;
@@ -382,6 +382,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.pull_images().await;
             self.refresh_predictor().await;
             self.rereserve().await;
+            // Once a tick, from the readings its plan counts by: never from a pass, a status read or a check.
+            self.look_at_growth();
         }
         pace.lap(Phase::Following, self.passes_in_tick);
         let (plan, mut admitting) = match mode {
@@ -917,9 +919,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// only once it is empty, as a warm runner may keep it from ever being. For any other job it is the plain margin's.
     pub(super) fn plan_budget(&self, admitting: &Admitting) -> Budget {
         let committed = self.committed_memory();
-        let count = self.count(admitting.remembered);
+        let tally = self.tally(admitting.remembered);
+        let count = tally.count();
         let running = self.footprints().next().is_some();
+        // The plan counts again after each start and stop: the count it starts from, with the same readings.
+        let recount = (self.pools() && !admitting.held).then(|| Recount {
+            tally,
+            memory_max: self.memory_max,
+            host: admitting.host.as_ref().map(|host| HostLimit {
+                limit: host.limit,
+                stalled: host.stalled,
+            }),
+        });
         Budget {
+            recount,
             // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
             memory: if admitting.held {
                 Some(0)
@@ -937,7 +950,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .as_ref()
                 .map(|host| host::left(host.limit, count.hosted(), host.stalled)),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
-            credit_room: self.most_credit().saturating_sub(count.credit),
+            credit_room: count.credit_room,
             host_credit_room: count.host_credit_room,
             drained: Drained {
                 memory: self
@@ -1098,6 +1111,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 takes: 0,
                 used: Reading::Stale,
             },
+            // A start in flight has no container to sample: its reservation, all of it room to grow, however long its
+            // registration waits behind the others' (ADR 0130).
+            Admission::Measured if occupant.stage == Stage::InFlight => Held {
+                takes: occupant.reserved,
+                used: Reading::NotYet,
+            },
             // What it uses when that is more: a job past its prediction, or one in a burst of starts. Its cap when
             // that is not known: the slice's or its own last sample is older than three intervals, as when the
             // sampler stalls or cannot read its container.
@@ -1129,29 +1148,43 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The most the pooled count may take off the plain one: none under caps or with `[host] pooled_count` off.
-    fn most_credit(&self) -> u64 {
-        let measured = self.config.host.admission == Admission::Measured;
-        if measured && self.config.host.pooled_count {
-            pooled::MOST_CREDIT
-        } else {
-            0
-        }
+    /// Whether the budgets count what runs uses and keep room for its growth (ADR 0099, 0108, 0130): under measured
+    /// admission with `[host] pooled_count`. Off, both read every runner's take.
+    pub(super) fn pools(&self) -> bool {
+        self.config.host.admission == Admission::Measured && self.config.host.pooled_count
     }
 
-    /// Whether the host's limit may take its credit (ADR 0108): under measured admission with `[host] pooled_host`.
-    fn host_reserve(&self) -> bool {
-        self.config.host.admission == Admission::Measured && self.config.host.pooled_host
+    /// The engine's clock as a time.
+    pub(super) fn now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(self.clock.now_ms())
     }
 
-    /// The aggregate count of what runs (ADR 0099, 0108), the host going by the margin `remembered` asks for.
+    /// The aggregate count of what runs (ADR 0099, 0108, 0130), the host going by the margin `remembered` asks for.
     pub(super) fn count(&self, remembered: host::Remembered) -> pooled::Count {
+        self.tally(remembered).count()
+    }
+
+    /// What the count is read from, each runner and start in flight by its slot, as the growth count's brake holds it
+    /// now: the growth count while it is free, the credits while it rests, every take with pooling off.
+    pub(super) fn tally(&self, remembered: host::Remembered) -> pooled::Tally<SlotRef> {
+        let now = self.now();
+        let growth = self.pools().then(|| match self.measured.braked(now) {
+            Some(_) => pooled::GROWTH.held(),
+            None => pooled::GROWTH,
+        });
+        let (slots, runners): (Vec<SlotRef>, Vec<pooled::Runner<'_>>) =
+            self.counted_runners().into_iter().unzip();
+        pooled::Tally::new(&self.snapshot(&runners, remembered, growth), slots)
+    }
+
+    /// Each runner and start in flight as the count reads it, by its slot.
+    fn counted_runners(&self) -> Vec<(SlotRef, pooled::Runner<'_>)> {
+        // How long a job ran goes by the clock its start was stamped by.
         let now = SystemTime::now();
-        let runners: Vec<pooled::Runner<'_>> = self
-            .footprints()
-            .map(|footprint| {
+        self.slot_footprints()
+            .map(|(slot, footprint)| {
                 let held = self.held_by(&footprint);
-                pooled::Runner {
+                let runner = pooled::Runner {
                     key: footprint.key,
                     takes: held.takes,
                     used: held.used,
@@ -1160,9 +1193,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .job_found_here
                         .and_then(|started| now.duration_since(started).ok()),
                     basis: footprint.basis,
-                }
+                };
+                (slot, runner)
             })
-            .collect();
+            .collect()
+    }
+
+    /// The snapshot of `runners` the count reads, counting by `growth`, the host going by `remembered`.
+    fn snapshot<'run>(
+        &self,
+        runners: &'run [pooled::Runner<'run>],
+        remembered: host::Remembered,
+        growth: Option<pooled::Growth>,
+    ) -> pooled::Snapshot<'run> {
         let fresh = (3 * SAMPLE_INTERVAL).as_secs();
         let slice = self
             .store
@@ -1175,15 +1218,59 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let host = self
             .host_memory()
             .map(|memory| host::pooling(&memory, remembered));
-        pooled::count(&pooled::Snapshot {
-            runners: &runners,
+        pooled::Snapshot {
+            runners,
             committed: self.committed_memory(),
             slice,
             host,
-            most: self.most_credit(),
-            host_reserve: self.host_reserve(),
-            largest: None,
-        })
+            most: if self.pools() { pooled::MOST_CREDIT } else { 0 },
+            host_reserve: self.pools(),
+            growth,
+        }
+    }
+
+    /// A tick's look for the growth count's brake (ADR 0130): what each runner uses, the room the count keeps and
+    /// whether it is above its guard's line, from the same readings the tick's plan counts by. Once a tick, before its
+    /// plan; never from a pass or a status read. With pooling off, none: turning it on begins the brake again.
+    pub(super) fn look_at_growth(&mut self) {
+        if !self.pools() {
+            return;
+        }
+        let now = self.now();
+        let counted = self.counted_runners();
+        let names: BTreeMap<SlotRef, String> = self
+            .slot_footprints()
+            .map(|(slot, footprint)| (slot, footprint.runner_name.to_owned()))
+            .collect();
+        let runners: Vec<pooled::Runner<'_>> = counted.iter().map(|(_, runner)| *runner).collect();
+        let room = pooled::growth_room(&runners, pooled::GROWTH);
+        let guard = if pooled::count(&self.snapshot(
+            &runners,
+            self.host_remembered(),
+            Some(pooled::GROWTH),
+        ))
+        .kept
+        .is_some()
+        {
+            growth::Guard::Clear
+        } else {
+            growth::Guard::Crossed
+        };
+        let used = counted
+            .iter()
+            .filter_map(|(slot, runner)| {
+                let memory = match runner.used {
+                    Reading::Used(memory) => memory,
+                    Reading::NotYet => 0,
+                    Reading::Stale => return None,
+                };
+                Some(growth::Use {
+                    runner: names.get(slot)?.clone(),
+                    memory,
+                })
+            })
+            .collect();
+        self.measured.look_at_growth(now, used, room, guard);
     }
 
     /// The mirror's part of `memory_in_use`.

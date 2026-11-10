@@ -15,7 +15,7 @@ const G: u64 = 1 << 30;
 const M: u64 = 1 << 20;
 
 /// `app` 4 slots of 4G under measured admission: 16G of caps for a 10G slice.
-fn measured() -> String {
+pub(super) fn measured() -> String {
     CONFIG.replace("slots = 2", "slots = 4").replace(
         "isolation = \"sysbox\"",
         "isolation = \"sysbox\"\nadmission = \"measured\"",
@@ -28,7 +28,7 @@ async fn history(store: &Store, peak: u64, oom_kills: u64) {
 }
 
 /// Ten finished `name` jobs of o/r from ID `first`, as `history`.
-async fn history_of(store: &Store, name: &str, first: u64, peak: u64, oom_kills: u64) {
+pub(super) async fn history_of(store: &Store, name: &str, first: u64, peak: u64, oom_kills: u64) {
     runs_of(store, name, first, 10, peak, oom_kills, Ended::Lost).await;
 }
 
@@ -120,7 +120,7 @@ async fn runs_of(
 }
 
 /// The slice's memory, sampled now.
-fn slice_at(store: &Store, memory: u64) {
+pub(super) fn slice_at(store: &Store, memory: u64) {
     store.host_sample(api::HostSample {
         at: time::now_ms() / 1000,
         cpu: 0,
@@ -382,7 +382,7 @@ async fn a_jobs_record_says_how_its_runner_was_admitted() {
 }
 
 /// A sample of each runner the engine registered, using `memory`.
-fn runners_use(github: &FakeGithub, store: &Store, memory: u64) {
+pub(super) fn runners_use(github: &FakeGithub, store: &Store, memory: u64) {
     runners_used(github, store, memory, time::now_ms());
 }
 
@@ -2161,14 +2161,14 @@ fn unpooled() -> String {
 }
 
 /// A recent sample of every runner using `used`, and of a slice and a host with room to spare.
-fn roomy_readings(github: &FakeGithub, store: &Store, used: u64) {
+pub(super) fn roomy_readings(github: &FakeGithub, store: &Store, used: u64) {
     runners_use(github, store, used);
     slice_at(store, G);
     host_at(store, G, 40 * G, 0);
 }
 
 /// Every running job's first minute went by.
-fn first_minute_passes(engine: &mut Engine<FakeGithub, FakeDocker>) {
+pub(super) fn first_minute_passes(engine: &mut Engine<FakeGithub, FakeDocker>) {
     for occupant in engine.occupants_mut() {
         occupant.age_job_start(POOL_AFTER);
     }
@@ -2987,9 +2987,9 @@ fn tight_host(github: &FakeGithub, store: &Store, available: u64) {
 }
 
 #[tokio::test]
-async fn a_host_credit_starts_what_only_it_fits_and_a_restart_or_pooled_host_off_holds_it() {
+async fn a_host_credit_starts_what_only_it_fits_and_a_restart_or_pooled_count_off_holds_it() {
     // Catches the host's limit reading the plain count where ADR 0108 has it read the host's credit, the credit
-    // surviving `pooled_host = false`, and a restart counting runners it adopted at their use: then nothing may start
+    // surviving `pooled_count = false`, and a restart counting runners it adopted at their use: then nothing may start
     // until the plain count fits (challenge finding 6).
     let (github, docker, dir) = (
         FakeGithub::default(),
@@ -3039,7 +3039,7 @@ async fn a_host_credit_starts_what_only_it_fits_and_a_restart_or_pooled_host_off
         "lint starts on the host's credit"
     );
 
-    // With `pooled_host = false` the same jobs leave lint waiting for the host.
+    // With `pooled_count = false` the same jobs leave lint waiting for the host.
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
@@ -3047,7 +3047,7 @@ async fn a_host_credit_starts_what_only_it_fits_and_a_restart_or_pooled_host_off
     );
     let off = measured().replace(
         "admission = \"measured\"",
-        "admission = \"measured\"\npooled_host = false",
+        "admission = \"measured\"\npooled_count = false",
     );
     let (mut engine, handle) = three_settled_jobs(&github, &docker, &dir, &off).await;
     github.0.lock().unwrap().queued = vec![small(4)];

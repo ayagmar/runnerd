@@ -267,6 +267,17 @@ struct Footprint<'slot> {
     job_found_here: Option<SystemTime>,
     /// What its reservation went by.
     basis: Option<api::Basis>,
+    /// Whether it is a runner yet.
+    stage: Stage,
+}
+
+/// Whether a footprint is a runner's or a start's in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Named and admitted, registering its runner or creating its container: there is nothing to sample yet.
+    InFlight,
+    /// A runner in its slot, with its container.
+    Placed,
 }
 
 /// A slot's runner and its container.
@@ -339,6 +350,7 @@ impl Occupant {
             key: self.key(),
             job_found_here: self.job_found_here(),
             basis: self.admission.map(|admission| admission.basis),
+            stage: Stage::Placed,
         }
     }
 
@@ -668,7 +680,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             last_prune: None,
             running_reads: running_reads::RunningReads::default(),
             governor: governor::Governor::default(),
-            measured: admission::Measured::default(),
+            measured: admission::Measured::new(SystemTime::now()),
             warm: warm::Warm::default(),
             records,
             build_cache: build_cache.clone(),
@@ -979,6 +991,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// What each runner and each start in flight takes of the budgets.
     fn footprints(&self) -> impl Iterator<Item = Footprint<'_>> {
         self.slots.values().flatten().filter_map(Slot::footprint)
+    }
+
+    /// Each runner and each start in flight with its slot.
+    fn slot_footprints(&self) -> impl Iterator<Item = (SlotRef, Footprint<'_>)> {
+        self.slots.iter().flat_map(|(profile, slots)| {
+            slots.iter().enumerate().filter_map(|(index, slot)| {
+                slot.footprint().map(|footprint| {
+                    (
+                        SlotRef {
+                            profile: profile.clone(),
+                            index,
+                        },
+                        footprint,
+                    )
+                })
+            })
+        })
     }
 
     /// The runner in `slot`, if one is.

@@ -279,6 +279,7 @@ documents! {
     new:
     "stopping": Stopping => variants(samples::stopping()),
     "shutdown-answer": ShutdownAnswer => full(samples::shutdown_answer(), None),
+    "count-brake": CountBrake => variants(samples::count_brake()),
 }
 
 /// The previous release's samples, one file per document.

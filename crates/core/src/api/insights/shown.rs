@@ -137,12 +137,12 @@ impl WaitSpread {
 impl Insight {
     /// What a [`HostLow`](InsightKind::HostLow) insight says: `On Nov 6 the host had under 6.2G available for 34s while
     /// a host credit stood, down to 4.1G. The credit lets runners start on memory the running ones may still grow
-    /// into; [host] pooled_host = false makes the host's limit count every reservation again.`
+    /// into; [host] pooled_count = false makes the budgets count every reservation again.`
     pub fn host_low_sentence(day: u64, seconds: u64, lowest: u64, line: u64) -> String {
         format!(
             "On {} the host had under {} available for {} while a host credit stood, down to {}. The credit lets \
-             runners start on memory the running ones may still grow into; [host] pooled_host = false makes the \
-             host's limit count every reservation again.",
+             runners start on memory the running ones may still grow into; [host] pooled_count = false makes the \
+             budgets count every reservation again.",
             short_date(day),
             ByteSize(line),
             duration(seconds),

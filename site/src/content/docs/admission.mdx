@@ -31,7 +31,7 @@ Without a recent reading only `MemoryMax` bounds starts. A waiting job says why,
 The host is short of memory: needs 6G; the host has 2G to spare; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
 ```
 
-What runs can reach that limit while it holds far less than it reserves. The job then waits with the host's memory free, says so, and names no programs. While [a host credit](#the-host-credit) stands it says what runs uses and what it keeps for growth:
+What runs can reach that limit while it holds far less than it reserves. The job then waits with the host's memory free, says so, and names no programs. While [a credit](#the-growth-count) stands it says what runs uses and what it keeps for growth:
 
 ```text
 The host has 42G of 62G available, but what runs may still grow into it: needs 7G; 3.4G of the 49.4G it leaves the slice is free
@@ -105,31 +105,31 @@ slots = 8       # 8 × 7G may exceed MemoryMax
 
 The caps still stop a container that goes over them, but several jobs going over their predictions at once can fill the slice, and the kernel then kills a process in it. `runnerctl job <id>` says what a runner reserved and why.
 
-### The pooled count
+### The growth count
 
-Each reservation is a job's worst case, and jobs rarely peak at once. So under `measured` the budget takes a credit off the sum of what runners count, up to 6G. Nothing changes for a runner: it reserves, learns and is recorded as before. `pooled_count = false` under `[host]` turns it off.
+Each reservation is a job's worst case, and jobs rarely peak at once. So under `measured` both `MemoryMax` and the host's limit count what runs uses, plus room for it to grow:
 
-A runner adds to the credit only if all of this holds:
+- what each runner uses, by its last sample;
+- the whole take of a runner whose samples are not recent;
+- room for growth: the three largest gaps between a runner's take and its use, or every young runner's gap if that is more, and never less than 6G. A runner is young before its first sample, in its job's first minute, and when this daemon did not see its job start. A start in flight counts as one, at its reservation.
 
-- Its job is known, it has run for a minute, and this daemon saw it start: a waiting or warm runner, a recent start and a runner adopted after a restart count in full.
-- Its reservation goes by a prediction, not its cap or a run that overran.
-- It has a recent sample.
+Nothing changes for a runner: it reserves, learns and is recorded as before. The difference from the plain count is a credit, and it never exceeds 14G, what the slice has under 90% of `MemoryMax`, less 2G, or what the host has available past its margin and a quarter of its memory. So if every runner reached its reservation at once, they could pass `MemoryMax` by at most 14G, against 6G under the older credits. The status line says what the count does:
 
-The room between what such a runner counts and what it uses adds up within one job, across profiles, as copies of a job grow together. Across jobs it adds as a root sum of squares. The credit is that sum of room less its root, and never more than:
+```text
+36.8G of 46G counted in ci.slice by predicted peaks: 42.8G reserved, 6G pooled; what runs uses 22G and keeps 14.8G for its growth
+```
 
-- 6G.
-- What the slice has under 90% of `MemoryMax`, less 2G.
-- What the host has available past its margin and a quarter of its memory. A host that stalls allows none, and so does a slice or host reading that is not recent.
+It rests and counts by the older, smaller credits (up to 6G for settled runners of different jobs, and the host keeping the two largest jobs' room) while:
 
-The slice's budget and a waiting job's room read the count after the credit, and so do reseeds and shells. When a guard takes the credit back, the count rises and nothing starts until it fits; no running job stops for it. The status line shows both figures (`36.8G of 46G counted in ci.slice by predicted peaks: 42.8G reserved, 6G pooled`).
+- the host stalls, has under its margin and a quarter of its memory available, or a slice or host reading is not recent: for 5 minutes from then, and again if it still is;
+- what runs grew past the room it kept within 10 minutes, for 30 minutes;
+- under 10 minutes have passed since runnerd started, or since a reload turned the count on or changed `MemoryMax` or `memory_ceiling`. Such a reload keeps a brake that ends later.
 
-### The host credit
+```text
+the growth count rests until 15:02 UTC: what ran grew 10G in 10m, past the 9G kept
+```
 
-The host's limit takes its own credit off the same runners. It counts what they use, and keeps room for growth: the two largest jobs' room between what they count and what they use, and never less than 6G. Every runner that does not add to the pooled credit counts in full here too. With one or two jobs that can add, the 6G or their own room covers it all, so the credit needs three or more.
-
-None stands while the host stalls, without a recent slice or host reading, under `caps`, or with `pooled_host = false` under `[host]`. `pooled_count` and `pooled_host` are separate switches. After a restart the runners runnerd adopts count in full until they end, so nothing starts until the count without a credit fits.
-
-What runs can then grow past what the host keeps. Then the credit falls, and starts wait until the count fits again; no running job stops. The host line says what the limit counts while a credit stands (`host: 30G of 62G available; leaves the slice 40G, so 3G is free; what runs counts 37G: it uses 28G and keeps 9G for growth`), and [insights](../insights/#the-hosts-memory-while-ci-ran) report how low the host went while one stood.
+When the count rises, starts wait until it fits again; no running job stops for it. [Insights](../insights/#the-hosts-memory-while-ci-ran) report how low the host went while a credit stood. `pooled_count = false` under `[host]` counts every reservation for both budgets.
 
 ### A starved job goes first
 
@@ -145,7 +145,7 @@ Smaller runners can take all the memory that frees up, so a large runner would n
 A younger job still starts behind that job if all of this holds:
 
 - It has a free slot and fits the budgets left. In the waiting job's profile, it leaves that job a free slot too.
-- The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. That time counts [the credit](#the-pooled-count) and [the host credit](#the-host-credit) at their largest, since both can grow with no job ending. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
+- The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. That time counts [the growth count](#the-growth-count) at its lowest, since it can fall with no job ending. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
 - Every job its runner could take usually ends by then. The usual run time is the p95 of a job's last 20 successful runs, from 3 of them. A pool with one queued job that has no estimate stays behind.
 - Everything that started behind a barrier since the wait reached its limit, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger. A runner counts whether or not it got a job. Runners started for older jobs don't count: the waiting job waits for them anyway.
 
@@ -175,7 +175,7 @@ Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d` (counted back from th
 
 These replays know the history from before the window, as the daemon would. A job that queued after another of its run ended arrives as long after that job's replayed end, so a job held back also holds back what follows it. The history has no `needs`, so this is read from the times.
 
-`runnerd simulate --causal` replays the config's policy with each job using what its own samples say, shifted to its replayed start, for the plain count and credits of 4G, 6G and 8G. A job counts as known when the daemon could name it, and the host's recorded readings bound what starts. Besides waits and run times it shows what each count risks: the slice past 90% and past `MemoryMax`, what runners used past the count that let them start, the host under 20G and 6.2G available, the time at its larger margin, and how often the credit fell. `--cold` gives every run its job's heaviest samples, placed so the run reaches the peak. `--overhead 4G` sets what the slice holds beside its runners, by default the window's 99th percentile, and `--guard-overhead 1G` what the guards read of that when they decide. `--credit 6G` picks the credit rows. `--count` picks the rows instead: `--count top3` is a row that counts what runs uses with room for its three largest growths (`top2`, two), at least 6G, for both `MemoryMax` and the host, and plainly while the host has under its margin and a quarter of its memory available, and `--count plain` keeps the credit rows beside it; `--brake` gives every such row a brake that counts plainly for 30 minutes once what runs grew past that room within 10, so a row with the brake and one without take two runs. The first row, `RECORDED`, is what the same jobs did as they ran, and `VS REC` reads each row's waits against it: the replay's own error, so compare rows with each other, not with what happened. `--shift 90m` moves the host's other programs against the jobs, `--host-reserve plain` replays a host limit with no [host credit](#the-host-credit), `--any-waiter-band` holds the larger margin while any job waits for the host, and with `--priority` it adds what the barrier does beside a credit. `--move 'owner/repo:job=profile'` replays a job in a pool made since it ran.
+`runnerd simulate --causal` replays the config's policy with each job using what its own samples say, shifted to its replayed start, for the plain count and credits of 4G, 6G and 8G. A job counts as known when the daemon could name it, and the host's recorded readings bound what starts. Besides waits and run times it shows what each count risks: the slice past 90% and past `MemoryMax`, what runners used past the count that let them start, the host under 20G and 6.2G available, the time at its larger margin, and how often the credit fell. `--cold` gives every run its job's heaviest samples, placed so the run reaches the peak. `--overhead 4G` sets what the slice holds beside its runners, by default the window's 99th percentile, and `--guard-overhead 1G` what the guards read of that when they decide. `--credit 6G` picks the credit rows. `--count` picks the rows instead: `--count growth` is [the growth count](#the-growth-count) as runnerd counts, and `--count plain` keeps the credit rows beside it. `--count top3` counts what runs uses with room for its three largest growths (`top2`, two), at least 6G, for both budgets, and plainly while the host has under its margin and a quarter of its memory available; options give it the growth count's rules one at a time: `--brake` (rest 30 minutes once what runs grew past that room within 10), `--bound` (the slice's and the host's room bound the credit), `--young` (keep room for every young runner), `--credits-below` (rest on the older credits, not plainly), `--guard-hold` (rest 5 minutes after the host was under its line) and `--ceiling 14G` (no credit past 14G). A row with a rule and one without take two runs. The first row, `RECORDED`, is what the same jobs did as they ran, and `VS REC` reads each row's waits against it: the replay's own error, so compare rows with each other, not with what happened. `--shift 90m` moves the host's other programs against the jobs, `--host-reserve plain` replays the credit rows with no host credit, `--any-waiter-band` holds the larger margin while any job waits for the host, and with `--priority` it adds what the barrier does beside a credit. `--move 'owner/repo:job=profile'` replays a job in a pool made since it ran.
 
 Jobs still queued have no run time, so the waits leave them out and the report only counts them: the jobs that waited longest may be the ones it cannot show. Without `--causal` the replay has no host readings. It never has warm runners or restarts, and it gives each job the runner started for it, where GitHub may give that runner any job of its pool. With no host limit there is less contention than the daemon sees, so try a smaller `--memory-max` too. Each window starts from an empty slice, so moving its start by minutes can change the figures a lot.
 

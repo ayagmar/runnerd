@@ -1,7 +1,8 @@
 //! What the memory budget means as every client shows it: its line, what is reserved and free of it, what of it no
 //! runner may start in, and the parts a bar draws. Plain derivations of [`Status`]; clients only lay them out.
 
-use super::{AdmissionPolicy, Budget, HostMemory, Status, percent};
+use super::units::{duration, utc_time};
+use super::{AdmissionPolicy, Budget, CountBrake, Counted, HostMemory, Status, percent};
 use crate::config::ByteSize;
 
 /// A figure and the words that follow it, such as `8G` and `of 24G reserved in runnerd.slice`, for a client that
@@ -49,6 +50,9 @@ impl Budget {
         if self.memory_max.is_none() {
             text.push_str(", which has no MemoryMax");
         }
+        if let Some(counted) = &self.counted {
+            text = format!("{text}; {}", counted.clause());
+        }
         Reading {
             figure: ByteSize(self.counted()).to_string(),
             text,
@@ -78,7 +82,8 @@ impl Budget {
     /// 25G, so 6.5G is free`; while it stalls, `…; stalling, so no runner starts`. While the slice is held
     /// (`Budget::held`), nothing is free, so it says no figure of it. While the host's limit takes a credit (ADR 0108),
     /// what it counts follows: `…; what runs counts 23G: it uses 14G and keeps 9G for growth`
-    /// (`HostBudget::growth_clause`). With programs outside the slice large enough to
+    /// (`HostBudget::growth_clause`), unless the growth count counts, which `Budget::memory_reading` says. With programs
+    /// outside the slice large enough to
     /// name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`). `None` without a recent
     /// reading of the host.
     pub fn host_line(&self) -> Option<String> {
@@ -113,7 +118,12 @@ impl Budget {
                 None => format!("{line}; leaves the slice {limit}, so {free} is free"),
             }
         };
-        if let Some(growth) = host.growth_clause(self.memory_in_use) {
+        // While the growth count counts, both budgets read it and the memory's reading says what it is made of.
+        let growth_counts = self.counted.is_some_and(|counted| counted.kept.is_some());
+        if let Some(growth) = host
+            .growth_clause(self.memory_in_use)
+            .filter(|_| !growth_counts)
+        {
             line = format!(
                 "{line}; what runs counts {}: {growth}",
                 ByteSize(host.counts(self.memory_in_use))
@@ -171,6 +181,44 @@ impl Budget {
     pub fn remaining(&self) -> Option<u64> {
         self.memory_max
             .map(|max| max.saturating_sub(self.counted()))
+    }
+}
+
+impl Counted {
+    /// What the growth count is made of, or why it rests, as every client says it after the budget's figure: `what runs
+    /// uses 15.7G and keeps 12.9G for its growth`; while it rests, `the growth count rests until 15:02 UTC: what ran
+    /// grew 14.1G in 10m, past the 12.9G kept`.
+    pub fn clause(&self) -> String {
+        let size = |bytes: u64| ByteSize(bytes).to_string();
+        let rests = |until: u64| format!("the growth count rests until {}", utc_time(until));
+        match (self.brake, self.kept) {
+            (None, Some(kept)) => format!(
+                "what runs uses {} and keeps {} for its growth",
+                size(self.used),
+                size(kept)
+            ),
+            (Some(CountBrake::Grew { grew, kept, until }), _) => format!(
+                "{}: what ran grew {} in {}, past the {} kept",
+                rests(until),
+                size(grew),
+                duration(super::GROWTH_WINDOW.as_secs()),
+                size(kept)
+            ),
+            (Some(CountBrake::Restarted { until }), _) => {
+                format!(
+                    "{}: too soon after a start or a reload to judge growth",
+                    rests(until)
+                )
+            }
+            (Some(CountBrake::Guard { until: Some(until) }), _) => {
+                format!("{}: the host ran under its line", rests(until))
+            }
+            (Some(CountBrake::Guard { until: None }) | None, _) => {
+                "the growth count rests while the host is under its line or a reading is missing"
+                    .to_owned()
+            }
+            (Some(CountBrake::Unknown), _) => "the growth count rests".to_owned(),
+        }
     }
 }
 

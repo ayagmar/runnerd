@@ -943,6 +943,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .is_some_and(|profile| slot.index < profile.slots as usize)
         });
         self.isolation = isolation::backend(self.config.host.isolation);
+        // The growth count's looks were taken by other rules, or none were: its brake begins again, as at a restart
+        // (ADR 0130). Its guard reads `MemoryMax` and the host's ceiling.
+        let pooled = |config: &Config| {
+            config.host.admission == crate::config::Admission::Measured && config.host.pooled_count
+        };
+        if pooled(&self.config)
+            && (!pooled(&old)
+                || memory_max != self.memory_max
+                || old.host.memory_ceiling != self.config.host.memory_ceiling)
+        {
+            self.measured.restart_growth(self.now());
+        }
         self.memory_max = memory_max;
         self.cpus = cpus;
         self.caches

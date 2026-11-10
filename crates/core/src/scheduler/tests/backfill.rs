@@ -421,7 +421,7 @@ fn the_room_gathers_when_the_cpu_has_it_too() {
                 younger(Some(usual)),
             ],
             &slots(vec![busy(2000, minutes(10)), busy(5000, minutes(30))]),
-            budget,
+            budget.clone(),
             now(),
         )
     };

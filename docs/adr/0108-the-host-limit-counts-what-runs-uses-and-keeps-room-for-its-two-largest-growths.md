@@ -1,6 +1,6 @@
 # 0108. The host limit counts what runs uses and keeps room for its two largest growths
 
-Status: **Proposed** (2026-11-07). Amends [0051](0051-insights-and-notifications.md),
+Status: **Proposed** (2026-11-07), amended by [0130](0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md). Amends [0051](0051-insights-and-notifications.md),
 [0055](0055-admission-follows-the-hosts-memory.md),
 [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) (its section "The host reads the plain count"),
 [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) and

@@ -229,7 +229,10 @@ fn counted(engine: &Engine<FakeGithub, FakeDocker>) -> Counted {
 }
 
 #[tokio::test]
-async fn a_start_in_flight_counts_as_the_runner_it_becomes() {
+async fn a_start_in_flight_counts_its_reservation_under_measured_admission_and_its_cap_under_caps()
+{
+    // Catches a start in flight read as a stale runner at its cap while its registration waits (ADR 0130), and one
+    // that counts other than the runner it becomes while the slice's sample is recent.
     let measured = CONFIG.replace(
         "isolation = \"sysbox\"",
         "isolation = \"sysbox\"\nadmission = \"measured\"",
@@ -288,13 +291,18 @@ async fn a_start_in_flight_counts_as_the_runner_it_becomes() {
             .place(starting.into_occupant(1, "container-1".to_owned()));
         let placed = counted(&engine);
 
-        assert_eq!(in_flight, placed, "{case}: a start counts as its runner");
-        // Its cap, unless measured admission has a recent sample to go by its reservation.
-        let memory = match (policy, sampled) {
-            (api::AdmissionPolicy::Measured, Sampled::Fresh) => G,
-            _ => 4 * G,
+        // In flight, measured admission goes by its reservation, which has no container to sample; placed, by its
+        // reservation only beside a recent sample of the slice, else by its cap.
+        let (flying, landed) = match (policy, sampled) {
+            (api::AdmissionPolicy::Caps, _) => (4 * G, 4 * G),
+            (api::AdmissionPolicy::Measured, Sampled::Fresh) => (G, G),
+            (api::AdmissionPolicy::Measured, Sampled::Stale) => (G, 4 * G),
         };
-        assert_eq!(in_flight.count.plain, memory, "{case}");
+        assert_eq!(in_flight.count.plain, flying, "{case}");
+        assert_eq!(placed.count.plain, landed, "{case}");
+        if flying == landed {
+            assert_eq!(in_flight, placed, "{case}: a start counts as its runner");
+        }
         let cpu = match policy {
             api::AdmissionPolicy::Caps => 2000,
             api::AdmissionPolicy::Measured => 500,

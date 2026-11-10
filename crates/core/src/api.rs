@@ -162,9 +162,13 @@ pub struct Budget {
     /// runner's predicted peak and its last sampled memory, nothing for one whose container is gone, and the caps of
     /// the seed containers, shells and the mirror.
     pub memory_in_use: u64,
-    /// What pooling takes off `memory_in_use` (ADR 0099); absent while it takes nothing.
+    /// What pooling takes off `memory_in_use` (ADR 0099, 0130); absent while it takes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pooled: Option<Pooled>,
+    /// The growth count both budgets go by, and its brake (ADR 0130); `pooled` and `host.credit` say what it takes off
+    /// `memory_in_use`. Absent under caps admission, with `[host] pooled_count` off, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counted: Option<Counted>,
     /// What a new runner must fit in beside them.
     pub admission: AdmissionPolicy,
     /// Under measured admission, whether the slice is at the high-water mark, so no runner starts.
@@ -199,6 +203,54 @@ pub struct Pooled {
     pub counted: u64,
     /// How many runners the credit counts on.
     pub runners: u64,
+}
+
+/// How far back the growth count's brake compares what runs uses: 10 minutes (ADR 0130,
+/// `admission::growth::GROWTH_WINDOW`).
+pub const GROWTH_WINDOW: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// The growth count (ADR 0130): what the runners use, and the room kept for what they may still grow by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Counted {
+    /// What the runners use, by their recent samples, in bytes.
+    pub used: u64,
+    /// The room it keeps for their growth, in bytes; absent while it rests (`brake`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<u64>,
+    /// How many of the largest growths the room covers at least.
+    pub jobs: u64,
+    /// Why it rests, while it does: the budgets then go by 0099's and 0108's credits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brake: Option<CountBrake>,
+}
+
+/// Why the growth count rests (ADR 0130).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum CountBrake {
+    /// What ran grew past the room kept within `GROWTH_WINDOW`.
+    Grew {
+        /// How much the runners present at both looks grew, together, in bytes.
+        grew: u64,
+        /// The room the earlier look kept, in bytes.
+        kept: u64,
+        /// Until when, in seconds since the Unix epoch.
+        until: u64,
+    },
+    /// The daemon started, or a reload changed what the count reads, too recently to judge growth.
+    Restarted {
+        /// Until when, in seconds since the Unix epoch.
+        until: u64,
+    },
+    /// The host is under the guard's line, or a reading is missing, now or at a look within 5 minutes.
+    Guard {
+        /// Until when, in seconds since the Unix epoch; absent for a moment the brake has not looked at yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
+    },
+    /// A brake a newer daemon names; this client shows only that the count rests.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What the host's memory leaves the runners (ADR 0055). New runners fit in the lower of `MemoryMax` and
