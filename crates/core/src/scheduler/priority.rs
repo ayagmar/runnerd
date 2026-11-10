@@ -154,6 +154,9 @@ pub(crate) struct Runner<'plan> {
     pub(crate) cpu: u64,
     /// What it could take.
     pub(crate) caps: Caps,
+    /// Whether it started behind a barrier (ADR 0131): a warm runner, one started for a job older than the owner and
+    /// one a restart adopted did not.
+    pub(crate) passed: bool,
 }
 
 impl Runner<'_> {
@@ -213,19 +216,20 @@ pub(crate) struct Candidate<'plan> {
     pub(crate) caps: Caps,
 }
 
-/// The room behind a barrier, as ADR 0097 bounds it. If each run takes what the plan read, everything started here has
-/// ended before the owner or any job older than it could start, so nothing they see changes and an owner that keeps the
-/// barrier starts no later than with no backfill. The plan reads p95s, so a run that ends early can bring the room while
-/// a job started here still runs, and that job can cost the owner what it has left. Whatever the run times do, what
-/// started since the barrier matured cannot take, even at its caps, what an empty slice has for the owner and the older
-/// jobs, nor the last free slot of its profile, so the owner fits once the older jobs and what ran before have ended.
+/// The room behind a barrier, as ADRs 0097 and 0131 bound it. If each run takes what the plan read, everything started
+/// here has ended before the owner or any job older than it could start, so nothing they see changes and an owner that
+/// keeps the barrier starts no later than with no backfill. The plan reads p95s, so a run that ends early can bring the
+/// room while a job started here still runs, and that job can cost the owner what it has left. Whatever the run times
+/// do, what passed a barrier since this one matured cannot take, even at its caps, what an empty slice has for the owner
+/// and the older jobs, nor the last free slot of its profile, so the owner fits once the older jobs and what ran before
+/// have ended.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backfill<'plan> {
     /// The owner's profile.
     profile: &'plan str,
     /// How long from now until the running runners' usual ends let the owner or an older job start.
     until: Duration,
-    /// What a drain leaves past the owner and the caps of what started since its barrier matured.
+    /// What a drain leaves past the owner and the caps of what passed a barrier since this one matured.
     spare: Left,
 }
 
@@ -311,9 +315,12 @@ impl<'plan> Backfill<'plan> {
         let memory = served.clone().map(|job| job.memory).max().unwrap_or(0);
         let cpu = served.map(|job| job.cpu).max().unwrap_or(0);
         spare.take(barrier.memory.max(memory), barrier.cpu.max(cpu));
+        // A runner started for an older job, or before T0, is one the owner waits out under a strict barrier too. One
+        // that passed counts at its caps, as it may hang and grow to them, whether or not GitHub gave it a job: an idle
+        // one holds its room until `IDLE_TIMEOUT`.
         for runner in runners
             .iter()
-            .filter(|runner| runner.started_at >= barrier.since)
+            .filter(|runner| runner.passed && runner.started_at >= barrier.since)
         {
             spare.take(runner.caps.memory, runner.caps.cpu);
         }

@@ -395,6 +395,7 @@ fn a_starved_pool_without_a_free_slot_erects_no_barrier_and_keeps_its_wait() {
         memory: 4 * GIB,
         cpu: 2000,
         usual: None,
+        behind: None,
     })]);
     profiles.insert(
         "small".to_owned(),
@@ -566,6 +567,7 @@ fn a_job_behind_a_barrier_with_no_slot_says_so_and_asks_for_no_slot() {
             memory: GIB,
             cpu: 1000,
             usual: None,
+            behind: None,
         })],
     };
     profiles.insert("full".to_owned(), other.clone());
@@ -631,6 +633,7 @@ fn warm_runner(repository: &str, memory: u64) -> Slot {
         memory,
         cpu: 500,
         usual: None,
+        behind: None,
     })
 }
 
@@ -815,6 +818,7 @@ mod generated {
                         memory: *memory,
                         cpu: 0,
                         usual: None,
+                        behind: None,
                     })
                 })
                 .collect();

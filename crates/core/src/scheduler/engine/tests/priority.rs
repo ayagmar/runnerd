@@ -1061,6 +1061,23 @@ async fn a_job_that_usually_ends_before_the_room_gathers_starts_behind_the_barri
     );
 }
 
+/// The runner keeps the barrier it passed from its start, so the next plan counts its caps against the room behind the
+/// barrier (ADR 0131): job 10's 8G leaves 1G of the 9G a drain gives, and job 11's runner's 1G cap takes it.
+#[tokio::test]
+async fn a_runner_that_passed_counts_against_the_room_behind_the_barrier_until_it_goes() {
+    let mut fixture = Fixture::behind_the_barrier("quick").await;
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 11 passed");
+    // Its runner waits for job 11 still: job 12 needs one of its own.
+    fixture.queue(vec![big(10), named(11, "quick"), named(12, "quick")]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 12 waits");
+    assert_eq!(
+        fixture.reason(12),
+        Some(api::Waiting::BehindMemory { job: 10 })
+    );
+}
+
 #[tokio::test]
 async fn a_job_that_would_outlast_the_room_or_has_too_few_runs_stays_behind_the_barrier() {
     for name in ["slow", "rare"] {

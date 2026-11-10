@@ -63,6 +63,8 @@ pub(super) struct Starting {
     repository: String,
     runner_name: String,
     purpose: Purpose,
+    /// The owner of the barrier its plan started it behind (ADR 0131).
+    behind: Option<u64>,
     /// What it reserves of memory and CPU.
     admission: api::Admission,
     /// Its container's memory cap.
@@ -100,6 +102,11 @@ impl Starting {
         self.launched_at
     }
 
+    /// The owner of the barrier its plan started it behind.
+    pub(super) fn behind(&self) -> Option<u64> {
+        self.behind
+    }
+
     /// The runner it became once Docker made `container` for its registration `runner_id`.
     pub(super) fn into_occupant(self, runner_id: u64, container: String) -> Occupant {
         Occupant {
@@ -114,7 +121,7 @@ impl Starting {
             labels: Some(self.labels),
             image: Some(self.image),
             spec: Some(THIS_SPEC.to_owned()),
-            engagement: Engagement::started(self.purpose),
+            engagement: Engagement::started(self.purpose, self.behind),
         }
     }
 }
@@ -134,6 +141,7 @@ impl Starting {
             repository: repository.to_owned(),
             runner_name: runner_name.to_owned(),
             purpose: Purpose::Job,
+            behind: None,
             admission,
             memory,
             cpus,
@@ -308,6 +316,8 @@ struct Launched {
     repository: String,
     /// The job it was started for; `None` for a warm runner.
     job: Option<u64>,
+    /// The owner of the barrier it was started behind.
+    behind: Option<u64>,
 }
 
 /// What the launcher did with a start.
@@ -562,6 +572,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slot,
             repository,
             job,
+            behind,
         };
         self.launch_admitted(launched, admission, purpose).await
     }
@@ -642,6 +653,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             repository: repository.to_owned(),
             runner_name: name,
             purpose,
+            behind: launched.behind,
             admission,
             memory: spec.memory.0,
             cpus: u64::from(spec.cpus) * 1000,

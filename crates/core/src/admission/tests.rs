@@ -1463,6 +1463,18 @@ fn a_replay_goes_back_to_the_first_limit_once_a_pools_queue_emptied() {
     assert_eq!(through_the_planner(&jobs, &known), replayed);
 }
 
+/// A runner of `through_the_planner`'s model.
+struct ModelRunner {
+    pool: Pool,
+    /// When it started and ends, in ms.
+    started: u64,
+    ends: u64,
+    /// How long its job usually runs.
+    usual: Option<Duration>,
+    /// The barrier it started behind.
+    behind: Option<u64>,
+}
+
 /// `jobs` through `scheduler::plan` itself, second by second, as a model of the engine commits it: each pool's waits in
 /// the order its jobs started. Under caps, whose runners take their profile's memory; `known` gives every usual run time.
 #[allow(
@@ -1477,13 +1489,12 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
     let mut waits: BTreeMap<Pool, Waits> = BTreeMap::new();
     let mut waited: BTreeMap<Pool, Vec<u64>> = BTreeMap::new();
     let mut queued: Vec<(u64, &Ran)> = Vec::new();
-    // Each runner: its pool, when it started and ends, in ms, and how long its job usually runs.
-    let mut running: Vec<(Pool, u64, u64, Option<Duration>)> = Vec::new();
+    let mut running: Vec<ModelRunner> = Vec::new();
     let mut arriving: Vec<(u64, &Ran)> = (0_u64..).zip(jobs).collect();
     arriving.reverse();
     let mut now = NOW;
     while !arriving.is_empty() || !queued.is_empty() || !running.is_empty() {
-        running.retain(|(_, _, ends, _)| *ends > now);
+        running.retain(|runner| runner.ends > now);
         while arriving.last().is_some_and(|(_, run)| run.queued_at <= now) {
             queued.extend(arriving.pop());
         }
@@ -1525,16 +1536,18 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
             .map(|(name, limits)| {
                 let mut slots: Vec<Slot> = running
                     .iter()
-                    .filter(|(pool, ..)| pool.profile == *name)
-                    .map(|(pool, started, _, usual)| {
+                    .filter(|runner| runner.pool.profile == *name)
+                    .map(|runner| {
                         used += limits.memory.0;
                         Slot::Runner(scheduler::RunnerSlot {
-                            repository: pool.repository.clone(),
+                            repository: runner.pool.repository.clone(),
                             busy: true,
-                            started_at: SystemTime::UNIX_EPOCH + Duration::from_millis(*started),
+                            started_at: SystemTime::UNIX_EPOCH
+                                + Duration::from_millis(runner.started),
                             memory: limits.memory.0,
                             cpu: 0,
-                            usual: *usual,
+                            usual: runner.usual,
+                            behind: runner.behind,
                         })
                     })
                     .collect();
@@ -1566,7 +1579,10 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
         );
         for decision in &plan.decisions {
             let Decision::Start {
-                repository, slot, ..
+                repository,
+                slot,
+                behind,
+                ..
             } = decision
             else {
                 continue;
@@ -1589,7 +1605,13 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
                 .entry(pool.clone())
                 .or_default()
                 .push((now - run.queued_at) / 1000);
-            running.push((pool, now, now + ran_for, usual));
+            running.push(ModelRunner {
+                pool,
+                started: now,
+                ends: now + ran_for,
+                usual,
+                behind: *behind,
+            });
         }
         for demand in &plan.held {
             waits
@@ -1635,11 +1657,22 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
         .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
         .collect();
     assert_eq!(through_the_planner(&jobs, &known), replayed);
+    // The lint job waits for the older one, then passes beside it: a runner started for an older job is one the owner
+    // waits out under a strict barrier too, so it leaves the room behind the barrier as it was (ADR 0131).
     let (jobs, known) = a_barrier_behind_an_older_job();
     let replay = replay_with_light(&jobs, &known, Barriers::On);
+    let lint = pool("halyard/lint", "light");
+    assert_eq!(replay.backfilled.jobs, 1, "the lint job passes");
     assert_eq!(
-        replay.backfilled.jobs, 0,
-        "the lint job waits for the older one"
+        replay.pools[&lint].waits,
+        [0, 30],
+        "once the older job started, at minute 14"
+    );
+    let strict = replay_with_light(&jobs, &known, Barriers::Strict);
+    let ledger = pool("halyard/ledger", "jvm");
+    assert_eq!(
+        replay.pools[&ledger].waits, strict.pools[&ledger].waits,
+        "and the owner starts when it would"
     );
     let replayed: BTreeMap<Pool, Vec<u64>> = replay
         .pools

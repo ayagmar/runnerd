@@ -147,7 +147,7 @@ A younger job still starts behind that job if all of this holds:
 - It has a free slot and fits the budgets left. In the waiting job's profile, it leaves that job a free slot too.
 - The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. That time counts [the credit](#the-pooled-count) and [the host credit](#the-host-credit) at their largest, since both can grow with no job ending. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
 - Every job its runner could take usually ends by then. The usual run time is the p95 of a job's last 20 successful runs, from 3 of them. A pool with one queued job that has no estimate stays behind.
-- Everything started since the wait reached its limit, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger.
+- Everything that started behind a barrier since the wait reached its limit, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger. A runner counts whether or not it got a job. Runners started for older jobs don't count: the waiting job waits for them anyway.
 
 So if every job takes exactly its usual run time, the waiting job starts when it would with nothing behind it. Usual run times err long, so a job that ends early can bring the room while a job behind the barrier still runs, and the waiting job then waits for that one too. It always fits once the runners from before that moment and any older jobs' have ended, even if a job behind it hangs.
 

@@ -63,6 +63,7 @@ fn running(memory: u64, ends_in: Duration) -> Slot {
         memory,
         cpu: 0,
         usual: Some(BEFORE + ends_in),
+        behind: None,
     })
 }
 
@@ -199,6 +200,7 @@ fn nothing_passes_while_a_runner_that_gives_the_room_is_past_its_usual_end() {
         memory: 4 * GIB,
         cpu: 0,
         usual: Some(BEFORE.saturating_sub(MINUTE)),
+        behind: None,
     });
     let runners = || vec![overdue.clone(), running(8 * GIB, minutes(40))];
     assert_held(&plan_behind(younger(Some(minutes(1))), runners()));
@@ -216,6 +218,7 @@ fn a_runner_with_no_estimate_or_no_job_counts_as_ending_now() {
             memory: 4 * GIB,
             cpu: 0,
             usual,
+            behind: None,
         })
     };
     for runner in [unknown(true, None), unknown(false, Some(minutes(60)))] {
@@ -246,31 +249,87 @@ fn gib(amount: i64) -> i64 {
     amount * i64::try_from(GIB).unwrap()
 }
 
-/// What started since the barrier matured may hang: at their caps they must leave the owner its room.
+/// What passed since the barrier matured may hang and grow to its caps: at its caps, it must leave the owner its room.
+/// What started for an older job, before the barrier matured, or as a warm runner did not pass, and the owner waits it
+/// out under a strict barrier too.
 #[test]
-fn the_caps_of_what_started_since_the_barrier_matured_leave_the_owner_its_room() {
+fn the_caps_of_what_passed_since_the_barrier_matured_leave_the_owner_its_room() {
     let since = now() - WAITED + PRIORITY_AFTER;
-    let backfilled = |started_at| {
-        Slot::Runner(RunnerSlot {
+    // A 1G runner in `profile`, since `started_at`: `other` caps it at 8G, `small` at 1G. Beside it, 4G back in 20
+    // minutes brings the owner's 8G; a drain gives 16G, so what passed may have caps of 8G less the 1G younger job.
+    let plan_with = |profile: &str, started_at, behind| {
+        let mut profiles = slots(vec![
+            running(4 * GIB, minutes(20)),
+            running(6 * GIB + GIB / 4, minutes(40)),
+        ]);
+        let slots = &mut profiles.get_mut(profile).unwrap().slots;
+        let free = slots.iter().position(|slot| *slot == Slot::Free);
+        let runner = Slot::Runner(RunnerSlot {
             repository: "o/other".to_owned(),
             busy: true,
             started_at,
             memory: GIB,
             cpu: 0,
             usual: Some(minutes(600)),
+            behind,
+        });
+        match free {
+            Some(index) => slots[index] = runner,
+            None => slots.push(runner),
+        }
+        plan(
+            &[owner(), younger(Some(minutes(1)))],
+            &profiles,
+            slice(11 * GIB + GIB / 4),
+            now(),
+        )
+    };
+    assert_passes(&plan_with("small", since, Some(1)));
+    // At its cap, not at the 1G it takes.
+    assert_held(&plan_with("other", since, Some(1)));
+    // Before the barrier matured, it is what a strict barrier waits out too.
+    let before = since - Duration::from_secs(1);
+    assert_passes(&plan_with("other", before, Some(1)));
+    // Started since for an older job: not what passed.
+    assert_passes(&plan_with("other", since, None));
+}
+
+/// An idle runner counts as ending now for when the room gathers, so its room only binds where the owner needs more
+/// than it and the runner that ends in 20 minutes: here 10G of a 16G drain, with 8G running.
+#[test]
+fn a_passed_runner_github_gave_no_job_holds_its_room_and_a_warm_one_does_not() {
+    let since = now() - WAITED + PRIORITY_AFTER;
+    let idle = |behind| {
+        Slot::Runner(RunnerSlot {
+            repository: "o/other".to_owned(),
+            busy: false,
+            started_at: since,
+            memory: 6 * GIB,
+            cpu: 0,
+            usual: None,
+            behind,
         })
     };
-    // 8G caps in `other`: with the owner's 8G they take all a drain gives.
-    let runners = |started_at| vec![running(10 * GIB, minutes(20)), backfilled(started_at)];
-    assert_held(&plan_behind(younger(Some(minutes(1))), runners(since)));
-    assert_passes(&plan_behind(
-        younger(Some(minutes(1))),
-        runners(since - Duration::from_secs(1)),
-    ));
+    let owner = Repository {
+        waits: starved(1),
+        ..pool("o/big", "big", 10 * GIB, None, &[1])
+    };
+    let plan_with = |idle| {
+        plan(
+            &[owner.clone(), younger(Some(minutes(1)))],
+            &slots(vec![running(8 * GIB, minutes(20)), idle]),
+            slice(14 * GIB),
+            now(),
+        )
+    };
+    // A twin, or a runner whose job went elsewhere: 16G less the owner's 10G and its 8G cap leaves nothing.
+    assert_held(&plan_with(idle(Some(1))));
+    // A warm runner never starts behind a barrier.
+    assert_passes(&plan_with(idle(None)));
 }
 
 #[test]
-fn the_caps_of_a_plans_own_starts_count_too() {
+fn the_caps_of_a_plans_own_passes_count_too() {
     let younger = pool("o/small", "small", GIB, Some(minutes(1)), &[2, 3, 4]);
     let budget = Budget {
         drained: Drained {
@@ -455,6 +514,7 @@ fn a_younger_job_ends_before_an_older_job_gets_its_slot() {
             memory: 2 * GIB,
             cpu: 0,
             usual: Some(BEFORE + minutes(5)),
+            behind: None,
         });
         let mut profiles = slots(vec![running(10 * GIB, minutes(20))]);
         profiles.insert("older".to_owned(), profile(2 * GIB, 1000, vec![in_older]));
@@ -647,6 +707,7 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
             memory: 4 * GIB,
             cpu: 0,
             usual: Some(ends_in),
+            behind: None,
         })
     };
     let runners = || vec![from_the_future(minutes(5)), running(8 * GIB, minutes(40))];
@@ -667,6 +728,7 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
         memory: 7 * GIB,
         cpu: 0,
         usual: Some(minutes(30)),
+        behind: None,
     });
     let mut wide = slots(vec![
         in_the_past_for_the_barrier,
@@ -720,6 +782,158 @@ fn a_credit_that_may_come_before_any_end_holds_back_what_would_outlast_it() {
     assert_held(&behind(6 * GIB));
 }
 
+/// The owner's status at 14:22:38 UTC on 2026-11-10, in GiB: fretboard's `check:backend:static` (jvm-heavy, 11G)
+/// matured at 14:22:03, and since then three runners started for older jvm and node jobs, which GitHub gave younger
+/// jobs of the same pools. Before rule 4 counted only what passed, their caps (13.25 + 9.75 + 9.75) left a drain of
+/// 39.81G less the owner's 11G short by 3.94G, and no light job passed.
+mod at_14_22_38 {
+    use super::*;
+
+    const UP_SINCE_T0: Duration = Duration::from_secs(35);
+
+    fn gib_of(hundredths: u64) -> u64 {
+        GIB * hundredths / 100
+    }
+
+    /// A runner of fretboard in `profile`, `up` seconds old, taking `hundredths` of a GiB, that usually ends in
+    /// `ends_in`.
+    fn runner(up: u64, hundredths: u64, ends_in: Duration) -> Slot {
+        let up = Duration::from_secs(up);
+        Slot::Runner(RunnerSlot {
+            repository: "fretboard".to_owned(),
+            busy: true,
+            started_at: now() - up,
+            memory: gib_of(hundredths),
+            cpu: 0,
+            usual: Some(up + ends_in),
+            behind: None,
+        })
+    }
+
+    /// The profiles at 14:22:38: what each runner took, how long it had run, and whether it started after T0.
+    fn profiles(light: Vec<Slot>) -> BTreeMap<String, Profile> {
+        let jvm = vec![
+            runner(20, 700, minutes(6)),
+            runner(39, 375, minutes(4)),
+            runner(52, 400, minutes(3)),
+            Slot::Free,
+            Slot::Free,
+            Slot::Free,
+        ];
+        let node = vec![
+            runner(148, 300, minutes(3)),
+            runner(240, 300, minutes(3)),
+            runner(333, 300, minutes(2)),
+            runner(21, 425, minutes(5)),
+            runner(40, 300, minutes(5)),
+            runner(200, 300, minutes(4)),
+            runner(413, 300, minutes(2)),
+            runner(33, 150, minutes(2)),
+        ];
+        BTreeMap::from([
+            (
+                "jvm-heavy".to_owned(),
+                profile(11 * GIB, 0, vec![Slot::Free; 3]),
+            ),
+            ("jvm".to_owned(), profile(gib_of(1325), 0, jvm)),
+            ("node".to_owned(), profile(gib_of(975), 0, node)),
+            ("light".to_owned(), profile(gib_of(175), 0, light)),
+        ])
+    }
+
+    /// The owner, job 10, and an older job each of jvm (7G) and node (5G), whose pools a start served since; then a
+    /// light job, 0.5G, that runs 30 s.
+    fn pools(light: &[u64]) -> Vec<Repository> {
+        let owner = Repository {
+            waits: Waits::default().with_memory(Some(Wait {
+                job: 10,
+                since: now() - UP_SINCE_T0 - PRIORITY_AFTER,
+            })),
+            ..pool("fretboard", "jvm-heavy", 11 * GIB, Some(minutes(3)), &[10])
+        };
+        vec![
+            pool("fretboard", "jvm", 7 * GIB, Some(minutes(6)), &[3]),
+            pool("fretboard", "node", 5 * GIB, Some(minutes(5)), &[4]),
+            owner,
+            pool(
+                "fretboard",
+                "light",
+                GIB / 2,
+                Some(Duration::from_secs(30)),
+                light,
+            ),
+        ]
+    }
+
+    /// The host left the slice 39.81G, of which the runners took 39.00G.
+    fn budget(used: u64) -> Budget {
+        let drain = gib_of(3981);
+        Budget {
+            memory: Some(super::super::super::left(drain, used)),
+            drained: Drained {
+                memory: Some(super::super::super::left(drain, 0)),
+                ..Drained::default()
+            },
+            ..Budget::default()
+        }
+    }
+
+    #[test]
+    fn a_light_job_passes_a_heavy_owner_behind_runners_started_for_older_jobs() {
+        let light = vec![
+            runner(47, 50, minutes(1)),
+            Slot::Free,
+            Slot::Free,
+            Slot::Free,
+        ];
+        let plan = plan(&pools(&[20]), &profiles(light), budget(gib_of(3900)), now());
+        assert_eq!(plan.barrier.map(|barrier| barrier.job), Some(10));
+        let started: Vec<&str> = plan
+            .decisions
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Start { slot, behind, .. } => {
+                    assert_eq!(*behind, Some(10), "it passed the owner");
+                    Some(slot.profile.as_str())
+                }
+                Decision::Stop { .. } => None,
+            })
+            .collect();
+        assert_eq!(started, ["light"], "{plan:?}");
+    }
+
+    /// The light runner that passed takes 0.5G and has not ended: once the older jobs' runners and those from before
+    /// T0 have, the owner fits beside it.
+    #[test]
+    fn the_owner_starts_once_the_older_runners_end() {
+        let passed = Slot::Runner(RunnerSlot {
+            repository: "fretboard".to_owned(),
+            busy: true,
+            started_at: now() - UP_SINCE_T0 / 2,
+            memory: GIB / 2,
+            cpu: 0,
+            usual: Some(Duration::from_secs(30)),
+            behind: Some(10),
+        });
+        let mut profiles = profiles(vec![passed, Slot::Free, Slot::Free, Slot::Free]);
+        for name in ["jvm", "node"] {
+            let profile = profiles.get_mut(name).unwrap();
+            profile.slots.fill(Slot::Free);
+        }
+        let owner_alone = &pools(&[])[2..3];
+        let plan = plan(owner_alone, &profiles, budget(GIB / 2), now());
+        let started: Vec<&str> = plan
+            .decisions
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Start { slot, .. } => Some(slot.profile.as_str()),
+                Decision::Stop { .. } => None,
+            })
+            .collect();
+        assert_eq!(started, ["jvm-heavy"], "{plan:?}");
+    }
+}
+
 /// The planner, a model of the engine and of GitHub: jobs queue, runners take the oldest job of their pool and run as
 /// long as a run time says, and nothing but the plan decides. Run times here are the model's own.
 mod generated {
@@ -762,7 +976,7 @@ mod generated {
         slots: usize,
         pools: [Kind; 3],
         /// When a job that hangs has grown to its cap: late enough that the budgets gave no warning while jobs passed,
-        /// which only rule 4 of ADR 0097 stands against.
+        /// which only rule 4 of ADRs 0097 and 0131 stands against.
         hung_jobs_grow_at: u64,
         credit: Option<Credit>,
     }
@@ -799,6 +1013,21 @@ mod generated {
         ],
         hung_jobs_grow_at: 30,
         credit: None,
+    };
+
+    /// `STREAMS` with a big job of more than half the slice: until the room gathers, what passes and hangs behind its
+    /// barrier can take more than a drain leaves past it, which only rule 4 of ADRs 0097 and 0131 stands against.
+    static HEAVY_STREAMS: Shape = Shape {
+        pools: [
+            Kind {
+                memory: 10 * GIB,
+                cap: 10 * GIB,
+                ..STREAMS.pools[0]
+            },
+            STREAMS.pools[1],
+            STREAMS.pools[2],
+        ],
+        ..STREAMS
     };
 
     /// A few jobs in two slots a pool, a job that waits a tick being starved: memory, CPU and slots each run out.
@@ -932,6 +1161,8 @@ mod generated {
         started: u64,
         /// `None`: it hangs.
         ends: Option<u64>,
+        /// The barrier it started behind.
+        behind: Option<u64>,
     }
 
     #[derive(Clone)]
@@ -1069,6 +1300,7 @@ mod generated {
                             memory: self.takes(run),
                             cpu: of_run.cpu,
                             usual: self.estimate(run.job.ticks),
+                            behind: run.behind,
                         })
                     })
                     .collect();
@@ -1154,6 +1386,7 @@ mod generated {
                     job,
                     started: tick,
                     ends: (!hangs).then_some(end),
+                    behind: *behind,
                 });
             }
             for demand in &plan.held {
@@ -1406,7 +1639,7 @@ mod generated {
         let mut most = 0;
         for seed in 0..64 {
             let arrivals = a_stream_behind_a_big_job(&mut Rng(seed));
-            let mut world = World::new(&STREAMS, Estimates::Exact, Runs::BackfilledHang);
+            let mut world = World::new(&HEAVY_STREAMS, Estimates::Exact, Runs::BackfilledHang);
             for tick in 0..300 {
                 world.step(arrival_at(&arrivals, tick));
                 if world.starts.contains_key(&6) {
@@ -1565,16 +1798,18 @@ mod generated {
     /// every_world_of_six`. Rule 2's older jobs change no count in these worlds: their unit tests and the replay and
     /// planner's shared fixture stand for them.
     #[test]
-    #[ignore = "takes minutes; ADRs 0097 and 0098 record its last result"]
+    #[ignore = "takes minutes; ADRs 0097, 0098 and 0131 record its last result"]
     #[allow(
         clippy::print_stderr,
-        reason = "its counts are what ADRs 0097 and 0098 record"
+        reason = "its counts are what ADRs 0097, 0098 and 0131 record"
     )]
     fn every_world_of_six() {
         for (shape, most, lost) in [
             (&SHARED, 5, false),
             (&TIGHT, 6, true),
-            (&TWO_LIMITS, 6, true),
+            // No owner that lost its barrier starts late here once runners started for older jobs stopped closing
+            // backfill (ADR 0131): 80 did before.
+            (&TWO_LIMITS, 6, false),
         ] {
             let tally = every_world(shape, most, |count| 1 << (count - 1).min(3), 8);
             eprintln!("{tally:?}");
