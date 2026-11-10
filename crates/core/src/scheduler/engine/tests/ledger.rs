@@ -325,3 +325,69 @@ async fn a_listing_of_a_removed_repository_keeps_the_clock_of_a_job_github_fails
     );
     assert_eq!(state_now(&handle, 5).await, Some(JobState::Elsewhere));
 }
+
+/// A read of a queued job that GitHub answers starts the clock of failed reads over: a later failure counts from
+/// itself, not from the reads that failed before the answer.
+#[tokio::test]
+async fn a_queued_job_github_answers_between_failed_reads_starts_its_clock_over() {
+    let github = FakeGithub::default();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(5)];
+        state.failed_jobs.insert(5);
+    }
+    let dir = TestDir::new("ledger-answered");
+    let (mut engine, handle) = engine_with(&github, &FakeDocker::default(), &dir, CONFIG);
+    // Too little memory for any runner: the job stays queued.
+    engine.memory_max = Some(1 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.is_followed_as_queued(5), "job 5 is listed queued");
+
+    // It leaves the listing, and GitHub fails to read it.
+    github.0.lock().unwrap().queued.clear();
+    engine.tick(Shutdown::No).await;
+    engine.age_followed_jobs(LOST_AFTER);
+    // GitHub answers that it is still queued, then fails again.
+    {
+        let mut state = github.0.lock().unwrap();
+        state.failed_jobs.clear();
+        state.jobs.insert(5, details(5, "queued", None));
+    }
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().failed_jobs.insert(5);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.is_followed_as_queued(5),
+        "GitHub failed one read of job 5 since it last answered"
+    );
+    assert_eq!(state_now(&handle, 5).await, Some(JobState::Queued));
+}
+
+/// A queued job that left the listing while GitHub still says it is queued is read once a tick, as a queued job, not
+/// as a closing one too.
+#[tokio::test]
+async fn a_queued_job_that_left_the_listing_is_read_once_a_tick() {
+    let github = FakeGithub::default();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(5)];
+        state.jobs.insert(5, details(5, "queued", None));
+    }
+    let dir = TestDir::new("ledger-read-once");
+    let (mut engine, _handle) = engine_with(&github, &FakeDocker::default(), &dir, CONFIG);
+    // Too little memory for any runner: the job stays queued.
+    engine.memory_max = Some(1 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued.clear();
+    for _ in 0..3 {
+        let before = reads_of(&github, 5);
+        engine.tick(Shutdown::No).await;
+        assert_eq!(reads_of(&github, 5) - before, 1, "job 5 is read once");
+    }
+    assert!(
+        engine.is_followed_as_queued(5),
+        "GitHub says job 5 is queued"
+    );
+}
