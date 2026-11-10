@@ -169,7 +169,7 @@ JSON over `$XDG_RUNTIME_DIR/runnerd.sock` (`curl --unix-socket`), mode 0600: onl
 
 Read-only: `GET /v1/host/samples`, `/v1/stats`, `/v1/activity`, `/v1/sizing` ([advice](../admission/#sizing)), `/v1/insights?days=` ([Insights](../insights/); 14 days by default, 90 at most), `/v1/digest`, `/v1/savings`, `/v1/caches` and `/v1/caches/history`.
 
-A forced pause cancels the runs of the repository's running jobs, other jobs of those runs included, and removes a runner still running 90 s later. A paused repository's waiting runners, warm ones too, stop at once. A pause lasts until a resume, across restarts.
+A forced pause cancels the runs of the repository's running jobs, other jobs of those runs included, and removes a runner still running 90 s later, a restart in between or not. A paused repository's waiting runners, warm ones too, stop at once. A pause lasts until a resume, across restarts.
 
 ### Events
 

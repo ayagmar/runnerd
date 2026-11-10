@@ -2931,6 +2931,122 @@ async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_whi
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
 }
 
+/// A forced pause's grace for a cancelled run goes on over a restart: the runner that still runs once it ends is
+/// removed, not left to a run GitHub may never end.
+#[tokio::test]
+async fn the_runner_of_a_cancelled_run_is_removed_after_its_grace_though_the_daemon_restarted() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("cancel-restart");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
+    handle.store.flush().await;
+    drop((engine, handle));
+
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        removed(&docker.calls()),
+        Vec::<&String>::new(),
+        "its grace goes on"
+    );
+    tokio::time::pause();
+    tokio::time::advance(super::control::CANCEL_GRACE).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+}
+
+/// A forced pause's grace that ran out while no daemon ran ends at the first tick after the restart.
+#[tokio::test]
+async fn the_runner_of_a_cancelled_run_whose_grace_ran_out_while_no_daemon_ran_is_removed_at_the_first_tick()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("cancel-expired");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
+    // As if the grace had passed by the restart.
+    let runner = identity("ci", ID_A).runner_name("app", 1, 1);
+    handle
+        .store
+        .runner_cancel_by(&runner, crate::time::now_ms() - 1);
+    handle.store.flush().await;
+    drop((engine, handle));
+
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+}
+
+/// A history 0.0.29 kept, at schema 19, opens at this build's schema, and a restart adopts the runner it ran with
+/// what its row says, and no forced pause's deadline.
+#[tokio::test]
+async fn a_history_at_schema_19_opens_and_its_running_runner_is_adopted_with_its_admission_and_job()
+{
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("history-19");
+    let runner = identity("ci", ID_A).runner_name("app", 1, 1);
+    let admission = api::Admission {
+        policy: api::AdmissionPolicy::Measured,
+        reserved: 3 << 30,
+        basis: api::Basis::Cap,
+        free: None,
+        slice: None,
+        cpu: None,
+    };
+    {
+        let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+        db.execute_batch(include_str!("../../store/tests/schema-19.sql"))
+            .unwrap();
+        db.execute(
+            "INSERT INTO runners (name, repository, profile, slot, container, started_at, admission)
+             VALUES (?1, 'o/r', 'app', 1, 'container-1', 1000, ?2)",
+            rusqlite::params![runner, serde_json::to_string(&admission).unwrap()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, runner, queued_at, started_at)
+             VALUES (1, 'o/r', 1, 1, 'build', '[]', 'running', ?1, 1000, 1000)",
+            [&runner],
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", 19).unwrap();
+    }
+
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    let adopted = engine.occupants_mut().next().unwrap();
+    assert_eq!(
+        (
+            adopted.runner_name.as_str(),
+            adopted.named_job(),
+            adopted.admission
+        ),
+        (runner.as_str(), Some(1), Some(admission))
+    );
+    engine.tick(Shutdown::No).await;
+    tokio::time::pause();
+    tokio::time::advance(super::control::CANCEL_GRACE).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        removed(&docker.calls()),
+        Vec::<&String>::new(),
+        "no forced pause cancelled its run"
+    );
+}
+
 #[tokio::test]
 async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fails_once() {
     let github = FakeGithub::default();

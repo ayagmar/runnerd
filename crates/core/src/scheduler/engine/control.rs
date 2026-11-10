@@ -664,6 +664,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .engagement
                         .cancelled(tokio::time::Instant::now() + CANCEL_GRACE);
                 }
+                // A restart keeps it.
+                self.store.runner_cancel_by(
+                    &occupant.runner_name,
+                    time::now_ms() + u64::try_from(CANCEL_GRACE.as_millis()).unwrap_or(u64::MAX),
+                );
             } else {
                 self.kill(&slot).await;
                 if self

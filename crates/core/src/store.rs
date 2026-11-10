@@ -64,6 +64,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         20,
         "ALTER TABLE jobs ADD COLUMN runner_fault INTEGER NOT NULL DEFAULT 0;",
     ),
+    (21, "ALTER TABLE runners ADD COLUMN cancel_by INTEGER;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -275,6 +276,10 @@ enum Write {
     RunnerStoppedFor {
         runner: String,
         reason: &'static str,
+    },
+    RunnerCancelBy {
+        runner: String,
+        at: u64,
     },
     HostWaited {
         jobs: Vec<u64>,
@@ -676,6 +681,15 @@ impl Store {
         self.send(Write::RunnerOomKilled(runner.to_owned()));
     }
 
+    /// Records when a forced pause that cancelled a runner's run removes it if it still runs, in ms since the epoch,
+    /// so a restart keeps that deadline.
+    pub fn runner_cancel_by(&self, runner: &str, at: u64) {
+        self.send(Write::RunnerCancelBy {
+            runner: runner.to_owned(),
+            at,
+        });
+    }
+
     /// Records why an idle runner was removed, as `scheduler::StopReason::as_str` names it.
     pub fn runner_stopped_for(&self, runner: &str, reason: &'static str) {
         self.send(Write::RunnerStoppedFor {
@@ -1060,6 +1074,14 @@ impl Store {
     ) -> Result<Option<api::Admission>, StoreError> {
         let runner = runner.to_owned();
         self.read(move |db| read::runner_admission(db, &runner))
+            .await
+    }
+
+    /// When a forced pause that cancelled a runner's run removes it if it still runs, in ms since the epoch, if one
+    /// did.
+    pub async fn runner_cancel_deadline(&self, runner: &str) -> Result<Option<u64>, StoreError> {
+        let runner = runner.to_owned();
+        self.read(move |db| read::runner_cancel_deadline(db, &runner))
             .await
     }
 

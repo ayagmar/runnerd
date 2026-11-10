@@ -175,6 +175,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // Its capture reports its job again; until then, or if it cannot, the history knows it.
             engagement: Engagement::adopted(
                 self.store.runner_job(&container.name).await.ok().flatten(),
+                self.store
+                    .runner_cancel_deadline(&container.name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(cancel_deadline),
             ),
         }
     }
@@ -464,4 +470,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => warn!("cannot read the job history: {error}"),
         }
     }
+}
+
+/// The deadline a forced pause stored as `at`, in ms since the epoch, on this daemon's clock: now if it has passed.
+fn cancel_deadline(at: u64) -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_millis(at.saturating_sub(time::now_ms()))
 }

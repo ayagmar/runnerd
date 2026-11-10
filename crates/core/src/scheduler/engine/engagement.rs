@@ -61,8 +61,9 @@ struct TakenJob {
 /// a job by the history's record, which a capture that names the job again does not change.
 ///
 /// A restart rebuilds it in `adopted`: adopted and not yet listed, counted busy until a listing says otherwise, with
-/// the job its history row names and no key until `find_keys` reads its record. Whether a listing showed it newly
-/// busy or waiting, when its job was found and a forced pause's deadline are lost. A reload does not touch it.
+/// the job its history row names, a forced pause's deadline as its row kept it, and no key until `find_keys` reads its
+/// record. Whether a listing showed it newly busy or waiting and when its job was found are lost. A reload does not
+/// touch it.
 #[derive(Debug, Clone)]
 pub(super) struct Engagement {
     origin: Origin,
@@ -89,14 +90,14 @@ impl Engagement {
     }
 
     /// A runner a restart adopts, running the job its history row names, if any: counted busy until a listing says
-    /// otherwise.
-    pub(super) fn adopted(job: Option<u64>) -> Self {
+    /// otherwise. `cancel_by` is the deadline a forced pause before the restart gave it, as its row kept it.
+    pub(super) fn adopted(job: Option<u64>, cancel_by: Option<tokio::time::Instant>) -> Self {
         Self {
             origin: Origin::Adopted(Adoption::Unknown),
             listing: Listed::Unlisted,
             job: job.map(|id| TakenJob { id, found_at: None }),
             key: None,
-            cancel_by: None,
+            cancel_by,
         }
     }
 
