@@ -16,7 +16,7 @@ starts only the jobs those paths can affect:
 | `site-build`: Astro build, then a check that every internal link and `#anchor` of the built pages resolves | `site/**`, `.github/scripts/check-site-links.py` |
 | `lint`: shellcheck, actionlint, zizmor | `.github/**`, any `*.sh` |
 | `text`: typos, `taplo fmt --check` | any file |
-| `state`: `check-state.py`, its fixtures, and the debt file against `origin/main` | any file |
+| `state`: `check-state.py` and its fixtures, and its exceptions against `origin/main` | any file |
 
 A change to `ci.yml` itself runs all of them. Pushes to `main` run every job and then deploy the site. A weekly
 schedule runs `deny`, so new advisories show up without a dependency change. Draft pull requests run only `changes`;
@@ -84,11 +84,11 @@ owner's slot layers and can reseed the owner's snapshot, and smaller shared-cach
 ## State machines
 
 `.github/scripts/check-state.py` fails on a lifecycle spread over several fields or written from more than one place
-(CLAUDE.md, "State"; [ADR 0114](docs/adr/0114-a-lifecycle-is-one-value-with-one-owner.md)). What it still finds is
-listed in `.github/state-debt.txt`, each group with what removes it. A change that fixes a finding deletes its lines.
-The run compares with `origin/main`: a line added, the limit raised, a new marker, a new `OPAQUE` key or a root dropped
-from `ROOTS` fails, and only a line tagged `# may become a marker` on main may turn into a marker. A local run fetches `origin/main` and skips the comparison if it
-cannot; CI fails instead.
+(CLAUDE.md, "State"; [ADR 0114](docs/adr/0114-a-lifecycle-is-one-value-with-one-owner.md)). Every finding fails; the
+exceptions that stay are in its `MARKED`, each with its reason. `ENGINE_LIFECYCLE_LIMIT` is `Engine`'s exact count of
+lifecycle fields: a change that removes one lowers it. The run compares with `origin/main`: a new marker, the limit
+raised, a new `OPAQUE` key, a root dropped from `ROOTS` or `.github/state-debt.txt` back fails. A local run fetches
+`origin/main` and skips the comparison if it cannot; CI fails instead.
 
 A refactor of one of these proves it kept behaviour with the invariants' trace. Run this on the base commit and on the
 change, and compare the two directories with `diff -r`; never sort them, as call order is what they show:

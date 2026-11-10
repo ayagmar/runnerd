@@ -60,8 +60,8 @@ add an ADR in the same change.
   site.
 - Two maps with one key are one map of a struct. A second `Option` or `bool` beside a first is a state to name.
 - The type's doc says what survives a restart and a reload.
-- Exceptions are in `MARKED` in `check-state.py`, each with its reason. What is still to fix is in
-  `.github/state-debt.txt`. Both only shrink.
+- Exceptions are in `MARKED` in `check-state.py`, each with its reason; the list only shrinks. Every other finding
+  fails, and `ENGINE_LIFECYCLE_LIMIT` is `Engine`'s exact count of lifecycle fields.
 
 ## Dependencies
 

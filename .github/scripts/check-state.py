@@ -16,9 +16,10 @@ C4  Engine has more lifecycle-typed fields than the recorded limit: new state go
 C5  SQL updates the jobs table outside the store's writer.
 C6  A named machine no rule above can see is still there, found by a fixed pattern (KNOWN).
 
-Findings a later change removes are listed in .github/state-debt.txt. Exceptions that stay are in MARKED, with the
-reason every combination of the fields is meant. Both can only shrink: the ratchet compares them with origin/main, and
-OPAQUE and ROOTS too, as what the walk does not reach is not a finding.
+Every finding fails. Exceptions that stay are in MARKED, with the reason every combination of the fields is meant, and
+ENGINE_LIFECYCLE_LIMIT is Engine's exact count. The ratchet compares them with origin/main, and OPAQUE and ROOTS too, as
+what the walk does not reach is not a finding: MARKED gains no entry, the limit does not rise, and the debt file
+(.github/state-debt.txt), which listed the findings still to fix until the last of them went, does not come back.
 
 The script first runs against state-fixtures/ and fails if it stops catching a case there. It matches names, not
 types: see ADR 0114 for what it cannot see.
@@ -63,9 +64,8 @@ OPAQUE = {
     "Status": "the published status: built whole by each publish",
 }
 
-# Exceptions that stay: finding -> why every combination is meant. A new entry fails the ratchet unless main's debt file
-# tags that finding as one that may become a marker: otherwise seal the type instead. One that no longer matches anything
-# fails, too.
+# Exceptions that stay: finding -> why every combination is meant. A new entry fails the ratchet: seal the type instead.
+# One that no longer matches anything fails, too.
 MARKED = {
     "C1 cli App": "each field is one view's own data or one read of the daemon's, filled on its own; the footer's questions are one value, Prompts, and help is drawn over them, every combination meant",
     "C1 cli History": "what the user filters by, each on its own, and the pages behind the one shown: no field says what state another is in",
@@ -92,8 +92,8 @@ MARKED = {
     "C3 policy trace &&": "two independent settings of one replay: whether it has a trace, and its policy",
 }
 
-# The limit on Engine's lifecycle fields once the debt file is gone; the debt file's own number applies until then.
-ENGINE_LIFECYCLE_LIMIT = None
+# Engine's lifecycle fields, exactly: one more fails C4, one fewer fails until this is lowered to match.
+ENGINE_LIFECYCLE_LIMIT = 19
 
 JOB_WRITERS = ("store/write.rs", "store.rs")
 
@@ -656,16 +656,16 @@ def main():
     debt_path = REPO / DEBT
     debt, limit, markable = None, ENGINE_LIFECYCLE_LIMIT, set()
     if debt_path.exists():
+        # The ratchet fails on a debt file main does not have; this only says what is wrong with it.
         debt, limit, markable = read_debt(debt_path.read_text())
-    else:
-        # The last of the wave: nothing is left to list, and the script's limit is exact.
         if limit is None:
-            failures.append(f"no {DEBT}, so set ENGINE_LIFECYCLE_LIMIT")
-        elif count != limit:
-            failures.append(f"ENGINE_LIFECYCLE_LIMIT is {limit}, Engine has {count}: they must match once the debt file is gone")
-    if limit is None:
-        failures.append(f"{DEBT} has no {LIMIT_KEY} line")
-    elif count > limit:
+            failures.append(f"{DEBT} has no {LIMIT_KEY} line")
+    elif limit is None:
+        failures.append(f"no {DEBT}, so set ENGINE_LIFECYCLE_LIMIT")
+    elif count != limit:
+        # Nothing is left to list, so the script's limit is exact.
+        failures.append(f"ENGINE_LIFECYCLE_LIMIT is {limit}, Engine has {count}: they must match once the debt file is gone")
+    if limit is not None and count > limit:
         failures.append(f"Engine has {count} lifecycle-typed fields, past the limit of {limit}: put new state in a sealed type")
     listed = debt or set()
     failures += [findings[i] for i in sorted(set(findings) - listed)]
@@ -687,7 +687,8 @@ def main():
     if failures:
         print(f"check-state: {len(failures)} problem(s). See CLAUDE.md, State, and ADR 0114.", file=sys.stderr)
         return 1
-    print(f"check-state: ok ({len(listed)} debt lines, {count} Engine lifecycle fields)")
+    debt_lines = f"{len(listed)} debt lines, " if debt is not None else ""
+    print(f"check-state: ok ({debt_lines}{count} Engine lifecycle fields)")
     return 0
 
 
