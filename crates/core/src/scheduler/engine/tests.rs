@@ -147,6 +147,8 @@ struct GithubState {
     held_queued: tokio::sync::watch::Sender<BTreeSet<String>>,
     /// Repositories whose queued jobs listings fail.
     failed_queued: BTreeSet<String>,
+    /// The repositories whose queued jobs listings failed, for any reason, in order, until a test takes them.
+    queued_failures: Vec<String>,
     /// Repositories whose runners listings fail, with what GitHub answers.
     failed_runners: BTreeMap<String, reqwest::StatusCode>,
     /// Repositories whose runners listings GitHub refuses until then, for its used-up rate limit.
@@ -445,7 +447,14 @@ impl FakeGithub {
 
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
-        self.blocked()?;
+        if let Err(error) = self.blocked() {
+            self.0
+                .lock()
+                .unwrap()
+                .queued_failures
+                .push(repository.to_owned());
+            return Err(error);
+        }
         self.answer().await;
         let waiting = Counted::new(&self.0, |state| &mut state.waiting);
         let mut held = self.0.lock().unwrap().held_queued.subscribe();
@@ -455,9 +464,11 @@ impl GithubApi for FakeGithub {
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
         if let Some(until) = state.rate_limited {
+            state.queued_failures.push(repository.to_owned());
             return Err(github::Error::RateLimited { until });
         }
         if state.failed_queued.contains(repository) {
+            state.queued_failures.push(repository.to_owned());
             return Err(github::Error::Status {
                 method: reqwest::Method::GET,
                 path: format!("/repos/{repository}/actions/runs"),
