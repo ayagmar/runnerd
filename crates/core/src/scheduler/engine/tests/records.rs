@@ -1471,6 +1471,48 @@ async fn a_pass_that_reaps_a_runner_waiting_to_capture_again_keeps_its_job_in_th
     assert!(job.runner.is_some(), "its runner is named: {job:?}");
 }
 
+/// A capture started again after a break whose output ends before it names a job leaves the job to the worker log:
+/// the runner's release reads it from the stopped container.
+#[tokio::test]
+async fn a_runner_whose_capture_broke_and_then_ended_with_no_job_is_named_from_its_worker_log() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("spent-claim");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    // Its first capture fails; the next tick's prints nothing and ends.
+    docker.0.lock().unwrap().fail_execs = 1;
+    github.0.lock().unwrap().queued = vec![job(5)];
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+        until_captures_end(&engine).await;
+    }
+    assert!(
+        !docker.0.lock().unwrap().captured.is_empty(),
+        "a capture started again after the failed one"
+    );
+    {
+        let mut github = github.0.lock().unwrap();
+        github.queued = Vec::new();
+        github
+            .jobs
+            .insert(5, details(5, "completed", Some("success")));
+    }
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers[0].running = false;
+        let container = state.containers[0].id.clone();
+        state
+            .container_logs
+            .insert(container.clone(), "Running job: build\n".to_owned());
+        state.diag.insert(container, docker::tests::diag_archive(5));
+    }
+    engine.exits.any();
+    engine.turnover().await;
+    handle.store.flush().await;
+    let job = handle.store.job(5).await.unwrap().unwrap().summary;
+    assert!(job.runner.is_some(), "its runner is named: {job:?}");
+}
+
 /// A runner whose broken capture was due again when its container stopped or went has its worker log read at most
 /// once, by `recapture`, not again by its release.
 #[tokio::test]

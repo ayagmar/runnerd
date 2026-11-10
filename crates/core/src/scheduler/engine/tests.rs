@@ -6482,6 +6482,41 @@ async fn a_capture_that_reached_log_max_is_not_started_again_while_its_runner_ru
     assert!(job.log.truncated, "job 1's log stops at log_max");
 }
 
+/// A capture started again after a break that stops at `log_max` while its runner runs on is not started again: each
+/// start would only find the job's log stored whole and end, one exec a tick until the job ends.
+#[tokio::test]
+async fn a_capture_started_again_that_reached_log_max_is_not_started_again_while_its_runner_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 12\nhello\nworld\n");
+    {
+        let mut state = docker.0.lock().unwrap();
+        // The first capture fails to start; only `log_max` ends the next one, and any after it.
+        state.fail_execs = 1;
+        state.container_captures.insert(
+            "container-1".to_owned(),
+            "@@job 1 1\n@@page 1 0 12\nhello\nworld\n".to_owned(),
+        );
+        state.stuck_captures.insert("container-1".to_owned());
+    }
+    let dir = TestDir::new("log-max-again");
+    let config = CONFIG.replace("[host]", "[history]\nlog_max = \"0.006K\"\n\n[host]");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    for _ in 0..4 {
+        until_captures_end(&engine).await;
+        engine.tick(Shutdown::No).await;
+    }
+    until_captures_end(&engine).await;
+    assert_eq!(
+        docker.0.lock().unwrap().exec_trace.len(),
+        2,
+        "the failed exec and the one that read the log up to log_max"
+    );
+    let job = handle.store.job(1).await.unwrap().unwrap().summary;
+    assert!(job.log.truncated, "job 1's log stops at log_max");
+}
+
 #[tokio::test]
 async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the_history_has() {
     let github = FakeGithub::default();
