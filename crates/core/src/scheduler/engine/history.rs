@@ -56,6 +56,14 @@ impl Closing {
     pub(super) fn found_gone_at(&mut self, ms: u64) {
         self.since_ms = ms;
     }
+
+    /// As if its runner was found gone `by` earlier.
+    pub(super) fn age(&mut self, by: Duration) {
+        self.since -= by;
+        self.since_ms = self
+            .since_ms
+            .saturating_sub(u64::try_from(by.as_millis()).unwrap_or(u64::MAX));
+    }
 }
 
 impl Closing {
@@ -81,6 +89,16 @@ impl Followed {
         Followed {
             repository: repository.to_owned(),
             unanswered_since: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Followed {
+    /// As if GitHub began failing its reads `by` earlier, if it fails them.
+    pub(super) fn age(&mut self, by: Duration) {
+        if let Some(since) = &mut self.unanswered_since {
+            *since -= by;
         }
     }
 }

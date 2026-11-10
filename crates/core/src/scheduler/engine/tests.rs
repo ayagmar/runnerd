@@ -142,6 +142,8 @@ struct GithubState {
     gone_jobs: BTreeSet<u64>,
     /// Jobs whose reads GitHub refuses until then, for its used-up rate limit.
     limited_jobs: BTreeMap<u64, std::time::SystemTime>,
+    /// Jobs whose reads fail, as when GitHub answers 502.
+    failed_jobs: BTreeSet<u64>,
 }
 
 impl GithubState {
@@ -443,6 +445,14 @@ impl GithubApi for FakeGithub {
                 path: format!("/repos/o/r/actions/jobs/{id}"),
                 status: reqwest::StatusCode::NOT_FOUND,
                 message: "Not Found".to_owned(),
+            });
+        }
+        if state.failed_jobs.contains(&id) {
+            return Err(github::Error::Status {
+                method: reqwest::Method::GET,
+                path: format!("/repos/o/r/actions/jobs/{id}"),
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "Bad Gateway".to_owned(),
             });
         }
         state
@@ -6661,6 +6671,7 @@ mod admission;
 mod build_cache;
 mod exit;
 mod invariants;
+mod ledger;
 mod occupant;
 mod open_waits;
 mod pacing;

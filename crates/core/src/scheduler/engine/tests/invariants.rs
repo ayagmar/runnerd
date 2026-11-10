@@ -1,9 +1,9 @@
 //! The engine's invariants over generated sequences of events, on the fakes: jobs queued with every kind of labels,
-//! taken, finished, cancelled and lost; runners that fail to start, before or after Docker made their container,
-//! wait or exit idle; Docker calls that fail once; log captures that fail or break off; samples of the slice and the
-//! host, short of memory or stalling, also between two starts of one tick; reseeds asked for; reloads, restarts and stops;
-//! time passing. After each
-//! tick the named checks below must hold, and once the sequence drains no runner may be left.
+//! taken, finished, cancelled and lost, and whose reads GitHub fails; runners that fail to start, before or after
+//! Docker made their container, wait or exit idle; Docker calls that fail once; log captures that fail or break off;
+//! samples of the slice and the host, short of memory or stalling, also between two starts of one tick; reseeds asked
+//! for; reloads, restarts and stops; time passing. After each tick the named checks below must hold, and once the
+//! sequence drains no runner may be left.
 //!
 //! The sequences come from a seeded generator, so a failure replays: it prints its seed and the shortest sequence
 //! it shrank to. `RUNNERD_INVARIANT_CASES` runs more cases than the default, `RUNNERD_INVARIANT_SEED` one seed.
@@ -402,6 +402,25 @@ enum Step {
     UseBuildCache,
     /// A running job saves to the build cache while GitHub names no runner for it.
     SaveUnnamed(usize),
+    /// GitHub names the runner of a job whose save went unnamed, as it does once the job is over, and says what
+    /// started its run.
+    RunnerNamed(usize),
+    /// GitHub fails every read of a job no runner of this machine runs, until a runner takes it.
+    JobReadFails {
+        pick: usize,
+        how: ReadFailure,
+    },
+}
+
+/// How GitHub fails a job's reads.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ReadFailure {
+    /// 404, as when its run was deleted.
+    Gone,
+    /// Its rate limit is used up.
+    Limited,
+    /// 502.
+    Other,
 }
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
@@ -486,6 +505,10 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             109 => Step::Reload(Change::Mirror),
             110 => Step::Reload(Change::RecordFailures),
             111 => Step::RestartLogsFail,
+            99 => Step::JobReadFails {
+                pick: rng.index(),
+                how: [ReadFailure::Gone, ReadFailure::Limited, ReadFailure::Other][rng.index() % 3],
+            },
             _ => Step::Tick,
         })
         .collect()
@@ -599,6 +622,13 @@ struct Seen {
     closing: usize,
     /// Ticks that ended with a runner's build cache uploads waiting for GitHub's word.
     ended_uploads: usize,
+    /// Ticks that decided such uploads by GitHub's word, before `ENDED_WAIT`.
+    decided_uploads: usize,
+    /// Cases that ended with a job lost: GitHub did not say it completed for `LOST_AFTER` after its runner went.
+    lost_closes: usize,
+    /// Cases that ended with a job closed as run elsewhere because GitHub said it was gone, or failed every read of
+    /// it for `LOST_AFTER`.
+    unanswered_closes: usize,
     /// Ticks that ended with a cancelled run's runner waiting to exit.
     cancelling: usize,
     /// Ticks that ended with a busy registration no slot holds.
@@ -622,6 +652,9 @@ impl Seen {
         self.runners_starting += case.runners_starting;
         self.closing += case.closing;
         self.ended_uploads += case.ended_uploads;
+        self.decided_uploads += case.decided_uploads;
+        self.lost_closes += case.lost_closes;
+        self.unanswered_closes += case.unanswered_closes;
         self.cancelling += case.cancelling;
         self.busy_orphans += case.busy_orphans;
         self.oversized += case.oversized;
@@ -639,6 +672,9 @@ impl Seen {
             ("a runner started before its job", self.runners_starting),
             ("a job whose runner went, still open", self.closing),
             ("uploads waiting for GitHub", self.ended_uploads),
+            ("uploads GitHub's word decided", self.decided_uploads),
+            ("a job lost", self.lost_closes),
+            ("a job GitHub stopped answering for", self.unanswered_closes),
             ("a cancelled run's runner", self.cancelling),
             ("a busy orphan registration", self.busy_orphans),
             ("an oversized snapshot", self.oversized),
@@ -702,6 +738,10 @@ struct Case {
     forced: BTreeSet<String>,
     /// Registrations `BusyOrphan` made.
     orphans: Vec<u64>,
+    /// The runners of jobs whose saves went unnamed, by job.
+    unnamed_saves: BTreeMap<u64, String>,
+    /// When the case began, which the trace's times of the jobs it closed count from.
+    began_ms: u64,
     /// What the case asked of the fakes, step by step, when traced.
     trace: Option<Vec<String>>,
     step: usize,
@@ -753,6 +793,8 @@ impl Case {
             listed_after_runner: BTreeSet::new(),
             forced: BTreeSet::new(),
             orphans: Vec::new(),
+            unnamed_saves: BTreeMap::new(),
+            began_ms: time::now_ms(),
             trace: None,
             step: 0,
         }
@@ -875,6 +917,23 @@ impl Case {
         }
     }
 
+    /// Counts the jobs the engine closed for GitHub's silence, as the history ends.
+    async fn note_closes(&mut self) {
+        self.handle.store.flush().await;
+        let db = rusqlite::Connection::open(self.dir.0.join("history.db")).unwrap();
+        let count = |condition: &str| {
+            db.query_row(
+                &format!("SELECT count(*) FROM jobs WHERE {condition}"),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| usize::try_from(count).unwrap())
+            .unwrap()
+        };
+        self.seen.lost_closes += count("state = 'lost'");
+        self.seen.unanswered_closes += count("state = 'elsewhere' AND conclusion IS NULL");
+    }
+
     /// The trace, with what the case left in its history's jobs table.
     async fn finished_trace(mut self) -> Vec<String> {
         self.handle.store.flush().await;
@@ -884,14 +943,18 @@ impl Case {
         let mut rows = db
             .prepare(
                 "SELECT id, repository, state, conclusion, github_completed, runner, \
-                 started_at IS NOT NULL, finished_at IS NOT NULL, slot_waited > 0, host_waited > 0 \
+                 started_at IS NOT NULL, finished_at IS NOT NULL, slot_waited > 0, host_waited > 0, \
+                 CASE WHEN state = 'lost' OR (state = 'elsewhere' AND conclusion IS NULL) THEN finished_at END \
                  FROM jobs ORDER BY id",
             )
             .unwrap();
+        // The time the engine closed a job at, in minutes from the case's start: `Elapse` moves it back by
+        // `LOST_AFTER`, so a clock kept or started over shows.
+        let began = i64::try_from(self.began_ms).unwrap();
         let jobs = rows
             .query_map([], |row| {
                 Ok(format!(
-                    "{} {} {} {:?} {} {:?} {} {} slot_waited {} host_waited {}",
+                    "{} {} {} {:?} {} {:?} {} {} slot_waited {} host_waited {} closed {:?}",
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
@@ -902,6 +965,8 @@ impl Case {
                     row.get::<_, bool>(7)?,
                     row.get::<_, bool>(8)?,
                     row.get::<_, bool>(9)?,
+                    row.get::<_, Option<i64>>(10)?
+                        .map(|at| (at - began + 30_000).div_euclid(60_000)),
                 ))
             })
             .unwrap();
@@ -940,6 +1005,12 @@ impl Case {
                     ..QueuedJob::default()
                 });
                 github.queued_on.insert(id, repository.to_owned());
+                // GitHub answers what started each even run, so the build cache can decide its writes.
+                if id.is_multiple_of(2) {
+                    github
+                        .triggers
+                        .insert(id, build_cache::trigger("push", "main"));
+                }
                 self.jobs.insert(
                     id,
                     JobModel {
@@ -1115,6 +1186,8 @@ impl Case {
                 self.a_restart_takes_the_host_credit_back()?;
             }
             Step::SaveUnnamed(pick) => self.save_unnamed(pick).await,
+            Step::RunnerNamed(pick) => self.runner_named(pick),
+            Step::JobReadFails { pick, how } => self.job_read_fails(pick, how),
         }
         self.no_removal_of_a_running_job()
     }
@@ -1299,9 +1372,49 @@ impl Case {
         };
         if let Some(details) = self.github.0.lock().unwrap().jobs.get_mut(&id) {
             details.status = "queued".to_owned();
-            details.runner_name = None;
+            if let Some(runner) = details.runner_name.take() {
+                self.unnamed_saves.insert(id, runner);
+            }
         }
         build_cache::save(&socket).await;
+    }
+
+    fn runner_named(&mut self, pick: usize) {
+        let unnamed: Vec<u64> = self.unnamed_saves.keys().copied().collect();
+        let Some(id) = pick_from(&unnamed, pick).copied() else {
+            return;
+        };
+        let runner = self.unnamed_saves.remove(&id);
+        let mut github = self.github.0.lock().unwrap();
+        if let Some(details) = github.jobs.get_mut(&id) {
+            details.runner_name = runner;
+        }
+        github
+            .triggers
+            .insert(id, build_cache::trigger("push", "main"));
+    }
+
+    /// GitHub fails the reads of a queued job, or of one no runner of this machine runs any more.
+    fn job_read_fails(&mut self, pick: usize, how: ReadFailure) {
+        let candidates: Vec<u64> = self
+            .jobs
+            .iter()
+            .filter(|(_, job)| !matches!(job.phase, Phase::Running { .. }))
+            .map(|(id, _)| *id)
+            .collect();
+        let Some(id) = pick_from(&candidates, pick).copied() else {
+            return;
+        };
+        let mut github = self.github.0.lock().unwrap();
+        match how {
+            ReadFailure::Gone => drop(github.gone_jobs.insert(id)),
+            ReadFailure::Limited => drop(
+                github
+                    .limited_jobs
+                    .insert(id, SystemTime::now() + Duration::from_secs(3600)),
+            ),
+            ReadFailure::Other => drop(github.failed_jobs.insert(id)),
+        }
     }
 
     /// A running job's container vanishes, as when someone removes it.
@@ -1424,6 +1537,10 @@ impl Case {
             running.runner_name = Some(container.name.clone());
             running.labels = self.jobs[&id].labels.clone();
             github.jobs.insert(id, running);
+            // GitHub answers for the job a runner took.
+            github.gone_jobs.remove(&id);
+            github.limited_jobs.remove(&id);
+            github.failed_jobs.remove(&id);
             assert!(runner_id.is_some(), "an assigned runner is registered");
         }
         {
@@ -1843,6 +1960,8 @@ impl Case {
         self.engine.make_unread_due();
         self.engine
             .age_ended_uploads(crate::scheduler::engine::build_cache::ENDED_WAIT);
+        self.engine
+            .age_followed_jobs(crate::scheduler::engine::history::LOST_AFTER);
     }
 
     fn settle(&mut self) {
@@ -1977,7 +2096,13 @@ impl Case {
         }
         self.cancelled_since_tick.clear();
         self.note_busy();
+        let uploads_waiting = self.engine.ended_uploads_waiting();
         self.engine.tick(Shutdown::No).await;
+        let ended = self.engine.ended_upload_runners();
+        self.seen.decided_uploads += uploads_waiting
+            .iter()
+            .filter(|runner| !ended.contains(*runner))
+            .count();
         self.removals_finish();
         self.failed_late();
         self.exits_hold_only_what_failed_to_start()?;
@@ -3031,6 +3156,7 @@ async fn run_case(steps: &[Step], mut case: Case) -> Result<Case, Violation> {
     case.step = steps.len();
     case.drain().await?;
     case.trace_step("drained").await;
+    case.note_closes().await;
     Ok(case)
 }
 
@@ -3059,6 +3185,7 @@ fn steps_of(seed: u64) -> Vec<Step> {
             9 => &A_BUSY_ORPHAN,
             11 => &AN_OVERSIZED_SNAPSHOT,
             13 => &AN_UNREAD_LEFTOVER,
+            _ if seed % 32 == 31 => &UPLOADS_DECIDED,
             _ => &UPLOADS_WAIT_FOR_GITHUB,
         };
         // Two ticks, for what the scenario left to end, so the slots are free for what starts next.
@@ -3348,6 +3475,20 @@ const UPLOADS_WAIT_FOR_GITHUB: [Step; 11] = [
     Step::Tick,
     Step::Elapse,
     Step::OpenJobCompletes(0),
+    Step::Tick,
+];
+
+/// As `UPLOADS_WAIT_FOR_GITHUB`, and GitHub then names the job's runner, so the run's trigger decides them.
+const UPLOADS_DECIDED: [Step; 10] = [
+    Step::UseBuildCache,
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::Tick,
+    Step::SaveUnnamed(0),
+    Step::RunnerGoes(0),
+    Step::Tick,
+    Step::RunnerNamed(0),
     Step::Tick,
 ];
 
