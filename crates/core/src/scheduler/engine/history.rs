@@ -343,7 +343,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.note_job(&pool, attempt, found.job, None, time::now_ms());
     }
 
-    /// Follows the jobs the last poll listed queued that no runner in `taken` has; the listing recorded them.
+    /// Follows the jobs the last poll listed queued that no runner in `taken` has; the listing recorded them. A job
+    /// whose runner went is followed as closing alone, though GitHub may list it queued a while longer.
     fn follow_listed(&mut self, taken: &BTreeSet<u64>) {
         for repository in &self.config.repositories {
             let Some(state) = self.repositories.listed(&repository.name) else {
@@ -353,7 +354,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 continue;
             };
             for job in listed {
-                if crate::scheduler::matches(job, &repository.labels) && !taken.contains(&job.id) {
+                if crate::scheduler::matches(job, &repository.labels)
+                    && !taken.contains(&job.id)
+                    && !self.closing.contains_key(&job.id)
+                {
                     self.queued_jobs
                         .entry(job.id)
                         .or_insert_with(|| Followed::new(&repository.name));

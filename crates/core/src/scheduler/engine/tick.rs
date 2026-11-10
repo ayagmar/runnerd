@@ -1211,7 +1211,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     state.listing.fail();
                 }
             } else {
-                for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
+                // A job whose runner went is followed as closing alone.
+                for job in recorded
+                    .into_iter()
+                    .filter(|job| !taken.contains(job) && !self.closing.contains_key(job))
+                {
                     self.queued_jobs
                         .entry(job)
                         .or_insert_with(|| Followed::new(&repository));

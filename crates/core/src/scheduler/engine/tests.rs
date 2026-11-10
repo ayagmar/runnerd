@@ -4302,6 +4302,101 @@ async fn a_job_whose_runner_ends_during_a_stop_is_not_followed_as_queued_from_th
     );
 }
 
+/// How many times GitHub was asked for job `id`.
+fn reads_of(github: &FakeGithub, id: u64) -> usize {
+    let call = format!("job {id}");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .trace
+        .iter()
+        .filter(|read| **read == call)
+        .count()
+}
+
+/// A job whose runner went while GitHub still lists it queued is followed as closing alone: once the listing drops
+/// it, it is read once a tick, not also as a queued job that left the queue.
+#[tokio::test]
+async fn a_job_still_listed_after_its_runner_went_is_read_once_a_tick_once_the_listing_drops_it() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    // GitHub lags: it still lists job 1 queued.
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().runners.clear();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
+    engine.tick(Shutdown::No).await;
+
+    // It completes, and the listing drops it.
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued.clear();
+        state
+            .jobs
+            .insert(1, details(1, "completed", Some("success")));
+    }
+    let before = reads_of(&github, 1);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(reads_of(&github, 1) - before, 1, "job 1 is read once");
+    assert!(!engine.is_closing(1), "GitHub said job 1 completed");
+    until_state(&handle, 1, JobState::Completed).await;
+}
+
+/// A reload that removes a repository while its listing is out leaves the jobs that listing recorded to be followed as
+/// queued, except one whose runner went: that job is followed as closing alone.
+#[tokio::test]
+async fn a_job_closing_on_a_repository_removed_during_its_listing_is_not_followed_as_queued() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/s", 1, 1);
+    {
+        // GitHub lags: it still lists job 1 queued.
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.queued_on.insert(1, "o/s".to_owned());
+    }
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().runners.clear();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
+
+    // `o/s` goes while its listing, which still shows job 1, is out.
+    github.hold_queued("o/s");
+    let reload = async {
+        github.until_waiting(1).await;
+        let committed = handle
+            .control
+            .replace_config(
+                Config::parse(CONFIG).unwrap(),
+                None,
+                None,
+                Commit::new(|| Ok(None)),
+                RunningSlots::Drain,
+                Author::Owner,
+            )
+            .await;
+        assert_eq!(committed, Ok(Vec::new()));
+        github.release_queued();
+    };
+    tokio::join!(engine.tick(Shutdown::No), reload);
+    assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
+    assert_eq!(
+        engine.state_counts().shared_with_queued,
+        0,
+        "job 1 is followed once"
+    );
+}
+
 #[tokio::test]
 async fn a_job_github_never_ends_after_its_runner_went_is_lost_as_of_when_it_went() {
     const WENT_MS: u64 = 1_792_697_000_000;
