@@ -510,7 +510,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// nothing here. Decides the writes of the jobs described, closes the build caches of ended runners and asks
     /// whether the jobs of removed runners completed, every tick.
     pub(super) async fn follow_running(&mut self, before: Described, anchor: tokio::time::Instant) {
-        let interval = self.config.host.poll_interval;
+        let interval = self.governor.reads_every(self.config.host.poll_interval);
         let running = if self.running_reads.due(anchor, interval) {
             self.running_reads.read(anchor);
             self.occupied()

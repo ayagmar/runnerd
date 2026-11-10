@@ -1,6 +1,6 @@
 # 0124. Running jobs are read every poll interval, not every tick
 
-Status: **Accepted** (2026-11-10). Amends [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md): the running
+Status: **Accepted** (2026-11-10), amended by [0127](0127-reads-are-paced-by-the-rate-limit.md). Amends [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md): the running
 jobs it reads after a tick's starts are read once every `poll_interval`, not at every tick. No wire, schema or config
 change.
 

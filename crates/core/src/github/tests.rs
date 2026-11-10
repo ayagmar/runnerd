@@ -1046,6 +1046,8 @@ async fn requests_are_counted_by_class_and_by_what_github_answered() {
             [1, 0, 1], // other: the repository, the refused cancel
         ]
     );
+    // What the pace is read by counts the registration and both deletes, whatever GitHub answered.
+    assert_eq!(github.spend().mutations, 3);
 }
 
 #[tokio::test]
@@ -1135,6 +1137,8 @@ fn a_window_reports_after_an_hour_and_the_next_starts_empty_with_the_limit_kept(
     counter.record(Class::Runs, StatusCode::OK, &headers);
     counter.record(Class::Runs, StatusCode::NOT_MODIFIED, &no_headers());
     counter.record(Class::Delete, StatusCode::TOO_MANY_REQUESTS, &no_headers());
+    counter.record(Class::Registration, StatusCode::OK, &no_headers());
+    counter.record(Class::Other, StatusCode::OK, &no_headers());
     assert!(counter.due(began + Duration::from_secs(3599)).is_none());
 
     let report = counter.due(began + WINDOW).unwrap();
@@ -1142,6 +1146,8 @@ fn a_window_reports_after_an_hour_and_the_next_starts_empty_with_the_limit_kept(
     assert_eq!(report.tally(Class::Runs).total(), 2);
     assert_eq!(report.tally(Class::Delete).refused, 1);
     assert_eq!(report.rate_limit().unwrap().remaining, 4200);
+    // The registrations and deletes the pace reads go on counting across windows: a window's end is not a drop.
+    assert_eq!(counter.spend().mutations, 2);
 
     counter.record(Class::Jobs, StatusCode::OK, &no_headers());
     let next = counter.peek(began + WINDOW + Duration::from_secs(5));
@@ -1149,6 +1155,7 @@ fn a_window_reports_after_an_hour_and_the_next_starts_empty_with_the_limit_kept(
     assert_eq!(next.tally(Class::Jobs).total(), 1);
     assert_eq!(next.window(), Duration::from_secs(5));
     assert_eq!(next.rate_limit().unwrap().remaining, 4200);
+    assert_eq!(counter.spend().mutations, 2);
     assert!(
         counter
             .due(began + WINDOW + Duration::from_secs(3599))

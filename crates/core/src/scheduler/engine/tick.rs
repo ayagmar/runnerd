@@ -277,6 +277,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let began = SystemTime::now();
         let mut pace = Pace::new();
         self.passes_in_tick = std::time::Duration::ZERO;
+        self.pace_by_limit();
         self.collect_reseeds().await;
         self.collect_measures().await;
         self.collect_trim().await;

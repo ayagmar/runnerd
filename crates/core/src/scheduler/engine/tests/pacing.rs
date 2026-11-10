@@ -1548,3 +1548,166 @@ async fn a_repository_removed_and_added_back_keeps_what_its_runners_took() {
     handle.shutdown(Shutdown::Force);
     run.await.unwrap();
 }
+
+/// When each round of running-job reads began, from the reads' count: reads of one round come within 5 s.
+fn read_rounds(reads: &mut Vec<Instant>, count: usize, seen: &mut usize) {
+    if count > *seen {
+        if reads
+            .last()
+            .is_none_or(|&at| Instant::now() - at > Duration::from_secs(5))
+        {
+            reads.push(Instant::now());
+        }
+        *seen = count;
+    }
+}
+
+fn gaps_of(times: &[Instant]) -> Vec<Duration> {
+    times.windows(2).map(|pair| pair[1] - pair[0]).collect()
+}
+
+/// Four jobs run for an hour while another client drains the rate limit (ADR 0127). The running jobs' reads slow
+/// first, then the listings, one step at a time, and a job queued then still gets its runner at once: its
+/// registration goes out in the tick that lists it, not at some later pace. The bugs it catches: listings slowed
+/// before the job reads, a governor that holds a registration back, and a pace that never reaches the engine's
+/// reads or its ticks.
+#[tokio::test(start_paused = true)]
+async fn job_reads_slow_first_then_listings_and_a_start_still_goes_out() {
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    let dir = TestDir::new("governor-pace");
+    let config = CONFIG.replace("slots = 2", "slots = 5");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.run = Duration::from_hours(1);
+    burst.queue(4);
+    let run = tokio::spawn(engine.run());
+    let settled = Instant::now() + Duration::from_mins(2);
+    play(&mut burst, |_, now| now >= settled).await;
+    assert_eq!(burst.running.len(), 4, "four jobs run: {:?}", burst.seen);
+
+    // 400 left, 30 minutes to the reset, another client spending 25 a minute and the engine as much again: a
+    // thousand projected against 300 of room.
+    github.limit(400, 25);
+    let began = Instant::now();
+    let (mut reads, mut seen) = (vec![began], github.0.lock().unwrap().job_reads);
+    let until = began + Duration::from_mins(14);
+    while Instant::now() < until {
+        burst.step(Instant::now());
+        let count = github.0.lock().unwrap().job_reads;
+        read_rounds(&mut reads, count, &mut seen);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let listings: Vec<Instant> = burst
+        .listed_at
+        .iter()
+        .copied()
+        .filter(|&at| at >= began)
+        .collect();
+    let (read_gaps, listing_gaps) = (gaps_of(&reads), gaps_of(&listings));
+
+    // Before anything is judged, the pace of before: reads and listings every 15 s.
+    let early = |times: &[Instant], gaps: &[Duration]| {
+        times
+            .windows(2)
+            .zip(gaps)
+            .take_while(|(pair, _)| pair[1] - began < Duration::from_mins(2))
+            .map(|(_, gap)| *gap)
+            .collect::<Vec<_>>()
+    };
+    for gap in early(&reads, &read_gaps)
+        .into_iter()
+        .chain(early(&listings, &listing_gaps))
+    {
+        assert!(gap <= Duration::from_secs(17), "early gap {gap:?}");
+    }
+    // The first slowed gap of each kind: job reads before listings.
+    let first_slow = |times: &[Instant], gaps: &[Duration]| {
+        times
+            .windows(2)
+            .zip(gaps)
+            .find(|(_, gap)| **gap >= Duration::from_secs(28))
+            .map(|(pair, _)| pair[1])
+    };
+    let slow_reads = first_slow(&reads, &read_gaps).expect("the reads slowed");
+    let slow_listings = first_slow(&listings, &listing_gaps).expect("the listings slowed");
+    assert!(
+        slow_reads + Duration::from_mins(3) < slow_listings,
+        "reads slowed at {:?}, listings at {:?} after the limit",
+        slow_reads - began,
+        slow_listings - began
+    );
+    // At the end, both at 4× `poll_interval`.
+    assert!(
+        read_gaps.last().unwrap() >= &Duration::from_secs(58)
+            && listing_gaps.last().unwrap() >= &Duration::from_secs(58),
+        "reads {read_gaps:?}, listings {listing_gaps:?}"
+    );
+
+    // A fifth job: the first listing that shows it is followed by its registration within seconds.
+    let calls = github.calls().len();
+    burst.queue(1);
+    let queued = Instant::now();
+    let (mut listed, mut registered) = (None, None);
+    while registered.is_none() && Instant::now() < queued + Duration::from_mins(3) {
+        burst.step(Instant::now());
+        for call in &github.calls()[calls..] {
+            if call.starts_with("queued ") {
+                listed.get_or_insert(Instant::now());
+            }
+            if call.starts_with("register ") {
+                registered.get_or_insert(Instant::now());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+    let (listed, registered) = (listed.unwrap(), registered.expect("the job got a runner"));
+    assert!(
+        registered - listed <= Duration::from_secs(3),
+        "listed {:?} after it was queued, registered {:?} after that",
+        listed - queued,
+        registered - listed
+    );
+}
+
+/// With a healthy limit, the calls the engine makes are the ones it made before the governor, in the same order: a
+/// governor that acts on a limit that is fine, or whose reading changes a tick, shows in the trace.
+#[tokio::test(start_paused = true)]
+async fn a_healthy_limit_leaves_the_engines_calls_as_they_were() {
+    async fn trace(limit: bool) -> Vec<String> {
+        let (github, docker) = burst_fakes(Duration::ZERO);
+        let dir = TestDir::new("governor-trace");
+        let config = CONFIG.replace("slots = 2", "slots = 4");
+        let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+        let mut burst = Burst::new(&github, &docker, u64::MAX);
+        burst.run = Duration::from_mins(4);
+        if limit {
+            github.limit(5000, 0);
+        }
+        burst.queue(4);
+        let run = tokio::spawn(engine.run());
+        let until = Instant::now() + Duration::from_mins(10);
+        play(&mut burst, |burst, now| {
+            now >= until || (burst.done() && now + Duration::from_mins(8) >= until)
+        })
+        .await;
+        handle.shutdown(Shutdown::Force);
+        run.await.unwrap();
+        // A runner's name ends in the wall clock's seconds, which no test's clock holds.
+        let trace = github.0.lock().unwrap().trace.clone();
+        trace
+            .into_iter()
+            .map(|call| match call.strip_prefix("register ") {
+                Some(name) => format!(
+                    "register {}",
+                    name.rsplit_once('-').map_or(name, |(kept, _)| kept)
+                ),
+                None => call,
+            })
+            .collect()
+    }
+    let (without, with) = (trace(false).await, trace(true).await);
+    assert!(without.len() > 100, "a trace to compare: {}", without.len());
+    assert_eq!(without, with);
+}
