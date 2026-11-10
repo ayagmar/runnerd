@@ -2694,6 +2694,9 @@ impl Case {
         let was_short = self.engine.host_is_short();
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         let github_before = self.github.calls().len();
+        // The listings that fail from here on, in the same window as the calls: one an aborted tick left belongs to no
+        // tick, as the restart after it forgets every listing and lists every repository again.
+        self.github.0.lock().unwrap().queued_failures.clear();
         let seeds_before: BTreeSet<String> = self.engine.seed_memories().into_keys().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
         let queued_before: BTreeSet<u64> = self.queued().into_iter().collect();
