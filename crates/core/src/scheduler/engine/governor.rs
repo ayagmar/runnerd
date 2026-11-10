@@ -216,12 +216,13 @@ impl Change {
     }
 }
 
-/// The readings of the last ten minutes, and the pace they put the reads at.
+/// The readings of the last ten minutes, and the pace they put the reads at: the pace is the newest reading's.
 #[derive(Debug, Default)]
 pub(super) struct Governor {
-    /// Oldest first, all of one count of the limit: the first of a new one clears them.
+    /// Oldest first, all of one count of the limit: the first of a new one clears them. The window reaches back to
+    /// the last reading at or before ten minutes ago, so that ticks further apart than ten minutes still see the
+    /// previous one.
     readings: VecDeque<Reading>,
-    step: Step,
 }
 
 impl Governor {
@@ -239,32 +240,31 @@ impl Governor {
             .duration_since(wall)
             .ok()
             .filter(|left| !left.is_zero())?;
-        let from = self.step;
+        let from = self.step();
         let started_over = self
             .readings
             .back()
             .is_some_and(|last| last.reset != limit.reset);
         if started_over {
             self.readings.clear();
-            self.step = Step::Steady;
         }
         self.readings.push_back(Reading {
             at: now,
-            step: self.step,
+            step: self.step(),
             remaining: limit.remaining,
             reset: limit.reset,
             mutations: spend.mutations,
         });
         if let Some(cutoff) = now.checked_sub(WINDOW) {
-            while self.readings.front().is_some_and(|r| r.at < cutoff) {
+            while self.readings.get(1).is_some_and(|r| r.at <= cutoff) {
                 self.readings.pop_front();
             }
         }
         let mut cause = started_over.then_some(Cause::Reset);
-        if let Some(outlook) = outlook(self.step, &self.readings, until_reset) {
-            let next = outlook.verdict(self.step);
-            if next != self.step {
-                self.step = next;
+        let step = self.step();
+        if let Some(outlook) = outlook(step, &self.readings, until_reset) {
+            let next = outlook.verdict(step);
+            if next != step {
                 // The reading the new pace is judged from.
                 if let Some(last) = self.readings.back_mut() {
                     last.step = next;
@@ -276,32 +276,52 @@ impl Governor {
                 });
             }
         }
-        (self.step != from).then_some(Change {
+        (self.step() != from).then_some(Change {
             from,
-            to: self.step,
+            to: self.step(),
             cause: cause?,
         })
     }
 
     /// How long the running jobs are read apart.
     pub(super) fn reads_every(&self, poll_interval: Duration) -> Duration {
-        poll_interval * self.step.reads()
+        poll_interval * self.step().reads()
     }
 
     /// How long scheduled ticks, which list every repository, are apart.
     pub(super) fn ticks_every(&self, poll_interval: Duration) -> Duration {
-        poll_interval * self.step.listings()
+        poll_interval * self.step().listings()
     }
 
-    /// The pace now.
-    #[cfg(test)]
+    /// How long an active repository's listings are apart, given the `wanted` pace of its own: held to the pace of
+    /// every listing once the step that does so is reached.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "listings have no pace of their own until PR 6 (ADR 0128)"
+        )
+    )]
+    pub(super) fn active_listings_every(
+        &self,
+        poll_interval: Duration,
+        wanted: Duration,
+    ) -> Duration {
+        if self.step() >= Step::ActiveListings {
+            self.ticks_every(poll_interval)
+        } else {
+            wanted
+        }
+    }
+
+    /// The pace now: the newest reading's, `Steady` before any.
     pub(super) fn step(&self) -> Step {
-        self.step
+        self.readings.back().map_or(Step::Steady, |r| r.step)
     }
 
     /// What the readings project now, `until_reset` before the limit starts over.
     #[cfg(test)]
     pub(super) fn outlook(&self, until_reset: Duration) -> Option<Outlook> {
-        outlook(self.step, &self.readings, until_reset)
+        outlook(self.step(), &self.readings, until_reset)
     }
 }

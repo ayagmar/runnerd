@@ -17,7 +17,9 @@ deletes sent.
 - **A governor in `engine/governor.rs` keeps one pace step**, from `Steady` (`poll_interval` for everything) through
   running-job reads at 2× and 4×, active repositories' listings at `poll_interval` (no change until listings have a
   pace of their own; the step is kept so that change needs none here), to every listing at 2× and 4×. It owns the
-  readings of the last ten minutes and the step, in one value in a leaf file with private fields.
+  readings of the last ten minutes and the step, which is the newest reading's, in one value in a leaf file with
+  private fields. The window reaches back to the last reading at or before ten minutes ago, so ticks further apart
+  than that (4× a `poll_interval` over 2½ minutes) still judge the pace from the previous tick.
 - **Each tick takes one reading** of the `core` limit the last answer carried (`GithubApi::spend`, with the count of
   registrations and deletes sent since the client was made) and moves the step at most one:
   - the **projected spend** is the drop in `remaining` since the step last changed, at most ten minutes, less the
@@ -33,8 +35,10 @@ deletes sent.
     already cut.
 - **What the governor changes:** the running-job reads' interval (`RunningReads` due test) and the interval of
   scheduled ticks, which list every repository. A tick a command or a wake-up calls early still lists. Nothing that
-  registers or deletes a runner asks the governor, so a registration goes out in the tick that lists its job whatever
-  the step; a slowed listing delays when the job is seen, not what follows.
+  registers or deletes a runner asks the governor, so no registration or delete waits for it: one a start decides
+  goes out in the tick that lists its job whatever the step. What a scheduled tick decides comes with the slower
+  ticks: a job is seen up to 4× `poll_interval` later, an idle runner past its time is deleted and a warm runner's
+  replacement registered at the next tick, not within `poll_interval`.
 - **A new count of the limit** (a different reset time) clears the readings and returns to `Steady`: the new hour has
   all its requests. A reading whose reset has passed, or with no limit, changes nothing.
 - **At 0 remaining, or on a secondary limit, [0112](0112-no-start-and-no-hold-while-githubs-rate-limit-is-used-up.md)

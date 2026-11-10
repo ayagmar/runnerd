@@ -503,3 +503,83 @@ fn with_the_same_demand_all_hour_no_step_is_taken_after_one_is_undone() {
         }
     }
 }
+
+/// The bug it catches: a window of ten minutes that ticks further apart than that leave with one reading, so no pace
+/// is ever judged again and a slowed one is held until the reset. With `poll_interval = 3m` the slowest ticks are 12
+/// minutes apart.
+#[test]
+fn with_ticks_further_apart_than_the_window_the_pace_still_eases() {
+    let poll = Duration::from_mins(3);
+    let mut sim = Sim::new(2500, Duration::from_mins(59));
+    let mut slowest = Step::Steady;
+    while sim.at < Duration::from_mins(58) {
+        let by = sim.governor.ticks_every(poll);
+        // Another client spends 60 a minute for the first 20 minutes.
+        let minutes = by.as_secs() / 60;
+        let spent = if sim.at < Duration::from_mins(20) {
+            60 * minutes
+        } else {
+            0
+        };
+        sim.tick(by, spent, 0);
+        slowest = slowest.max(sim.governor.step());
+    }
+    assert_eq!(slowest, Step::Listings4, "it slowed all the way");
+    assert_eq!(
+        sim.governor.step(),
+        Step::Steady,
+        "and eased once the other client stopped, with {} left",
+        sim.remaining
+    );
+}
+
+/// The bug it catches: the previous reading dropped from a window it is the only one to reach back across: two
+/// readings 12 minutes apart are a span of 12 minutes, so the spend between them is projected.
+#[test]
+fn the_window_reaches_back_to_the_last_reading_at_or_before_ten_minutes_ago() {
+    let mut sim = Sim::new(1_000_000, Duration::from_mins(60));
+    sim.tick(Duration::from_mins(12), 120, 0);
+    // 120 in 12 minutes, 48 minutes to the reset.
+    assert_eq!(
+        sim.governor.outlook(sim.until_reset()).unwrap().projected,
+        480
+    );
+    // A third, 12 minutes on: the first is out of the window, the second is the one before the cutoff.
+    sim.tick(Duration::from_mins(12), 0, 0);
+    assert_eq!(
+        sim.governor.outlook(sim.until_reset()).unwrap().projected,
+        0
+    );
+}
+
+/// The bug it catches: the step that holds active repositories' listings at `poll_interval` not telling PR 6 anything:
+/// before it, their own pace; from it on, every listing's.
+#[test]
+fn active_listings_keep_their_own_pace_until_the_step_that_holds_them() {
+    let third = POLL / 3;
+    let mut sim = Sim::new(1000, Duration::from_mins(30));
+    let mut paces = vec![(
+        sim.governor.step(),
+        sim.governor.active_listings_every(POLL, third),
+    )];
+    // 60 a minute against 900 left: five steps up.
+    for _ in 0..(12 * 4) {
+        if sim.tick(TICK, 15, 0).is_some() {
+            paces.push((
+                sim.governor.step(),
+                sim.governor.active_listings_every(POLL, third),
+            ));
+        }
+    }
+    assert_eq!(
+        paces,
+        [
+            (Step::Steady, third),
+            (Step::JobReads2, third),
+            (Step::JobReads4, third),
+            (Step::ActiveListings, POLL),
+            (Step::Listings2, POLL * 2),
+            (Step::Listings4, POLL * 4),
+        ]
+    );
+}
