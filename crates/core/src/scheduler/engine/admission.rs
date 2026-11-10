@@ -458,14 +458,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// them when that changes.
     pub(super) fn note_host(&mut self, admitting: &Admitting, plan: &Plan) {
         let stalled = admitting.host.as_ref().is_some_and(|host| host.stalled);
-        // A job the plan starts, as the tick's own starts did not, is a waiter the band reads too: one that fits,
-        // whose start the larger margin must not hold back (ADR 0102).
+        // A job the plan starts without stopping a warm runner, as the tick's own starts did not, is a waiter the band
+        // reads too: one that fits, whose start the larger margin must not hold back (ADR 0102). One that replaces warm
+        // runners fits only once they go, which the plain room beside what runs does not show: it is no such waiter.
         let starts = plan.decisions.iter().filter_map(|decision| match decision {
             Decision::Start {
                 memory,
                 for_: StartFor::Job(_),
+                replacing,
                 ..
-            } => Some(*memory),
+            } if replacing.is_empty() => Some(*memory),
             Decision::Start { .. } | Decision::Stop { .. } => None,
         });
         let needs = plan
