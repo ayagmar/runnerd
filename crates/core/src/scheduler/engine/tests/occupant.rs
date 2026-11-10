@@ -163,6 +163,8 @@ async fn a_detaching_stop_takes_an_adopted_runner_with_no_job_and_leaves_one_it_
     let dir = TestDir::new("detach-shape");
     let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
     engine.recover().await.unwrap();
+    // The first listing shows the adopted runner newly busy, which may have taken job 1: the next starts a runner.
+    engine.tick(Shutdown::No).await;
     engine.tick(Shutdown::No).await;
     let started = {
         let mut state = github.0.lock().unwrap();
@@ -295,6 +297,74 @@ async fn a_runner_listed_busy_github_keeps_as_it_goes_took_no_listed_job() {
     assert_eq!(engine.refill().await, 1, "job 1 gets a runner");
 }
 
+/// A runner a restart adopts that takes its job before the first listing gets the claim of a runner first listed
+/// busy: GitHub may list that job queued a while longer, and it gets no twin.
+#[tokio::test]
+async fn an_adopted_runner_that_takes_a_job_before_the_first_listing_gets_no_twin_for_it() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let dir = TestDir::new("adopted-newly-busy");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    handle.store.flush().await;
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    // It takes job 1 while no daemon runs, and GitHub still lists the job queued.
+    for runner in &mut github.0.lock().unwrap().runners {
+        runner.busy = true;
+    }
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 1 is the one the adopted runner may have taken"
+    );
+}
+
+/// The cost of that claim: a runner a restart adopts that was busy before it holds back one listed job of its pool,
+/// for one listing.
+#[tokio::test]
+async fn an_adopted_runner_already_busy_holds_back_a_listed_job_for_one_listing_at_most() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let dir = TestDir::new("adopted-busy");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    handle.store.flush().await;
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    // It took job 1 before the restart, which no capture named; job 2 queues meanwhile.
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(2)];
+        for runner in &mut state.runners {
+            runner.busy = true;
+        }
+    }
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 2 may be the one it took, as far as the first listing tells"
+    );
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "the next listing still shows job 2, which gets a runner"
+    );
+}
+
 /// A runners listing that fails still ends the claim of a runner the listing before first showed busy: the job it
 /// may have taken would have left the queue by then, so one still listed is another start's.
 #[tokio::test]
@@ -327,6 +397,41 @@ async fn a_runners_listing_that_fails_ends_the_claim_of_a_runner_first_listed_bu
         registered(&github.calls()).len(),
         2,
         "job 1, still listed after the failed listing, gets a runner"
+    );
+}
+
+/// The claim comes with the first listing that shows the adopted runner busy: while its runners listing fails, it holds
+/// back no listed job of its pool, which an outage would otherwise starve.
+#[tokio::test]
+async fn an_adopted_runner_whose_runners_listing_fails_holds_back_no_listed_job() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let dir = TestDir::new("adopted-unlisted");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    handle.store.flush().await;
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(2)];
+        for runner in &mut state.runners {
+            runner.busy = true;
+        }
+        state
+            .failed_runners
+            .insert("o/r".to_owned(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "job 2 gets a runner though no listing answered for the adopted one"
     );
 }
 
