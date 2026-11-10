@@ -200,6 +200,9 @@ impl Writer<'_> {
                 done,
             } => self.sizing_resolved(id, resolution, done),
             Write::Notify { change, done } => self.notify(change, done),
+            Write::RunnerNamed { secs, done } => {
+                let _ = done.send(self.runner_named(secs));
+            }
             Write::Flush(done) => {
                 self.store_host_samples();
                 let _ = done.send(());
@@ -1025,6 +1028,16 @@ impl Writer<'_> {
                 )?;
                 announced.push(Event::SizingChanged { change });
             }
+            Ok(())
+        })
+    }
+
+    fn runner_named(&self, secs: u64) -> bool {
+        self.change("record a runner's name", |_| {
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('runner_named', ?1)",
+                [secs],
+            )?;
             Ok(())
         })
     }

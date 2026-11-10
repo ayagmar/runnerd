@@ -1137,12 +1137,17 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
 
 pub(super) fn last_runner_second(db: &Connection, prefix: &str) -> rusqlite::Result<Option<u64>> {
     // A name ends in its second: the digits after the last `-`. A job names its runner even when the runner never
-    // got a row, as when Docker never let the engine inspect it.
+    // got a row, as when Docker never let the engine inspect it. `runner_named` holds the latest second named, also
+    // of runners pruning removed and of those nothing else recorded.
     db.prepare_cached(
-        "SELECT max(CAST(substr(name, length(rtrim(name, '0123456789')) + 1) AS INTEGER)) FROM (
-            SELECT name FROM runners WHERE substr(name, 1, length(?1)) = ?1
+        "SELECT max(second) FROM (
+            SELECT CAST(substr(name, length(rtrim(name, '0123456789')) + 1) AS INTEGER) AS second FROM (
+                SELECT name FROM runners WHERE substr(name, 1, length(?1)) = ?1
+                UNION ALL
+                SELECT runner AS name FROM jobs WHERE substr(runner, 1, length(?1)) = ?1
+            )
             UNION ALL
-            SELECT runner AS name FROM jobs WHERE substr(runner, 1, length(?1)) = ?1
+            SELECT value FROM meta WHERE key = 'runner_named'
         )",
     )?
     .query_row([prefix], |row| row.get(0))

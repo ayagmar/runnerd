@@ -4007,3 +4007,33 @@ async fn a_pass_starts_no_runner_for_a_job_a_failed_start_may_have_taken() {
     ];
     assert_eq!(broken(&steps).await, None);
 }
+
+/// Shrunk from seed 66. The first runner's inspect fails and its container goes, so neither Docker nor its runner
+/// row names it to the daemon that restarts within its second; a runner named later must not take its name. It
+/// breaks only when both are named in one second: `a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one`
+/// holds the same apart from the clock.
+#[tokio::test]
+async fn a_runner_started_after_a_restart_never_takes_a_name_nothing_recorded() {
+    let queue = |second, labels| Step::Queue { second, labels };
+    let steps = [
+        queue(false, Labels::SelfHosted),
+        Step::StartedInspectFails,
+        queue(false, Labels::Typo),
+        Step::RestartLogsFail,
+        Step::CaptureFails { mid_stream: false },
+        queue(true, Labels::Empty),
+        queue(true, Labels::Heavy),
+        Step::RunnerGoes(4),
+        Step::AssignListed(1),
+        Step::RunnerGoes(4),
+        Step::Elapse,
+        Step::RestartInspectFails(3),
+        Step::CaptureFails { mid_stream: false },
+        Step::Reload(Change::SecondRepository),
+        Step::Cancel(7),
+        Step::Assign(4),
+        Step::OpenJobCompletes(2),
+        Step::Stop { docker_gone: false },
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
