@@ -1,6 +1,6 @@
-//! A slot's runner from start to removal: registers it with a JIT config and starts its container, stops idle or
-//! forced ones, frees the slots of ended containers and holds back a pool whose runners fail to start or keep ending
-//! without a job (ADR 0104). It must not decide which slots start or stop: `tick` does, through `plan`.
+//! A slot's runner once started, to its removal: stops idle or forced ones, frees the slots of ended containers and
+//! holds back a pool whose runners fail to start or keep ending without a job (ADR 0104); starts go through `start`. It
+//! must not decide which slots start or stop: `tick` does, through `plan`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
@@ -10,12 +10,11 @@ use tracing::{info, warn};
 
 use super::history::{CAPTURE_DRAIN, Capture};
 use super::runner_exit::{Exit, Logged, TOOK_JOB};
-use super::{Engagement, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, Slot, unix_secs};
-use crate::api::{Admission, Event, HoldCause, RunnerFailure};
+use super::{Engine, Occupant, STOP_DEADLINE, Shutdown, Slot};
+use crate::api::{Event, HoldCause, RunnerFailure};
 use crate::cache;
-use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
-use crate::github::{self, Deleted, GithubApi, Runner};
-use crate::isolation;
+use crate::docker::{self, DockerApi, is_being_removed, is_log_gone, is_not_found};
+use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{SlotRef, StopReason};
 use crate::sync::lock;
@@ -76,37 +75,6 @@ impl Default for PrepareFailures {
             retry_at: SystemTime::UNIX_EPOCH,
         }
     }
-}
-
-/// What a start came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
-pub(super) enum StartOutcome {
-    /// Its runner is in its slot.
-    Started,
-    /// No runner is: its pool or profile went, a stop was asked for, or GitHub or Docker failed, which holds its pool
-    /// back unless only preparing the caches failed. A container Docker kept holds the slot until it is removed.
-    Failed,
-}
-
-/// The labels of a runner container: what a restart adopts it by.
-fn container_labels(
-    name: &str,
-    repository: &str,
-    slot: usize,
-    runner_id: u64,
-    labels: &[String],
-    image: &str,
-) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("runnerd.job".to_owned(), name.to_owned()),
-        ("runnerd.repository".to_owned(), repository.to_owned()),
-        ("runnerd.slot".to_owned(), slot.to_string()),
-        ("runnerd.runner-id".to_owned(), runner_id.to_string()),
-        (LABELS.to_owned(), labels.join(",")),
-        (IMAGE.to_owned(), image.to_owned()),
-        (SPEC.to_owned(), THIS_SPEC.to_owned()),
-    ])
 }
 
 /// The last lines a runner logged, on one line, for a warning about one that took no job: its log goes with its
@@ -482,7 +450,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// A runner container's environment: its slot's share of what the slots' Docker Engines may keep, which its
     /// image's job cleanup holds it to, once the caches' check has measured Docker's disk.
-    fn runner_env(&self) -> Vec<String> {
+    pub(super) fn runner_env(&self) -> Vec<String> {
         self.docker_disk
             .borrow()
             .map(|disk| {
@@ -708,7 +676,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Holds back the next runners of a repository's pool in `profile` after one failed, longer each time in a row,
     /// and announces the first hold of a streak as `runner.failed`: a pool that stays broken says so once, not every
     /// 10 minutes, until a runner takes a job. Its repository's other pools go on. Runners that fail while it is held started before the hold, so they do not lengthen it.
-    fn hold(&mut self, repository: &str, profile: &str, cause: HoldCause, error: String) {
+    pub(super) fn hold(
+        &mut self,
+        repository: &str,
+        profile: &str,
+        cause: HoldCause,
+        error: String,
+    ) {
         let Some(hold) = self
             .repositories
             .listed_mut(repository)
@@ -755,7 +729,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// After a start in `profile` that failed and left nothing in Docker, deletes its `runner`'s registration and
     /// closes its build cache, and holds back its pool.
-    async fn abandon(&mut self, profile: &str, repository: &str, runner: &Runner, failure: String) {
+    pub(super) async fn abandon(
+        &mut self,
+        profile: &str,
+        repository: &str,
+        runner: &Runner,
+        failure: String,
+    ) {
         self.close_build_cache(&runner.name);
         if let Err(error) = self.github.delete_runner(repository, runner.id).await {
             warn!("{repository}: cannot delete {}: {error}", runner.name);
@@ -764,7 +744,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Starts the registry mirror, when enabled and down, for a runner about to start.
-    async fn start_mirror(&mut self) {
+    pub(super) async fn start_mirror(&mut self) {
         let mirror = &self.config.caches.mirror;
         if mirror.enabled && self.mirror.needs_start() {
             match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
@@ -779,7 +759,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Creates what a runner in `slot` mounts and says whether it is there. Not yet when the slot's last try failed
     /// and the time for the next has not come.
-    async fn caches_ready(&mut self, slot: &SlotRef, now: SystemTime) -> bool {
+    pub(super) async fn caches_ready(&mut self, slot: &SlotRef, now: SystemTime) -> bool {
         if self
             .prepare_failures
             .get(slot)
@@ -806,150 +786,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
         failed.failures += 1;
         false
-    }
-
-    /// Registers a runner of `repository` and starts it in `slot`, and says whether it is there.
-    pub(super) async fn start(
-        &mut self,
-        slot: &SlotRef,
-        repository: &str,
-        admission: Admission,
-        purpose: Purpose,
-    ) -> StartOutcome {
-        // Its pool's labels: those of the repository's entry in the slot's profile.
-        let Some(labels) = self
-            .config
-            .pool_in(repository, &slot.profile)
-            .map(|pool| pool.labels.clone())
-        else {
-            return StartOutcome::Failed;
-        };
-        let now = SystemTime::now();
-        if !self.caches_ready(slot, now).await {
-            return StartOutcome::Failed;
-        }
-        let number = slot.index + 1;
-        let secs = unix_secs(now).max(self.named + 1);
-        self.named = secs;
-        let name = self.identity.runner_name(&slot.profile, number, secs);
-        self.start_mirror().await;
-        let Some(profile) = self.config.profiles.get(&slot.profile) else {
-            return StartOutcome::Failed;
-        };
-        let (runner, jit_config) = match self.github.jit_config(repository, &name, &labels).await {
-            Ok(registered) => registered,
-            // Not the pool's fault: no runner starts anywhere until the limit resets.
-            Err(github::Error::RateLimited { until }) => {
-                self.github_limited(until);
-                return StartOutcome::Failed;
-            }
-            Err(error) => {
-                let failure = format!("cannot register a runner: {error}");
-                warn!("{repository}: {failure}");
-                self.hold(repository, &slot.profile, HoldCause::Register, failure);
-                return StartOutcome::Failed;
-            }
-        };
-        // A stop asked for while GitHub registered it: its runner would take a job no daemon watches.
-        if self.control.mode() != Shutdown::No {
-            info!("{repository}: stopping; deleting {name} before it starts");
-            if let Err(error) = self.github.delete_runner(repository, runner.id).await {
-                warn!("{repository}: cannot delete {name}: {error}");
-            }
-            return StartOutcome::Failed;
-        }
-        let image = profile.image.reference();
-        let spec = RunnerSpec {
-            name: name.clone(),
-            image: image.clone(),
-            profile: slot.profile.clone(),
-            slice: self.config.host.slice.clone(),
-            cpus: profile.cpus,
-            memory: profile.memory,
-            env: self.runner_env(),
-            mounts: self.runner_mounts(&slot.profile, number, &name, repository),
-            network: Some(self.names.network()),
-            labels: container_labels(&name, repository, number, runner.id, &labels, &image),
-            entrypoint: None,
-            jit_config: Some(jit_config),
-        };
-        let (container, failure) = match self.docker.start(&spec, self.isolation).await {
-            Ok(container) => (container, None),
-            Err(failed) => {
-                let failure = isolation::start_failure(&name, &failed.error.to_string());
-                warn!("{repository}: {failure}");
-                self.recheck_image(&spec.image);
-                let Some(container) = failed.container else {
-                    // Its runner may have taken a listed job, which no capture names.
-                    if failed.may_have_run {
-                        self.spend(repository, &slot.profile);
-                    }
-                    self.abandon(&slot.profile, repository, &runner, failure)
-                        .await;
-                    return StartOutcome::Failed;
-                };
-                (container, Some(failure))
-            }
-        };
-        let occupant = Occupant {
-            repository: repository.to_owned(),
-            runner_name: name.clone(),
-            runner_id: runner.id,
-            container,
-            started_at: now,
-            memory: spec.memory.0,
-            cpus: u64::from(spec.cpus) * 1000,
-            admission: Some(admission),
-            labels: Some(labels),
-            image: Some(image),
-            spec: Some(THIS_SPEC.to_owned()),
-            engagement: Engagement::started(purpose),
-        };
-        self.place(slot, occupant, purpose, failure).await
-    }
-
-    /// Puts a runner a start made in its slot and watches it, or after a start that failed, its container that
-    /// Docker kept: it holds the slot, with its registration, until `collect_finished` confirms its removal, which
-    /// keeps a second runner off the slot's volumes. If it runs, the next tick watches it as a runner.
-    async fn place(
-        &mut self,
-        slot: &SlotRef,
-        occupant: Occupant,
-        purpose: Purpose,
-        failure: Option<String>,
-    ) -> StartOutcome {
-        if let Some(entry) = self
-            .slots
-            .get_mut(&slot.profile)
-            .and_then(|slots| slots.get_mut(slot.index))
-        {
-            entry.place(occupant.clone());
-        }
-        let (repository, name, number) =
-            (&occupant.repository, &occupant.runner_name, slot.index + 1);
-        match failure {
-            None => {
-                let warm = match purpose {
-                    Purpose::Job => "",
-                    Purpose::Warm => " warm, for jobs not queued yet",
-                    Purpose::Burst => " warm, for a job its runs are expected to queue",
-                };
-                info!(
-                    "{repository}: started {name} in {} slot {number}{warm}",
-                    slot.profile
-                );
-                self.observe(slot, &occupant).await;
-                StartOutcome::Started
-            }
-            Some(failure) => {
-                warn!(
-                    "{repository}: {name} may be left in Docker; {} slot {number} stays its until it is removed",
-                    slot.profile
-                );
-                self.hold(repository, &slot.profile, HoldCause::Start, failure);
-                StartOutcome::Failed
-            }
-        }
     }
 }
 

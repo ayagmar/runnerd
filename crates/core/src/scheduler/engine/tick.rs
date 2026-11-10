@@ -15,10 +15,12 @@ use super::admission::Admitting;
 use super::history::CAPTURE_DRAIN;
 use super::pool_health::PoolHealth;
 use super::presence::RunnersListing;
-use super::runners::{Collected, Removal, StartOutcome};
-use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
+use super::runners::{Collected, Removal};
+use super::slot::Holder;
+use super::start::{Carried, Gate, StartOutcome};
+use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown};
 use crate::admission::{host, pooled};
-use crate::api::{AdmissionPolicy, Basis};
+use crate::api::AdmissionPolicy;
 use crate::config::Admission;
 use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
@@ -497,7 +499,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // after a tick took its listing and before it did.
         self.rereserve().await;
         let (plan, mut admitting) = self.plan();
-        let mut started = 0;
         // The jobs the plan starts a runner for that this pass did not: they go on waiting for what they waited for.
         let mut not_carried_out: BTreeSet<u64> = plan
             .decisions
@@ -510,26 +511,28 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 _ => None,
             })
             .collect();
-        for decision in &plan.decisions {
-            let Decision::Start {
-                for_: StartFor::Job(job),
-                replacing,
-                ..
-            } = decision
-            else {
-                continue;
-            };
-            // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-            if !replacing.is_empty() || self.control.mode() != Shutdown::No {
-                continue;
+        // Only starts for jobs: one that takes a warm runner's room waits for the tick.
+        let (jobs, starts): (Vec<u64>, Vec<Decision>) = plan
+            .decisions
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Start {
+                    for_: StartFor::Job(job),
+                    replacing,
+                    ..
+                } if replacing.is_empty() => Some((*job, decision.clone())),
+                _ => None,
+            })
+            .unzip();
+        let carried = self
+            .start_batch(starts, &mut admitting, Gate::StopOnly)
+            .await;
+        let mut started = 0;
+        for (job, carried) in jobs.iter().zip(carried) {
+            if let Carried::Done(outcome) = carried {
+                started += usize::from(outcome == StartOutcome::Started);
+                not_carried_out.remove(job);
             }
-            match self.apply_start(decision.clone(), &mut admitting).await {
-                Some(StartOutcome::Started) => started += 1,
-                Some(StartOutcome::Failed) => {}
-                // The plan's later starts counted on the room of one that no longer fits: the tick plans again.
-                None => break,
-            }
-            not_carried_out.remove(job);
         }
         self.note_pass_waits(&plan, &not_carried_out);
         // A plan's waits count whichever path ran it, and only once its starts are done.
@@ -595,23 +598,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         applied.acted = self.occupied().count() < before;
         pace.lap(Phase::Removing, self.passes_in_tick);
-        for decision in decisions {
-            match decision {
-                Decision::Stop { .. } => {}
-                // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-                Decision::Start { .. } if self.control.mode() != Shutdown::No => {}
-                // GitHub registers no runner before its rate limit resets.
-                Decision::Start { .. } if self.github_limit().is_some() => {}
-                Decision::Start { .. } if applied.deferred > 0 => applied.deferred += 1,
-                start @ Decision::Start { .. } => match self.apply_start(start, admitting).await {
-                    Some(StartOutcome::Started) => {
-                        applied.acted = true;
-                        pace.started += 1;
-                    }
-                    // It changed nothing a plan again would start more by.
-                    Some(StartOutcome::Failed) => {}
-                    None => applied.deferred += 1,
-                },
+        for carried in self
+            .start_batch(decisions, admitting, Gate::RateLimit)
+            .await
+        {
+            match carried {
+                Carried::Done(StartOutcome::Started) => {
+                    applied.acted = true;
+                    pace.started += 1;
+                }
+                // It changed nothing a plan again would start more by.
+                Carried::Done(StartOutcome::Failed) | Carried::Skipped => {}
+                Carried::Deferred => applied.deferred += 1,
             }
         }
         pace.lap(Phase::Starting, self.passes_in_tick);
@@ -634,98 +632,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .collect(),
             ..Plan::default()
         }
-    }
-
-    /// Carries out a plan's `Decision::Start`, unless a warm runner it replaces is still there: that one took a job
-    /// before its stop, and the start waits for the next plan. Returns what the start came to, or `None` when it waits
-    /// for the next plan.
-    async fn apply_start(
-        &mut self,
-        start: Decision,
-        admitting: &mut Admitting,
-    ) -> Option<StartOutcome> {
-        let Decision::Start {
-            slot,
-            repository,
-            memory,
-            cpu,
-            for_,
-            replacing,
-            behind,
-        } = start
-        else {
-            return None;
-        };
-        if replacing.iter().any(|slot| self.holds_runner(slot)) {
-            info!("{repository}: a warm runner it would replace took a job; planning again");
-            return None;
-        }
-        // The plan's budgets are those of its start: the starts before this one are counted since, and so are what
-        // ran meanwhile.
-        if !self.still_fits(admitting, &slot.profile, memory, cpu) {
-            info!(
-                "{repository}: its runner in {} no longer fits what runs now; planning again",
-                slot.profile
-            );
-            return None;
-        }
-        if let Some(owner) = behind {
-            info!(
-                "{repository}: a runner in {} starts behind the barrier of job {owner}",
-                slot.profile
-            );
-        }
-        let pool = Pool {
-            repository,
-            profile: slot.profile.clone(),
-        };
-        self.refresh_free(admitting);
-        let mut admission = admitting.admit(&pool, memory, cpu);
-        let repository = pool.repository;
-        let StartFor::Job(job) = for_ else {
-            // Its profile's caps, whatever its repository's queued jobs predict.
-            admission.basis = Basis::Cap;
-            if let Some(cpu) = admission.cpu.as_mut() {
-                cpu.basis = Basis::Cap;
-            }
-            let purpose = self.warm_purpose(&Pool {
-                repository: repository.clone(),
-                profile: slot.profile.clone(),
-            });
-            return Some(self.start(&slot, &repository, admission, purpose).await);
-        };
-        let held_since = self
-            .repositories
-            .listed(&repository)
-            .and_then(|state| state.waits(&slot.profile)?.cpu())
-            // The pool's wait for CPU can be another job's, as memory and CPU may each hold a different one.
-            .filter(|wait| wait.job == job)
-            .map(|wait| wait.since);
-        if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
-            cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
-        }
-        let outcome = self
-            .start(&slot, &repository, admission, Purpose::Job)
-            .await;
-        // Only a runner in its slot ends the wait: a start that failed served nothing, even one that left a container
-        // there. Its backoff takes the pool's wait; the job waits for neither a slot nor the host's memory since.
-        if self.holds_runner(&slot) {
-            self.note_started(job);
-        }
-        if outcome == StartOutcome::Started
-            && !self.backing_off(&repository, &slot.profile, SystemTime::now())
-            && let Some(waits) = self
-                .repositories
-                .listed_mut(&repository)
-                .and_then(|state| state.waits_mut(&slot.profile))
-            && waits.started()
-        {
-            info!(
-                "{repository}: a barrier served its pool in {}: its next jobs hold sooner until its queue empties",
-                slot.profile
-            );
-        }
-        Some(outcome)
     }
 
     /// Plans from the last poll's listings, as they stand now.
@@ -952,19 +858,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let slots_len = slots.len();
         let slots = slots
             .iter()
-            .map(|slot| match slot.occupant() {
-                None if free > 0 => {
+            .map(|slot| match slot.holder() {
+                Holder::Free if free > 0 => {
                     free -= 1;
                     Slot::Free
                 }
-                None => Slot::Closed,
-                Some(occupant) => Slot::Runner(RunnerSlot {
+                Holder::Free => Slot::Closed,
+                // A start in flight is a runner its plan gave a job or a warm purpose already: none to start again.
+                Holder::Starting(starting) => {
+                    let footprint = starting.footprint();
+                    Slot::Runner(RunnerSlot {
+                        repository: starting.repository().to_owned(),
+                        busy: true,
+                        started_at: starting.launched_at(),
+                        memory: self.held_by(&footprint).takes,
+                        cpu: self.reserves_cpu(&footprint),
+                        usual: None,
+                    })
+                }
+                Holder::Runner(occupant) => Slot::Runner(RunnerSlot {
                     repository: occupant.repository.clone(),
                     // Its capture named its job before a listing showed it busy: it waits for none of those queued.
                     busy: occupant.engaged(),
                     started_at: occupant.started_at,
                     memory: self.takes(occupant),
-                    cpu: self.reserves_cpu(occupant),
+                    cpu: self.reserves_cpu(&occupant.footprint()),
                     usual: self.usual_run(occupant, name),
                 }),
             })
@@ -1021,11 +939,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// What a runner takes of the budget.
     pub(super) fn takes(&self, occupant: &Occupant) -> u64 {
-        self.held_by(occupant).takes
+        self.held_by(&occupant.footprint()).takes
     }
 
-    /// What a runner takes of the budget and what it is known to use.
-    fn held_by(&self, occupant: &Occupant) -> Held {
+    /// What a runner, or a start in flight as the runner it becomes, takes of the budget and what it is known to use.
+    fn held_by(&self, occupant: &Footprint<'_>) -> Held {
         match self.config.host.admission {
             // Whatever it reserved under measured admission before a reload.
             Admission::Caps => Held {
@@ -1034,7 +952,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             },
             // Nothing once its container's cgroup is gone: its job ended and its memory with it, though its slot waits
             // for its log and its removal, for 20 s after a burst.
-            Admission::Measured if self.store.container_gone(&occupant.runner_name) => Held {
+            Admission::Measured if self.store.container_gone(occupant.runner_name) => Held {
                 takes: 0,
                 used: None,
             },
@@ -1048,7 +966,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .store
                     .latest_host_sample()
                     .is_some_and(|sample| sample.at.saturating_mul(1000) + fresh >= now);
-                let own = self.store.latest_sample(&occupant.runner_name);
+                let own = self.store.latest_sample(occupant.runner_name);
                 // Before its first sample, a runner is as fresh as its start.
                 let sampled_at = own
                     .as_ref()
@@ -1061,7 +979,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 } else {
                     let used = own.map(|sample| sample.memory);
                     Held {
-                        takes: occupant.reserved().max(used.unwrap_or(0)),
+                        takes: occupant.reserved.max(used.unwrap_or(0)),
                         used,
                     }
                 }
@@ -1088,18 +1006,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn count(&self, remembered: host::Remembered) -> pooled::Count {
         let now = SystemTime::now();
         let runners: Vec<pooled::Runner<'_>> = self
-            .occupied()
-            .map(|(_, occupant)| {
-                let held = self.held_by(occupant);
+            .footprints()
+            .map(|footprint| {
+                let held = self.held_by(&footprint);
                 pooled::Runner {
-                    key: occupant.key(),
+                    key: footprint.key,
                     takes: held.takes,
                     used: held.used,
                     // An adopted runner's job may have started under another daemon.
-                    ran: occupant
-                        .job_found_here()
+                    ran: footprint
+                        .job_found_here
                         .and_then(|started| now.duration_since(started).ok()),
-                    basis: occupant.admission.map(|admission| admission.basis),
+                    basis: footprint.basis,
                 }
             })
             .collect();

@@ -1,8 +1,9 @@
 //! The engine's invariants over generated sequences of events, on the fakes: jobs queued with every kind of labels,
 //! taken, finished, cancelled and lost, and whose reads GitHub fails; runners that fail to start, before or after
-//! Docker made their container, wait or exit idle; Docker calls that fail once; log captures that fail or break off;
-//! samples of the slice and the host, short of memory or stalling, also between two starts of one tick; reseeds asked
-//! for; reloads, restarts and stops; time passing. After each tick the named checks below must hold, and once the
+//! Docker made their container, wait or exit idle; registrations GitHub fails or refuses for its rate limit, and caches
+//! Docker fails to prepare; Docker calls that fail once; log captures that fail or break off; samples of the slice and
+//! the host, short of memory or stalling, also between two starts of one tick; reseeds asked for; reloads, restarts
+//! and stops, also while GitHub registers a runner; time passing. After each tick the named checks below must hold, and once the
 //! sequence drains no runner may be left.
 //!
 //! The sequences come from a seeded generator, so a failure replays: it prints its seed and the shortest sequence
@@ -413,6 +414,17 @@ enum Step {
         pick: usize,
         how: ReadFailure,
     },
+    /// GitHub fails the next runner's registration.
+    RegisterFails,
+    /// GitHub refuses the next runner's registration for its used-up rate limit, which resets 30 minutes on.
+    RegistrationRateLimited,
+    /// Docker fails to prepare the next runner's caches.
+    PrepareFails,
+    /// The daemon is asked to stop while GitHub registers the next runner: on a signal, or with `runnerd stop` once
+    /// Docker is gone. The stop runs to its end, then the daemon starts again.
+    StopDuringStart {
+        docker_gone: bool,
+    },
 }
 
 /// How GitHub fails a job's reads.
@@ -428,7 +440,7 @@ enum ReadFailure {
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
     (0..EVENTS)
-        .map(|_| match rng.below(112) {
+        .map(|_| match rng.below(116) {
             0..=17 => Step::Queue {
                 second: rng.below(3) == 0,
                 labels: match rng.below(10) {
@@ -511,6 +523,12 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             99 => Step::JobReadFails {
                 pick: rng.index(),
                 how: [ReadFailure::Gone, ReadFailure::Limited, ReadFailure::Other][rng.index() % 3],
+            },
+            112 => Step::RegisterFails,
+            113 => Step::RegistrationRateLimited,
+            114 => Step::PrepareFails,
+            115 => Step::StopDuringStart {
+                docker_gone: rng.below(2) == 0,
             },
             _ => Step::Tick,
         })
@@ -646,6 +664,14 @@ struct Seen {
     split_waits: usize,
     /// Ticks that ended with a capture running beside its next start's memory of where it broke.
     captures_with_recaptures: usize,
+    /// Starts whose registration GitHub failed.
+    registrations_failed: usize,
+    /// Starts whose registration GitHub refused for its rate limit.
+    registrations_limited: usize,
+    /// Starts whose caches Docker failed to prepare.
+    prepares_failed: usize,
+    /// Stops asked for while GitHub registered a runner.
+    stops_during_start: usize,
 }
 
 impl Seen {
@@ -665,6 +691,10 @@ impl Seen {
         self.mirrors += case.mirrors;
         self.split_waits += case.split_waits;
         self.captures_with_recaptures += case.captures_with_recaptures;
+        self.registrations_failed += case.registrations_failed;
+        self.registrations_limited += case.registrations_limited;
+        self.prepares_failed += case.prepares_failed;
+        self.stops_during_start += case.stops_during_start;
     }
 
     /// The states no generated case reached, so nothing checks them.
@@ -691,6 +721,13 @@ impl Seen {
                 "a capture beside a recapture",
                 self.captures_with_recaptures,
             ),
+            ("a registration that failed", self.registrations_failed),
+            (
+                "a registration refused for the rate limit",
+                self.registrations_limited,
+            ),
+            ("caches that failed to prepare", self.prepares_failed),
+            ("a stop while a runner registers", self.stops_during_start),
         ]
         .into_iter()
         .filter_map(|(state, count)| (count == 0).then_some(state))
@@ -724,6 +761,8 @@ struct Case {
     host: Option<HostReading>,
     /// The reading a `SampleDuringStart` took, until the tick it was taken in checks the starts after it.
     host_during_start: Arc<Mutex<Option<HostReading>>>,
+    /// The stop a `StopDuringStart` asked for as GitHub registered a runner, until the step carries it out.
+    stop_during_start: Arc<Mutex<Option<bool>>>,
     /// Log captures `CaptureFails` failed, by container, as of the start of the last tick.
     capture_faults: HashMap<String, u32>,
     /// Runners that exited without a job, whose slots the engine has not freed yet. A restart forgets them, as it
@@ -789,6 +828,7 @@ impl Case {
             calls_seen: 0,
             host: None,
             host_during_start: Arc::default(),
+            stop_during_start: Arc::default(),
             capture_faults: HashMap::new(),
             exits: Vec::new(),
             busy_before: Vec::new(),
@@ -935,6 +975,15 @@ impl Case {
         };
         self.seen.lost_closes += count("state = 'lost'");
         self.seen.unanswered_closes += count("state = 'elsewhere' AND conclusion IS NULL");
+    }
+
+    /// Counts the faults of a start's registration and preparation that a start met.
+    fn note_start_faults(&mut self) {
+        let github = self.github.0.lock().unwrap();
+        self.seen.registrations_failed += github.registrations_failed;
+        self.seen.registrations_limited += github.registrations_limited_once;
+        drop(github);
+        self.seen.prepares_failed += self.docker.0.lock().unwrap().prepares_failed;
     }
 
     /// The trace, with what the case left in its history's jobs table.
@@ -1191,8 +1240,45 @@ impl Case {
             Step::SaveUnnamed(pick) => self.save_unnamed(pick).await,
             Step::RunnerNamed(pick) => self.runner_named(pick),
             Step::JobReadFails { pick, how } => self.job_read_fails(pick, how),
+            Step::RegisterFails => self.github.0.lock().unwrap().fail_registrations += 1,
+            Step::RegistrationRateLimited => {
+                self.github.0.lock().unwrap().limit_registrations += 1;
+            }
+            Step::PrepareFails => self.docker.0.lock().unwrap().fail_prepares += 1,
+            Step::StopDuringStart { docker_gone } => self.stop_during_start(docker_gone),
         }
+        self.finish_stop_during_start().await?;
         self.no_removal_of_a_running_job()
+    }
+
+    /// Asks for a stop as GitHub registers the next runner, which the step that started it then carries out.
+    fn stop_during_start(&mut self, docker_gone: bool) {
+        let (control, docker, asked) = (
+            self.handle.control.clone(),
+            self.docker.clone(),
+            self.stop_during_start.clone(),
+        );
+        self.github.0.lock().unwrap().on_register = Some(Box::new(move || {
+            if docker_gone {
+                docker.set_outage(Outage::Refused);
+                control.shutdown(Shutdown::Graceful);
+            } else {
+                control.shutdown(Shutdown::Detach);
+            }
+            *asked.lock().unwrap() = Some(docker_gone);
+        }));
+    }
+
+    /// Carries out the stop a `StopDuringStart` asked for, if it did, as `Stop` does: to its end, then a restart.
+    async fn finish_stop_during_start(&mut self) -> Result<(), Violation> {
+        let Some(docker_gone) = self.stop_during_start.lock().unwrap().take() else {
+            return Ok(());
+        };
+        self.seen.stops_during_start += 1;
+        self.stop(docker_gone).await?;
+        self.restart().await?;
+        self.tick().await?;
+        self.a_restart_takes_the_host_credit_back()
     }
 
     /// A running job's runner and container go while GitHub goes on saying the job runs, and with `Listing::Stale`
@@ -1239,6 +1325,16 @@ impl Case {
         self.still_listed.remove(&id);
         drop(github);
         self.took_job.remove(&container);
+        // Its runner ran a job, which proves its pool works, as `end_job`'s does.
+        if let Some((slot, occupant)) = self
+            .engine
+            .occupied()
+            .find(|(_, occupant)| occupant.container == container)
+        {
+            let repository = occupant.repository.clone();
+            self.ended_between
+                .push((container, repository, slot.profile));
+        }
     }
 
     /// The jobs whose runner went and that GitHub has not said ended.
@@ -1860,6 +1956,7 @@ impl Case {
         } else {
             Shutdown::Detach
         };
+        // Asked for already by a `StopDuringStart`, which this asks for again.
         self.handle.control.shutdown(mode);
         // Far past what a stop takes, so only a stop that hangs fails it, however slow the machine.
         let stopped = tokio::time::timeout(Duration::from_secs(300), self.engine.schedule()).await;
@@ -1930,6 +2027,8 @@ impl Case {
         self.host = None;
         self.exits.clear();
         self.docker.0.lock().unwrap().on_start = None;
+        // A stop asked for of the engine gone would never be carried out.
+        self.github.0.lock().unwrap().on_register = None;
         self.recover().await
     }
 
@@ -1958,6 +2057,7 @@ impl Case {
         }
         let past = SystemTime::now() - Duration::from_secs(1);
         self.engine.expire_holds(past);
+        self.engine.expire_github_limit(past);
         self.engine.age_waits(PRIORITY_AFTER);
         self.engine.expire_cancelling();
         self.engine.make_unread_due();
@@ -2141,6 +2241,7 @@ impl Case {
             .filter(|profile| !seeds_before.contains(*profile))
             .map(|profile| format!("{profile}{SEED_START}"))
             .collect::<Vec<_>>();
+        self.no_slot_is_left_starting()?;
         let read_during_start = self.starts_after_a_reading(&starts);
         let same_reading = read_during_start.is_none();
         let seeded = !seeds.is_empty();
@@ -2151,7 +2252,10 @@ impl Case {
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.no_watch_outlives_its_runner()?;
-        self.only_unserved_jobs_wait_for_a_pool(&after)?;
+        // A stop asked for during the tick plans no more, and so says no more which jobs no pool serves.
+        if !after.shutting_down {
+            self.only_unserved_jobs_wait_for_a_pool(&after)?;
+        }
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
@@ -2161,6 +2265,18 @@ impl Case {
         }
         self.note_states();
         self.no_removal_of_a_running_job()
+    }
+
+    /// ADR 0125: a start in flight lives only inside its batch, which a tick or a pass ends before it returns.
+    fn no_slot_is_left_starting(&self) -> Result<(), Violation> {
+        if self.engine.any_starting() {
+            return violation(
+                self,
+                "no_slot_is_left_starting",
+                "a slot is still starting".to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// Counts the states the checks exist for, as a tick or a pass leaves them.
@@ -2224,6 +2340,7 @@ impl Case {
             .collect();
         let starts: BTreeSet<String> = order.iter().cloned().collect();
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
+        self.no_slot_is_left_starting()?;
         let bound = self.starts_after_a_reading(&order);
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
@@ -2880,6 +2997,7 @@ impl Case {
     /// Ends the sequence: the queued jobs are cancelled, the running ones finish, and time passes.
     async fn drain(&mut self) -> Result<(), Violation> {
         self.step += 1;
+        self.github.0.lock().unwrap().on_register = None;
         while !self.queued().is_empty() {
             self.apply(Step::Cancel(0)).await?;
         }
@@ -3145,6 +3263,7 @@ async fn run_case(steps: &[Step], mut case: Case) -> Result<Case, Violation> {
     case.drain().await?;
     case.trace_step("drained").await;
     case.note_closes().await;
+    case.note_start_faults();
     Ok(case)
 }
 
@@ -3552,8 +3671,9 @@ const UNSTEADY_STATUS: &[&str] = &["seed_memory", "reseeding"];
 const QUIET_ROUNDS: u32 = 8;
 
 /// Seeds whose trace differed between runs of one binary, over eight runs of each of the first 64 seeds: a comparison
-/// leaves them out. Seed 21 differed once, in where a capture's end reads the runner's files.
-const TRACE_UNSTABLE: &[u64] = &[21];
+/// leaves them out. Seed 21 differed once, in where a capture's end reads the runner's files; seed 53 once, under
+/// load, in where a capture's inspect and exec land.
+const TRACE_UNSTABLE: &[u64] = &[21, 53];
 
 /// Writes each seed's trace under `RUNNERD_INVARIANT_TRACE`, for comparing two commits (see the module's documentation).
 #[tokio::test]

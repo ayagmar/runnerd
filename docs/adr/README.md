@@ -130,5 +130,6 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0120](0120-a-job-its-runner-failed-reads-as-a-runner-fault.md) | A job its runner failed reads as a runner fault | Accepted |
 | [0121](0121-a-repository-keeps-its-pools-in-one-map.md) | A repository keeps its pools in one map | Accepted |
 | [0122](0122-what-admission-keeps-is-sealed.md) | What admission keeps between plans is sealed | Accepted |
-| [0123](0123-a-slots-state-is-one-sealed-value.md) | A slot's state is one sealed value | Accepted |
+| [0123](0123-a-slots-state-is-one-sealed-value.md) | A slot's state is one sealed value | Amended by 0125 |
 | [0124](0124-running-jobs-are-read-every-poll-interval.md) | Running jobs are read every poll interval, not every tick | Accepted |
+| [0125](0125-a-start-runs-its-io-in-a-task-of-its-own.md) | A start runs its I/O in a task of its own | Accepted |

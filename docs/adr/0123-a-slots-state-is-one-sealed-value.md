@@ -1,6 +1,7 @@
 # 0123. A slot's state is one sealed value
 
-Status: **Accepted** (2026-11-10). No wire, schema or config change.
+Status: **Accepted** (2026-11-10), amended by [0125](0125-a-start-runs-its-io-in-a-task-of-its-own.md). No wire, schema
+or config change.
 
 ## Context
 

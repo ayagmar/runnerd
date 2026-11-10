@@ -12,7 +12,7 @@ use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
 use crate::scheduler::engine::history::{Capture, Found};
 use crate::scheduler::engine::open_waits::WaitFor;
-use crate::scheduler::engine::slot::Slot;
+use crate::scheduler::engine::slot::{Holder, Slot};
 use crate::scheduler::engine::upkeep::Due;
 use crate::scheduler::{Hold, Key, Wait, Waits};
 use crate::store::LogPosition;
@@ -105,6 +105,26 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
             for hold in state.all_health_mut() {
                 hold.expire(past);
             }
+        }
+    }
+
+    /// The slot `slot` names.
+    pub(super) fn slot_mut(&mut self, slot: &crate::scheduler::SlotRef) -> &mut Slot {
+        &mut self.slots.get_mut(&slot.profile).unwrap()[slot.index]
+    }
+
+    /// Whether a start is in flight in any slot.
+    pub(super) fn any_starting(&self) -> bool {
+        self.slots
+            .values()
+            .flatten()
+            .any(|slot| matches!(slot.holder(), Holder::Starting(_)))
+    }
+
+    /// Moves the end of a used-up GitHub rate limit, if one is noted, to `past`.
+    pub(super) fn expire_github_limit(&mut self, past: SystemTime) {
+        if let Some(until) = self.github_limited_until.as_mut() {
+            *until = past;
         }
     }
 
