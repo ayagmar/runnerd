@@ -313,7 +313,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.note_queued();
         } else {
             for (_, state) in self.repositories.iter_listed_mut() {
-                state.listing.stop();
+                state.listing_mut().stop();
             }
         }
         self.forget_unlisted();
@@ -697,7 +697,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let held_since = self
             .repositories
             .listed(&repository)
-            .and_then(|state| state.waits.get(&slot.profile)?.cpu())
+            .and_then(|state| state.waits(&slot.profile)?.cpu())
             // The pool's wait for CPU can be another job's, as memory and CPU may each hold a different one.
             .filter(|wait| wait.job == job)
             .map(|wait| wait.since);
@@ -717,7 +717,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             && let Some(waits) = self
                 .repositories
                 .listed_mut(&repository)
-                .and_then(|state| state.waits.get_mut(&slot.profile))
+                .and_then(|state| state.waits_mut(&slot.profile))
             && waits.started()
         {
             info!(
@@ -744,16 +744,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
                     paused: self.control.is_paused(&repository.name),
-                    held: state
-                        .holds
-                        .get(&repository.profile)
-                        .and_then(PoolHealth::held),
+                    held: state.health(&repository.profile).and_then(PoolHealth::held),
                     queued: self.listed_demand(repository, &taken),
                     runner_memory: None,
                     runner_cpu: None,
                     waits: state
-                        .waits
-                        .get(&repository.profile)
+                        .waits(&repository.profile)
                         .copied()
                         .unwrap_or_default(),
                     usual: None,
@@ -860,7 +856,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn listed_unnamed(&self, repository: &str, taken: &BTreeSet<u64>) -> Vec<QueuedJob> {
         self.repositories
             .listed(repository)
-            .map(|state| state.listing.jobs())
+            .map(|state| state.listing().jobs())
             .unwrap_or_default()
             .iter()
             .filter(|job| !taken.contains(&job.id) && !self.claims.consumed(repository, job.id))
@@ -1169,12 +1165,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if let Some(state) = self.repositories.listed_mut(&repository) {
                 // Before the plan: a start for the next job must not read the note of one that left the queue.
                 if listed {
-                    for waits in state.waits.values_mut() {
+                    for waits in state.all_waits_mut() {
                         waits.retain(|job| queued.iter().any(|listed| listed.id == job));
                     }
-                    state.listing.answer(queued);
+                    state.listing_mut().answer(queued);
                 } else {
-                    state.listing.fail();
+                    state.listing_mut().fail();
                 }
             } else {
                 for job in recorded.into_iter().filter(|job| !taken.contains(job)) {

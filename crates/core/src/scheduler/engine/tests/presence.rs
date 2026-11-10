@@ -31,14 +31,14 @@ fn mark(repositories: &mut Repositories, name: &str) {
     repositories
         .listed_mut(name)
         .unwrap()
-        .listing
+        .listing_mut()
         .answer(Vec::new());
 }
 
 fn is_marked(repositories: &Repositories, name: &str) -> bool {
     repositories
         .listed(name)
-        .is_some_and(|state| state.listing.is_listed())
+        .is_some_and(|state| state.listing().is_listed())
 }
 
 #[test]

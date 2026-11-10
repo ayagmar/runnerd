@@ -401,7 +401,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if let Some(health) = self
             .repositories
             .listed_mut(&occupant.repository)
-            .map(|state| state.holds.entry(slot.profile.clone()).or_default())
+            .map(|state| state.health_mut(&slot.profile))
         {
             let cause = health.runner_left(logged, &occupant.runner_name, beside);
             let error = match logged {
@@ -711,7 +711,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some(hold) = self
             .repositories
             .listed_mut(repository)
-            .map(|state| state.holds.entry(profile.to_owned()).or_default())
+            .map(|state| state.health_mut(profile))
             .and_then(|health| health.hold(cause, SystemTime::now()))
         else {
             return;

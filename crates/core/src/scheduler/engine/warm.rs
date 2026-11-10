@@ -188,7 +188,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             seen.extend(
                 state
-                    .listing
+                    .listing()
                     .jobs()
                     .iter()
                     .filter(|job| matches(job, &repository.labels))
@@ -235,7 +235,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .listed(&pool.repository)
             .map_or(0, |state| {
                 state
-                    .listing
+                    .listing()
                     .jobs()
                     .iter()
                     .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels))

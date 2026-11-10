@@ -670,7 +670,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     let queued = self
                         .repositories
                         .listed(&occupant.repository)
-                        .map(|state| state.listing.jobs())
+                        .map(|state| state.listing().jobs())
                         .unwrap_or_default()
                         .iter()
                         .filter(|job| !taken.contains(&job.id) && matches(job, labels));
@@ -769,7 +769,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn backing_off(&self, repository: &str, profile: &str, now: SystemTime) -> bool {
         self.repositories
             .listed(repository)
-            .and_then(|state| state.holds.get(profile))
+            .and_then(|state| state.health(profile))
             .is_some_and(|health| health.holding(now))
     }
 
@@ -812,8 +812,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let Some(state) = self.repositories.listed_mut(&pool.repository) else {
                 continue;
             };
-            let listed = state.listing.is_listed();
-            let waits = state.waits.entry(pool.profile.clone()).or_default();
+            let listed = state.listing().is_listed();
+            let waits = state.waits_entry(&pool.profile);
             if stopped {
                 waits.stopped();
             } else if listed {
@@ -848,7 +848,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             waits.set_cpu_held(cpu_held);
             if waits.is_empty() {
-                state.waits.remove(&pool.profile);
+                state.end_waits(&pool.profile);
             }
         }
         let job = barrier.map(|barrier| barrier.job);
