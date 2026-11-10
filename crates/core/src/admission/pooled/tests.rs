@@ -28,7 +28,7 @@ fn settled(key: &Key, takes: u64, used: u64) -> Runner<'_> {
     Runner {
         key: Some(key),
         takes,
-        used: Some(used),
+        used: Reading::Used(used),
         ran: Some(SETTLED),
         basis: Some(PREDICTED),
     }
@@ -50,6 +50,7 @@ fn roomy(runners: &[Runner<'_>]) -> Count {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
+        largest: None,
     })
 }
 
@@ -116,7 +117,7 @@ fn only_a_prediction_with_a_job_and_a_fresh_sample_is_credited() {
     let ineligible = [
         Runner { key: None, ..third },
         Runner {
-            used: None,
+            used: Reading::Stale,
             ..third
         },
         Runner { ran: None, ..third },
@@ -145,39 +146,60 @@ fn only_a_prediction_with_a_job_and_a_fresh_sample_is_credited() {
 
 /// `ayagmar/fretboard` and `ayagmar/trellis` at 02:40 UTC on 2026-11-06, from the status of the moment and the last
 /// sample before it: what the host study worked out by hand.
-#[test]
-fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
-    const MIRROR: u64 = 536_870_912;
-    let it = key("ayagmar/fretboard", "backend / check:backend:it");
-    let android = key("ayagmar/trellis", "Android quality gate");
-    let infra = key("ayagmar/glowly", "infra-validate");
-    let contracts = key("ayagmar/glowly", "contracts-verify");
-    let route = key("ayagmar/fretboard", "design-pages (route)");
-    let ledger = key("ayagmar/fretboard", "design-pages (ledger)");
-    let signal = key("ayagmar/fretboard", "design-pages (signal)");
-    let node: u64 = 1_879_048_192;
-    let starting = |key, takes, used, ran| Runner {
-        ran: Some(Duration::from_secs(ran)),
-        ..settled(key, takes, used)
-    };
-    let runners = [
-        settled(&it, 5_368_709_120, 5_205_680_128),
-        starting(&it, 8_321_499_136, 510_816_256, 8),
-        settled(&android, 11_811_160_064, 8_324_890_624),
-        starting(&infra, 536_870_912, 91_303_936, 0),
-        starting(&contracts, 536_870_912, 92_073_984, 0),
-        settled(&route, node, 1_246_507_008),
-        settled(&ledger, node, 946_700_288),
-        settled(&signal, node, 1_241_194_496),
-        settled(&ledger, node, 999_522_304),
-        settled(&signal, node, 1_340_145_664),
-        settled(&signal, node, 1_038_569_472),
-        settled(&signal, node, 1_009_111_040),
-        settled(&ledger, node, 1_061_969_920),
-        settled(&route, node, 1_379_262_464),
-        settled(&ledger, node, 1_181_487_104),
-    ];
-    let memory = HostMemory {
+/// The jobs of the night of the study, 2026-11-04, by the name `Night::runners` gives each.
+struct Night {
+    keys: [Key; 7],
+}
+
+const MIRROR: u64 = 536_870_912;
+
+impl Night {
+    fn new() -> Night {
+        Night {
+            keys: [
+                key("ayagmar/fretboard", "backend / check:backend:it"),
+                key("ayagmar/trellis", "Android quality gate"),
+                key("ayagmar/glowly", "infra-validate"),
+                key("ayagmar/glowly", "contracts-verify"),
+                key("ayagmar/fretboard", "design-pages (route)"),
+                key("ayagmar/fretboard", "design-pages (ledger)"),
+                key("ayagmar/fretboard", "design-pages (signal)"),
+            ],
+        }
+    }
+
+    /// The fifteen runners of its status, the runner set every count is read on here: three young, the rest
+    /// settled.
+    fn runners(&self) -> Vec<Runner<'_>> {
+        let [it, android, infra, contracts, route, ledger, signal] = &self.keys;
+        let node: u64 = 1_879_048_192;
+        let starting = |key, takes, used, ran| Runner {
+            ran: Some(Duration::from_secs(ran)),
+            ..settled(key, takes, used)
+        };
+        vec![
+            settled(it, 5_368_709_120, 5_205_680_128),
+            starting(it, 8_321_499_136, 510_816_256, 8),
+            settled(android, 11_811_160_064, 8_324_890_624),
+            starting(infra, 536_870_912, 91_303_936, 0),
+            starting(contracts, 536_870_912, 92_073_984, 0),
+            settled(route, node, 1_246_507_008),
+            settled(ledger, node, 946_700_288),
+            settled(signal, node, 1_241_194_496),
+            settled(ledger, node, 999_522_304),
+            settled(signal, node, 1_340_145_664),
+            settled(signal, node, 1_038_569_472),
+            settled(signal, node, 1_009_111_040),
+            settled(ledger, node, 1_061_969_920),
+            settled(route, node, 1_379_262_464),
+            settled(ledger, node, 1_181_487_104),
+        ]
+    }
+}
+
+/// The host of that status.
+fn night_memory() -> HostMemory {
+    HostMemory {
         at: 1_793_932_817,
         total: 66_748_674_048,
         available: 26_178_785_280,
@@ -193,9 +215,14 @@ fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
         holders: Vec::new(),
         ceiling: None,
         swap: None,
-    };
-    let count = count(&Snapshot {
-        runners: &runners,
+    }
+}
+
+/// `runners` read as that night's status read them, counting by `largest`.
+fn night<'run>(runners: &'run [Runner<'run>], largest: Option<usize>) -> Snapshot<'run> {
+    let memory = night_memory();
+    Snapshot {
+        runners,
         committed: MIRROR,
         slice: Some(Slice {
             memory: memory.slice,
@@ -204,12 +231,161 @@ fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
         host: Some(host::pooling(&memory, Remembered::default())),
         most: MOST_CREDIT,
         host_reserve: true,
-    });
-    let thousandths = |bytes: u64| (bytes * 1000 + G / 2) / G;
+        largest,
+    }
+}
+
+fn thousandths(bytes: u64) -> u64 {
+    (bytes * 1000 + G / 2) / G
+}
+
+#[test]
+fn the_status_of_the_night_of_the_study_reproduces_its_figure() {
+    let night_jobs = Night::new();
+    let runners = night_jobs.runners();
+    let count = count(&night(&runners, None));
     assert_eq!(count.plain, 45_902_462_976, "the status's memory_in_use");
     assert_eq!(thousandths(count.plain), 42_750);
     assert_eq!(thousandths(count.pooled()), 37_849);
     assert_eq!(count.runners, 12, "the three still starting count in full");
+}
+
+#[test]
+fn the_growth_count_reads_what_runs_uses_and_room_for_its_largest_growths() {
+    let night_jobs = Night::new();
+    let runners = night_jobs.runners();
+    // 25.67G used and the mirror; the young `it` runner has 7.27G to grow, Android 3.25G, the two next 0.87G and 0.82G.
+    for (largest, kept, counted) in [
+        (3, 12_229_300_224, 35_796),
+        (2, 11_296_952_320, 34_927),
+        (1, 7_810_682_880, 31_681),
+    ] {
+        let count = count(&night(&runners, Some(largest)));
+        assert_eq!(count.kept, Some(kept), "top {largest}");
+        assert_eq!(thousandths(count.pooled()), counted, "top {largest}");
+        assert_eq!(
+            count.hosted(),
+            count.pooled(),
+            "both budgets read one count"
+        );
+        assert_eq!(
+            thousandths(count.plain),
+            42_750,
+            "the plain count stays as it is"
+        );
+    }
+}
+
+#[test]
+fn a_start_costs_only_what_it_adds_to_the_largest_growths() {
+    let night_jobs = Night::new();
+    let mut runners = night_jobs.runners();
+    let before = count(&night(&runners, Some(GROWTH_JOBS))).pooled();
+    let starting = |takes| Runner {
+        key: None,
+        takes,
+        used: Reading::NotYet,
+        ran: Some(Duration::ZERO),
+        basis: None,
+    };
+    runners.push(starting(G / 2));
+    let small = count(&night(&runners, Some(GROWTH_JOBS)));
+    assert_eq!(
+        small.pooled(),
+        before,
+        "0.5G is not among the three largest"
+    );
+    assert_eq!(
+        small.plain,
+        45_902_462_976 + G / 2,
+        "though it counts in the plain count"
+    );
+    runners.push(starting(4 * G));
+    let large = count(&night(&runners, Some(GROWTH_JOBS))).pooled();
+    assert_eq!(
+        large - before,
+        4 * G - 932_347_904,
+        "4G takes the third largest's place"
+    );
+}
+
+#[test]
+fn a_runner_whose_samples_say_nothing_counts_its_whole_take() {
+    let night_jobs = Night::new();
+    let mut runners = night_jobs.runners();
+    // The young `it` runner's sample goes stale: its 8.32G counts in full, and the three largest growths left, 3.25G,
+    // 0.87G and 0.82G, are under the floor.
+    runners[1].used = Reading::Stale;
+    let count = count(&night(&runners, Some(GROWTH_JOBS)));
+    assert_eq!(count.kept, Some(GROWTH_FLOOR));
+    assert_eq!(
+        count.pooled(),
+        MIRROR + 25_669_234_688 - 510_816_256 + 8_321_499_136 + GROWTH_FLOOR
+    );
+}
+
+#[test]
+fn the_growth_count_keeps_at_least_its_floor_and_at_most_every_growth() {
+    let (a, b) = (key("o/r", "a"), key("o/r", "b"));
+    let few = [settled(&a, 3 * G, G), settled(&b, 3 * G, G)];
+    let count_of = |runners: &[Runner<'_>]| {
+        count(&Snapshot {
+            largest: Some(GROWTH_JOBS),
+            ..night(runners, None)
+        })
+    };
+    assert_eq!(
+        count_of(&few).pooled(),
+        count_of(&few).plain,
+        "4G of growth, under the floor, is all kept"
+    );
+    let many: Vec<Runner<'_>> = (0..8).map(|_| settled(&a, 2 * G, G)).collect();
+    assert_eq!(
+        count_of(&many).kept,
+        Some(GROWTH_FLOOR),
+        "8G of growth, three of 1G: the floor"
+    );
+    assert_eq!(count_of(&many).pooled(), MIRROR + 8 * G + GROWTH_FLOOR);
+}
+
+#[test]
+fn below_the_guards_line_the_growth_count_is_plain() {
+    let night_jobs = Night::new();
+    let runners = night_jobs.runners();
+    let snapshot = night(&runners, Some(GROWTH_JOBS));
+    let keeps = snapshot.host.unwrap().keeps;
+    let at = |available, stalled| Snapshot {
+        host: Some(Host {
+            available,
+            keeps,
+            stalled,
+        }),
+        ..snapshot
+    };
+    let plain = |snapshot: Snapshot<'_>| {
+        let count = count(&snapshot);
+        count.kept.is_none() && count.pooled() == count.plain && count.hosted() == count.plain
+    };
+    assert!(
+        !plain(at(keeps, false)),
+        "at the line it still counts by growth"
+    );
+    assert!(plain(at(keeps - 1, false)), "under it, plain");
+    assert!(plain(at(keeps + G, true)), "while the host stalls");
+    assert!(
+        plain(Snapshot {
+            host: None,
+            ..snapshot
+        }),
+        "without a reading of the host"
+    );
+    assert!(
+        plain(Snapshot {
+            slice: None,
+            ..snapshot
+        }),
+        "without a recent slice sample"
+    );
 }
 
 #[test]
@@ -230,6 +406,7 @@ fn every_guard_can_take_the_credit_back() {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
+        largest: None,
     };
     assert_eq!(count(&snapshot).credit, 2 * G);
     let credit = |snapshot: Snapshot<'_>| count(&snapshot).credit;
@@ -357,6 +534,7 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
+        largest: None,
     };
     let host_credit = |snapshot: Snapshot<'_>| count(&snapshot).host_credit;
     assert_eq!(host_credit(snapshot), 3 * G);
@@ -380,6 +558,7 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
     assert_eq!((unlimited.credit, unlimited.host_credit), (0, 3 * G));
     let off = Snapshot {
         host_reserve: false,
+        largest: None,
         ..snapshot
     };
     let no_slice = Snapshot {
@@ -482,7 +661,11 @@ mod generated {
                 Runner {
                     key: (rng.below(6) != 0).then(|| &keys[index]),
                     takes,
-                    used: (rng.below(6) != 0).then_some(used),
+                    used: match rng.below(8) {
+                        0 => Reading::Stale,
+                        1 => Reading::NotYet,
+                        _ => Reading::Used(used),
+                    },
                     ran: match rng.below(6) {
                         0 => None,
                         1 => Some(Duration::from_secs(rng.below(60))),
@@ -517,6 +700,7 @@ mod generated {
             }),
             most: if rng.below(8) == 0 { 0 } else { MOST_CREDIT },
             host_reserve: rng.below(8) != 0,
+            largest: None,
         }
     }
 
@@ -614,7 +798,7 @@ mod generated {
                     .iter()
                     .map(|runner| Runner {
                         key: runner.key.or(Some(&keys[0])),
-                        used: Some(rng.below(runner.takes + 1)),
+                        used: Reading::Used(rng.below(runner.takes + 1)),
                         ran: Some(POOL_AFTER),
                         basis: Some(PREDICTED),
                         ..*runner
@@ -655,7 +839,7 @@ mod generated {
             let starting = Runner {
                 key: None,
                 takes,
-                used: None,
+                used: Reading::Stale,
                 ran: None,
                 basis: None,
             };
@@ -707,6 +891,134 @@ mod generated {
                     after.hosted() <= before.hosted()
                         && before.hosted() - after.hosted() <= gone.takes,
                     "seed {seed}: {gone:?} left, the host's count {before:?} to {after:?}"
+                );
+            }
+        }
+    }
+
+    /// `runners` in a generated snapshot counted by the growth count of one to four jobs.
+    fn growth_snapshot<'run>(rng: &mut Rng, runners: &'run [Runner<'run>]) -> Snapshot<'run> {
+        Snapshot {
+            largest: Some(1 + usize::try_from(rng.below(4)).unwrap()),
+            ..snapshot(rng, runners)
+        }
+    }
+
+    /// The growth count, under the guard's line or over it: one figure for both budgets, never past the plain count nor
+    /// under what counts in full with the room it must keep; a runner leaving frees at most its take; a start adds at
+    /// most its own.
+    #[test]
+    fn the_growth_count_keeps_its_bounds_on_every_snapshot() {
+        let keys: Vec<Key> = (0..5)
+            .map(|job| key("o/r", &format!("job-{job}")))
+            .collect();
+        let mut counted = 0;
+        for seed in 0..CASES {
+            let mut rng = Rng(seed);
+            let runners = runners(&mut rng, &keys);
+            let view = growth_snapshot(&mut rng, &runners);
+            let now = count(&view);
+            counted += u64::from(now.kept.is_some());
+            assert_eq!(now.pooled(), now.hosted(), "seed {seed}: {now:?}");
+            assert!(now.pooled() <= now.plain, "seed {seed}: {now:?}");
+            if let Some(kept) = now.kept {
+                let headroom: u64 = runners.iter().filter_map(Runner::headroom).sum();
+                let full: u64 = runners
+                    .iter()
+                    .map(|runner| match runner.used {
+                        Reading::Used(_) => runner.sampled().unwrap_or(0),
+                        Reading::NotYet => 0,
+                        Reading::Stale => runner.takes,
+                    })
+                    .sum();
+                assert_eq!(
+                    now.pooled(),
+                    view.committed + full + kept,
+                    "seed {seed}: {now:?}"
+                );
+                assert!(
+                    kept >= headroom.min(GROWTH_FLOOR) && kept <= headroom,
+                    "seed {seed}: kept {kept} of {headroom}"
+                );
+            } else {
+                assert_eq!(
+                    now.pooled(),
+                    now.plain,
+                    "seed {seed}: below the line, plain"
+                );
+            }
+            for leaving in 0..runners.len() {
+                let mut rest = runners.clone();
+                let gone = rest.remove(leaving);
+                let after = count(&Snapshot {
+                    runners: &rest,
+                    ..view
+                });
+                assert!(
+                    after.pooled() <= now.pooled() && now.pooled() - after.pooled() <= gone.takes,
+                    "seed {seed}: {gone:?} left, {now:?} to {after:?}"
+                );
+            }
+            let takes = rng.below(8 * G);
+            let mut started = runners.clone();
+            started.push(Runner {
+                key: None,
+                takes,
+                used: Reading::NotYet,
+                ran: Some(Duration::ZERO),
+                basis: None,
+            });
+            let with = count(&Snapshot {
+                runners: &started,
+                ..view
+            });
+            assert!(
+                with.pooled() >= now.pooled() && with.pooled() - now.pooled() <= takes,
+                "seed {seed}: a start of {takes} took {now:?} to {with:?}"
+            );
+        }
+        assert!(
+            counted > CASES / 3,
+            "only {counted} snapshots were over the guard's line"
+        );
+    }
+
+    /// `Backfill` reads `host_credit_room` of the growth count as of the host's credit: with the same runners, using
+    /// anything up to what they take and read over the line, the count never falls further than that.
+    #[test]
+    fn the_growth_count_never_falls_past_its_room_while_the_same_runners_run() {
+        let keys: Vec<Key> = (0..5)
+            .map(|job| key("o/r", &format!("job-{job}")))
+            .collect();
+        for seed in 0..CASES {
+            let mut rng = Rng(seed);
+            let runners = runners(&mut rng, &keys);
+            let view = growth_snapshot(&mut rng, &runners);
+            let now = count(&view);
+            for _ in 0..4 {
+                let later: Vec<Runner<'_>> = runners
+                    .iter()
+                    .map(|runner| Runner {
+                        used: Reading::Used(rng.below(runner.takes + 1)),
+                        ..*runner
+                    })
+                    .collect();
+                let after = count(&Snapshot {
+                    runners: &later,
+                    slice: view.slice.or(Some(Slice {
+                        memory: 0,
+                        memory_max: Some(46 * G),
+                    })),
+                    host: Some(Host {
+                        available: 62 * G,
+                        keeps: 20 * G,
+                        stalled: false,
+                    }),
+                    ..view
+                });
+                assert!(
+                    after.pooled() + now.host_credit_room >= now.pooled(),
+                    "seed {seed}: {now:?} fell to {after:?}"
                 );
             }
         }

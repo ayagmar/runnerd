@@ -268,4 +268,8 @@ pub struct Hazard {
     pub credit: u128,
     /// The most it was, in bytes.
     pub most_credit: u64,
+    /// How long, in ms, with a runner running, the growth brake held the growth count plain (`growth::Growth`).
+    pub braked: u64,
+    /// How long the guard did, the brake not standing: no recent reading, the host stalling or under its line.
+    pub guarded: u64,
 }

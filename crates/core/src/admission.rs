@@ -3,8 +3,10 @@
 //! (`simulate`), to show what each would have done with the same jobs, with the barrier `scheduler::plan` puts up for
 //! a starved job or without, and with jobs arriving when they did or after what they followed, or as they really ran
 //! (`trace`); what the host's memory leaves runners (`host`); and what all that runs counts for in the budget (`pooled`,
-//! ADR 0099). A job's memory and usual run time go by its last runs (`recent`, ADR 0070, 0097). Pure: no I/O, no clock.
+//! ADR 0099), with the growth count's brake (`growth`). A job's memory and usual run time go by its last runs (`recent`,
+//! ADR 0070, 0097). Pure: no I/O, no clock.
 
+pub mod growth;
 pub mod host;
 pub mod pooled;
 pub mod recent;
@@ -20,7 +22,7 @@ use crate::config;
 use crate::scheduler::Pool;
 use crate::sizing::{GRANULE, History, Ran, spread};
 use recent::{Ending, RECENT_RUNS, Recent};
-pub use replay::simulate;
+pub use replay::{recorded, simulate};
 use trace::{Hazard, OOMD_UNDER, Reading, RunId, RunTrace, STEP, THROTTLES_UNDER, Trace};
 
 /// For at most this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its
@@ -409,6 +411,26 @@ pub struct Replaying<'known> {
     pub credit_room: CreditRoom,
     /// What holds the host's larger margin up.
     pub band: Band,
+    /// With a `trace` and measured admission, count by the growth count instead of `most_credit` and `host_reserve`.
+    pub growth: Option<GrowthCount>,
+}
+
+/// How a replay counts by the growth count (`pooled::Snapshot::largest`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrowthCount {
+    /// How many jobs' growth it keeps room for.
+    pub jobs: usize,
+    /// Whether `growth::Growth` turns the count plain once what runs grows past the room it kept.
+    pub brake: Brake,
+}
+
+/// Whether a replay's growth count has its brake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Brake {
+    /// As the density study proposes.
+    On,
+    /// To show what the brake costs and what it guards against.
+    Off,
 }
 
 /// What the host's limit reads of what runs in a replay (ADR 0108).
@@ -450,6 +472,7 @@ impl From<Barriers> for Replaying<'_> {
             host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
             band: Band::NoWaiterFits,
+            growth: None,
         }
     }
 }
@@ -542,6 +565,25 @@ pub struct Replay {
     pub host_waited: u64,
     /// What the replay found of a pooled count's risks; only with a trace.
     pub hazard: Hazard,
+}
+
+/// What the jobs a replay runs did as they really ran, to read its figures against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recorded {
+    /// By pool, the seconds each job waited from queued to its runner's start, less what passed while no runnerd ran;
+    /// a job a warm runner took waited none.
+    pub pools: BTreeMap<Pool, PoolReplay>,
+    /// By run attempt, from its first job's queueing to its last job's end.
+    pub runs: Vec<RunReplay>,
+    /// How long the jobs waited for the host's memory alone, added up, in ms.
+    pub host_waited: u64,
+}
+
+impl Recorded {
+    /// Every job's wait added up, in seconds.
+    pub fn waited(&self) -> u64 {
+        self.pools.values().flat_map(|pool| &pool.waits).sum()
+    }
 }
 
 #[cfg(test)]

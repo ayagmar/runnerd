@@ -103,7 +103,9 @@ second table), and leaving the credit out gains 1 s at most.
 A replay with a `Trace`: each job uses its own samples shifted to its replayed start, is known only when the daemon could
 name it, holds its full reservation for a minute, and runs through the real planner with barrier, backfill, CPU budget and
 host bound. Every figure here is from this command on the backup of 2026-11-06, with `--memory-max` and `--since` as the row
-says, plus `--cold`, `--priority`, `--shift`, `--host-hold` and `--guard-overhead` where it says so:
+says, plus `--cold`, `--priority`, `--shift`, `--host-hold` and `--guard-overhead` where it says so. These figures predate
+#283, which holds a replayed runner from its own start and counts an unnamed runner at its pool's largest CPU; the command
+no longer reproduces them:
 
 ```sh
 runnerd simulate --causal --cpus 32 --memory-max 46G --since 24h \

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use runnerd_core::admission::trace::Trace;
-use runnerd_core::admission::{Band, HostReserve};
+use runnerd_core::admission::{Band, Brake, GrowthCount, HostReserve};
 use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
@@ -108,7 +108,8 @@ enum Command {
         #[arg(long)]
         priority: bool,
         /// Also replay the config's policy and slots as the jobs really ran, each using its recorded samples from its
-        /// replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs and hazards.
+        /// replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs and hazards,
+        /// beside what the same jobs waited as they ran.
         #[arg(long)]
         causal: bool,
         /// With --causal, give every run of a job the samples of its heaviest run, placed so that the run reaches its
@@ -126,6 +127,16 @@ enum Command {
         /// With --causal, the credit of a row, 0G for the plain count; repeat it for more rows [default: 0, 4G, 6G, 8G].
         #[arg(long, requires = "causal")]
         credit: Vec<ByteSize>,
+        /// With --causal, how rows count what runs: `plain`, as the daemon does, a row for each --credit; `top2` or
+        /// `top3`, a row by what runs uses with room for its two or three largest growths, at least 6G, for both
+        /// MemoryMax and the host, and the plain count while the host has under its margin and a quarter of its
+        /// memory available. It picks the rows: list `plain` too to keep the credit rows [default: plain].
+        #[arg(long, requires = "causal", value_enum)]
+        count: Vec<CountArg>,
+        /// With --causal, give the top2 and top3 rows the growth brake: the plain count for 30 minutes once what runs
+        /// grew past the room the count kept within 10 minutes.
+        #[arg(long, requires = "causal")]
+        brake: bool,
         /// With --causal, what the host's limit reads of what runs: `top2`, eligible runners at their use with room
         /// for the two largest growths, as the daemon does; or `plain`, every runner's take.
         #[arg(long, requires = "causal", value_enum, default_value_t = HostReserveArg::Top2)]
@@ -198,11 +209,17 @@ fn main() -> ExitCode {
             overhead,
             guard_overhead,
             credit,
+            count,
+            brake,
             host_reserve,
             any_waiter_band,
             shift,
             moves,
         }) => config_or_default(config).and_then(|path| {
+            let rows = causal
+                .then(|| rows(&credit, &count, brake))
+                .transpose()?
+                .unwrap_or_default();
             run_simulation(
                 &path,
                 Limits {
@@ -213,7 +230,7 @@ fn main() -> ExitCode {
                         cold,
                         overhead,
                         guard_overhead,
-                        credits: credit,
+                        rows,
                         host_reserve: match host_reserve {
                             HostReserveArg::Plain => HostReserve::Plain,
                             HostReserveArg::Top2 => HostReserve::Top2,
@@ -317,6 +334,63 @@ struct Limits {
     moves: Vec<simulate::Move>,
 }
 
+/// `runnerd simulate --causal --count`: how a row counts what runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CountArg {
+    /// As the daemon does: every runner's take, less the credits.
+    Plain,
+    /// What runs uses, with room for its two largest growths.
+    Top2,
+    /// What runs uses, with room for its three largest growths.
+    Top3,
+}
+
+/// The rows `--credit`, `--count` and `--brake` ask `runnerd simulate --causal` for: each `plain` a row for each credit,
+/// [`CREDITS`] without one; each growth count a row.
+fn rows(
+    credits: &[ByteSize],
+    counts: &[CountArg],
+    brake: bool,
+) -> Result<Vec<simulate::Counting>, ExitCode> {
+    if !credits.is_empty() && !counts.is_empty() && !counts.contains(&CountArg::Plain) {
+        return Err(fail(
+            &"--credit needs --count plain beside --count top2 or top3",
+        ));
+    }
+    let counts = if counts.is_empty() {
+        &[CountArg::Plain][..]
+    } else {
+        counts
+    };
+    let brake = if brake { Brake::On } else { Brake::Off };
+    let mut rows = Vec::new();
+    for count in counts {
+        match count {
+            CountArg::Plain if credits.is_empty() => {
+                rows.extend(CREDITS.map(simulate::Counting::Credit));
+            }
+            CountArg::Plain => rows.extend(
+                credits
+                    .iter()
+                    .map(|credit| simulate::Counting::Credit(credit.0)),
+            ),
+            CountArg::Top2 | CountArg::Top3 => {
+                rows.push(simulate::Counting::Growth(GrowthCount {
+                    jobs: if *count == CountArg::Top2 { 2 } else { 3 },
+                    brake,
+                }));
+            }
+        }
+    }
+    let grows = rows
+        .iter()
+        .any(|row| matches!(row, simulate::Counting::Growth(_)));
+    if brake == Brake::On && !grows {
+        return Err(fail(&"--brake needs --count top2 or top3"));
+    }
+    Ok(rows)
+}
+
 /// `runnerd simulate --causal --host-reserve`: what the host's limit reads of what runs (ADR 0108).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum HostReserveArg {
@@ -335,8 +409,8 @@ struct Causal {
     overhead: Option<ByteSize>,
     /// What the guards read of that, where given.
     guard_overhead: Option<ByteSize>,
-    /// The credit of each row; none, the usual rows.
-    credits: Vec<ByteSize>,
+    /// How each row counts.
+    rows: Vec<simulate::Counting>,
     /// What the host's limit reads of what runs.
     host_reserve: HostReserve,
     /// What holds up the host's larger margin.
@@ -444,13 +518,8 @@ fn run_simulation(
     }
     if let Some(causal) = &limits.causal {
         let trace = trace_of(&config, &database, since, causal, &history.jobs)?;
-        let credits: Vec<u64> = if causal.credits.is_empty() {
-            CREDITS.to_vec()
-        } else {
-            causal.credits.iter().map(|credit| credit.0).collect()
-        };
         let counts = simulate::Counts {
-            credits: &credits,
+            rows: &causal.rows,
             host_reserve: causal.host_reserve,
             band: causal.band,
             barriers: limits.priority,

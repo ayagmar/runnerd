@@ -984,6 +984,7 @@ fn a_job_of_one_name_in_two_pools_is_predicted_from_its_runs_in_each() {
 }
 
 mod causal;
+mod growth;
 mod recent;
 
 fn minutes(minutes: u64) -> Duration {
@@ -1122,6 +1123,7 @@ fn after_needs(barriers: Barriers, known: Option<&History>) -> Replaying<'_> {
         host_reserve: HostReserve::Top2,
         credit_room: CreditRoom::Counted,
         band: Band::NoWaiterFits,
+        growth: None,
     }
 }
 
@@ -1294,6 +1296,7 @@ fn replay_with_light(jobs: &[Ran], known: &History, barriers: Barriers) -> Repla
         host_reserve: HostReserve::Top2,
         credit_room: CreditRoom::Counted,
         band: Band::NoWaiterFits,
+        growth: None,
     };
     simulate(
         &with_light(),
@@ -1403,6 +1406,7 @@ fn a_pool_of_many_large_jobs_is_not_held_to_one_runner_per_first_limit() {
             host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
             band: Band::NoWaiterFits,
+            growth: None,
         };
         simulate(
             &config,
@@ -1664,4 +1668,58 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
         .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
         .collect();
     assert_eq!(through_the_planner(&jobs, &known), replayed);
+}
+
+/// A job whose runner took 2 minutes to start it, then ran 8: the job behind it in a profile of one slot waits for
+/// the runner, not the job.
+#[test]
+fn a_replayed_job_holds_its_runner_from_the_runners_start() {
+    let booted = Ran {
+        started_at: Some(NOW + 2 * MINUTE),
+        ..site(NOW, 10)
+    };
+    let next = in_run(site(NOW + MINUTE, 5), 2, 1);
+    let jobs = [booted, next];
+    let one = BTreeMap::from([("node".to_owned(), 1)]);
+    let replay = simulate(
+        &config(),
+        Some(32 * G),
+        None,
+        &jobs,
+        Policy::Caps,
+        &one,
+        Barriers::Off,
+    );
+    assert_eq!(
+        replay.pools[&pool("halyard/storefront", "node")].waits,
+        [0, 9 * 60],
+        "from minute 1 to the runner's end at minute 10"
+    );
+}
+
+#[test]
+fn recorded_waits_run_from_queueing_to_the_runners_start_less_what_no_runnerd_saw() {
+    let waited = Ran {
+        runner_started_at: NOW + 3 * MINUTE,
+        started_at: Some(NOW + 4 * MINUTE),
+        finished_at: Some(NOW + 10 * MINUTE),
+        unseen: MINUTE,
+        host_waited: 30_000,
+        ..site(NOW, 10)
+    };
+    let warm = Ran {
+        runner_started_at: NOW - 60 * MINUTE,
+        ..in_run(site(NOW + MINUTE, 5), 2, 1)
+    };
+    let recorded = super::recorded(&config(), &[waited, warm]);
+    assert_eq!(
+        recorded.pools[&pool("halyard/storefront", "node")].waits,
+        [120, 0],
+        "3 minutes less the one unseen, and none on a warm runner"
+    );
+    assert_eq!(recorded.waited(), 120);
+    assert_eq!(recorded.host_waited, 30_000);
+    let mut took: Vec<u64> = recorded.runs.iter().map(|run| run.took).collect();
+    took.sort_unstable();
+    assert_eq!(took, [5 * 60, 10 * 60], "from queueing to the end");
 }

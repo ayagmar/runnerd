@@ -127,7 +127,9 @@ No weekly notice: the digest and insights already compare. No new chart until th
 
 Replayed with the shipped `runnerd simulate --causal --cpus 32 --memory-max 46G --since 72h --credit 6G`, the five
 fretboard `--move`s of 0099, `--host-reserve plain` against `top2`, and `--shift` 0 to 13h30 every 30 minutes (28
-alignments of the desktop's readings), on the history copied at 2026-11-07 18:45 UTC:
+alignments of the desktop's readings), on the history copied at 2026-11-07 18:45 UTC. These figures predate #283's
+replay fixes (a runner held from its own start, an unnamed runner at its pool's largest CPU), so today's command no
+longer reproduces them:
 
 | 46G, 72 h | All wait h, median (range) | Host-held h, median | Under 20G, minutes summed | Under 6.2G: alignments, seconds summed | Lowest `MemAvailable`, median / worst |
 |---|---|---|---|---|---|
