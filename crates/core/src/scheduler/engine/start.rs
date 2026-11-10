@@ -421,6 +421,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 {
                     continue;
                 }
+                // A sample or host reading taken during those waits binds it as one taken before its launch would: it
+                // starts only if what it reserves still fits. No CPU budget reserves no CPU, and checks none.
+                let cpu = readied.admission.cpu.as_ref().map_or(0, |cpu| cpu.reserved);
+                if !self.still_fits(
+                    admitting,
+                    &launched.slot.profile,
+                    readied.admission.reserved,
+                    cpu,
+                ) {
+                    info!(
+                        "{}: its runner in {} no longer fits what runs now; planning again",
+                        launched.repository, launched.slot.profile
+                    );
+                    deferred = true;
+                    carried[index] = Carried::Deferred;
+                    continue;
+                }
                 match self.commit(readied) {
                     Committed::Failed(launched) => {
                         self.started(&launched, StartOutcome::Failed);

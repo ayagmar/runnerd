@@ -31,9 +31,10 @@ queue of starts does.
 - **Each launch goes by every start that came back.** Before each launch, the batch folds every task that has ended,
   then checks, in order: a stop asked for, GitHub's rate limit used up, a failure that holds the start's pool back
   since the plan, and an earlier start of the batch deferred. A launch then waits for its slot's caches, the
-  history's write of its name and the mirror, during which more tasks end; so once it is readied, the batch folds
-  again and checks the stop, the limit and the hold again, before the start opens its build cache and its slot
-  becomes `Starting`. That last step waits for nothing, so nothing comes back between the batch's last look and the
+  history's write of its name and the mirror, during which more tasks end and the host may be read; so once it is
+  readied, the batch folds again and checks the stop, the limit and the hold again, and `still_fits` again, so a
+  sample or host reading taken during those waits binds it, before the start opens its build cache and its slot
+  becomes `Starting`. One that no longer fits is deferred, as at launch. That last step waits for nothing, so nothing comes back between the batch's last look and the
   start. One gate for a tick's starts and a pass's: a pass now
   stops launching once a registration is refused for the rate limit, as a tick did.
   - A pool held mid-batch launches nothing more; its starts in flight finish. The start is skipped, not deferred: other
