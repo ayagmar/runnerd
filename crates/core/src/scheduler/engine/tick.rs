@@ -17,7 +17,7 @@ use super::pool_health::PoolHealth;
 use super::presence::RunnersListing;
 use super::runners::{Collected, Removal};
 use super::slot::Holder;
-use super::start::{Carried, Gate, StartOutcome};
+use super::start::{Carried, StartOutcome};
 use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown};
 use crate::admission::{host, pooled};
 use crate::api::AdmissionPolicy;
@@ -525,9 +525,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 _ => None,
             })
             .unzip();
-        let carried = self
-            .start_batch(starts, &mut admitting, Gate::StopOnly)
-            .await;
+        let carried = self.start_batch(starts, &mut admitting).await;
         let mut started = 0;
         for (job, carried) in jobs.iter().zip(carried) {
             if let Carried::Done(outcome) = carried {
@@ -599,10 +597,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         applied.acted = self.occupied().count() < before;
         pace.lap(Phase::Removing, self.passes_in_tick);
-        for carried in self
-            .start_batch(decisions, admitting, Gate::RateLimit)
-            .await
-        {
+        for carried in self.start_batch(decisions, admitting).await {
             match carried {
                 Carried::Done(StartOutcome::Started) => {
                     applied.acted = true;
@@ -779,7 +774,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn plan_budget(&self, admitting: &Admitting) -> Budget {
         let committed = self.committed_memory();
         let count = self.count(admitting.remembered);
-        let running = self.occupied().next().is_some();
+        let running = self.footprints().next().is_some();
         Budget {
             // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
             memory: if admitting.held {

@@ -431,6 +431,12 @@ impl BuildCache {
         }
     }
 
+    /// The runners open now.
+    #[cfg(test)]
+    pub(crate) fn attached(&self) -> Vec<String> {
+        lock(&self.inner.state).runners.keys().cloned().collect()
+    }
+
     /// Whether `runner` is open and its writes undecided.
     pub fn undecided(&self, runner: &str) -> bool {
         lock(&self.inner.state)

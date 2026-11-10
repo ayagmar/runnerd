@@ -101,7 +101,16 @@ struct GithubState {
     registrations_failed: usize,
     registrations_limited_once: usize,
     /// Runs once as the next registration succeeds, before GitHub answers: what happens meanwhile.
-    on_register: Option<Box<dyn FnOnce() + Send>>,
+    on_register: Option<OnRegister>,
+    /// How many registrations succeed before `on_register` runs at the next.
+    register_hook_after: u32,
+    /// The runner whose registration `on_register` ran in.
+    hooked_registration: Option<String>,
+    /// How many registrations succeed before `fail_registrations` or `limit_registrations` fail the next: a fault
+    /// in the middle of a batch.
+    pass_before_fault: u32,
+    /// Registrations that named a runner GitHub had registered already, which it refuses.
+    duplicate_names: Vec<String>,
     /// While true, deleting a busy runner answers `Busy` and an absent one `NotFound`, as GitHub does, and each runner
     /// gets an ID never given before: for tests that delete and register runners at random.
     strict: bool,
@@ -124,6 +133,15 @@ struct GithubState {
     held_deletes: tokio::sync::watch::Sender<bool>,
     /// While true, runner registrations do not answer.
     held_registrations: tokio::sync::watch::Sender<bool>,
+    /// While `Some(n)`, the next `n` registrations are answered, and those after them are made but not answered, as
+    /// when GitHub's answer is late, until `None`.
+    answered: tokio::sync::watch::Sender<Option<u32>>,
+    /// Until when GitHub's rate limit is used up, from its last refusal of a registration: every request fails at once
+    /// until then, before it is sent, as `Github::send` fails them.
+    blocked_until: Option<std::time::SystemTime>,
+    /// Registrations asked for and not answered yet, and the most there were at once.
+    registering: usize,
+    most_registering: usize,
     /// Repositories whose queued jobs listings do not answer, while others do.
     held_queued: tokio::sync::watch::Sender<BTreeSet<String>>,
     /// Repositories whose queued jobs listings fail.
@@ -211,6 +229,9 @@ impl GithubState {
 
 #[derive(Clone, Default)]
 struct FakeGithub(Arc<Mutex<GithubState>>);
+
+/// What the fake GitHub runs once as it registers a runner; it may change what GitHub answers next.
+type OnRegister = Box<dyn FnOnce(&mut GithubState) + Send>;
 
 impl FakeGithub {
     /// From now on the answers carry a rate limit with `remaining` requests left until it resets in 30 minutes, which
@@ -314,13 +335,9 @@ impl FakeGithub {
     }
 
     async fn wait(&self, held: fn(&GithubState) -> &tokio::sync::watch::Sender<bool>) {
-        let mut held = {
-            let mut state = self.0.lock().unwrap();
-            state.waiting += 1;
-            held(&state).subscribe()
-        };
+        let _waiting = Counted::new(&self.0, |state| &mut state.waiting);
+        let mut held = held(&self.0.lock().unwrap()).subscribe();
         let _ = held.wait_for(|held| !held).await;
-        self.0.lock().unwrap().waiting -= 1;
     }
 
     /// Waits until `count` listings, job reads, registrations or deletes wait for an answer at once.
@@ -346,11 +363,73 @@ impl FakeGithub {
     }
 }
 
+/// A registration asked of the fake GitHub, counted while it waits for its answer.
+/// A wait counted in a fake's state while it lasts, so one dropped with its task, as an aborted batch's are, leaves
+/// the count right.
+struct Counted<S> {
+    state: Arc<Mutex<S>>,
+    count: fn(&mut S) -> &mut usize,
+}
+
+impl<S> Counted<S> {
+    fn new(state: &Arc<Mutex<S>>, count: fn(&mut S) -> &mut usize) -> Counted<S> {
+        *count(&mut state.lock().unwrap()) += 1;
+        Counted {
+            state: state.clone(),
+            count,
+        }
+    }
+}
+
+impl<S> Drop for Counted<S> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            *(self.count)(&mut state) -= 1;
+        }
+    }
+}
+
+struct Registering(FakeGithub);
+
+impl Registering {
+    fn new(github: &FakeGithub) -> Registering {
+        let mut state = github.0.lock().unwrap();
+        state.registering += 1;
+        state.most_registering = state.most_registering.max(state.registering);
+        Registering(github.clone())
+    }
+}
+
+impl Drop for Registering {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.0.lock() {
+            state.registering -= 1;
+        }
+    }
+}
+
 impl FakeGithub {
-    /// Waits as long as a request takes.
+    /// Fails a request at once while a registration's refusal blocks every request, as the client does.
+    fn blocked(&self) -> Result<(), github::Error> {
+        match self.0.lock().unwrap().blocked_until {
+            Some(until) if until > std::time::SystemTime::now() => {
+                Err(github::Error::RateLimited { until })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Lifts what a refusal blocked: its reset came, or a new daemon's client knows nothing of it.
+    fn unblock(&self) {
+        self.0.lock().unwrap().blocked_until = None;
+    }
+
+    /// Waits as long as a request takes; not at all, not even a turn of the runtime's timers, where no test says.
     async fn latency(&self) {
         let latency = self.0.lock().unwrap().latency;
-        tokio::time::sleep(latency).await;
+        if !latency.is_zero() {
+            tokio::time::sleep(latency).await;
+        }
     }
 
     /// Waits as long as a listing takes.
@@ -365,14 +444,12 @@ impl FakeGithub {
 
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
+        self.blocked()?;
         self.answer().await;
-        let mut held = {
-            let mut state = self.0.lock().unwrap();
-            state.waiting += 1;
-            state.held_queued.subscribe()
-        };
+        let waiting = Counted::new(&self.0, |state| &mut state.waiting);
+        let mut held = self.0.lock().unwrap().held_queued.subscribe();
         let _ = held.wait_for(|held| !held.contains(repository)).await;
-        self.0.lock().unwrap().waiting -= 1;
+        drop(waiting);
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
@@ -403,6 +480,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
+        self.blocked()?;
         self.answer().await;
         self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
@@ -445,62 +523,91 @@ impl GithubApi for FakeGithub {
         name: &str,
         _labels: &[String],
     ) -> Result<(Runner, JitConfig), github::Error> {
+        self.blocked()?;
+        let _registering = Registering::new(self);
         self.wait(|state| &state.held_registrations).await;
         self.latency().await;
-        let mut state = self.0.lock().unwrap();
-        state.call(format!("register {name}"));
-        if let Some(until) = state.rate_limited.or(state.registrations_limited) {
-            return Err(github::Error::RateLimited { until });
-        }
-        if state.register_fails {
-            return Err(github::Error::Token("register fails".to_owned()));
-        }
-        if state.limit_registrations > 0 {
-            state.limit_registrations -= 1;
-            state.registrations_limited_once += 1;
-            return Err(github::Error::RateLimited {
-                until: std::time::SystemTime::now() + Duration::from_mins(30),
+        let (runner, mut answered) = {
+            let mut state = self.0.lock().unwrap();
+            state.call(format!("register {name}"));
+            let refused = |state: &mut GithubState, until| {
+                state.blocked_until = Some(until);
+                Err(github::Error::RateLimited { until })
+            };
+            if let Some(until) = state.rate_limited.or(state.registrations_limited) {
+                return refused(&mut state, until);
+            }
+            if state.register_fails {
+                return Err(github::Error::Token("register fails".to_owned()));
+            }
+            let faulted = state.pass_before_fault == 0;
+            if !faulted && (state.limit_registrations > 0 || state.fail_registrations > 0) {
+                state.pass_before_fault -= 1;
+            }
+            if faulted && state.limit_registrations > 0 {
+                state.limit_registrations -= 1;
+                state.registrations_limited_once += 1;
+                let until = std::time::SystemTime::now() + Duration::from_mins(30);
+                return refused(&mut state, until);
+            }
+            if faulted && state.fail_registrations > 0 {
+                state.fail_registrations -= 1;
+                state.registrations_failed += 1;
+                return Err(github::Error::Status {
+                    method: reqwest::Method::POST,
+                    path: "/repos/o/r/actions/runners/generate-jitconfig".to_owned(),
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                    message: "Bad Gateway".to_owned(),
+                });
+            }
+            // As GitHub does: a name is one runner's while it is registered.
+            if state.runners.iter().any(|runner| runner.name == name) {
+                state.duplicate_names.push(name.to_owned());
+                return Err(github::Error::Status {
+                    method: reqwest::Method::POST,
+                    path: "/repos/o/r/actions/runners/generate-jitconfig".to_owned(),
+                    status: reqwest::StatusCode::CONFLICT,
+                    message: format!(
+                        "Already exists - A runner with the name {name} already exists."
+                    ),
+                });
+            }
+            if state.on_register.is_some() && state.register_hook_after > 0 {
+                state.register_hook_after -= 1;
+            } else if let Some(hook) = state.on_register.take() {
+                hook(&mut state);
+                state.hooked_registration = Some(name.to_owned());
+            }
+            state.registrations += 1;
+            let id = if state.strict {
+                1000 + state.registrations
+            } else {
+                100 + state.runners.len() as u64
+            };
+            let runner = Runner {
+                id,
+                name: name.to_owned(),
+                status: "offline".to_owned(),
+                busy: false,
+            };
+            state.runners.push(runner.clone());
+            let mut held = false;
+            state.answered.send_modify(|left| match left {
+                Some(0) => held = true,
+                Some(left) => *left -= 1,
+                None => {}
             });
-        }
-        if state.fail_registrations > 0 {
-            state.fail_registrations -= 1;
-            state.registrations_failed += 1;
-            return Err(github::Error::Status {
-                method: reqwest::Method::POST,
-                path: "/repos/o/r/actions/runners/generate-jitconfig".to_owned(),
-                status: reqwest::StatusCode::BAD_GATEWAY,
-                message: "Bad Gateway".to_owned(),
-            });
-        }
-        // As GitHub does: a name is one runner's while it is registered.
-        if state.runners.iter().any(|runner| runner.name == name) {
-            return Err(github::Error::Status {
-                method: reqwest::Method::POST,
-                path: "/repos/o/r/actions/runners/generate-jitconfig".to_owned(),
-                status: reqwest::StatusCode::CONFLICT,
-                message: format!("Already exists - A runner with the name {name} already exists."),
-            });
-        }
-        if let Some(hook) = state.on_register.take() {
-            hook();
-        }
-        state.registrations += 1;
-        let id = if state.strict {
-            1000 + state.registrations
-        } else {
-            100 + state.runners.len() as u64
+            (runner, held.then(|| state.answered.subscribe()))
         };
-        let runner = Runner {
-            id,
-            name: name.to_owned(),
-            status: "offline".to_owned(),
-            busy: false,
-        };
-        state.runners.push(runner.clone());
+        if let Some(answered) = answered.as_mut() {
+            let _waiting = Counted::new(&self.0, |state| &mut state.waiting);
+            let _ = answered.wait_for(Option::is_none).await;
+        }
         Ok((runner, JitConfig("jit".to_owned())))
     }
 
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
+        self.blocked()?;
         self.0.lock().unwrap().call(format!("delete {id}"));
         self.wait(|state| &state.held_deletes).await;
         self.latency().await;
@@ -525,6 +632,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, github::Error> {
+        self.blocked()?;
         self.wait(|state| &state.held_jobs).await;
         let latency = {
             let state = self.0.lock().unwrap();
@@ -566,6 +674,7 @@ impl GithubApi for FakeGithub {
         _repository: &str,
         run: u64,
     ) -> Result<github::RunTrigger, github::Error> {
+        self.blocked()?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("run {run}"));
         state
@@ -580,6 +689,7 @@ impl GithubApi for FakeGithub {
         _repository: &str,
         number: u64,
     ) -> Result<github::PullRequest, github::Error> {
+        self.blocked()?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("pull request {number}"));
         state
@@ -593,6 +703,7 @@ impl GithubApi for FakeGithub {
         &self,
         repository: &str,
     ) -> Result<github::RepositoryDetails, github::Error> {
+        self.blocked()?;
         self.0
             .lock()
             .unwrap()
@@ -619,6 +730,7 @@ impl GithubApi for FakeGithub {
         branch: &str,
         sha: &str,
     ) -> Result<bool, github::Error> {
+        self.blocked()?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("compare {branch}...{sha}"));
         if state.compare_fails {
@@ -628,6 +740,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), github::Error> {
+        self.blocked()?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("cancel {repository} {run}"));
         Ok(())
@@ -724,12 +837,28 @@ struct DockerState {
     fail_prepares: u32,
     /// Preparations `fail_prepares` failed.
     prepares_failed: usize,
+    /// How many runners' caches were prepared, or tried to be.
+    prepares: usize,
+    /// How many preparations succeed before `fail_prepares` fails the next.
+    prepares_before_fault: u32,
+    /// Runs once as the next runner's caches are prepared, which the engine admitted already: what the sampler reads,
+    /// or a stop asked for, before the batch's next start launches.
+    on_prepare: Option<OnPrepare>,
+    /// How many preparations succeed before `on_prepare` runs at the next.
+    prepare_hook_after: u32,
     /// While true, runner container starts do not answer, before Docker makes the container.
     held_starts: tokio::sync::watch::Sender<bool>,
     /// While true, runner container starts do not answer once Docker made and started the container.
     held_started: tokio::sync::watch::Sender<bool>,
     /// Runner container starts `held_starts` or `held_started` hold.
     starts_waiting: usize,
+    /// Runner container starts asked for and not answered yet, and the most there were at once.
+    runner_starts: usize,
+    most_runner_starts: usize,
+    /// How much longer the next runner container start takes, as when sysbox hangs on one.
+    slow_start: Option<Duration>,
+    /// How many runner container starts took `slow_start` since a test last looked.
+    slow_started: u32,
     /// How many of the next runner container starts panic, as a bug in them would.
     panic_starts: u32,
     /// Volumes a container still uses, which Docker refuses to remove.
@@ -828,16 +957,53 @@ enum CaptureEnd {
 /// How long the fake Docker Engine takes to answer.
 #[derive(Debug, Default, Clone, Copy)]
 struct DockerLatency {
-    /// A runner container's start.
+    /// A runner container's start, alone.
     start: Duration,
+    /// How much longer a runner container's start takes for each other one in flight as it begins, as sysbox's
+    /// starts contend for the host. A placeholder until the e2e measures it; zero unless a test sets it.
+    contention: Duration,
     /// The removal of a running container, which kills it first.
     remove_running: Duration,
     /// The removal of a stopped container.
     remove_stopped: Duration,
+    /// The making of a runner's shared pnpm volume, as its caches are prepared.
+    prepare: Duration,
 }
 
 /// What the fake Docker runs once at a runner start.
 type OnStart = Box<dyn FnOnce(&DockerState) + Send>;
+
+/// What the fake Docker runs once as a runner's caches are prepared; it may change what Docker answers next.
+type OnPrepare = Box<dyn FnOnce(&mut DockerState) + Send>;
+
+/// A runner container start asked of the fake Docker, counted while it waits for its answer.
+struct RunnerStart(FakeDocker);
+
+impl RunnerStart {
+    /// Counts a runner's start in, and says how many others were in flight as it began; another container's
+    /// counts as none.
+    fn new(docker: &FakeDocker, runner: bool) -> (Option<RunnerStart>, u32) {
+        if !runner {
+            return (None, 0);
+        }
+        let mut state = docker.0.lock().unwrap();
+        let others = state.runner_starts;
+        state.runner_starts += 1;
+        state.most_runner_starts = state.most_runner_starts.max(state.runner_starts);
+        (
+            Some(RunnerStart(docker.clone())),
+            u32::try_from(others).unwrap(),
+        )
+    }
+}
+
+impl Drop for RunnerStart {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.0.lock() {
+            state.runner_starts -= 1;
+        }
+    }
+}
 
 /// A runner start that fails after Docker made its container, as when Docker's answer is lost: the container runs,
 /// and its ID is not its name.
@@ -988,13 +1154,21 @@ impl FakeDocker {
 
     /// Waits while `held` holds starts.
     async fn wait_to_start(&self, held: fn(&DockerState) -> &tokio::sync::watch::Sender<bool>) {
-        let mut held = {
-            let mut state = self.0.lock().unwrap();
-            state.starts_waiting += 1;
-            held(&state).subscribe()
-        };
+        let _waiting = Counted::new(&self.0, |state| &mut state.starts_waiting);
+        let mut held = held(&self.0.lock().unwrap()).subscribe();
         let _ = held.wait_for(|held| !held).await;
-        self.0.lock().unwrap().starts_waiting -= 1;
+    }
+
+    /// How long a container start takes with `others` runner starts in flight; a runner's takes `slow_start` more.
+    fn start_latency(&self, runner: bool, others: u32) -> Duration {
+        let mut state = self.0.lock().unwrap();
+        let slow = if runner {
+            state.slow_start.take()
+        } else {
+            None
+        };
+        state.slow_started += u32::from(slow.is_some());
+        state.latency.start + state.latency.contention * others + slow.unwrap_or_default()
     }
 
     /// Whether this runner container start panics, as `panic_starts` says.
@@ -1054,6 +1228,7 @@ impl DockerApi for FakeDocker {
             });
         }
         let runner = spec.labels.contains_key("runnerd.job");
+        let (_counted, others) = RunnerStart::new(self, runner);
         if runner {
             self.wait_to_start(|state| &state.held_starts).await;
         }
@@ -1062,8 +1237,7 @@ impl DockerApi for FakeDocker {
             "the start of {} panics",
             spec.name
         );
-        let latency = self.0.lock().unwrap().latency.start;
-        tokio::time::sleep(latency).await;
+        tokio::time::sleep(self.start_latency(runner, others)).await;
         let id = {
             let mut state = self.0.lock().unwrap();
             state.call(format!("start {}", spec.name));
@@ -1453,8 +1627,22 @@ impl DockerApi for FakeDocker {
 
     async fn ensure_volume(&self, name: &str) -> Result<(), docker::Error> {
         self.outage().await?;
+        let prepare = self.0.lock().unwrap().latency.prepare;
+        if name.ends_with("-pnpm") && !prepare.is_zero() {
+            tokio::time::sleep(prepare).await;
+        }
         let mut state = self.0.lock().unwrap();
-        if state.fail_prepares > 0 && name.ends_with("-pnpm") {
+        state.prepares += usize::from(name.ends_with("-pnpm"));
+        if name.ends_with("-pnpm") && state.on_prepare.is_some() {
+            if state.prepare_hook_after > 0 {
+                state.prepare_hook_after -= 1;
+            } else if let Some(hook) = state.on_prepare.take() {
+                hook(&mut state);
+            }
+        }
+        if state.fail_prepares > 0 && state.prepares_before_fault > 0 && name.ends_with("-pnpm") {
+            state.prepares_before_fault -= 1;
+        } else if state.fail_prepares > 0 && name.ends_with("-pnpm") {
             state.fail_prepares -= 1;
             state.prepares_failed += 1;
             return Err(docker::Error::DockerResponseServerError {
@@ -1871,7 +2059,7 @@ async fn a_restart_names_runners_later_than_an_aborted_start_left_on_github() {
     {
         let mut state = github.0.lock().unwrap();
         state.queued = vec![job(1)];
-        state.on_register = Some(Box::new(move || {
+        state.on_register = Some(Box::new(move |_: &mut GithubState| {
             control.shutdown(Shutdown::Detach);
         }));
         state.busy_deletes = 2;

@@ -365,8 +365,11 @@ fn burst_fakes(listing_lag: Duration) -> (FakeGithub, FakeDocker) {
         state.measured = Some(format!("slot 1 changed {} bytes\n", 1 << 20));
         state.latency = DockerLatency {
             start: Duration::from_millis(1000),
+            // Not measured yet: `workload_figures` prints a burst under `CONTENTION_PLACEHOLDER` on its own line.
+            contention: Duration::ZERO,
             remove_running: Duration::from_millis(1000),
             remove_stopped: Duration::from_millis(300),
+            prepare: Duration::ZERO,
         };
     }
     (github, docker)
@@ -869,11 +872,33 @@ fn figures(mut durations: Vec<Duration>) -> String {
     )
 }
 
-/// How long after the first listing that showed them each of a burst of `jobs` jobs, queued together, got its
-/// container, shortest first, with 16 free slots: the staircase a start's own time makes of a queue, one place at a
-/// time.
-async fn staircase(jobs: u64) -> Vec<Duration> {
+/// How much longer a runner container's start takes for each other one in flight, as `workload_figures` prints it:
+/// a guess until the e2e measures sysbox's starts side by side (ADR 0126).
+const CONTENTION_PLACEHOLDER: Duration = Duration::from_millis(250);
+
+/// What a burst into free slots came to.
+struct Staircase {
+    /// How long after the first listing that showed them each job got its container, shortest first.
+    places: Vec<Duration>,
+    /// The most registrations GitHub was asked for at once.
+    most_registering: usize,
+    /// The most runner container starts Docker was asked for at once.
+    most_starts: usize,
+}
+
+/// A burst of `jobs` jobs, queued together, into 16 free slots, with Docker's starts slowed by `contention` for each
+/// other in flight and `slow_first` more for the first: the staircase a start's own time makes of a queue.
+async fn burst_into_free_slots(
+    jobs: u64,
+    contention: Duration,
+    slow_first: Option<Duration>,
+) -> Staircase {
     let (github, docker) = burst_fakes(Duration::ZERO);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.latency.contention = contention;
+        state.slow_start = slow_first;
+    }
     let dir = TestDir::new("staircase");
     let config = CONFIG.replace("slots = 2", "slots = 16");
     let (engine, handle) = engine_with(&github, &docker, &dir, &config);
@@ -894,7 +919,64 @@ async fn staircase(jobs: u64) -> Vec<Duration> {
         .map(|wait| (queued + *wait).saturating_duration_since(listed))
         .collect();
     places.sort();
+    let most_registering = github.0.lock().unwrap().most_registering;
+    let most_starts = docker.0.lock().unwrap().most_runner_starts;
+    Staircase {
+        places,
+        most_registering,
+        most_starts,
+    }
+}
+
+/// How long after the first listing that showed them each of a burst of `jobs` jobs got its container, shortest
+/// first, with 16 free slots.
+async fn staircase(jobs: u64) -> Vec<Duration> {
+    burst_into_free_slots(jobs, Duration::ZERO, None)
+        .await
+        .places
+}
+
+/// Places in tenths of a second, as `workload_figures` prints them.
+fn tenths(places: &[Duration]) -> String {
     places
+        .iter()
+        .map(|place| format!("{:.1}", place.as_secs_f64()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Twelve jobs queued together into 16 free slots: their runners register one after another, 0.3 s each, while up to
+/// four containers start at once, 1 s each, so the queue's places come 0.3 s apart and a fifth start waits for the
+/// first container. The bugs it catches: starts one at a time (1.3 s a place), registrations sent side by side, which
+/// GitHub asks clients not to do, and more or fewer than four starts in flight.
+#[tokio::test(start_paused = true)]
+async fn a_burst_into_free_slots_starts_one_registration_at_a_time() {
+    let burst = burst_into_free_slots(12, Duration::ZERO, None).await;
+    assert_eq!(
+        tenths(&burst.places),
+        "1.2, 1.5, 1.8, 2.1, 2.5, 2.8, 3.1, 3.4, 3.8, 4.1, 4.4, 4.7"
+    );
+    assert_eq!(burst.most_registering, 1, "one registration at a time");
+    assert_eq!(burst.most_starts, 4, "four containers start at once");
+}
+
+/// Eight jobs into free slots while the first container's start takes 20 s, as when sysbox hangs on one: the other
+/// seven get their containers as if three slots started them, long before the slow one. The engine still waits for
+/// it before its batch ends. The bug it catches: starts that wait for the one before them.
+#[tokio::test(start_paused = true)]
+async fn a_slow_container_start_holds_back_no_other_start_of_its_batch() {
+    let burst = burst_into_free_slots(8, Duration::ZERO, Some(Duration::from_secs(20))).await;
+    let (others, slow) = burst.places.split_at(7);
+    assert!(
+        others.iter().all(|place| *place < Duration::from_secs(5)),
+        "the others start beside the slow one: {}",
+        tenths(&burst.places)
+    );
+    assert!(
+        slow[0] >= Duration::from_secs(21),
+        "the slow one takes its 20 s: {}",
+        tenths(&burst.places)
+    );
 }
 
 /// What a quiet three-repository host asks of GitHub and how soon it sees a job: `o/r` has four long jobs running,
@@ -1080,16 +1162,18 @@ async fn workload_figures() {
         );
     }
     for jobs in [4, 8, 12, 16] {
-        let places: Vec<String> = staircase(jobs)
-            .await
-            .iter()
-            .map(|place| format!("{:.1}", place.as_secs_f64()))
-            .collect();
         println!(
             "a burst of {jobs} jobs into 16 free slots, the listing that showed them to each one's container, in seconds: {}",
-            places.join(", ")
+            tenths(&staircase(jobs).await)
         );
     }
+    let contended = burst_into_free_slots(16, CONTENTION_PLACEHOLDER, None).await;
+    println!(
+        "the same burst of 16, with Docker's starts {:.2} s longer for each other one in flight, a placeholder the \
+         e2e replaces: {}",
+        CONTENTION_PLACEHOLDER.as_secs_f64(),
+        tenths(&contended.places)
+    );
     three_repositories().await;
 }
 

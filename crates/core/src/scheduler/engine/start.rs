@@ -1,14 +1,17 @@
-//! A batch of a plan's starts, one launcher for a tick's `apply` and a pass's `refill` (ADR 0125). Each start is
+//! A batch of a plan's starts, one launcher for a tick's `apply` and a pass's `refill` (ADR 0125, 0126). Each start is
 //! launched on the engine, which checks it still fits, admits it, prepares its slot's caches, names it and marks its
-//! slot `Starting`; a task of its own then registers its runner with GitHub, starts its container and inspects it; and
-//! the engine folds the task's result back into the slot and its records. It must not decide which slots start, which
-//! `plan` does, nor let any reader but the budgets' see a start in flight: a batch ends only once each of its tasks is
+//! slot `Starting`; a task of its own then registers its runner with GitHub, one registration of the batch at a time,
+//! starts its container and inspects it; and the engine folds the task's result back into the slot and its records. Up
+//! to `CONCURRENT_STARTS` tasks run at once. It must not decide which slots start, which `plan` does, nor let any
+//! reader but the budgets' and the launcher's see a start in flight: a batch ends only once each of its tasks is
 //! folded, and the engine answers no command, plans nothing and publishes nothing until it does.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use tokio::task::JoinSet;
+use tokio::sync::Semaphore;
+use tokio::task::{JoinError, JoinSet};
 use tracing::{info, warn};
 
 use super::admission::Admitting;
@@ -22,8 +25,12 @@ use crate::github::{self, GithubApi, Runner};
 use crate::isolation::{self, Isolation};
 use crate::scheduler::{Decision, Pool, SlotRef, StartFor};
 
-/// How many starts of a batch are in flight at once.
-pub(super) const CONCURRENT_STARTS: usize = 1;
+/// How many starts of a batch are in flight at once: their Docker work overlaps (ADR 0126).
+pub(super) const CONCURRENT_STARTS: usize = 4;
+
+/// How many of a batch's runner registrations GitHub is asked for at once. GitHub asks for its mutating requests to
+/// be made one after another, and a secondary rate limit it answers stops every request until it lifts (ADR 0126).
+pub(super) const POST_LANE: usize = 1;
 
 /// What a start came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,17 +51,9 @@ pub(super) enum Carried {
     /// It waits for the next plan: it, or a start before it, no longer fits what runs, or a warm runner it replaces
     /// took a job.
     Deferred,
-    /// A stop, or GitHub's used-up rate limit, kept it from launching.
+    /// Nothing of it is done with: a stop, GitHub's used-up rate limit or a failure that holds its pool back since the
+    /// plan kept it from launching, or GitHub refused its registration for the rate limit. Its job waits on as it did.
     Skipped,
-}
-
-/// What keeps a batch's next start from launching, besides a stop asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Gate {
-    /// GitHub's rate limit, used up since the plan: a tick's starts.
-    RateLimit,
-    /// Nothing more: a pass checks the limit once, as it begins.
-    StopOnly,
 }
 
 /// A start in flight: named and admitted, with its slot's caches prepared, registering its runner or creating its
@@ -180,7 +179,8 @@ struct Request {
 enum StartRun {
     /// GitHub registered no runner.
     Unregistered(github::Error),
-    /// A stop was asked for while GitHub registered it: the task deleted its registration.
+    /// A stop was asked for before its registration was sent, or while GitHub registered it: no registration is left,
+    /// as the task deleted the one GitHub made.
     Stopped,
     /// Docker failed and kept no container.
     NoContainer {
@@ -204,17 +204,31 @@ enum Made {
     Failed(String),
 }
 
-/// A start's I/O, in a task of its own: registers its runner, deletes the registration if a stop was asked for
-/// meanwhile, starts its container and inspects it once it runs. It decides nothing.
+/// A start's I/O, in a task of its own: registers its runner once `lane` lets it, unless a stop was asked for by then,
+/// deletes the registration if one was asked for meanwhile, starts its container and inspects it once it runs. It
+/// decides nothing.
 async fn run<G: GithubApi, D: DockerApi>(
-    github: std::sync::Arc<G>,
-    docker: std::sync::Arc<D>,
-    control: std::sync::Arc<Control>,
+    github: Arc<G>,
+    docker: Arc<D>,
+    control: Arc<Control>,
     isolation: &'static dyn Isolation,
+    lane: Arc<Semaphore>,
     request: Request,
 ) -> StartRun {
     let (repository, name) = (request.repository.as_str(), request.spec.name.clone());
-    let (runner, jit_config) = match github.jit_config(repository, &name, &request.labels).await {
+    let registered = {
+        // Held for the registration alone: Docker's work of the batch's other starts goes on meanwhile.
+        let Ok(_turn) = lane.acquire().await else {
+            // Never closed: its batch owns it.
+            return StartRun::Stopped;
+        };
+        // A registration sent after a stop was asked for would only be deleted again, holding the stop back.
+        if control.mode() != Shutdown::No {
+            return StartRun::Stopped;
+        }
+        github.jit_config(repository, &name, &request.labels).await
+    };
+    let (runner, jit_config) = match registered {
         Ok(registered) => registered,
         Err(error) => return StartRun::Unregistered(error),
     };
@@ -262,6 +276,32 @@ async fn run<G: GithubApi, D: DockerApi>(
     }
 }
 
+/// The runners batches launched, by name, in launch order, for a test to tell the launches a reading taken
+/// mid-batch binds from those before it, whose registration or Docker start may come later.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(super) struct Launches(Arc<std::sync::Mutex<Vec<String>>>);
+
+#[cfg(test)]
+impl Launches {
+    fn note(&self, runner: &str) {
+        crate::sync::lock(&self.0).push(runner.to_owned());
+    }
+
+    /// How many runners were launched so far.
+    pub(super) fn count(&self) -> usize {
+        crate::sync::lock(&self.0).len()
+    }
+
+    /// The runners launched after the first `count`, in order.
+    pub(super) fn after(&self, count: usize) -> Vec<String> {
+        crate::sync::lock(&self.0)
+            .get(count..)
+            .unwrap_or_default()
+            .to_vec()
+    }
+}
+
 /// A start the launcher is done with or let go, for what follows its end.
 struct Launched {
     slot: SlotRef,
@@ -276,85 +316,181 @@ enum Launch {
     Deferred,
     /// It failed before its task: its pool or profile went, or its slot's caches are not ready.
     Failed(Launched),
+    /// Its caches are ready and its name recorded; nothing of it is open yet, and its slot is still free.
+    Readied(Readied),
+}
+
+/// A start whose launch did all it waits for, for the batch to commit once nothing that came back meanwhile bars it.
+struct Readied {
+    launched: Launched,
+    admission: api::Admission,
+    purpose: Purpose,
+    /// The labels its runner registers with.
+    labels: Vec<String>,
+    name: String,
+    /// When its launch began.
+    at: SystemTime,
+}
+
+/// What committing a readied start came to.
+enum Committed {
     /// Its slot is `Starting`, and its task is to run.
     Running(Launched, Box<Request>),
+    /// Its profile or slot went while it was readied.
+    Failed(Launched),
+}
+
+/// A batch's tasks, each with the index of its start and what the launcher kept of it.
+struct InFlight {
+    tasks: JoinSet<StartRun>,
+    starts: HashMap<tokio::task::Id, (usize, Launched)>,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Carries out `starts`, a plan's start decisions in its order, `CONCURRENT_STARTS` at a time; returns what
-    /// became of each. Each launches against what runs and what is in flight by then. None launches once a stop is
-    /// asked for, nor, with `Gate::RateLimit`, while GitHub's rate limit is used up; once one is deferred, the later
-    /// ones are too, as they counted on its room. Returns once every start it launched is folded: the tasks are its
-    /// own, and go with it.
+    /// became of each. Each launches against what runs and what is in flight by then, once the starts that already
+    /// came back are folded. None launches once a stop is asked for, while GitHub's rate limit is used up, or into a
+    /// pool a failure holds back since the plan, and none of these may come while a launch waits for its caches and
+    /// name either: the starts that came back meanwhile are folded and the start checked again before its slot
+    /// starts. Once one is deferred, the later ones are too, as they counted on its room. Returns once every start it
+    /// launched is folded: the tasks are its own, and go with it.
     pub(super) async fn start_batch(
         &mut self,
         starts: Vec<Decision>,
         admitting: &mut Admitting,
-        gate: Gate,
     ) -> Vec<Carried> {
         let mut carried = vec![Carried::Skipped; starts.len()];
-        let mut tasks: JoinSet<StartRun> = JoinSet::new();
-        let mut in_flight: HashMap<tokio::task::Id, (usize, Launched)> = HashMap::new();
+        let mut in_flight = InFlight {
+            tasks: JoinSet::new(),
+            starts: HashMap::new(),
+        };
+        let lane = Arc::new(Semaphore::new(POST_LANE));
         let mut deferred = false;
         let mut starts = starts.into_iter().enumerate();
         loop {
-            while tasks.len() < CONCURRENT_STARTS
+            while in_flight.tasks.len() < CONCURRENT_STARTS
                 && let Some((index, start)) = starts.next()
             {
-                let limited = gate == Gate::RateLimit && self.github_limit().is_some();
-                // A runner started after a stop was asked for could take a job a detaching stop leaves running.
-                if self.control.mode() != Shutdown::No || limited {
+                // What came back already decides this one: a hold, the rate limit, the room a failure gave back.
+                if let Decision::Start {
+                    slot, repository, ..
+                } = &start
+                    && self
+                        .barred_once_folded(&mut in_flight, &mut carried, repository, &slot.profile)
+                        .await
+                {
                     continue;
                 }
                 if deferred {
                     carried[index] = Carried::Deferred;
                     continue;
                 }
-                match self.launch(start, admitting).await {
+                let readied = match self.launch(start, admitting).await {
                     Launch::Deferred => {
                         deferred = true;
                         carried[index] = Carried::Deferred;
+                        continue;
                     }
                     Launch::Failed(launched) => {
                         self.started(&launched, StartOutcome::Failed);
                         carried[index] = Carried::Done(StartOutcome::Failed);
+                        continue;
                     }
-                    Launch::Running(launched, request) => {
-                        let task = tasks.spawn(run(
+                    Launch::Readied(readied) => readied,
+                };
+                // What came back while the launch waited bars it as well: nothing of it is open yet.
+                let launched = &readied.launched;
+                if self
+                    .barred_once_folded(
+                        &mut in_flight,
+                        &mut carried,
+                        &launched.repository,
+                        &launched.slot.profile,
+                    )
+                    .await
+                {
+                    continue;
+                }
+                match self.commit(readied) {
+                    Committed::Failed(launched) => {
+                        self.started(&launched, StartOutcome::Failed);
+                        carried[index] = Carried::Done(StartOutcome::Failed);
+                    }
+                    Committed::Running(launched, request) => {
+                        #[cfg(test)]
+                        self.launches.note(&request.spec.name);
+                        let task = in_flight.tasks.spawn(run(
                             self.github.clone(),
                             self.docker.clone(),
                             self.control.clone(),
                             self.isolation,
+                            lane.clone(),
                             *request,
                         ));
-                        in_flight.insert(task.id(), (index, launched));
+                        in_flight.starts.insert(task.id(), (index, launched));
                     }
                 }
             }
-            // Awaited here, never while answering commands: nothing may see a start in flight but the budgets.
-            let Some(joined) = tasks.join_next_with_id().await else {
+            // Awaited here, never while answering commands: only the batch's own launches see a start in flight.
+            let Some(joined) = in_flight.tasks.join_next_with_id().await else {
                 break;
             };
-            let (id, ran) = match joined {
-                Ok(done) => done,
-                Err(error) => {
-                    // As if it had panicked here.
-                    if let Ok(panic) = error.try_into_panic() {
-                        std::panic::resume_unwind(panic);
-                    }
-                    // Cancelled, which only happens while the runtime shuts down, which drops this batch too.
-                    std::future::pending::<()>().await;
-                    continue;
-                }
-            };
-            let Some((index, launched)) = in_flight.remove(&id) else {
-                continue;
-            };
-            let outcome = self.fold(&launched.slot, ran).await;
-            self.started(&launched, outcome);
-            carried[index] = Carried::Done(outcome);
+            self.fold_joined(joined, &mut in_flight, &mut carried).await;
         }
         carried
+    }
+
+    /// Folds a task of the batch that ended, and notes what became of its start.
+    async fn fold_joined(
+        &mut self,
+        joined: Result<(tokio::task::Id, StartRun), JoinError>,
+        in_flight: &mut InFlight,
+        carried: &mut [Carried],
+    ) {
+        let (id, ran) = match joined {
+            Ok(done) => done,
+            Err(error) => {
+                // As if it had panicked here.
+                if let Ok(panic) = error.try_into_panic() {
+                    std::panic::resume_unwind(panic);
+                }
+                // Cancelled, which only happens while the runtime shuts down, which drops this batch too.
+                return std::future::pending::<()>().await;
+            }
+        };
+        let Some((index, launched)) = in_flight.starts.remove(&id) else {
+            return;
+        };
+        let became = self.fold(&launched.slot, ran).await;
+        if let Carried::Done(outcome) = became {
+            self.started(&launched, outcome);
+        }
+        carried[index] = became;
+    }
+
+    /// Folds every task of the batch that ended, then says whether a start of `repository` in `profile` is barred
+    /// (`launch_barred`).
+    async fn barred_once_folded(
+        &mut self,
+        in_flight: &mut InFlight,
+        carried: &mut [Carried],
+        repository: &str,
+        profile: &str,
+    ) -> bool {
+        while let Some(joined) = in_flight.tasks.try_join_next_with_id() {
+            self.fold_joined(joined, in_flight, carried).await;
+        }
+        self.launch_barred(repository, profile)
+    }
+
+    /// Whether a start of `repository` in `profile` must not launch, or, readied, go on: a stop was asked for, as a
+    /// runner started since could take a job a detaching stop leaves running; GitHub's rate limit is used up; or a
+    /// failure holds back its pool, which, as the plan starts nothing in a held pool, came since. Its pool's other
+    /// starts in flight go on, and so do its repository's other pools and other repositories.
+    fn launch_barred(&self, repository: &str, profile: &str) -> bool {
+        self.control.mode() != Shutdown::No
+            || self.github_limit().is_some()
+            || self.backing_off(repository, profile, SystemTime::now())
     }
 
     /// Launches a plan's `Decision::Start`, unless a warm runner it replaces is still there: that one took a job before
@@ -430,8 +566,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.launch_admitted(launched, admission, purpose).await
     }
 
-    /// Launches an admitted start: prepares its slot's caches, names it, opens its build cache and marks its slot
-    /// `Starting`, for its task to run.
+    /// Readies an admitted start: prepares its slot's caches and names it, for `commit`.
     async fn launch_admitted(
         &mut self,
         launched: Launched,
@@ -461,8 +596,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let name = self.identity.runner_name(&slot.profile, number, secs);
         self.start_mirror().await;
+        Launch::Readied(Readied {
+            launched,
+            admission,
+            purpose,
+            labels,
+            name,
+            at: now,
+        })
+    }
+
+    /// Commits a readied start: opens its build cache and marks its slot `Starting`, for its task to run. It waits for
+    /// nothing, so nothing comes back between the batch's last look and its slot's start.
+    fn commit(&mut self, readied: Readied) -> Committed {
+        let Readied {
+            launched,
+            admission,
+            purpose,
+            labels,
+            name,
+            at: now,
+        } = readied;
+        let (slot, repository) = (&launched.slot, launched.repository.as_str());
+        let number = slot.index + 1;
         let Some(profile) = self.config.profiles.get(&slot.profile) else {
-            return Launch::Failed(launched);
+            return Committed::Failed(launched);
         };
         let image = profile.image.reference();
         // Its build cache opens here, before GitHub registers its runner: the fold closes it if no container comes.
@@ -497,7 +655,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .and_then(|slots| slots.get_mut(slot.index))
         else {
             self.close_build_cache(&spec.name);
-            return Launch::Failed(launched);
+            return Committed::Failed(launched);
         };
         entry.launch(starting);
         let request = Request {
@@ -506,28 +664,29 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             labels,
             spec,
         };
-        Launch::Running(launched, Box::new(request))
+        Committed::Running(launched, Box::new(request))
     }
 
     /// Puts what a start's task came to in its slot and records it: its runner, or the container of a failed start
     /// that Docker kept, holds the slot; otherwise the slot is free, the build cache its start opened is closed, and
-    /// GitHub's or Docker's failure holds back its pool.
-    async fn fold(&mut self, slot: &SlotRef, ran: StartRun) -> StartOutcome {
+    /// GitHub's or Docker's failure holds back its pool. A registration refused for the rate limit is carried as
+    /// skipped, as a start the limit kept from launching is.
+    async fn fold(&mut self, slot: &SlotRef, ran: StartRun) -> Carried {
         let Some(starting) = self
             .slots
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
             .and_then(Slot::end_start)
         else {
-            return StartOutcome::Failed;
+            return Carried::Done(StartOutcome::Failed);
         };
         let repository = starting.repository.clone();
-        match ran {
+        let outcome = match ran {
             // Not the pool's fault: no runner starts anywhere until the limit resets.
             StartRun::Unregistered(github::Error::RateLimited { until }) => {
                 self.close_build_cache(&starting.runner_name);
                 self.github_limited(until);
-                StartOutcome::Failed
+                return Carried::Skipped;
             }
             StartRun::Unregistered(error) => {
                 self.close_build_cache(&starting.runner_name);
@@ -552,8 +711,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 if may_have_run {
                     self.spend(&repository, &slot.profile);
                 }
-                self.abandon(&slot.profile, &repository, &runner, failure)
-                    .await;
+                self.abandon(&slot.profile, &repository, &runner, failure);
                 StartOutcome::Failed
             }
             StartRun::Container {
@@ -574,7 +732,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 let occupant = starting.into_occupant(runner.id, container);
                 self.place(slot, occupant, purpose, made).await
             }
-        }
+        };
+        Carried::Done(outcome)
     }
 
     /// Puts a runner a start made in its slot and watches it, or after a start that failed, its container that

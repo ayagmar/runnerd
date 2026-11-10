@@ -414,17 +414,45 @@ enum Step {
         pick: usize,
         how: ReadFailure,
     },
-    /// GitHub fails the next runner's registration.
-    RegisterFails,
-    /// GitHub refuses the next runner's registration for its used-up rate limit, which resets 30 minutes on.
-    RegistrationRateLimited,
-    /// Docker fails to prepare the next runner's caches.
-    PrepareFails,
-    /// The daemon is asked to stop while GitHub registers the next runner: on a signal, or with `runnerd stop` once
-    /// Docker is gone. The stop runs to its end, then the daemon starts again.
+    /// GitHub fails the registration `after` registrations from now: the next one, or one in the middle of a batch.
+    RegisterFailsMidBatch {
+        after: u32,
+    },
+    /// GitHub refuses the registration `after` registrations from now for its used-up rate limit, which resets 30
+    /// minutes on; every request fails at once until then, as the client fails them.
+    RateLimitedDuringStart {
+        after: u32,
+    },
+    /// Docker fails to prepare the caches of the runner `after` preparations from now.
+    PrepareFailsMidBatch {
+        after: u32,
+    },
+    /// The daemon is asked to stop `after` registrations or launches from now: on a signal, or with `runnerd stop`
+    /// once Docker is gone. At a registration, the batch's starts behind it wait for their turn to register; at a
+    /// launch, as the runner's caches are prepared, between it and the batch's next launch. The stop runs to its end,
+    /// then the daemon starts again.
     StopDuringStart {
         docker_gone: bool,
+        after: u32,
+        at: StopAt,
     },
+    /// Docker takes 200 ms more to start the next runner container, much more than the others of its batch.
+    SlowStart,
+    /// The sampler stops while the next runner container starts: the slice's sample turns stale with starts in flight.
+    SliceSampleStallsDuringStart,
+    /// The daemon goes in the middle of a batch: one start's container runs, Docker's answer not given; the next
+    /// start's registration is made, GitHub's answer not given; any later ones wait for their turn to register. Then
+    /// it starts again.
+    AbortMidBatch,
+}
+
+/// Where a `StopDuringStart` comes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StopAt {
+    /// As GitHub registers a runner.
+    Registration,
+    /// As a launched runner's caches are prepared.
+    Launch,
 }
 
 /// How GitHub fails a job's reads.
@@ -440,7 +468,7 @@ enum ReadFailure {
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
     (0..EVENTS)
-        .map(|_| match rng.below(116) {
+        .map(|_| match rng.below(119) {
             0..=17 => Step::Queue {
                 second: rng.below(3) == 0,
                 labels: match rng.below(10) {
@@ -524,15 +552,37 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 pick: rng.index(),
                 how: [ReadFailure::Gone, ReadFailure::Limited, ReadFailure::Other][rng.index() % 3],
             },
-            112 => Step::RegisterFails,
-            113 => Step::RegistrationRateLimited,
-            114 => Step::PrepareFails,
-            115 => Step::StopDuringStart {
-                docker_gone: rng.below(2) == 0,
-            },
+            fault @ 112..=118 => mid_batch(rng, fault),
             _ => Step::Tick,
         })
         .collect()
+}
+
+/// A fault in the middle of a batch of starts, as `generate` drew `fault` from 112 to 118.
+fn mid_batch(rng: &mut Rng, fault: u64) -> Step {
+    match fault {
+        112 => Step::RegisterFailsMidBatch {
+            after: u32::try_from(rng.below(4)).unwrap(),
+        },
+        113 => Step::RateLimitedDuringStart {
+            after: u32::try_from(rng.below(4)).unwrap(),
+        },
+        114 => Step::PrepareFailsMidBatch {
+            after: u32::try_from(rng.below(4)).unwrap(),
+        },
+        115 => Step::StopDuringStart {
+            docker_gone: rng.below(2) == 0,
+            after: u32::try_from(rng.below(4)).unwrap(),
+            at: if rng.below(2) == 0 {
+                StopAt::Registration
+            } else {
+                StopAt::Launch
+            },
+        },
+        116 => Step::SlowStart,
+        117 => Step::SliceSampleStallsDuringStart,
+        _ => Step::AbortMidBatch,
+    }
 }
 
 /// What GitHub's listing of queued jobs shows of a job a runner just took.
@@ -623,6 +673,26 @@ struct Violation {
     detail: String,
 }
 
+/// What changed as a runner of a batch started, and how many runners the batch's engine had launched by then: the
+/// launches after those go by it, and those before by what their plan had, whenever their registration or Docker's
+/// start came.
+#[derive(Debug, Clone, Copy)]
+struct MidBatch {
+    /// The sampler's reading then, if it took one.
+    reading: Option<HostReading>,
+    launched: usize,
+}
+
+/// A stop a `StopDuringStart` asked for, with what the engine had done by then.
+#[derive(Debug, Clone)]
+struct AskedStop {
+    docker_gone: bool,
+    at: StopAt,
+    /// How many runners the engine had launched, and how many calls GitHub had seen, when it was asked for.
+    launched: usize,
+    calls: usize,
+}
+
 /// A case: the engine on the fakes, and what GitHub and Docker hold as the world sees it.
 /// How many checks saw what they exist for: none of either in all cases, and they check nothing.
 #[derive(Debug, Clone, Copy, Default)]
@@ -672,6 +742,14 @@ struct Seen {
     prepares_failed: usize,
     /// Stops asked for while GitHub registered a runner.
     stops_during_start: usize,
+    /// Stops asked for between two launches of a batch.
+    stops_between_launches: usize,
+    /// Slow runner starts beside other starts of their batch.
+    slow_starts: usize,
+    /// Slice samples that turned stale with starts in flight.
+    stalls_during_start: usize,
+    /// Daemons gone with one start's container made and the next start's registration made.
+    aborts_mid_batch: usize,
 }
 
 impl Seen {
@@ -695,6 +773,10 @@ impl Seen {
         self.registrations_limited += case.registrations_limited;
         self.prepares_failed += case.prepares_failed;
         self.stops_during_start += case.stops_during_start;
+        self.stops_between_launches += case.stops_between_launches;
+        self.slow_starts += case.slow_starts;
+        self.stalls_during_start += case.stalls_during_start;
+        self.aborts_mid_batch += case.aborts_mid_batch;
     }
 
     /// The states no generated case reached, so nothing checks them.
@@ -728,6 +810,10 @@ impl Seen {
             ),
             ("caches that failed to prepare", self.prepares_failed),
             ("a stop while a runner registers", self.stops_during_start),
+            ("a stop between two launches", self.stops_between_launches),
+            ("a slow start beside others", self.slow_starts),
+            ("a slice sample stale mid-batch", self.stalls_during_start),
+            ("a daemon gone mid-batch", self.aborts_mid_batch),
         ]
         .into_iter()
         .filter_map(|(state, count)| (count == 0).then_some(state))
@@ -759,10 +845,11 @@ struct Case {
     calls_seen: usize,
     /// The last reading of the host this daemon's store has, which a restart loses.
     host: Option<HostReading>,
-    /// The reading a `SampleDuringStart` took, until the tick it was taken in checks the starts after it.
-    host_during_start: Arc<Mutex<Option<HostReading>>>,
-    /// The stop a `StopDuringStart` asked for as GitHub registered a runner, until the step carries it out.
-    stop_during_start: Arc<Mutex<Option<bool>>>,
+    /// What a `SampleDuringStart` or a `SliceSampleStallsDuringStart` changed as a runner started, until the tick
+    /// it came in checks the starts launched after it.
+    mid_batch: Arc<Mutex<Option<MidBatch>>>,
+    /// The stop a `StopDuringStart` asked for, until the step carries it out.
+    stop_during_start: Arc<Mutex<Option<AskedStop>>>,
     /// Log captures `CaptureFails` failed, by container, as of the start of the last tick.
     capture_faults: HashMap<String, u32>,
     /// Runners that exited without a job, whose slots the engine has not freed yet. A restart forgets them, as it
@@ -813,7 +900,7 @@ impl Case {
         let dir = TestDir::new("invariants");
         let shape = Shape::START;
         let clock = Clock::stopped();
-        let (engine, handle) = Case::engine(&github, &docker, &dir, shape, clock);
+        let (engine, handle) = Case::engine(&github, &docker, &dir, shape, clock.clone());
         Case {
             seen: Seen::default(),
             clock,
@@ -830,7 +917,7 @@ impl Case {
             cancelled_since_tick: BTreeSet::new(),
             calls_seen: 0,
             host: None,
-            host_during_start: Arc::default(),
+            mid_batch: Arc::default(),
             stop_during_start: Arc::default(),
             capture_faults: HashMap::new(),
             exits: Vec::new(),
@@ -1244,45 +1331,316 @@ impl Case {
             Step::SaveUnnamed(pick) => self.save_unnamed(pick).await,
             Step::RunnerNamed(pick) => self.runner_named(pick),
             Step::JobReadFails { pick, how } => self.job_read_fails(pick, how),
-            Step::RegisterFails => self.github.0.lock().unwrap().fail_registrations += 1,
-            Step::RegistrationRateLimited => {
-                self.github.0.lock().unwrap().limit_registrations += 1;
+            Step::RegisterFailsMidBatch { after } => {
+                let mut github = self.github.0.lock().unwrap();
+                github.pass_before_fault = after;
+                github.fail_registrations += 1;
             }
-            Step::PrepareFails => self.docker.0.lock().unwrap().fail_prepares += 1,
-            Step::StopDuringStart { docker_gone } => self.stop_during_start(docker_gone),
+            Step::RateLimitedDuringStart { after } => {
+                let mut github = self.github.0.lock().unwrap();
+                github.pass_before_fault = after;
+                github.limit_registrations += 1;
+            }
+            Step::PrepareFailsMidBatch { after } => {
+                let mut docker = self.docker.0.lock().unwrap();
+                docker.prepares_before_fault = after;
+                docker.fail_prepares += 1;
+            }
+            Step::StopDuringStart {
+                docker_gone,
+                after,
+                at,
+            } => self.stop_during_start(docker_gone, after, at),
+            Step::SlowStart => {
+                self.docker.0.lock().unwrap().slow_start = Some(Duration::from_millis(200));
+            }
+            Step::SliceSampleStallsDuringStart => self.slice_sample_stalls_during_start(),
+            Step::AbortMidBatch => {
+                self.abort_mid_batch().await;
+                self.restart().await?;
+                self.tick().await?;
+                self.a_restart_cleans_up_an_aborted_batch().await?;
+                self.a_restart_takes_the_host_credit_back()?;
+            }
         }
         self.finish_stop_during_start().await?;
         self.no_removal_of_a_running_job()
     }
 
-    /// Asks for a stop as GitHub registers the next runner, which the step that started it then carries out.
-    fn stop_during_start(&mut self, docker_gone: bool) {
-        let (control, docker, asked) = (
+    /// Asks for a stop `after` registrations or launches from now, which the step that started it then carries out.
+    fn stop_during_start(&mut self, docker_gone: bool, after: u32, at: StopAt) {
+        let (control, asked, launches, github) = (
             self.handle.control.clone(),
-            self.docker.clone(),
             self.stop_during_start.clone(),
+            self.engine.launches(),
+            self.github.clone(),
         );
-        self.github.0.lock().unwrap().on_register = Some(Box::new(move || {
-            if docker_gone {
-                docker.set_outage(Outage::Refused);
-                control.shutdown(Shutdown::Graceful);
+        // Under the lock of the fake whose call runs it: the other one's is free.
+        let ask = move |calls: usize| {
+            control.shutdown(if docker_gone {
+                Shutdown::Graceful
             } else {
-                control.shutdown(Shutdown::Detach);
+                Shutdown::Detach
+            });
+            *asked.lock().unwrap() = Some(AskedStop {
+                docker_gone,
+                at,
+                launched: launches.count(),
+                calls,
+            });
+        };
+        match at {
+            StopAt::Registration => {
+                let docker = self.docker.clone();
+                let mut state = self.github.0.lock().unwrap();
+                state.register_hook_after = after;
+                state.on_register = Some(Box::new(move |_| {
+                    if docker_gone {
+                        docker.set_outage(Outage::Refused);
+                    }
+                    // GitHub's lock is held: its calls so far include this registration, which is answered after.
+                    ask(usize::MAX);
+                }));
             }
-            *asked.lock().unwrap() = Some(docker_gone);
-        }));
+            StopAt::Launch => {
+                let mut state = self.docker.0.lock().unwrap();
+                state.prepare_hook_after = after;
+                state.on_prepare = Some(Box::new(move |docker| {
+                    if docker_gone {
+                        docker.outage = Outage::Refused;
+                    }
+                    ask(github.calls().len());
+                }));
+            }
+        }
     }
 
     /// Carries out the stop a `StopDuringStart` asked for, if it did, as `Stop` does: to its end, then a restart.
     async fn finish_stop_during_start(&mut self) -> Result<(), Violation> {
-        let Some(docker_gone) = self.stop_during_start.lock().unwrap().take() else {
+        let Some(asked) = self.stop_during_start.lock().unwrap().take() else {
             return Ok(());
         };
-        self.seen.stops_during_start += 1;
-        self.stop(docker_gone).await?;
+        match asked.at {
+            StopAt::Registration => self.seen.stops_during_start += 1,
+            StopAt::Launch => self.seen.stops_between_launches += 1,
+        }
+        self.no_start_after_a_stop(&asked)?;
+        self.stop(asked.docker_gone).await?;
         self.restart().await?;
         self.tick().await?;
         self.a_restart_takes_the_host_credit_back()
+    }
+
+    /// ADR 0126: once a stop is asked for, no runner launches and GitHub is asked to register none, not even for a
+    /// start in flight that waited for its turn; one GitHub registered as the stop came does not start its container.
+    /// The registrations answered before the stop may go on to Docker, and the stop removes their runners.
+    fn no_start_after_a_stop(&self, asked: &AskedStop) -> Result<(), Violation> {
+        let mut launched = self.engine.launches().after(asked.launched);
+        // A stop asked for as a launch prepared its runner's caches came after that launch's checks: it is noted once
+        // it ends, and its task registers nothing, which the check of the registrations below sees.
+        if asked.at == StopAt::Launch && !launched.is_empty() {
+            launched.remove(0);
+        }
+        if !launched.is_empty() {
+            return violation(
+                self,
+                "no_start_after_a_stop",
+                format!("{launched:?} launched after the stop"),
+            );
+        }
+        let (calls, hooked) = {
+            let github = self.github.0.lock().unwrap();
+            (github.calls.clone(), github.hooked_registration.clone())
+        };
+        // At a registration, the stop came after the calls up to that registration's own.
+        let from = match asked.at {
+            StopAt::Registration => calls
+                .iter()
+                .position(|call| {
+                    hooked
+                        .as_ref()
+                        .is_some_and(|name| *call == format!("register {name}"))
+                })
+                .map_or(calls.len(), |at| at + 1),
+            StopAt::Launch => asked.calls.min(calls.len()),
+        };
+        let registered: Vec<&String> = calls[from..]
+            .iter()
+            .filter(|call| call.starts_with("register "))
+            .collect();
+        if !registered.is_empty() {
+            return violation(
+                self,
+                "no_start_after_a_stop",
+                format!("{registered:?} after the stop"),
+            );
+        }
+        if let Some(name) = hooked.filter(|_| asked.at == StopAt::Registration)
+            && self
+                .docker
+                .calls()
+                .iter()
+                .any(|call| *call == format!("start {name}"))
+        {
+            return violation(
+                self,
+                "no_start_after_a_stop",
+                format!("{name}, registered as the stop came, started its container"),
+            );
+        }
+        Ok(())
+    }
+
+    /// Makes the slice's sample stale as the next runner container starts, with the starts launched before it in
+    /// flight.
+    fn slice_sample_stalls_during_start(&mut self) {
+        let (clock, launches, mid_batch) = (
+            self.clock.clone(),
+            self.engine.launches(),
+            self.mid_batch.clone(),
+        );
+        self.docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+            clock.advance(Duration::from_secs(3 * api::SAMPLE_INTERVAL + 1));
+            *mid_batch.lock().unwrap() = Some(MidBatch {
+                reading: None,
+                launched: launches.count(),
+            });
+        }));
+    }
+
+    /// Runs a tick until a start's container is made and held, gives its batch's other starts time to reach their
+    /// own hold or their turn to register, and drops the engine there, as a daemon that goes does.
+    async fn abort_mid_batch(&mut self) {
+        let (github, docker) = (self.github.clone(), self.docker.clone());
+        docker.hold_started();
+        github.0.lock().unwrap().answered.send_replace(Some(1));
+        // Holds a start's container, or a registration's answer, once every container start in flight is held and,
+        // with no answer held, nothing registers: the first start may fail before Docker, another's registration may
+        // fail.
+        let all_held = async {
+            loop {
+                let (starts, in_docker) = {
+                    let state = docker.0.lock().unwrap();
+                    (state.starts_waiting, state.runner_starts)
+                };
+                let (answers, registering) = {
+                    let state = github.0.lock().unwrap();
+                    (state.waiting, state.registering)
+                };
+                if starts + answers > 0 && in_docker == starts && (answers > 0 || registering == 0)
+                {
+                    return answers > 0 && starts > 0;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        let both = tokio::select! {
+            _ = self.engine.tick(Shutdown::No) => false,
+            both = all_held => both,
+        };
+        if both {
+            self.seen.aborts_mid_batch += 1;
+        }
+        github.0.lock().unwrap().answered.send_replace(None);
+        docker.release_started();
+    }
+
+    /// ADR 0125, 0126: once a restart after an aborted batch has ticked, every registration of this machine has a
+    /// container, and every build cache open is a runner's. Recovery holds its containers in slots, which
+    /// `docker_runs_no_runner_the_engine_lost` checks.
+    async fn a_restart_cleans_up_an_aborted_batch(&mut self) -> Result<(), Violation> {
+        // The deletes a failed start sends in the background.
+        self.settle_background().await;
+        let containers: BTreeSet<String> = self
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .filter(|container| container.labels.contains_key("runnerd.job"))
+            .map(|container| container.name.clone())
+            .collect();
+        let bare: Vec<String> = self
+            .github
+            .0
+            .lock()
+            .unwrap()
+            .runners
+            .iter()
+            .filter(|runner| {
+                !self.orphans.contains(&runner.id) && !containers.contains(&runner.name)
+            })
+            .map(|runner| runner.name.clone())
+            .collect();
+        if !bare.is_empty() {
+            return violation(
+                self,
+                "a_restart_cleans_up_an_aborted_batch",
+                format!("{bare:?} stay registered with no container"),
+            );
+        }
+        self.no_build_cache_left_open_without_a_runner()
+    }
+
+    /// A build cache opens for a runner about to start and closes with it, or with its start that failed: one stays
+    /// open only for a runner in a slot, or for one removed whose uploads wait for GitHub's word.
+    fn no_build_cache_left_open_without_a_runner(&self) -> Result<(), Violation> {
+        let held: BTreeSet<&str> = self
+            .engine
+            .occupied()
+            .map(|(_, occupant)| occupant.runner_name.as_str())
+            .collect();
+        let ended = self.engine.ended_upload_runners();
+        let open: Vec<String> = self
+            .engine
+            .build_cache_runners()
+            .into_iter()
+            .filter(|runner| !held.contains(runner.as_str()) && !ended.contains(runner))
+            .collect();
+        if open.is_empty() {
+            Ok(())
+        } else {
+            violation(
+                self,
+                "no_build_cache_left_open_without_a_runner",
+                format!("{open:?} are open with no runner"),
+            )
+        }
+    }
+
+    /// L4 of 4b's challenge: GitHub is never asked to register a name it has registered, and Docker never runs two
+    /// runner containers of one name. The history's runners are keyed by name, so it keeps one row per name.
+    fn runner_names_are_unique(&self) -> Result<(), Violation> {
+        let reused = self.github.0.lock().unwrap().duplicate_names.clone();
+        if !reused.is_empty() {
+            return violation(
+                self,
+                "runner_names_are_unique",
+                format!("GitHub was asked to register {reused:?} again"),
+            );
+        }
+        let mut names = BTreeSet::new();
+        let twice: Vec<String> = self
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .containers
+            .iter()
+            .filter(|container| container.labels.contains_key("runnerd.job"))
+            .filter(|container| !names.insert(container.name.clone()))
+            .map(|container| container.name.clone())
+            .collect();
+        if twice.is_empty() {
+            Ok(())
+        } else {
+            violation(
+                self,
+                "runner_names_are_unique",
+                format!("Docker runs two containers named {twice:?}"),
+            )
+        }
     }
 
     /// A running job's runner and container go while GitHub goes on saying the job runs, and with `Listing::Stale`
@@ -1853,16 +2211,20 @@ impl Case {
 
     /// Takes a `sample` while the next runner starts.
     fn sample_during_start(&mut self, percent: u64, available: u64, stalled: bool) {
-        let (store, took_job, taken, clock) = (
+        let (store, took_job, mid_batch, clock, launches) = (
             self.handle.store.clone(),
             self.took_job.clone(),
-            self.host_during_start.clone(),
-            self.clock,
+            self.mid_batch.clone(),
+            self.clock.clone(),
+            self.engine.launches(),
         );
         self.docker.0.lock().unwrap().on_start = Some(Box::new(move |docker| {
             let now = clock.now_ms();
             let reading = sample(docker, &store, &took_job, now, percent, available, stalled);
-            *taken.lock().unwrap() = Some(reading);
+            *mid_batch.lock().unwrap() = Some(MidBatch {
+                reading: Some(reading),
+                launched: launches.count(),
+            });
         }));
     }
 
@@ -2023,7 +2385,7 @@ impl Case {
             &self.docker,
             &self.dir,
             self.shape,
-            self.clock,
+            self.clock.clone(),
         );
         self.engine = engine;
         self.engine.named = self.names_from;
@@ -2031,9 +2393,20 @@ impl Case {
         // The store keeps the host's reading in memory only, and a sample still to come goes to the old store.
         self.host = None;
         self.exits.clear();
-        self.docker.0.lock().unwrap().on_start = None;
-        // A stop asked for of the engine gone would never be carried out.
+        {
+            let mut docker = self.docker.0.lock().unwrap();
+            docker.on_start = None;
+            docker.on_prepare = None;
+        }
+        // A stop asked for of the engine gone would never be carried out, nor one it was asked already.
         self.github.0.lock().unwrap().on_register = None;
+        let asked = self.stop_during_start.lock().unwrap().take();
+        // Docker comes back for the next start, as `stop` brings it back.
+        if asked.is_some_and(|asked| asked.docker_gone) {
+            self.docker.set_outage(Outage::None);
+        }
+        // A new daemon's client knows nothing of the rate limit the old one met.
+        self.github.unblock();
         self.recover().await
     }
 
@@ -2063,6 +2436,7 @@ impl Case {
         let past = SystemTime::now() - Duration::from_secs(1);
         self.engine.expire_holds(past);
         self.engine.expire_github_limit(past);
+        self.github.unblock();
         self.engine.age_waits(PRIORITY_AFTER);
         self.engine.expire_cancelling();
         self.engine.make_unread_due();
@@ -2237,6 +2611,7 @@ impl Case {
             .filter(|name| running.contains(*name))
             .map(str::to_owned)
             .collect();
+        self.note_slow_start(starts.len());
         let mut started: BTreeSet<String> = starts.iter().cloned().collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
         let seeds = self
@@ -2247,6 +2622,8 @@ impl Case {
             .map(|profile| format!("{profile}{SEED_START}"))
             .collect::<Vec<_>>();
         self.no_slot_is_left_starting()?;
+        self.runner_names_are_unique()?;
+        self.no_build_cache_left_open_without_a_runner()?;
         let read_during_start = self.starts_after_a_reading(&starts);
         let same_reading = read_during_start.is_none();
         let seeded = !seeds.is_empty();
@@ -2284,6 +2661,14 @@ impl Case {
         Ok(())
     }
 
+    /// Counts a slow start among `starts` runners started by one tick or pass.
+    fn note_slow_start(&mut self, starts: usize) {
+        let slow = std::mem::take(&mut self.docker.0.lock().unwrap().slow_started);
+        if slow > 0 && starts > 1 {
+            self.seen.slow_starts += 1;
+        }
+    }
+
     /// Counts the states the checks exist for, as a tick or a pass leaves them.
     fn note_states(&mut self) {
         let counts = self.engine.state_counts();
@@ -2309,15 +2694,23 @@ impl Case {
         );
     }
 
-    /// The starts a reading taken while a runner started binds, if one was: those after it, seeds among them, which go
-    /// last. The starts before it went by the reading the plan had.
+    /// The starts a reading taken, or a sample gone stale, while a runner started binds, if one did: those the engine
+    /// launched after it that run now. The starts launched before it went by what their plan had, though their
+    /// registration or Docker's start came later. Seed containers start after the batch and are added by the caller.
     fn starts_after_a_reading(&mut self, starts: &[String]) -> Option<BTreeSet<String>> {
-        let hooked = self.docker.0.lock().unwrap().hooked_start.take();
-        let during = self.host_during_start.lock().unwrap().take();
-        let (hooked, reading) = hooked.zip(during)?;
-        self.host = Some(reading);
-        let after = starts.iter().skip_while(|name| **name != hooked).skip(1);
-        Some(after.cloned().collect())
+        let mid_batch = self.mid_batch.lock().unwrap().take()?;
+        self.docker.0.lock().unwrap().hooked_start = None;
+        match mid_batch.reading {
+            Some(reading) => self.host = Some(reading),
+            None => self.seen.stalls_during_start += 1,
+        }
+        let launched = self.engine.launches().after(mid_batch.launched);
+        Some(
+            launched
+                .into_iter()
+                .filter(|name| starts.contains(name))
+                .collect(),
+        )
     }
 
     /// A pass between ticks, after Docker said every runner may have stopped: the checks of a tick that bind a pass,
@@ -2343,9 +2736,12 @@ impl Case {
             .filter(|name| running.contains(*name))
             .map(str::to_owned)
             .collect();
+        self.note_slow_start(order.len());
         let starts: BTreeSet<String> = order.iter().cloned().collect();
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
         self.no_slot_is_left_starting()?;
+        self.runner_names_are_unique()?;
+        self.no_build_cache_left_open_without_a_runner()?;
         let bound = self.starts_after_a_reading(&order);
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
@@ -2906,8 +3302,10 @@ impl Case {
             .map(|(id, container)| (container, id))
             .collect();
         for call in &calls[self.calls_seen..] {
+            // A forced pause's kill may remove one, even if Docker then fails to.
             if let Some(container) = call.strip_prefix("remove ")
                 && let Some(job) = running.get(container)
+                && !self.forced.contains(container)
             {
                 let detail = format!("removed {container}, which runs job {job}");
                 self.calls_seen = calls.len();
@@ -2983,6 +3381,10 @@ impl Case {
                 );
             }
         }
+        // While GitHub's rate limit is used up, every listing fails at once, as the client fails it.
+        if status.github_limited_until.is_some() {
+            return Ok(());
+        }
         for id in self.queued() {
             let job = &self.jobs[&id];
             if self.shape.configures(job.repository)
@@ -3003,6 +3405,7 @@ impl Case {
     async fn drain(&mut self) -> Result<(), Violation> {
         self.step += 1;
         self.github.0.lock().unwrap().on_register = None;
+        self.docker.0.lock().unwrap().on_prepare = None;
         while !self.queued().is_empty() {
             self.apply(Step::Cancel(0)).await?;
         }
@@ -3300,6 +3703,45 @@ async fn run_case(steps: &[Step], mut case: Case) -> Result<Case, Violation> {
     Ok(case)
 }
 
+const LIGHT: Step = Step::Queue {
+    second: false,
+    labels: Labels::Light,
+};
+
+/// ADR 0125, 0126: the daemon goes with one start's container made, the next one's registration made, and the third
+/// waiting for its turn to register. The slice's 8.5G takes the two light runners and the heavy one at once.
+const A_BATCH_ABORTED: [Step; 4] = [LIGHT, LIGHT, HEAVY, Step::AbortMidBatch];
+
+/// A stop asked for as GitHub registers the second runner of a batch, with the third waiting for its turn.
+const A_STOP_WHILE_A_BATCH_REGISTERS: [Step; 5] = [
+    LIGHT,
+    LIGHT,
+    HEAVY,
+    Step::StopDuringStart {
+        docker_gone: false,
+        after: 1,
+        at: StopAt::Registration,
+    },
+    Step::Tick,
+];
+
+/// Under measured admission, the first container of a batch takes long to start, and the slice's sample turns stale
+/// as it does.
+const A_SLOW_STALLING_START_IN_A_BATCH: [Step; 8] = [
+    Step::Reload(Change::Policy),
+    Step::Sample {
+        percent: 50,
+        available: 50,
+        stalled: false,
+    },
+    LIGHT,
+    LIGHT,
+    HEAVY,
+    Step::SlowStart,
+    Step::SliceSampleStallsDuringStart,
+    Step::Tick,
+];
+
 /// What a generated case runs: its seed's steps, after the scenarios every so many seeds start from.
 fn steps_of(seed: u64) -> Vec<Step> {
     let mut steps = generate(&mut Rng(seed));
@@ -3315,6 +3757,17 @@ fn steps_of(seed: u64) -> Vec<Step> {
     }
     if seed.is_multiple_of(32) {
         steps.splice(0..0, WAITS_ON_DIFFERENT_JOBS);
+    }
+    // First, on seeds no reach check asks a state of and no scenario above needs a clean start: a batch of starts in
+    // the middle of which something happens.
+    if seed.is_multiple_of(8) && !seed.is_multiple_of(32) {
+        let batch: &[Step] = match seed % 32 {
+            8 => &A_BATCH_ABORTED,
+            16 => &A_STOP_WHILE_A_BATCH_REGISTERS,
+            _ => &A_SLOW_STALLING_START_IN_A_BATCH,
+        };
+        // Two ticks, for what the scenario left to end.
+        steps.splice(0..0, batch.iter().copied().chain([Step::Tick, Step::Tick]));
     }
     if seed % 2 == 1 {
         let rarely: &[Step] = match seed % 16 {

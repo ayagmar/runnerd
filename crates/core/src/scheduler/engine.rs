@@ -549,6 +549,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// and a restart takes it from there and the containers, so a name ahead of the clock, or a clock that stepped
     /// back, is not used again.
     named: u64,
+    /// The runners each batch launched, in launch order: what a test's reading taken mid-batch binds.
+    #[cfg(test)]
+    launches: start::Launches,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -678,6 +681,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             passes_in_tick: Duration::ZERO,
             listing: 0,
             named: 0,
+            #[cfg(test)]
+            launches: start::Launches::default(),
             claims: Claims::default(),
         };
         engine.publish();
