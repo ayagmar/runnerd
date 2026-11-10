@@ -7,7 +7,7 @@ use crate::admission::pooled::POOL_AFTER;
 use crate::api::{AdmissionPolicy, Basis, JobPeak};
 use crate::observe::metrics::Events;
 use crate::scheduler::PRIORITY_AFTER;
-use crate::scheduler::{Decision, Key, SlotRef};
+use crate::scheduler::{Decision, Key, Plan, SlotRef, StartFor};
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -1317,6 +1317,60 @@ fn waits(handle: &Handle) -> Vec<Option<api::Waiting>> {
         .collect()
 }
 
+/// Catches a start that fits only by stopping a warm runner being read as a waiter of its size (ADR 0102): the plain
+/// room beside what runs still counts that warm runner, so the start would look like a waiter no margin fits, raise the
+/// larger margin with nothing else waiting, and could hold its own job back at the next plan while the warm runner idles.
+#[tokio::test]
+async fn a_planned_start_that_stops_a_warm_runner_leaves_the_plain_margin() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 0);
+    // A 64G host keeps 4G free: beside nothing running, 1G is left, short of the 2G the job's runner takes.
+    host_at(&handle.store, 0, 5 * G, 0);
+    let (_, admitting) = engine.plan();
+    let slot = |index| SlotRef {
+        profile: "app".to_owned(),
+        index,
+    };
+    let replacing = Plan {
+        decisions: vec![Decision::Start {
+            slot: slot(1),
+            repository: "o/r".to_owned(),
+            memory: 2 * G,
+            cpu: 2000,
+            for_: StartFor::Job(1),
+            replacing: vec![slot(0)],
+            behind: None,
+        }],
+        ..Plan::default()
+    };
+    engine.note_host(&admitting, &replacing);
+    assert!(
+        !engine.host_is_short(),
+        "a start that stops a warm runner keeps the plain margin"
+    );
+    // The same 2G as a job waiting for the host fits no margin: the reading is short of it.
+    let waiting = Plan {
+        waiting: BTreeMap::from([(
+            1,
+            api::Waiting::HostMemory {
+                needs: 2 * G,
+                free: 0,
+            },
+        )]),
+        ..Plan::default()
+    };
+    engine.note_host(&admitting, &waiting);
+    assert!(
+        engine.host_is_short(),
+        "a 2G waiter raises the larger margin"
+    );
+}
+
 #[tokio::test]
 async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_again() {
     let (github, docker, dir) = (
@@ -1558,7 +1612,7 @@ async fn a_pass_keeps_only_the_waits_of_the_starts_it_did_not_make() {
         needs: 1280 * M,
         free: 0,
     };
-    let plan = crate::scheduler::Plan {
+    let plan = Plan {
         slot_waiting: BTreeSet::from([5, 6]),
         waiting: BTreeMap::from([(5, needs_memory)]),
         ..Default::default()

@@ -5,7 +5,7 @@
 //! slot's runner is `runners`. It lists the repositories due at once, a few requests at a time, and answers the API's
 //! commands while it waits for the listings (ADR 0026).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -419,9 +419,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         match mode {
             Shutdown::No if admitting.host.is_some() => {
                 let (after, admitting) = self.plan();
-                self.note_host(&admitting, &after.waiting);
+                self.note_host(&admitting, &after);
             }
-            _ => self.note_host(&admitting, &BTreeMap::new()),
+            _ => self.note_host(&admitting, &Plan::default()),
         }
         // A stop asked during the starts reads the jobs in its own tick, or leaves them to the next start's: its
         // idle runners are removed first (ADR 0091).

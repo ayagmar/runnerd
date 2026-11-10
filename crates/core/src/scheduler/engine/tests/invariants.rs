@@ -4808,3 +4808,32 @@ async fn an_idle_runner_is_named_for_the_oldest_job_whatever_order_the_listing_g
     ];
     assert_eq!(broken(&steps).await, None);
 }
+
+/// Shrunk from seed 170. Job 2's heavy runner went idle, so the last tick has jobs 2 and 3 wait for the host, which
+/// fits neither, and starts a light runner for job 4, which fits the plain margin. That start fails to prepare its
+/// caches, so the plan after the starts still starts job 4: a waiter that fits, which keeps the plain margin rather
+/// than the larger one that would hold job 4 back at the next plan.
+#[tokio::test]
+async fn a_start_the_tick_did_not_make_keeps_the_plain_margin() {
+    let queue = |labels| Step::Queue {
+        second: false,
+        labels,
+    };
+    let steps = [
+        queue(Labels::Light),
+        Step::PrepareFailsMidBatch { after: 2 },
+        queue(Labels::Heavy),
+        Step::Stop { docker_gone: false },
+        queue(Labels::SelfHosted),
+        Step::Tick,
+        queue(Labels::Light),
+        Step::ExitsIdle(7),
+        Step::Sample {
+            percent: 10,
+            available: 6,
+            stalled: false,
+        },
+        Step::Tick,
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
