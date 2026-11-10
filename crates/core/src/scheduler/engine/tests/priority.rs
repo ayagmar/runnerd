@@ -145,7 +145,7 @@ impl Fixture {
         self.engine
             .repositories
             .listed_mut("o/big")
-            .and_then(|state| state.waits.get_mut("big"))
+            .and_then(|state| state.waits_mut("big"))
             .and_then(|waits| waits.memory_mut())
             .expect("o/big's next job waits")
             .since -= by;
@@ -414,6 +414,23 @@ async fn a_reload_that_removes_the_pool_drops_its_wait() {
     assert!(
         fixture.engine.keeps_no_waits("o/big"),
         "the pool in `big` is gone"
+    );
+}
+
+/// A reload that changes a pool's runners starts its health again, as what failed may be what changed, but its next job
+/// has waited no less.
+#[tokio::test]
+async fn a_reload_that_changes_the_pools_runners_keeps_its_wait() {
+    let mut fixture = Fixture::starved().await;
+    let before = fixture.wait();
+    let more_cpus = big_and_small().replace("cpus = 2\n", "cpus = 3\n");
+    fixture
+        .engine
+        .reload(Config::parse(&more_cpus).unwrap(), Some(9 * G), None);
+    assert_eq!(
+        fixture.wait(),
+        before,
+        "job 10 has waited as long as before"
     );
 }
 

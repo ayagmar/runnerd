@@ -902,9 +902,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // at once: what failed may be what changed.
         for (name, state) in self.repositories.iter_listed_mut() {
             let new = &self.config;
-            state
-                .holds
-                .retain(|profile, _| same_runners(&old, new, name, profile));
+            state.forget_health(|profile| same_runners(&old, new, name, profile));
         }
         if let Some(cache) = &self.build_cache {
             cache.set_max_size(self.config.caches.build.max_size.0);
@@ -933,9 +931,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A pool gone, or moved to another profile, keeps no wait a pool made there later would inherit.
         let config = &self.config;
         for (name, state) in self.repositories.iter_listed_mut() {
-            state
-                .waits
-                .retain(|profile, _| config.pool_in(name, profile).is_some());
+            state.forget_waits(|profile| config.pool_in(name, profile).is_some());
         }
         self.control.set_repositories(names);
         let profiles = &self.config.profiles;

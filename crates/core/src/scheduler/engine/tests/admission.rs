@@ -1091,7 +1091,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     engine
         .repositories
         .listed_mut("o/r")
-        .and_then(|state| state.waits.get_mut("app"))
+        .and_then(|state| state.waits_mut("app"))
         .and_then(|waits| waits.cpu_mut())
         .expect("the build's wait is kept")
         .since -= PRIORITY_AFTER;

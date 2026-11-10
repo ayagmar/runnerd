@@ -305,7 +305,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let Some(state) = self.repositories.listed(&repository.name) else {
                 continue;
             };
-            let Some(listed) = state.listing.listed() else {
+            let Some(listed) = state.listing().listed() else {
                 continue;
             };
             for job in listed {
@@ -409,7 +409,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             !taken.contains(&id)
                 && repositories
                     .listed(repository)
-                    .is_none_or(|state| state.listing.no_longer_shows(id))
+                    .is_none_or(|state| state.listing().no_longer_shows(id))
         });
         for (repository, id, answer) in self
             .serving(read_jobs(self.github.clone(), left), Meanwhile::Turnover)

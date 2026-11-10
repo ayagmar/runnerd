@@ -32,6 +32,7 @@ mod presence;
 mod records;
 mod recover;
 mod registrations;
+mod repository_state;
 mod runner_exit;
 mod runners;
 mod status;
@@ -60,15 +61,14 @@ use self::history::{CAPTURE_DRAIN, Found};
 use self::images::Images;
 use self::ledger::Ledger;
 use self::leftovers::Leftovers;
-use self::listing::Listing;
 use self::mirror::Mirror;
-use self::pool_health::PoolHealth;
 use self::presence::Repositories;
 pub use self::records::RecordSelection;
 use self::registrations::Registrations;
+use self::repository_state::RepositoryState;
 use self::upkeep::Upkeep;
 use self::watches::Watches;
-use super::{SlotRef, Waits};
+use super::SlotRef;
 use crate::admission::Key;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -378,23 +378,6 @@ impl Occupant {
             job: self.named_job(),
         }
     }
-}
-
-/// A repository's state, shared by its pools but for their holds and what they wait for CPU.
-#[derive(Debug, Default)]
-struct RepositoryState {
-    /// Its queued jobs as its last listing showed them.
-    listing: Listing,
-    /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
-    /// not hold back the others (ADR 0058).
-    holds: BTreeMap<String, PoolHealth>,
-    /// By the profile of each of its pools, what that pool's next job has waited for and since when (ADR 0096): from
-    /// the first plan of a tick or a pass that held it, not one a status runs, until a runner of the pool is in its
-    /// slot, the pool may no longer start one, or a listing that succeeded no longer shows the job. A plan that holds
-    /// it for a slot or for the other resource does not make it younger, nor does a listing that failed. With them,
-    /// whether a barrier has served the pool (ADR 0098), until a listing that succeeded shows its queue empty or the
-    /// pool may no longer start a runner. Not kept over a restart.
-    waits: BTreeMap<String, Waits>,
 }
 
 /// How long a stop that detaches or is forced takes at most, from its request: what Docker and GitHub have not

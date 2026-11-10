@@ -5819,9 +5819,7 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
             .repositories
             .listed_mut("o/r")
             .unwrap()
-            .holds
-            .get_mut("app")
-            .unwrap()
+            .health_mut("app")
             .expire(std::time::SystemTime::UNIX_EPOCH);
         engine.tick(Shutdown::No).await;
     }
