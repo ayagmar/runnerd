@@ -35,6 +35,7 @@ mod registrations;
 mod repository_state;
 mod runner_exit;
 mod runners;
+mod running_reads;
 mod status;
 mod stop;
 mod tick;
@@ -460,6 +461,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// went.
     ledger: Ledger,
     last_prune: Option<SystemTime>,
+    /// When the running jobs were last read from GitHub, which is once every `poll_interval` (ADR 0124).
+    running_reads: running_reads::RunningReads,
     /// The records of failed jobs and the shells open in them.
     records: records::RecordState,
     /// The predictor, the high-water mark of measured admission, and what admission saw of the host.
@@ -609,6 +612,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             mirror_until: MirrorPosition::default(),
             ledger: Ledger::default(),
             last_prune: None,
+            running_reads: running_reads::RunningReads::default(),
             measured: admission::Measured::default(),
             warm: warm::Warm::default(),
             records,

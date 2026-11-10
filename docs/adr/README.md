@@ -130,3 +130,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0120](0120-a-job-its-runner-failed-reads-as-a-runner-fault.md) | A job its runner failed reads as a runner fault | Accepted |
 | [0121](0121-a-repository-keeps-its-pools-in-one-map.md) | A repository keeps its pools in one map | Accepted |
 | [0122](0122-what-admission-keeps-is-sealed.md) | What admission keeps between plans is sealed | Accepted |
+| [0124](0124-running-jobs-are-read-every-poll-interval.md) | Running jobs are read every poll interval, not every tick | Accepted |

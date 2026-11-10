@@ -369,7 +369,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A stop asked during the starts reads the jobs in its own tick, or leaves them to the next start's: its
         // idle runners are removed first (ADR 0091).
         if self.control.mode() == mode {
-            self.follow_running(described).await;
+            self.follow_running(described, listed_at).await;
         }
         self.idle_caches(mode, began).await;
         self.keep_records().await;

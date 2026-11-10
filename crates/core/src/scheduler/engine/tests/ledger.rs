@@ -161,6 +161,7 @@ async fn a_twin_runner_reporting_a_job_whose_first_runner_went_leaves_it_closing
     until_runs(&mut engine, 1).await;
     assert!(engine.is_closing(1), "job 1 is still followed as closing");
     let before = reads_of(&github, 1);
+    engine.age_running_reads(Duration::from_hours(1));
     engine.tick(Shutdown::No).await;
     assert_eq!(
         reads_of(&github, 1) - before,

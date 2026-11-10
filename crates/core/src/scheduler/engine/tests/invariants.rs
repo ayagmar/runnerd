@@ -57,6 +57,9 @@ const CASES: u64 = 64;
 /// Events in a case.
 const EVENTS: usize = 40;
 
+/// How far apart the model's ticks are, for the running jobs' reads: a third of the default `poll_interval` (ADR 0124).
+const TICK_EVERY: Duration = Duration::from_secs(5);
+
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
 pub(super) struct Rng(pub(super) u64);
 
@@ -2097,6 +2100,8 @@ impl Case {
         self.cancelled_since_tick.clear();
         self.note_busy();
         let uploads_waiting = self.engine.ended_uploads_waiting();
+        // Ticks come every 5 s, a third of `poll_interval`: the running jobs are read at every third (ADR 0124).
+        self.engine.age_running_reads(TICK_EVERY);
         self.engine.tick(Shutdown::No).await;
         let ended = self.engine.ended_upload_runners();
         self.seen.decided_uploads += uploads_waiting
