@@ -26,4 +26,6 @@ free one. A reload keeps it.
 ## Consequences
 
 Behaviour is unchanged: the invariants' trace is the same before and after. A third state is one new variant of the
-private enum. Each of `Slot`'s readers then has to answer for it in `slot.rs`, rather than at each call site.
+private enum. Each of `Slot`'s methods in `slot.rs` then has to decide what it returns for that variant. Callers of
+`occupant()` and `is_free()` inherit that answer without being asked: rustc flags none of them, so the change that
+adds the variant names the call sites that must read it differently.
