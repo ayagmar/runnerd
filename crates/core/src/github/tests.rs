@@ -2,6 +2,7 @@
 //! conditional requests and how much of them is kept, rate limits, token refresh, runner registration and deletion, who started a run and opened a pull request, and that the token
 //! never shows in `Debug` output or errors.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -9,7 +10,7 @@ use axum::Router;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
-use super::{Conditional, Deleted, Error, Github, GithubApi, QueuedJob, Token};
+use super::{Class, Conditional, Deleted, Error, Github, GithubApi, QueuedJob, Token};
 use crate::sync::lock;
 
 const TOKEN: &str = "ghp_sentinelTokenValue0123456789";
@@ -946,5 +947,329 @@ async fn a_repository_says_its_default_branch_and_whether_it_is_public() {
     assert!(
         github.repository("o/gone").await.is_err(),
         "a deleted repository is an error, not a visibility"
+    );
+}
+
+/// A fake GitHub that tags every answer with the limit's reading, `remaining` lower with each one, and answers a
+/// request conditional on the tag of its URI with a 304.
+fn counting_fake() -> impl Fn(&Seen) -> Response + Send + Sync + 'static {
+    let left = Arc::new(Mutex::new(5000_u64));
+    move |request| {
+        let remaining = {
+            let mut left = left.lock().unwrap();
+            *left -= 1;
+            *left
+        };
+        let mut response = match (request.method.as_str(), request.uri.as_str()) {
+            ("GET", "/repos/o/r/actions/runs?status=queued&per_page=100") => {
+                page(request, r#"{"total_count":1,"workflow_runs":[{"id":10}]}"#, false)
+            }
+            ("GET", "/repos/o/r/actions/runs?status=in_progress&per_page=100") => {
+                page(request, r#"{"total_count":0,"workflow_runs":[]}"#, false)
+            }
+            ("GET", "/repos/o/r/actions/runs/10/jobs?filter=latest&per_page=100") => {
+                page(request, r#"{"jobs":[]}"#, false)
+            }
+            ("GET", "/repos/o/r/actions/runners?per_page=100") => {
+                page(request, r#"{"runners":[]}"#, false)
+            }
+            ("GET", "/repos/o/r/actions/jobs/5") => page(
+                request,
+                r#"{"id":5,"run_id":10,"name":"smoke","status":"in_progress"}"#,
+                false,
+            ),
+            ("GET", "/repos/o/r") => json(r#"{"default_branch":"main","visibility":"public"}"#),
+            ("POST", "/repos/o/r/actions/runners/generate-jitconfig") => (
+                StatusCode::CREATED,
+                json(r#"{"runner":{"id":42,"name":"n","status":"offline","busy":false},"encoded_jit_config":"Yw=="}"#),
+            )
+                .into_response(),
+            ("DELETE", "/repos/o/r/actions/runners/1") => StatusCode::NO_CONTENT.into_response(),
+            ("DELETE", "/repos/o/r/actions/runners/2") => StatusCode::NOT_FOUND.into_response(),
+            ("POST", "/repos/o/r/actions/runs/10/cancel") => StatusCode::FORBIDDEN.into_response(),
+            _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let headers = response.headers_mut();
+        headers.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
+        headers.insert(
+            "x-ratelimit-remaining",
+            HeaderValue::from_str(&remaining.to_string()).unwrap(),
+        );
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+        response
+    }
+}
+
+/// How many requests of each class got a fresh answer, a 304 and a refusal, in `Class::ALL`'s order.
+fn tallies(github: &Github) -> Vec<[u64; 3]> {
+    let report = github.requests();
+    Class::ALL
+        .iter()
+        .map(|class| {
+            let tally = report.tally(*class);
+            [tally.fresh, tally.unchanged, tally.refused]
+        })
+        .collect()
+}
+
+/// The bugs it catches: a class counted under another (a jobs page as a runs listing, a job read as `other`), a 304
+/// counted as a fresh answer, a refusal not counted, and a request retried after a 401 counted once.
+#[tokio::test]
+async fn requests_are_counted_by_class_and_by_what_github_answered() {
+    let (url, _) = fake_github(counting_fake()).await;
+    let github = client(&url);
+    // A poll of the repository, twice: the second poll's three answers are 304s.
+    github.queued_jobs("o/r").await.unwrap();
+    github.queued_jobs("o/r").await.unwrap();
+    github.runners("o/r").await.unwrap();
+    github.job("o/r", 5).await.unwrap();
+    github.job("o/r", 5).await.unwrap();
+    let labels = ["self-hosted".to_owned()];
+    github.jit_config("o/r", "n", &labels).await.unwrap();
+    github.delete_runner("o/r", 1).await.unwrap();
+    assert_eq!(
+        github.delete_runner("o/r", 2).await.unwrap(),
+        Deleted::NotFound
+    );
+    github.repository("o/r").await.unwrap();
+    assert!(github.cancel_run("o/r", 10).await.is_err());
+
+    assert_eq!(
+        tallies(&github),
+        [
+            [2, 2, 0], // runs: queued and in progress, twice
+            [1, 1, 0], // jobs of run 10
+            [1, 0, 0], // runners
+            [1, 1, 0], // job reads
+            [1, 0, 0], // registrations
+            [2, 0, 0], // deletes
+            [1, 0, 1], // other: the repository, the refused cancel
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_request_the_token_was_refused_for_counts_each_time_it_was_sent() {
+    let sent = Arc::new(Mutex::new(0));
+    let counter = sent.clone();
+    let (url, _) = fake_github(move |_| {
+        let mut sent = counter.lock().unwrap();
+        *sent += 1;
+        if *sent == 1 {
+            StatusCode::UNAUTHORIZED.into_response()
+        } else {
+            json(r#"{"runners":[]}"#)
+        }
+    })
+    .await;
+    let github = client(&url);
+    github.runners("o/r").await.unwrap();
+    assert_eq!(github.requests().tally(Class::Runners).total(), 2);
+}
+
+/// The bugs it catches: the limit read only from answers that carry a body, so a run of 304s leaves a stale count for
+/// a governor to act on; and a reading of the search or GraphQL resource taken for the core one.
+#[tokio::test]
+async fn the_rate_limit_is_read_from_every_answer_of_the_core_resource() {
+    let calls = Arc::new(Mutex::new(0));
+    let counter = calls.clone();
+    let (url, _) = fake_github(move |request| {
+        let call = {
+            let mut calls = counter.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        let mut response = if call == 3 {
+            json(r#"{"runners":[]}"#)
+        } else {
+            page(request, r#"{"runners":[]}"#, false)
+        };
+        let headers = response.headers_mut();
+        headers.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
+        headers.insert(
+            "x-ratelimit-remaining",
+            HeaderValue::from_str(&(5000 - call * 10).to_string()).unwrap(),
+        );
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+        if call == 3 {
+            headers.insert("x-ratelimit-resource", HeaderValue::from_static("search"));
+        } else {
+            headers.insert("x-ratelimit-resource", HeaderValue::from_static("core"));
+        }
+        response
+    })
+    .await;
+    let github = client(&url);
+    assert_eq!(github.requests().rate_limit(), None);
+    github.runners("o/r").await.unwrap();
+    github.runners("o/r").await.unwrap();
+    // The second answer was a 304.
+    let limit = github.requests().rate_limit().unwrap();
+    assert_eq!(
+        (limit.limit, limit.remaining, limit.reset),
+        (
+            5000,
+            4980,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000)
+        )
+    );
+    github.runners("o/r").await.unwrap();
+    assert_eq!(github.requests().rate_limit().unwrap().remaining, 4980);
+}
+
+fn no_headers() -> HeaderMap {
+    HeaderMap::new()
+}
+
+/// The bugs it catches: a window that ends early or late, a new one that keeps the old one's counts, and the limit
+/// lost with the window: the next window's line would say it was never read.
+#[test]
+fn a_window_reports_after_an_hour_and_the_next_starts_empty_with_the_limit_kept() {
+    use super::requests::{Counter, WINDOW};
+    let began = std::time::Instant::now();
+    let mut counter = Counter::new(began, WINDOW);
+    let mut headers = no_headers();
+    headers.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
+    headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4200"));
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+    counter.record(Class::Runs, StatusCode::OK, &headers);
+    counter.record(Class::Runs, StatusCode::NOT_MODIFIED, &no_headers());
+    counter.record(Class::Delete, StatusCode::TOO_MANY_REQUESTS, &no_headers());
+    assert!(counter.due(began + Duration::from_secs(3599)).is_none());
+
+    let report = counter.due(began + WINDOW).unwrap();
+    assert_eq!(report.window(), WINDOW);
+    assert_eq!(report.tally(Class::Runs).total(), 2);
+    assert_eq!(report.tally(Class::Delete).refused, 1);
+    assert_eq!(report.rate_limit().unwrap().remaining, 4200);
+
+    counter.record(Class::Jobs, StatusCode::OK, &no_headers());
+    let next = counter.peek(began + WINDOW + Duration::from_secs(5));
+    assert_eq!(next.tally(Class::Runs).total(), 0);
+    assert_eq!(next.tally(Class::Jobs).total(), 1);
+    assert_eq!(next.window(), Duration::from_secs(5));
+    assert_eq!(next.rate_limit().unwrap().remaining, 4200);
+    assert!(
+        counter
+            .due(began + WINDOW + Duration::from_secs(3599))
+            .is_none()
+    );
+}
+
+/// The line the owner reads, in full: every class, a refusal only where there was one, and when the count starts
+/// over. The bug it catches: a class missing from the line, or a figure under another's name.
+#[test]
+fn the_line_names_every_class_and_the_limit() {
+    use super::requests::{Counter, WINDOW};
+    let began = std::time::Instant::now();
+    let mut counter = Counter::new(began, WINDOW);
+    let mut headers = no_headers();
+    headers.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
+    headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4200"));
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("1800"));
+    for (class, status) in [
+        (Class::Runs, StatusCode::OK),
+        (Class::Runs, StatusCode::NOT_MODIFIED),
+        (Class::Runs, StatusCode::NOT_MODIFIED),
+        (Class::Jobs, StatusCode::NOT_MODIFIED),
+        (Class::Runners, StatusCode::OK),
+        (Class::JobRead, StatusCode::OK),
+        (Class::Registration, StatusCode::CREATED),
+        (Class::Delete, StatusCode::NO_CONTENT),
+        (Class::Other, StatusCode::FORBIDDEN),
+    ] {
+        counter.record(class, status, &headers);
+    }
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1800 - 90);
+    assert_eq!(
+        counter.take(began + Duration::from_secs(3600)).line(now),
+        "GitHub requests in the last 1h 00m: runs 3 (1 fresh, 2 unchanged), jobs 1 (0 fresh, 1 unchanged), \
+         runners 1 (1 fresh, 0 unchanged), job reads 1 (1 fresh, 0 unchanged), registrations 1 (1 fresh, 0 unchanged), \
+         deletes 1 (1 fresh, 0 unchanged), other 1 (0 fresh, 0 unchanged, 1 refused); \
+         rate limit 4200 of 5000 left, resets in 1m 30s"
+    );
+}
+
+/// The messages logged on this thread while installed with `tracing::subscriber::set_default`.
+#[derive(Clone, Default)]
+struct LogLines(Arc<Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for LogLines {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message<'lines>(&'lines Mutex<Vec<String>>);
+        impl tracing::field::Visit for Message<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+                if field.name() == "message" {
+                    self.0.lock().unwrap().push(format!("{value:?}"));
+                }
+            }
+        }
+        event.record(&mut Message(&self.0));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A client that asked GitHub something says so as it goes, and one that asked nothing stays quiet. The bug it
+/// catches: the figures of the last window lost with the daemon, which is the window the e2e reads.
+#[tokio::test]
+async fn a_client_logs_what_it_asked_as_it_is_dropped() {
+    // A second live dispatcher: with only one, `tracing-core` computes a callsite's interest from the thread that
+    // reaches it first, and a parallel test with no subscriber caches "never".
+    static SECOND: std::sync::LazyLock<tracing::Dispatch> =
+        std::sync::LazyLock::new(|| tracing::Dispatch::new(LogLines::default()));
+    std::sync::LazyLock::force(&SECOND);
+    let lines = LogLines::default();
+    let _installed = tracing::subscriber::set_default(lines.clone());
+    let (url, _) = fake_github(counting_fake()).await;
+    drop(client(&url));
+    let ours = || -> Vec<String> {
+        let lines = lines.0.lock().unwrap();
+        lines
+            .iter()
+            .filter(|line| line.starts_with("GitHub requests"))
+            .cloned()
+            .collect()
+    };
+    assert!(ours().is_empty(), "nothing was asked");
+
+    let github = client(&url);
+    github.runners("o/r").await.unwrap();
+    assert!(ours().is_empty(), "the hour is not over");
+    drop(github);
+    let logged = ours();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(
+        logged[0].starts_with("GitHub requests in the last 0s: runs 0 (0 fresh, 0 unchanged), jobs 0 (0 fresh, 0 unchanged), runners 1 (1 fresh, 0 unchanged)"),
+        "{logged:?}"
+    );
+    assert!(!logged[0].contains(TOKEN));
+
+    // A window that is over as the request is counted is logged with it, and the stop adds nothing for it.
+    let github = client(&url);
+    *lock(&github.requests) =
+        super::requests::Counter::new(std::time::Instant::now(), Duration::ZERO);
+    github.runners("o/r").await.unwrap();
+    assert_eq!(ours().len(), 2, "{:?}", ours());
+    drop(github);
+    assert_eq!(
+        ours().len(),
+        2,
+        "the stop repeated the hour's line: {:?}",
+        ours()
     );
 }
