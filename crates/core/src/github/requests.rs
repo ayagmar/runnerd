@@ -234,7 +234,10 @@ impl Counter {
             StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS => tally.refused += 1,
             _ => tally.fresh += 1,
         }
-        if let Some(limit) = RateLimit::read(headers) {
+        // A refused token gets the unauthenticated reading, which is not the account's.
+        if status != StatusCode::UNAUTHORIZED
+            && let Some(limit) = RateLimit::read(headers)
+        {
             self.report.rate_limit = Some(limit);
         }
     }

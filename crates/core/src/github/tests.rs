@@ -1273,3 +1273,44 @@ async fn a_client_logs_what_it_asked_as_it_is_dropped() {
         ours()
     );
 }
+
+/// GitHub answers a token it refuses with the unauthenticated reading of the limit, 60 an hour. The bug it catches:
+/// that reading replacing the account's, so a revoked token leaves a limit of 60 for a governor to pace by.
+#[tokio::test]
+async fn a_refused_token_does_not_change_the_rate_limit_reading() {
+    let calls = Arc::new(Mutex::new(0));
+    let counter = calls.clone();
+    let (url, _) = fake_github(move |_| {
+        let call = {
+            let mut calls = counter.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        let (status, limit, remaining) = if call == 1 {
+            (StatusCode::OK, "5000", "4990")
+        } else {
+            (StatusCode::UNAUTHORIZED, "60", "58")
+        };
+        (
+            status,
+            [
+                ("x-ratelimit-limit", limit),
+                ("x-ratelimit-remaining", remaining),
+                ("x-ratelimit-reset", "4000000000"),
+            ],
+            r#"{"runners":[]}"#,
+        )
+            .into_response()
+    })
+    .await;
+    let github = client(&url);
+    github.runners("o/r").await.unwrap();
+    assert!(github.runners("o/r").await.is_err());
+    let report = github.requests();
+    assert_eq!(
+        report.tally(Class::Runners).total(),
+        3,
+        "both sends of the refused request count"
+    );
+    assert_eq!(report.rate_limit().unwrap().limit, 5000);
+}
