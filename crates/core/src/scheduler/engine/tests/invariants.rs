@@ -690,8 +690,9 @@ struct JobModel {
     taken_by: Option<(String, String)>,
     /// A tick saw it queued, so the engine follows it.
     listed: bool,
-    /// A listing of its repository's queued jobs since it queued showed it, served by a pool or not, so the status
-    /// lists it while it stays queued.
+    /// The last listing of its repository's queued jobs since it queued showed it, served by a pool or not, so the
+    /// status lists it while it stays queued. One that failed forgets it, as the engine forgets what a failed listing
+    /// showed; that repository keeps its cadence (ADR 0128), so a tick before it is due again does not list it back.
     shown: bool,
     /// A tick saw it running once it was listed and no longer queued: GitHub's details then name its runner,
     /// whatever its log capture said.
@@ -2693,6 +2694,9 @@ impl Case {
         let was_short = self.engine.host_is_short();
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         let github_before = self.github.calls().len();
+        // The listings that fail from here on, in the same window as the calls: one an aborted tick left belongs to no
+        // tick, as the restart after it forgets every listing and lists every repository again.
+        self.github.0.lock().unwrap().queued_failures.clear();
         let seeds_before: BTreeSet<String> = self.engine.seed_memories().into_keys().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
         let queued_before: BTreeSet<u64> = self.queued().into_iter().collect();
@@ -2787,12 +2791,17 @@ impl Case {
     /// serves is listed, once its repository's queued jobs were; a running one listed before that its repository's
     /// listing no longer shows is named by GitHub; a runners listing of a repository starts GitHub's lag for the jobs
     /// of it that its runners took and it still lists; a repository listed no longer shows the jobs cancelled since
-    /// its last listing.
+    /// its last listing; and one whose listing failed shows none of its queued jobs until a listing of it answers.
     fn note_listings(&mut self, github_before: usize, queued_before: &BTreeSet<u64>) {
         let calls = self.github.calls();
+        let failed: BTreeSet<String> =
+            std::mem::take(&mut self.github.0.lock().unwrap().queued_failures)
+                .into_iter()
+                .collect();
         let listed: BTreeSet<&str> = calls[github_before..]
             .iter()
             .filter_map(|call| call.strip_prefix("queued "))
+            .filter(|repository| !failed.contains(*repository))
             .collect();
         let runners_listed: BTreeSet<&str> = calls[github_before..]
             .iter()
@@ -2814,6 +2823,9 @@ impl Case {
             }
         }
         for (id, job) in &mut self.jobs {
+            if failed.contains(job.repository) && job.phase == Phase::Queued {
+                job.shown = false;
+            }
             if !listed.contains(job.repository) {
                 continue;
             }
@@ -4834,6 +4846,30 @@ async fn a_start_the_tick_did_not_make_keeps_the_plain_margin() {
             stalled: false,
         },
         Step::Tick,
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+/// Shrunk from seed 298 of a branch whose generator draws differently; it fails the same way on main. A registration
+/// refused for the rate limit leaves the client failing every request, so the reload's tick lists nothing and forgets
+/// o/r's jobs. The limit then lifts, and a tick 3 s on lists only what is due: o/r keeps the 5 s cadence its failed
+/// listing had (ADR 0128), so job 1 is not shown yet, and comes back at the tick that lists o/r again.
+#[tokio::test(start_paused = true)]
+async fn a_job_a_failed_listing_forgot_is_shown_again_at_the_next_listing_of_its_repository() {
+    let heavy = Step::Queue {
+        second: false,
+        labels: Labels::Heavy,
+    };
+    let steps = [
+        heavy,
+        Step::RateLimitedDuringStart { after: 3 },
+        heavy,
+        Step::RestartLogsFail,
+        Step::Stop { docker_gone: false },
+        Step::Reload(Change::CpuOvercommit),
+        Step::Elapse,
+        Step::TickSoon { after: 3 },
+        Step::TickSoon { after: 3 },
     ];
     assert_eq!(broken(&steps).await, None);
 }
