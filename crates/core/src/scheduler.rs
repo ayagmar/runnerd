@@ -1103,6 +1103,18 @@ struct Sorted {
     warm: usize,
 }
 
+/// The queued jobs `repository`'s labels match, oldest first whatever the listing's order: the order `to_serve` starts
+/// runners in, so the job a start served is the one its runner is named for at the next plan (ADR 0110).
+fn oldest_first(repository: &Repository) -> Vec<&QueuedJob> {
+    let mut matching: Vec<&QueuedJob> = repository
+        .queued
+        .iter()
+        .filter(|job| matches(job, &repository.labels))
+        .collect();
+    matching.sort_by_key(|job| job.id);
+    matching
+}
+
 /// Stops a repository's idle runners no job is left for, beyond its warm ones, and says why its jobs wait when it is
 /// paused or held, or which an idle runner will take. Returns the jobs it wants a runner for and how many warm
 /// runners it is short of, unless it is held.
@@ -1112,11 +1124,7 @@ fn sort_out(
     now: SystemTime,
     decided: &mut Plan,
 ) -> Option<Sorted> {
-    let mut matching: Vec<&QueuedJob> = repository
-        .queued
-        .iter()
-        .filter(|job| matches(job, &repository.labels))
-        .collect();
+    let mut matching = oldest_first(repository);
     let profile = profiles.get(&repository.profile);
     let mut warm = repository.warm;
     if repository.paused {
@@ -1190,7 +1198,7 @@ fn sort_out(
             },
         }));
     let missing = matching.len().saturating_sub(idle.len());
-    // The oldest jobs are the ones still waiting once the idle runners take theirs.
+    // The idle runners take the oldest jobs; the younger ones still wait.
     let skip = matching.len() - missing;
     decided.waiting.extend(
         matching
