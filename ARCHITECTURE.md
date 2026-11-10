@@ -57,7 +57,9 @@ flowchart TB
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
   aggregate count of what runs, which the engine and a replay by `admission::trace` both call
-  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)); `admission::recent` reads
+  ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md)), and has the density study's growth
+  count beside it, whose brake is `admission::growth`, a leaf only its own methods write; only `simulate` reads either
+  yet; `admission::recent` reads
   each job's recent runs, the one window both admission and sizing read memory from
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)); `sizing` turns the history into advice,
   `sizing::memory` says what a raise and a lowering of `memory` read and which lowering went too far, and

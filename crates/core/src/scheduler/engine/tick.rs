@@ -19,6 +19,7 @@ use super::runners::{Collected, Removal};
 use super::slot::Holder;
 use super::start::{Carried, StartOutcome};
 use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown};
+use crate::admission::trace::Reading;
 use crate::admission::{host, pooled};
 use crate::api::AdmissionPolicy;
 use crate::config::Admission;
@@ -267,7 +268,7 @@ struct Held {
     /// What it takes of it.
     takes: u64,
     /// What it uses, from a recent sample.
-    used: Option<u64>,
+    used: Reading,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -944,13 +945,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // Whatever it reserved under measured admission before a reload.
             Admission::Caps => Held {
                 takes: occupant.memory,
-                used: None,
+                used: Reading::Stale,
             },
             // Nothing once its container's cgroup is gone: its job ended and its memory with it, though its slot waits
             // for its log and its removal, for 20 s after a burst.
             Admission::Measured if self.store.container_gone(occupant.runner_name) => Held {
                 takes: 0,
-                used: None,
+                used: Reading::Stale,
             },
             // What it uses when that is more: a job past its prediction, or one in a burst of starts. Its cap when
             // that is not known: the slice's or its own last sample is older than three intervals, as when the
@@ -970,13 +971,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 if !slice_sampled || sampled_at + fresh < now {
                     Held {
                         takes: occupant.memory,
-                        used: None,
+                        used: Reading::Stale,
                     }
                 } else {
                     let used = own.map(|sample| sample.memory);
                     Held {
                         takes: occupant.reserved.max(used.unwrap_or(0)),
-                        used,
+                        used: used.map_or(Reading::NotYet, Reading::Used),
                     }
                 }
             }
@@ -1036,6 +1037,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             host,
             most: self.most_credit(),
             host_reserve: self.host_reserve(),
+            largest: None,
         })
     }
 

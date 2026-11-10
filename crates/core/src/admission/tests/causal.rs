@@ -4,6 +4,7 @@
 use super::*;
 use crate::admission::pooled::{self, MOST_CREDIT};
 use crate::admission::trace::{Outside, Point, Reading, RunId, RunTrace, STEP, Trace};
+use crate::admission::{Brake, GrowthCount};
 
 /// A slice with 1.5G left of two 3.5G reservations and the 512M mirror, under the mark with room for what the credit
 /// adds; a host with memory to spare.
@@ -120,6 +121,7 @@ fn replay_held(
             host_reserve: HostReserve::Top2,
             credit_room: CreditRoom::Counted,
             band,
+            growth: None,
         },
     )
 }
@@ -143,7 +145,7 @@ fn a_pooled_replay_starts_what_only_the_pooled_count_fits() {
     let runner = |key, takes| pooled::Runner {
         key: Some(key),
         takes,
-        used: Some(USED),
+        used: Reading::Used(USED),
         ran: Some(pooled::POOL_AFTER),
         basis: Some(Basis::Job {
             runs: 10,
@@ -168,6 +170,7 @@ fn a_pooled_replay_starts_what_only_the_pooled_count_fits() {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
+        largest: None,
     });
     assert_eq!(
         pooled.hazard.most_credit, direct.credit,
@@ -474,4 +477,230 @@ fn a_run_between_samples_reads_the_last_and_a_gap_reads_nothing() {
     assert_eq!(run.at(9000), Reading::Used(2 * G), "at the edge of fresh");
     assert_eq!(run.at(9001), Reading::Stale);
     assert_eq!(run.at(90_000), Reading::Used(3 * G), "its end is not a gap");
+}
+
+/// A replay of `jobs` as `trace` says they ran, with six slots a profile, under `memory_max`, counted by `growth` or,
+/// without it, plainly.
+fn replay_counted(
+    jobs: &[Ran],
+    trace: &Trace,
+    memory_max: u64,
+    growth: Option<GrowthCount>,
+) -> Replay {
+    let known = known();
+    let slots = BTreeMap::from([("jvm".to_owned(), 6), ("node".to_owned(), 6)]);
+    simulate(
+        &config(),
+        Some(memory_max),
+        None,
+        jobs,
+        Policy::Measured,
+        &slots,
+        Replaying {
+            barriers: Barriers::On,
+            arrivals: Arrivals::AsQueued,
+            known: Some(&known),
+            trace: Some(trace),
+            most_credit: 0,
+            host_reserve: HostReserve::Plain,
+            credit_room: CreditRoom::Counted,
+            band: Band::NoWaiterFits,
+            growth,
+        },
+    )
+}
+
+const TOP3: GrowthCount = GrowthCount {
+    jobs: 3,
+    brake: Brake::Off,
+};
+
+const TOP3_BRAKED: GrowthCount = GrowthCount {
+    jobs: 3,
+    brake: Brake::On,
+};
+
+/// Four `check` runners and four `site` runners from `NOW` for `minutes`, 3.5G reserved each, and `page`, 2.5G, from
+/// minute 12: the runner sets the growth count's replays read.
+fn eight_and_a_page(minutes: u64) -> Vec<Ran> {
+    let mut jobs: Vec<Ran> = (0..4)
+        .flat_map(|i| {
+            [
+                in_run(check(NOW, minutes), 10 + i, 1),
+                in_run(site(NOW, minutes), 20 + i, 1),
+            ]
+        })
+        .collect();
+    jobs.push(in_run(page(NOW + 12 * MINUTE, 5), 30, 1));
+    jobs
+}
+
+/// `jobs` each using `USED` until minute 10 and `grown` after.
+fn growing(jobs: &[Ran], grown: u64) -> Trace {
+    let mut trace = trace_of(jobs);
+    for run in trace.runs.values_mut() {
+        run.samples = (0..70 * MINUTE / STEP)
+            .map(|step| Point {
+                at: step * STEP,
+                memory: if step * STEP < 10 * MINUTE {
+                    USED
+                } else {
+                    grown
+                },
+            })
+            .collect();
+    }
+    trace
+}
+
+/// How long the last job of `pool` waited, in seconds.
+fn last_waited(replay: &Replay, repository: &str, profile: &str) -> u64 {
+    *replay.pools[&pool(repository, profile)]
+        .waits
+        .last()
+        .unwrap()
+}
+
+#[test]
+fn the_growth_count_starts_what_only_it_fits() {
+    // Eight runners using 0.5G each count 0.5G + 4G + the three largest growths, 9G: 13.5G of 15G, where the plain
+    // count is 28.5G. A start is all growth, and the eighth's or page's is not among the three largest, so neither adds
+    // anything; counted in full, either would pass 15G.
+    let jobs = eight_and_a_page(30);
+    let trace = trace_of(&jobs);
+    let plain = replay_counted(&jobs, &trace, 15 * G, None);
+    let counted = replay_counted(&jobs, &trace, 15 * G, Some(TOP3));
+    assert!(
+        plain
+            .pools
+            .values()
+            .flat_map(|pool| &pool.waits)
+            .any(|waited| *waited >= 25 * 60),
+        "the plain count fits four of the eight, the rest wait for the first to end: {:?}",
+        plain.pools
+    );
+    assert!(
+        counted
+            .pools
+            .values()
+            .flat_map(|pool| &pool.waits)
+            .all(|waited| *waited <= 15),
+        "every job starts at the plan it arrives at: {:?}",
+        counted.pools
+    );
+    assert_eq!(counted.hazard.braked, 0, "no brake to engage");
+}
+
+#[test]
+fn the_brake_holds_starts_to_the_plain_count_once_what_runs_outgrows_its_room_and_then_releases() {
+    // At minute 10 each runner grows 1.3G, 10.4G together, past the 9G the count kept: page, at minute 12, fits the
+    // growth count (0.5G + 14.4G + 6G kept) but not the plain one. Every look for the next 10 minutes still has a look
+    // from before the growth in its window, so the brake stands until 30 minutes after the last of them, minute 50.
+    let jobs = eight_and_a_page(60);
+    let trace = growing(&jobs, 1800 * M);
+    let free = replay_counted(&jobs, &trace, 24 * G, Some(TOP3));
+    assert!(
+        last_waited(&free, "halyard/storefront", "node") <= 15,
+        "without the brake it starts at once"
+    );
+    let braked = replay_counted(&jobs, &trace, 24 * G, Some(TOP3_BRAKED));
+    let waited = last_waited(&braked, "halyard/storefront", "node");
+    assert!(
+        (38 * 60 - 15..=38 * 60 + 15).contains(&waited),
+        "from minute 12 to the brake's end at minute 50, waited {waited}"
+    );
+    assert!(
+        (40 * MINUTE - 30_000..=40 * MINUTE + 30_000).contains(&braked.hazard.braked),
+        "it stood from minute 10 to 50, then released: {:?}",
+        braked.hazard
+    );
+}
+
+#[test]
+fn a_host_under_its_line_keeps_the_growth_count_plain() {
+    let jobs = eight_and_a_page(30);
+    let mut trace = trace_of(&jobs);
+    for reading in &mut trace.outside {
+        // 64G less 44G outside leaves just under 20G, the 4G margin and the 16G quarter, with no runner yet.
+        reading.memory = 44 * G + 1;
+    }
+    let counted = replay_counted(&jobs, &trace, 24 * G, Some(TOP3));
+    let plain = replay_counted(&jobs, &trace, 24 * G, None);
+    assert_eq!(
+        counted.pools, plain.pools,
+        "the same starts as the plain count"
+    );
+    assert!(counted.hazard.guarded > 0, "{:?}", counted.hazard);
+}
+
+#[test]
+fn a_cold_window_engages_the_brake_where_its_warm_one_does_not() {
+    // One check run grows to 3.4G at minute 10: within the room the count keeps. Cold, every check run does, and
+    // four together outgrow it.
+    let jobs = eight_and_a_page(30);
+    let mut trace = trace_of(&jobs);
+    let heavy = growing(&jobs[..1], 3400 * M);
+    trace.runs.extend(heavy.runs);
+    let warm = replay_counted(&jobs, &trace, 24 * G, Some(TOP3_BRAKED));
+    assert_eq!(warm.hazard.braked, 0, "{:?}", warm.hazard);
+    let cold = replay_counted(&jobs, &trace.cold(&jobs), 24 * G, Some(TOP3_BRAKED));
+    assert!(cold.hazard.braked > 0, "{:?}", cold.hazard);
+}
+
+#[test]
+fn a_replayed_runner_counts_its_pools_largest_cpu_until_its_job_is_known() {
+    // Site's runner starts while build, 6.5 CPUs, waits in its pool, so it reserves 6.5 CPUs until site is named at
+    // minute 10, as the daemon's does; then 1. Report, 2 CPUs, fits beside it only from then.
+    let cpu = |run: Ran, average| Ran {
+        cpu_average: Some(average),
+        ..run
+    };
+    let build = |queued| {
+        cpu(
+            run("halyard/storefront", "build", "node", queued, 30, G),
+            6500,
+        )
+    };
+    let report = |queued| cpu(run("halyard/ledger", "report", "jvm", queued, 30, G), 2000);
+    let mut known = known();
+    let before = NOW - 900 * MINUTE;
+    known
+        .jobs
+        .extend((0..10).flat_map(|i| [build(before + i * MINUTE), report(before + i * MINUTE)]));
+    known.jobs.sort_by_key(|run| run.queued_at);
+    let jobs = vec![
+        in_run(site(NOW, 30), 1, 1),
+        in_run(build(NOW), 2, 1),
+        in_run(report(NOW + MINUTE), 3, 1),
+    ];
+    let mut trace = trace_of(&jobs);
+    trace
+        .runs
+        .get_mut(&RunId::of(&jobs[0]))
+        .unwrap()
+        .named_after = 10 * MINUTE;
+    let replay = simulate(
+        &config(),
+        Some(40 * G),
+        Some(7000),
+        &jobs,
+        Policy::Measured,
+        &BTreeMap::new(),
+        Replaying {
+            barriers: Barriers::Off,
+            arrivals: Arrivals::AsQueued,
+            known: Some(&known),
+            trace: Some(&trace),
+            most_credit: 0,
+            host_reserve: HostReserve::Plain,
+            credit_room: CreditRoom::Counted,
+            band: Band::NoWaiterFits,
+            growth: None,
+        },
+    );
+    let waited = last_waited(&replay, "halyard/ledger", "jvm");
+    assert!(
+        (9 * 60..=9 * 60 + 15).contains(&waited),
+        "from minute 1 to site's name at minute 10, waited {waited}"
+    );
 }
