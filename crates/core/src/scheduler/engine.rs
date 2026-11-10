@@ -18,6 +18,7 @@ mod caches;
 mod claims;
 mod clock;
 mod control;
+mod engagement;
 mod exits;
 mod history;
 mod images;
@@ -54,6 +55,7 @@ pub use self::control::{
     Author, Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown,
     Target, same_slice,
 };
+use self::engagement::Engagement;
 use self::history::{CAPTURE_DRAIN, Found};
 use self::images::Images;
 use self::ledger::Ledger;
@@ -244,10 +246,6 @@ struct Occupant {
     runner_name: String,
     runner_id: u64,
     container: String,
-    busy: bool,
-    /// Whether the last runners listing was the first to show it busy, or GitHub said so since: the queued jobs
-    /// listing after it may still show the job it took, as GitHub lists one queued for a few seconds after.
-    newly_busy: bool,
     started_at: SystemTime,
     /// Its container's memory cap, which a reload does not change.
     memory: u64,
@@ -256,13 +254,6 @@ struct Occupant {
     /// How it was admitted, with what it reserved of the budget, kept through a restart by its record; `None` for
     /// one whose record says nothing of it, which reserves its cap.
     admission: Option<api::Admission>,
-    /// The job it took, once its log capture found it.
-    job: Option<u64>,
-    /// When this daemon's capture found that job; `None` before, and for a job found again after a restart only by
-    /// an adopted runner, whose `purpose` says so.
-    job_started: Option<SystemTime>,
-    /// That job as admission tells jobs apart, once the history had its record.
-    key: Option<Key>,
     /// The labels it registered with; `None` for one adopted from a container that does not say.
     labels: Option<Vec<String>>,
     /// The image it runs; `None` for one adopted from a container that does not say.
@@ -270,8 +261,8 @@ struct Occupant {
     /// The release whose container spec it runs; `None` for one adopted from a container of a release before the
     /// label.
     spec: Option<String>,
-    /// Why this daemon started it; `None` for one a restart adopted.
-    purpose: Option<Purpose>,
+    /// Why it is there, whether it holds a job and which.
+    engagement: Engagement,
 }
 
 impl Occupant {
@@ -319,26 +310,24 @@ impl Occupant {
             .map_or(self.cpus, |cpu| cpu.reserved)
     }
 
-    /// Whether GitHub's last runners listing showed it busy, or GitHub said so since. Alone it says what the listing
-    /// says, which lags a capture that named a job: `engaged` is whether it holds one.
+    /// Whether GitHub's last runners listing showed it busy, or GitHub said so since (`Engagement::listed_busy`).
     fn listed_busy(&self) -> bool {
-        self.busy
+        self.engagement.listed_busy()
     }
 
-    /// The job its capture or its history row named; a listing that shows it idle does not unname it.
+    /// The job its capture or its history row named (`Engagement::named_job`).
     fn named_job(&self) -> Option<u64> {
-        self.job
+        self.engagement.named_job()
     }
 
     /// Whether `job` is the one named for it.
     fn runs(&self, job: u64) -> bool {
-        self.job == Some(job)
+        self.engagement.runs(job)
     }
 
-    /// Whether it holds a job as far as this daemon knows: the listing shows it busy, or a capture named its job
-    /// first.
+    /// Whether it holds a job as far as this daemon knows (`Engagement::engaged`).
     fn engaged(&self) -> bool {
-        self.busy || self.job.is_some()
+        self.engagement.engaged()
     }
 
     /// Whether it waits for a job: not `engaged`.
@@ -346,42 +335,35 @@ impl Occupant {
         !self.engaged()
     }
 
-    /// Whether it may be running one of its pool's listed jobs that no capture named yet: the listing that first
-    /// showed it busy can still show that job queued. A listing clears this (`apply_runners`), so a pass between two
-    /// listings keeps counting it.
+    /// Whether it may be running one of its pool's listed jobs that no capture named yet
+    /// (`Engagement::claims_a_listed_job`).
     fn claims_a_listed_job(&self) -> bool {
-        self.newly_busy && self.job.is_none()
+        self.engagement.claims_a_listed_job()
     }
 
-    /// Whether a detaching stop removes it: no job named and either listed idle or adopted, as adoption counts a
-    /// runner busy until a listing says otherwise. One started here that a listing shows busy is left to its job.
+    /// Whether a detaching stop removes it (`Engagement::goes_when_detaching`).
     fn goes_when_detaching(&self) -> bool {
-        self.job.is_none() && (!self.busy || !self.was_started_here())
-    }
-
-    /// Whether this daemon started it: a restart adopted it otherwise.
-    fn was_started_here(&self) -> bool {
-        self.purpose.is_some()
+        self.engagement.goes_when_detaching()
     }
 
     /// Why this daemon started it; `None` for one a restart adopted.
     fn purpose(&self) -> Option<Purpose> {
-        self.purpose
+        self.engagement.purpose()
     }
 
-    /// When this daemon's capture found its job; `None` for an adopted runner, whose job started under another daemon.
+    /// When this daemon's capture found its job (`Engagement::job_found_here`).
     fn job_found_here(&self) -> Option<SystemTime> {
-        self.job_started.filter(|_| self.was_started_here())
+        self.engagement.job_found_here()
     }
 
     /// Its job as admission tells jobs apart, once the history had its record.
     fn key(&self) -> Option<&Key> {
-        self.key.as_ref()
+        self.engagement.key()
     }
 
     /// Whether admission can tell its job apart yet. A job named with no record yet has no key.
     fn has_key(&self) -> bool {
-        self.key.is_some()
+        self.key().is_some()
     }
 
     /// Whether it holds a job admission cannot tell apart yet, as when its log capture failed.
@@ -393,7 +375,7 @@ impl Occupant {
         api::RunningJob {
             repository: self.repository.clone(),
             runner: self.runner_name.clone(),
-            job: self.job,
+            job: self.named_job(),
         }
     }
 }
@@ -494,8 +476,6 @@ pub struct Engine<G = Github, D = Docker> {
     /// The jobs followed on GitHub that no runner of this machine runs now: queued, or closing once their runner
     /// went.
     ledger: Ledger,
-    /// Runners of runs a forced pause cancelled, with when they are removed if they still run.
-    cancelling: BTreeMap<String, tokio::time::Instant>,
     last_prune: Option<SystemTime>,
     /// The records of failed jobs and the shells open in them.
     records: records::RecordState,
@@ -645,7 +625,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             leases: Leases::default(),
             mirror_until: MirrorPosition::default(),
             ledger: Ledger::default(),
-            cancelling: BTreeMap::new(),
             last_prune: None,
             measured: admission::Measured::default(),
             warm: warm::Warm::default(),

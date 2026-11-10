@@ -150,6 +150,7 @@ impl Leftovers {
 mod tests {
     use std::time::SystemTime;
 
+    use super::super::Engagement;
     use super::*;
 
     const POLL: Duration = Duration::from_secs(30);
@@ -160,19 +161,14 @@ mod tests {
             runner_name: format!("runner-{id}"),
             runner_id: 1,
             container: id.to_owned(),
-            busy: false,
-            newly_busy: false,
             started_at: SystemTime::UNIX_EPOCH,
             memory: 0,
             cpus: 0,
             admission: None,
-            job: None,
-            key: None,
-            job_started: None,
             labels: None,
             image: None,
             spec: None,
-            purpose: None,
+            engagement: Engagement::adopted(None),
         };
         let slot = SlotRef {
             profile: "small".to_owned(),

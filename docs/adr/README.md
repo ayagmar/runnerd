@@ -126,4 +126,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0116](0116-a-profiles-upkeep-is-one-state.md) | A profile's upkeep is one state | Accepted |
 | [0117](0117-a-runners-exit-is-one-verdict.md) | A runner's exit is one verdict | Accepted |
 | [0118](0118-a-followed-job-is-in-one-stage.md) | A followed job is in one stage | Accepted |
+| [0119](0119-a-slots-runner-is-one-engagement.md) | A slot's runner is one engagement | Accepted |
 | [0120](0120-a-job-its-runner-failed-reads-as-a-runner-fault.md) | A job its runner failed reads as a runner fault | Accepted |

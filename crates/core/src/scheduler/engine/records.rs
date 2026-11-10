@@ -336,7 +336,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     ) -> Result<bool, Undecided> {
         if !self.records_failures(&slot.profile)
             || occupant
-                .job
+                .named_job()
                 .is_some_and(|job| self.records.of_job(job).is_some())
         {
             return Ok(false);
@@ -363,10 +363,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if self.records.of_job(job).is_some() {
             return Ok(false);
         }
-        let occupant = Occupant {
-            job: Some(job),
-            ..occupant.clone()
-        };
+        let mut occupant = occupant.clone();
+        occupant.engagement.named_by_worker_log(job);
         Ok(self.begin_record(slot, &occupant).await)
     }
 

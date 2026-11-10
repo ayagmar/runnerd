@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use super::leftovers::Unread;
 use super::records::Undecided;
-use super::{Engine, Occupant};
+use super::{Engagement, Engine, Occupant};
 use crate::api;
 use crate::cache;
 use crate::docker::{self, DockerApi, is_being_removed, is_not_found};
@@ -155,8 +155,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_name: container.name.clone(),
             runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
             container: container.id.clone(),
-            busy: true,
-            newly_busy: false,
             // Its uptime goes on from its container's start, not from this restart.
             started_at: caps.started_at.unwrap_or_else(SystemTime::now),
             memory: caps.memory,
@@ -168,17 +166,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .await
                 .ok()
                 .flatten(),
-            // Its capture reports it again; until then, or if it cannot, the history knows it.
-            job: self.store.runner_job(&container.name).await.ok().flatten(),
-            key: None,
-            job_started: None,
             labels: container
                 .labels
                 .get(super::runners::LABELS)
                 .map(|labels| labels.split(',').map(str::to_owned).collect()),
             image: container.labels.get(super::runners::IMAGE).cloned(),
             spec: container.labels.get(super::runners::SPEC).cloned(),
-            purpose: None,
+            // Its capture reports its job again; until then, or if it cannot, the history knows it.
+            engagement: Engagement::adopted(
+                self.store.runner_job(&container.name).await.ok().flatten(),
+            ),
         }
     }
 

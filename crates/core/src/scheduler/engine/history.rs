@@ -287,8 +287,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if occupant.runs(found.job) {
             return;
         }
-        occupant.job = Some(found.job);
-        occupant.job_started = Some(SystemTime::now());
+        occupant.engagement.found(found.job, SystemTime::now());
         // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
         // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
         let pool = Pool {
@@ -335,7 +334,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         for occupant in self.slots.values_mut().flatten().flatten() {
             if occupant.runs(details.id) {
-                occupant.key = Some(key.clone());
+                occupant.engagement.keyed(key.clone());
             }
         }
     }

@@ -1187,7 +1187,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Updates each runner's busy flag from the listings and deletes this host's runners that no slot holds.
     async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>) {
         for occupant in self.slots.values_mut().flatten().flatten() {
-            occupant.newly_busy = false;
+            occupant.engagement.runners_listed();
         }
         for (repository, answer) in listings {
             // Whether this machine still has a runner registered on it.
@@ -1216,8 +1216,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
                     Some(occupant) => {
-                        occupant.newly_busy |= runner.busy && !occupant.busy;
-                        occupant.busy = runner.busy;
+                        occupant.engagement.listed(runner.busy);
                         left = true;
                     }
                     // Only this machine's names: other machines serve the same repositories.
