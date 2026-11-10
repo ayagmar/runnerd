@@ -1,4 +1,4 @@
--- The job history at schema version 19, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 21, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -105,7 +105,10 @@ CREATE TABLE runners (
     purpose TEXT,
     -- Why it was removed while idle (`scheduler::StopReason::as_str`); NULL for one that ended, was killed or is
     -- still up, and in rows from before schema 19.
-    stopped_for TEXT
+    stopped_for TEXT,
+    -- When a forced pause that cancelled its run removes it if it still runs, in ms since the epoch; NULL for one no
+    -- forced pause cancelled, and in rows from before schema 21.
+    cancel_by INTEGER
 );
 
 CREATE TABLE steps (

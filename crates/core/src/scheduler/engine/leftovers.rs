@@ -168,7 +168,7 @@ mod tests {
             labels: None,
             image: None,
             spec: None,
-            engagement: Engagement::adopted(None),
+            engagement: Engagement::adopted(None, None),
         };
         let slot = SlotRef {
             profile: "small".to_owned(),

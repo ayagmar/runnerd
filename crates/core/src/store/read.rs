@@ -1208,6 +1208,20 @@ pub(super) fn runner_job(db: &Connection, runner: &str) -> rusqlite::Result<Opti
     .optional()
 }
 
+pub(super) fn runner_cancel_deadline(
+    db: &Connection,
+    runner: &str,
+) -> rusqlite::Result<Option<u64>> {
+    Ok(db
+        .query_row(
+            "SELECT cancel_by FROM runners WHERE name = ?1",
+            [runner],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 pub(super) fn runner_memory_cap(db: &Connection, runner: &str) -> rusqlite::Result<Option<u64>> {
     Ok(db
         .query_row(

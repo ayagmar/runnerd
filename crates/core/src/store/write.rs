@@ -90,6 +90,7 @@ impl Writer<'_> {
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
             Write::RunnerStoppedFor { runner, reason } => self.runner_stopped_for(&runner, reason),
+            Write::RunnerCancelBy { runner, at } => self.runner_cancel_by(&runner, at),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
             Write::SlotWaited { jobs, ms } => self.slot_waited(&jobs, ms),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
@@ -331,6 +332,16 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET stopped_for = ?2 WHERE name = ?1",
                 params![runner, reason],
+            ),
+        );
+    }
+
+    fn runner_cancel_by(&self, runner: &str, at: u64) {
+        logged(
+            "record a cancelled runner's deadline",
+            self.db.execute(
+                "UPDATE runners SET cancel_by = ?2 WHERE name = ?1",
+                params![runner, at],
             ),
         );
     }
