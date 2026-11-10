@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use runnerd_core::admission::trace::Trace;
-use runnerd_core::admission::{Band, Brake, GrowthCount, HostReserve};
+use runnerd_core::admission::{Band, Brake, GrowthCount, GuardHold, HostReserve, pooled};
 use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
@@ -127,16 +127,15 @@ enum Command {
         /// With --causal, the credit of a row, 0G for the plain count; repeat it for more rows [default: 0, 4G, 6G, 8G].
         #[arg(long, requires = "causal")]
         credit: Vec<ByteSize>,
-        /// With --causal, how rows count what runs: `plain`, as the daemon does, a row for each --credit; `top2` or
-        /// `top3`, a row by what runs uses with room for its two or three largest growths, at least 6G, for both
-        /// MemoryMax and the host, and the plain count while the host has under its margin and a quarter of its
-        /// memory available. It picks the rows: list `plain` too to keep the credit rows [default: plain].
+        /// With --causal, how rows count what runs: `plain`, by the credits alone, a row for each --credit; `growth`, as
+        /// the daemon does (ADR 0130); `top2` or `top3`, a row by what runs uses with room for its two or three
+        /// largest growths, at least 6G, for both MemoryMax and the host, and the plain count while the host has under
+        /// its margin and a quarter of its memory available, which the options below change. It picks the rows: list
+        /// `plain` too to keep the credit rows [default: plain].
         #[arg(long, requires = "causal", value_enum)]
         count: Vec<CountArg>,
-        /// With --causal, give the top2 and top3 rows the growth brake: the plain count for 30 minutes once what runs
-        /// grew past the room the count kept within 10 minutes.
-        #[arg(long, requires = "causal")]
-        brake: bool,
+        #[command(flatten)]
+        rules: Rules,
         /// With --causal, what the host's limit reads of what runs: `top2`, eligible runners at their use with room
         /// for the two largest growths, as the daemon does; or `plain`, every runner's take.
         #[arg(long, requires = "causal", value_enum, default_value_t = HostReserveArg::Top2)]
@@ -210,14 +209,14 @@ fn main() -> ExitCode {
             guard_overhead,
             credit,
             count,
-            brake,
+            rules,
             host_reserve,
             any_waiter_band,
             shift,
             moves,
         }) => config_or_default(config).and_then(|path| {
             let rows = causal
-                .then(|| rows(&credit, &count, brake))
+                .then(|| rows(&credit, &count, rules.variant()))
                 .transpose()?
                 .unwrap_or_default();
             run_simulation(
@@ -337,32 +336,103 @@ struct Limits {
 /// `runnerd simulate --causal --count`: how a row counts what runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CountArg {
-    /// As the daemon does: every runner's take, less the credits.
+    /// Every runner's take, less the credits.
     Plain,
+    /// As the daemon does: the growth count with its brake and every rule (ADR 0130).
+    Growth,
     /// What runs uses, with room for its two largest growths.
     Top2,
     /// What runs uses, with room for its three largest growths.
     Top3,
 }
 
-/// The rows `--credit`, `--count` and `--brake` ask `runnerd simulate --causal` for: each `plain` a row for each credit,
-/// [`CREDITS`] without one; each growth count a row.
+/// The flags of `runnerd simulate --causal` that give the top2 and top3 rows the growth count's rules (ADR 0130).
+#[derive(Debug, Clone, Copy, clap::Args)]
+#[allow(
+    clippy::doc_markdown,
+    reason = "clap prints these comments as --help, where backticks would show"
+)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one switch per rule, as the command line has them"
+)]
+struct Rules {
+    /// With --causal, give the top2 and top3 rows the growth brake: their count rests for 30 minutes once what
+    /// runs grew past the room it kept within 10 minutes.
+    #[arg(long, requires = "causal")]
+    brake: bool,
+    /// With --causal, bound the top2 and top3 rows' credit as the daemon's is: MemoryMax's at most the slice's
+    /// room under its high-water mark less 2G, and both at most what the host has past what it keeps.
+    #[arg(long, requires = "causal")]
+    bound: bool,
+    /// With --causal, make the top2 and top3 rows keep room for at least every young runner's growth: one whose
+    /// job has run under a minute, or that has no job yet.
+    #[arg(long, requires = "causal")]
+    young: bool,
+    /// With --causal, count the top2 and top3 rows by the credits, not the plain count, below the guard's line
+    /// and while the brake holds.
+    #[arg(long, requires = "causal")]
+    credits_below: bool,
+    /// With --causal and --brake, rest the top2 and top3 rows' count for 5 minutes from a plan that finds it below the
+    /// guard's line, and again from the first plan after that still below it.
+    #[arg(long, requires = "brake")]
+    guard_hold: bool,
+}
+
+impl Rules {
+    /// The rules the flags ask for.
+    fn variant(self) -> Variant {
+        Variant {
+            brake: if self.brake { Brake::On } else { Brake::Off },
+            bound: if self.bound {
+                pooled::Bound::HighWater
+            } else {
+                pooled::Bound::Open
+            },
+            young: if self.young {
+                pooled::Young::Covered
+            } else {
+                pooled::Young::Ranked
+            },
+            below: if self.credits_below {
+                pooled::Below::Credits
+            } else {
+                pooled::Below::Plain
+            },
+            guard: if self.guard_hold {
+                GuardHold::On
+            } else {
+                GuardHold::Off
+            },
+        }
+    }
+}
+
+/// The rules `--brake`, `--bound`, `--young`, `--credits-below` and `--guard-hold` give the top2 and top3 rows.
+#[derive(Debug, Clone, Copy)]
+struct Variant {
+    brake: Brake,
+    bound: pooled::Bound,
+    young: pooled::Young,
+    below: pooled::Below,
+    guard: GuardHold,
+}
+
+/// The rows `--credit`, `--count` and the rules of `variant` ask `runnerd simulate --causal` for: each `plain` a row for
+/// each credit, [`CREDITS`] without one; each growth count a row.
 fn rows(
     credits: &[ByteSize],
     counts: &[CountArg],
-    brake: bool,
+    variant: Variant,
 ) -> Result<Vec<simulate::Counting>, ExitCode> {
     if !credits.is_empty() && !counts.is_empty() && !counts.contains(&CountArg::Plain) {
-        return Err(fail(
-            &"--credit needs --count plain beside --count top2 or top3",
-        ));
+        return Err(fail(&"--credit needs --count plain beside a growth count"));
     }
     let counts = if counts.is_empty() {
         &[CountArg::Plain][..]
     } else {
         counts
     };
-    let brake = if brake { Brake::On } else { Brake::Off };
     let mut rows = Vec::new();
     for count in counts {
         match count {
@@ -374,19 +444,32 @@ fn rows(
                     .iter()
                     .map(|credit| simulate::Counting::Credit(credit.0)),
             ),
+            CountArg::Growth => rows.push(simulate::Counting::Growth(GrowthCount::DAEMON)),
             CountArg::Top2 | CountArg::Top3 => {
                 rows.push(simulate::Counting::Growth(GrowthCount {
-                    jobs: if *count == CountArg::Top2 { 2 } else { 3 },
-                    brake,
+                    growth: pooled::Growth {
+                        bound: variant.bound,
+                        young: variant.young,
+                        below: variant.below,
+                        ..pooled::Growth::top(if *count == CountArg::Top2 { 2 } else { 3 })
+                    },
+                    brake: variant.brake,
+                    guard: variant.guard,
                 }));
             }
         }
     }
-    let grows = rows
+    let varies = variant.brake == Brake::On
+        || variant.bound == pooled::Bound::HighWater
+        || variant.young == pooled::Young::Covered
+        || variant.below == pooled::Below::Credits;
+    let tops = counts
         .iter()
-        .any(|row| matches!(row, simulate::Counting::Growth(_)));
-    if brake == Brake::On && !grows {
-        return Err(fail(&"--brake needs --count top2 or top3"));
+        .any(|count| matches!(count, CountArg::Top2 | CountArg::Top3));
+    if varies && !tops {
+        return Err(fail(
+            &"--brake, --bound, --young and --credits-below need --count top2 or top3",
+        ));
     }
     Ok(rows)
 }
@@ -908,4 +991,37 @@ async fn stop(force: bool, socket: Option<PathBuf>) -> Result<ExitCode, ExitCode
         answer.map_or("shutting down", |answer| answer.stopping.line())
     ));
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_daemons_growth_count_is_top3_with_every_rule() {
+        // Catches `--count growth` drifting from the rules `simulate` names it by, so that the table's row for the
+        // daemon's count replays another one.
+        let every = Variant {
+            brake: Brake::On,
+            bound: pooled::Bound::HighWater,
+            young: pooled::Young::Covered,
+            below: pooled::Below::Credits,
+            guard: GuardHold::On,
+        };
+        let none = Variant {
+            brake: Brake::Off,
+            bound: pooled::Bound::Open,
+            young: pooled::Young::Ranked,
+            below: pooled::Below::Plain,
+            guard: GuardHold::Off,
+        };
+        assert_eq!(
+            rows(&[], &[CountArg::Top3], every).ok(),
+            rows(&[], &[CountArg::Growth], none).ok()
+        );
+        assert!(
+            rows(&[], &[CountArg::Growth], every).is_err(),
+            "a rule without a top2 or top3 row is refused"
+        );
+    }
 }

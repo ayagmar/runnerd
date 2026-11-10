@@ -12,21 +12,21 @@
 use runnerd_core::api::{
     Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, AutoNote, AutoPlan, Basis, Bucket,
     Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind,
-    CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, CpuAdmission,
-    CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event, EventEnvelope,
-    EventQuery, HoldCause, Holder, HostBudget, HostCredit, HostHazard, HostMemory, HostSample,
-    HostSampleQuery, HostSamples, HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job,
-    JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState, JobSummary, LogQuery,
-    LogSummary, LongWait, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest,
-    NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period,
-    PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob,
-    Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
-    ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink, RunnerFailure,
-    RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity,
-    ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold,
-    SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats,
-    StatsQuery, StatsRow, Status, Step, Stopping, Swap, Timeline, Usd, WaitSpread, Waiting,
-    WeekWaits,
+    CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, CountBrake,
+    Counted, CpuAdmission, CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event,
+    EventEnvelope, EventQuery, HoldCause, Holder, HostBudget, HostCredit, HostHazard, HostMemory,
+    HostSample, HostSampleQuery, HostSamples, HostSpan, Insight, InsightKind, Insights,
+    InsightsQuery, Job, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState,
+    JobSummary, LogQuery, LogSummary, LongWait, MemoryBound, MemoryHold, Notification, NotifyEvent,
+    NotifyTest, NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks,
+    Period, PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus,
+    QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
+    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink,
+    RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings,
+    SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing,
+    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread,
+    Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Stopping, Swap, Timeline, Usd,
+    WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -43,7 +43,7 @@ pub(crate) fn status() -> Status {
 }
 
 /// A status with nothing that serializing skips: a host reading that names no programs and has no ceiling or swap, no CPU
-/// budget, a queued job without a pool or a reason.
+/// budget, a growth count resting with no brake, a queued job without a pool or a reason.
 pub(crate) fn status_empty() -> Status {
     let mut status = status();
     if let Some(host) = &mut status.budget.host {
@@ -51,6 +51,12 @@ pub(crate) fn status_empty() -> Status {
         host.memory.ceiling = None;
         host.memory.swap = None;
     }
+    status.budget.counted = Some(Counted {
+        used: 4 << 30,
+        kept: None,
+        jobs: 3,
+        brake: None,
+    });
     status.budget.cpu = None;
     status.budget.slice_cpus = None;
     status.queued[0].profile = None;
@@ -68,6 +74,16 @@ fn budget() -> Budget {
             credit: 1 << 30,
             counted: 8 << 30,
             runners: 2,
+        }),
+        counted: Some(Counted {
+            used: 4 << 30,
+            kept: Some(4 << 30),
+            jobs: 3,
+            brake: Some(CountBrake::Grew {
+                grew: 7 << 30,
+                kept: 6 << 30,
+                until: 1_800_000_000,
+            }),
         }),
         admission: AdmissionPolicy::Measured,
         held: false,
@@ -244,6 +260,32 @@ pub(crate) fn hold_cause() -> Vec<HoldCause> {
     for cause in &every {
         match cause {
             HoldCause::NoJob | HoldCause::IdleExits | HoldCause::Register | HoldCause::Start => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn count_brake() -> Vec<CountBrake> {
+    let every = vec![
+        CountBrake::Grew {
+            grew: 7 << 30,
+            kept: 6 << 30,
+            until: 1_800_000_000,
+        },
+        CountBrake::Restarted {
+            until: 1_800_000_000,
+        },
+        CountBrake::Guard {
+            until: Some(1_800_000_000),
+        },
+        CountBrake::Guard { until: None },
+    ];
+    for brake in &every {
+        match brake {
+            CountBrake::Grew { .. }
+            | CountBrake::Restarted { .. }
+            | CountBrake::Guard { .. }
+            | CountBrake::Unknown => {}
         }
     }
     every

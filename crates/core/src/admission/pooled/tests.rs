@@ -50,7 +50,7 @@ fn roomy(runners: &[Runner<'_>]) -> Count {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
-        largest: None,
+        growth: None,
     })
 }
 
@@ -218,7 +218,8 @@ fn night_memory() -> HostMemory {
     }
 }
 
-/// `runners` read as that night's status read them, counting by `largest`.
+/// `runners` read as that night's status read them, counting by the growth count of the `largest` growths, as the
+/// density study had it (`Growth::top`).
 fn night<'run>(runners: &'run [Runner<'run>], largest: Option<usize>) -> Snapshot<'run> {
     let memory = night_memory();
     Snapshot {
@@ -231,7 +232,7 @@ fn night<'run>(runners: &'run [Runner<'run>], largest: Option<usize>) -> Snapsho
         host: Some(host::pooling(&memory, Remembered::default())),
         most: MOST_CREDIT,
         host_reserve: true,
-        largest,
+        growth: largest.map(Growth::top),
     }
 }
 
@@ -330,7 +331,7 @@ fn the_growth_count_keeps_at_least_its_floor_and_at_most_every_growth() {
     let few = [settled(&a, 3 * G, G), settled(&b, 3 * G, G)];
     let count_of = |runners: &[Runner<'_>]| {
         count(&Snapshot {
-            largest: Some(GROWTH_JOBS),
+            growth: Some(Growth::top(GROWTH_JOBS)),
             ..night(runners, None)
         })
     };
@@ -406,7 +407,7 @@ fn every_guard_can_take_the_credit_back() {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
-        largest: None,
+        growth: None,
     };
     assert_eq!(count(&snapshot).credit, 2 * G);
     let credit = |snapshot: Snapshot<'_>| count(&snapshot).credit;
@@ -510,10 +511,10 @@ fn the_host_keeps_room_for_the_two_largest_growths_and_counts_the_rest_at_use() 
 }
 
 #[test]
-fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
-    // Catches a host credit taken from a stale or missing reading, during a stall, with `pooled_host` off, turned off
-    // with `pooled_count`, which is `MemoryMax`'s decision alone, or lost on a slice with no `MemoryMax`, where the host
-    // binds alone.
+fn the_host_credit_needs_its_own_reserve_fresh_readings_and_no_stall() {
+    // Catches a host credit taken from a stale or missing reading, during a stall, without the host's reserve, taken
+    // off with `MemoryMax`'s credit, which is that budget's alone, or lost on a slice with no `MemoryMax`, where the
+    // host binds alone.
     let (a, b, c) = (key("o/r", "a"), key("o/r", "b"), key("o/r", "c"));
     let runners = [
         settled(&a, 6 * G, G),
@@ -534,16 +535,16 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
         }),
         most: MOST_CREDIT,
         host_reserve: true,
-        largest: None,
+        growth: None,
     };
     let host_credit = |snapshot: Snapshot<'_>| count(&snapshot).host_credit;
     assert_eq!(host_credit(snapshot), 3 * G);
-    let pooled_count_off = Snapshot {
+    let no_slice_credit = Snapshot {
         most: 0,
         ..snapshot
     };
     assert_eq!(
-        host_credit(pooled_count_off),
+        host_credit(no_slice_credit),
         3 * G,
         "apart from MemoryMax's"
     );
@@ -558,7 +559,7 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
     assert_eq!((unlimited.credit, unlimited.host_credit), (0, 3 * G));
     let off = Snapshot {
         host_reserve: false,
-        largest: None,
+        growth: None,
         ..snapshot
     };
     let no_slice = Snapshot {
@@ -577,7 +578,7 @@ fn the_host_credit_needs_its_own_switch_fresh_readings_and_no_stall() {
         ..snapshot
     };
     for (gate, snapshot) in [
-        ("pooled_host off", off),
+        ("no host reserve", off),
         ("no recent slice sample", no_slice),
         ("no recent host reading", no_host),
         ("a stall", stalled),
@@ -700,7 +701,7 @@ mod generated {
             }),
             most: if rng.below(8) == 0 { 0 } else { MOST_CREDIT },
             host_reserve: rng.below(8) != 0,
-            largest: None,
+            growth: None,
         }
     }
 
@@ -896,17 +897,42 @@ mod generated {
         }
     }
 
-    /// `runners` in a generated snapshot counted by the growth count of one to four jobs.
+    /// `runners` in a generated snapshot counted by a growth count of one to four jobs, each of its rules on or off,
+    /// its brake holding it one time in eight: the daemon's among them.
     fn growth_snapshot<'run>(rng: &mut Rng, runners: &'run [Runner<'run>]) -> Snapshot<'run> {
+        let growth = Growth {
+            jobs: 1 + usize::try_from(rng.below(4)).unwrap(),
+            bound: if rng.below(2) == 0 {
+                Bound::HighWater
+            } else {
+                Bound::Open
+            },
+            young: if rng.below(2) == 0 {
+                Young::Covered
+            } else {
+                Young::Ranked
+            },
+            below: if rng.below(2) == 0 {
+                Below::Credits
+            } else {
+                Below::Plain
+            },
+            hold: if rng.below(8) == 0 {
+                Hold::Held
+            } else {
+                Hold::Free
+            },
+        };
         Snapshot {
-            largest: Some(1 + usize::try_from(rng.below(4)).unwrap()),
+            growth: Some(growth),
             ..snapshot(rng, runners)
         }
     }
 
-    /// The growth count, under the guard's line or over it: one figure for both budgets, never past the plain count nor
-    /// under what counts in full with the room it must keep; a runner leaving frees at most its take; a start adds at
-    /// most its own.
+    /// The growth count, under the guard's line or over it, by every rule: never past the plain count; over the line
+    /// and free, what counts in full with the room it keeps, which is at least the floor and with `Young::Covered`
+    /// every young runner's growth, at most all of it, both budgets reading that unbounded and at least that bounded;
+    /// otherwise what `Below` says. A runner leaving frees at most its take; a start adds at most its own.
     #[test]
     fn the_growth_count_keeps_its_bounds_on_every_snapshot() {
         let keys: Vec<Key> = (0..5)
@@ -917,12 +943,20 @@ mod generated {
             let mut rng = Rng(seed);
             let runners = runners(&mut rng, &keys);
             let view = growth_snapshot(&mut rng, &runners);
+            let growth = view.growth.unwrap();
             let now = count(&view);
             counted += u64::from(now.kept.is_some());
-            assert_eq!(now.pooled(), now.hosted(), "seed {seed}: {now:?}");
-            assert!(now.pooled() <= now.plain, "seed {seed}: {now:?}");
+            assert!(
+                now.pooled() <= now.plain && now.hosted() <= now.plain,
+                "seed {seed}: {now:?}"
+            );
             if let Some(kept) = now.kept {
                 let headroom: u64 = runners.iter().filter_map(Runner::headroom).sum();
+                let young: u64 = runners
+                    .iter()
+                    .filter(|runner| runner.young())
+                    .filter_map(Runner::headroom)
+                    .sum();
                 let full: u64 = runners
                     .iter()
                     .map(|runner| match runner.used {
@@ -931,51 +965,43 @@ mod generated {
                         Reading::Stale => runner.takes,
                     })
                     .sum();
-                assert_eq!(
-                    now.pooled(),
-                    view.committed + full + kept,
-                    "seed {seed}: {now:?}"
-                );
+                let growth_count = view.committed + full + kept;
+                match growth.bound {
+                    Bound::Open => assert!(
+                        now.pooled() == growth_count && now.hosted() == growth_count,
+                        "seed {seed}: {now:?}"
+                    ),
+                    Bound::HighWater => assert!(
+                        now.pooled() >= growth_count
+                            && now.hosted() >= growth_count
+                            && now.pooled() >= now.hosted(),
+                        "seed {seed}: bounded, {now:?}"
+                    ),
+                }
                 assert!(
                     kept >= headroom.min(GROWTH_FLOOR) && kept <= headroom,
                     "seed {seed}: kept {kept} of {headroom}"
                 );
+                if growth.young == Young::Covered {
+                    assert!(kept >= young, "seed {seed}: kept {kept}, young {young}");
+                }
             } else {
-                assert_eq!(
-                    now.pooled(),
-                    now.plain,
-                    "seed {seed}: below the line, plain"
-                );
-            }
-            for leaving in 0..runners.len() {
-                let mut rest = runners.clone();
-                let gone = rest.remove(leaving);
-                let after = count(&Snapshot {
-                    runners: &rest,
-                    ..view
-                });
+                let below = match growth.below {
+                    Below::Plain => Count {
+                        plain: now.plain,
+                        ..Count::default()
+                    },
+                    Below::Credits => count(&Snapshot {
+                        growth: None,
+                        ..view
+                    }),
+                };
                 assert!(
-                    after.pooled() <= now.pooled() && now.pooled() - after.pooled() <= gone.takes,
-                    "seed {seed}: {gone:?} left, {now:?} to {after:?}"
+                    now.pooled() == below.pooled() && now.hosted() == below.hosted(),
+                    "seed {seed}: below the line or held, {now:?} against {below:?}"
                 );
             }
-            let takes = rng.below(8 * G);
-            let mut started = runners.clone();
-            started.push(Runner {
-                key: None,
-                takes,
-                used: Reading::NotYet,
-                ran: Some(Duration::ZERO),
-                basis: None,
-            });
-            let with = count(&Snapshot {
-                runners: &started,
-                ..view
-            });
-            assert!(
-                with.pooled() >= now.pooled() && with.pooled() - now.pooled() <= takes,
-                "seed {seed}: a start of {takes} took {now:?} to {with:?}"
-            );
+            one_leaving_or_starting_moves_it_by_its_take(seed, &mut rng, &view, now);
         }
         assert!(
             counted > CASES / 3,
@@ -983,8 +1009,52 @@ mod generated {
         );
     }
 
-    /// `Backfill` reads `host_credit_room` of the growth count as of the host's credit: with the same runners, using
-    /// anything up to what they take and read over the line, the count never falls further than that.
+    /// Part of `the_growth_count_keeps_its_bounds_on_every_snapshot`: a runner leaving `view` frees at most its take, and
+    /// a start adds at most its own, from the count `now`.
+    fn one_leaving_or_starting_moves_it_by_its_take(
+        seed: u64,
+        rng: &mut Rng,
+        view: &Snapshot<'_>,
+        now: Count,
+    ) {
+        let runners = view.runners;
+        for leaving in 0..runners.len() {
+            let mut rest = runners.to_vec();
+            let gone = rest.remove(leaving);
+            let after = count(&Snapshot {
+                runners: &rest,
+                ..*view
+            });
+            for read in [Count::pooled, Count::hosted] {
+                assert!(
+                    read(after) <= read(now) && read(now) - read(after) <= gone.takes,
+                    "seed {seed}: {gone:?} left, {now:?} to {after:?}"
+                );
+            }
+        }
+        let takes = rng.below(8 * G);
+        let mut started = runners.to_vec();
+        started.push(Runner {
+            key: None,
+            takes,
+            used: Reading::NotYet,
+            ran: Some(Duration::ZERO),
+            basis: None,
+        });
+        let with = count(&Snapshot {
+            runners: &started,
+            ..*view
+        });
+        for read in [Count::pooled, Count::hosted] {
+            assert!(
+                read(with) >= read(now) && read(with) - read(now) <= takes,
+                "seed {seed}: a start of {takes} took {now:?} to {with:?}"
+            );
+        }
+    }
+
+    /// `Backfill` reads `credit_room` and `host_credit_room`: with the same runners, using anything up to what they
+    /// take, beside any slice and a host over the line, neither count falls further than its room, held or not.
     #[test]
     fn the_growth_count_never_falls_past_its_room_while_the_same_runners_run() {
         let keys: Vec<Key> = (0..5)
@@ -1017,7 +1087,8 @@ mod generated {
                     ..view
                 });
                 assert!(
-                    after.pooled() + now.host_credit_room >= now.pooled(),
+                    after.pooled() + now.credit_room >= now.pooled()
+                        && after.hosted() + now.host_credit_room >= now.hosted(),
                     "seed {seed}: {now:?} fell to {after:?}"
                 );
             }

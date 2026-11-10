@@ -695,17 +695,14 @@ fn the_pooled_count_is_on_unless_turned_off() {
     );
     let config = Config::parse(&off).unwrap();
     assert!(!config.host.pooled_count, "turned off under [host]");
-    assert!(
-        config.host.pooled_host,
-        "the host's credit is its own decision"
-    );
     let host_off = MINIMAL.replace(
         "isolation = \"sysbox\"",
         "isolation = \"sysbox\"\npooled_host = false",
     );
-    let config = Config::parse(&host_off).unwrap();
-    assert!(!config.host.pooled_host, "turned off under [host]");
-    assert!(config.host.pooled_count, "MemoryMax's credit stays on");
+    assert!(
+        Config::parse(&host_off).is_err(),
+        "one switch for both budgets: pooled_host is gone"
+    );
 }
 
 #[test]

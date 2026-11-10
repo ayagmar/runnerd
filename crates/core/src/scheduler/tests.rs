@@ -1264,3 +1264,106 @@ fn a_job_with_no_warm_slot_leaves_a_younger_jobs_warm_slot_to_it() {
 
 mod backfill;
 mod priority;
+
+#[test]
+fn a_warm_runner_stops_for_room_only_if_the_count_without_it_fits_the_start() {
+    // Catches `Warm::make_room` giving back a stopped runner's take under the growth count (ADR 0130): stopping this
+    // 9G warm runner lowers the count by 4G, as the room kept for growth then shrinks to the three largest headrooms
+    // left, so the job's 4G does not fit the 41.5G `MemoryMax` though 9G less would.
+    use crate::admission::pooled::{self, Host, Runner, Slice, Snapshot};
+    use crate::admission::trace::Reading;
+    let max = 41 * GIB + GIB / 2;
+    let used = |takes: u64, used: u64, ran: u64| Runner {
+        key: None,
+        takes: takes * GIB,
+        used: Reading::Used(used * GIB),
+        ran: Some(Duration::from_secs(ran)),
+        basis: None,
+    };
+    let runners = [
+        Runner {
+            ran: None,
+            ..used(9, 3, 0)
+        },
+        used(16, 6, 120),
+        used(11, 6, 120),
+        used(8, 7, 10),
+        used(1, 1, 10),
+        used(1, 1, 10),
+        used(6, 0, 120),
+    ];
+    let snapshot = Snapshot {
+        runners: &runners,
+        committed: 0,
+        slice: Some(Slice {
+            memory: 0,
+            memory_max: Some(max),
+        }),
+        host: Some(Host {
+            available: 100 * GIB,
+            keeps: 0,
+            stalled: false,
+        }),
+        most: pooled::MOST_CREDIT,
+        host_reserve: true,
+        growth: Some(pooled::GROWTH),
+    };
+    let web = |index| SlotRef {
+        profile: "web".to_owned(),
+        index,
+    };
+    let tally = pooled::Tally::new(&snapshot, (0..runners.len()).map(web));
+    assert_eq!(tally.count().pooled(), 46 * GIB);
+    let web_runner = |memory: u64, busy: bool| {
+        Slot::Runner(RunnerSlot {
+            repository: "o/w".to_owned(),
+            busy,
+            started_at: now(),
+            memory: memory * GIB,
+            cpu: 2000,
+            usual: None,
+            behind: None,
+        })
+    };
+    let busy = |memory| web_runner(memory, true);
+    let mut profiles = profiles(vec![Slot::Free]);
+    profiles.insert(
+        "web".to_owned(),
+        Profile {
+            memory: 16 * GIB,
+            cpus: 2000,
+            preparing: None,
+            upkeep_due: false,
+            count: 7,
+            ran: Vec::new(),
+            slots: vec![
+                web_runner(9, false),
+                busy(16),
+                busy(11),
+                busy(8),
+                busy(1),
+                busy(1),
+                busy(6),
+            ],
+        },
+    );
+    let repositories = [
+        warm("o/w", "web", 1),
+        repository("o/a", "app", vec![job(1, &["app"])]),
+    ];
+    let budget = Budget {
+        memory: Some(super::left(max, 46 * GIB)),
+        recount: Some(super::Recount {
+            tally,
+            memory_max: Some(max),
+            host: None,
+        }),
+        ..budget(None, None)
+    };
+    let plan = plan(&repositories, &profiles, budget, now());
+    assert_eq!(
+        plan.decisions,
+        [],
+        "the job waits with the warm runner kept"
+    );
+}

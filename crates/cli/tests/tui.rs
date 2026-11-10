@@ -66,6 +66,7 @@ fn serve(socket: &Path) {
             memory_max: None,
             memory_in_use: 0,
             pooled: None,
+            counted: None,
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),

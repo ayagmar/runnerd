@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
-use crate::admission::Key;
+use crate::admission::{Key, host, pooled};
 use crate::api::Waiting;
 use crate::github::QueuedJob;
 
@@ -293,7 +293,7 @@ pub struct Plan {
 }
 
 /// The budgets a plan starts runners within.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Budget {
     /// The memory left, negative by what the running containers take past `MemoryMax` (`left`); `None` for no
     /// budget.
@@ -310,12 +310,61 @@ pub struct Budget {
     pub held: bool,
     /// What the budgets would leave with no runner: what a job may hold younger ones for.
     pub drained: Drained,
-    /// How much more the pooled count could take off what runs with no runner ending (ADR 0099): room that may come at
-    /// any moment, which a backfill must not outlast. 0 with pooling off.
+    /// How much more the pooled count could take off what runs with no runner ending (ADR 0099, 0130): room that may
+    /// come at any moment, which a backfill must not outlast. 0 with pooling off.
     pub credit_room: u64,
     /// How much more the host's credit could take off what runs with no runner ending (ADR 0108), as `credit_room`
-    /// does for `MemoryMax`'s. 0 with `[host] pooled_host` off.
+    /// does for `MemoryMax`'s.
     pub host_credit_room: u64,
+    /// With pooling on, the count `memory` and `host` come from, which the plan counts again after each start and
+    /// stop: under the growth count, a start moves it by what it adds to the room kept, not by its take (ADR 0130).
+    /// `None`, each start takes its runner's memory from both, and each stop gives it back.
+    pub recount: Option<Recount>,
+}
+
+/// What a plan counts again after each start and stop, and the budgets it reads that count against (ADR 0130).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recount {
+    /// What runs, each runner and start in flight by its slot.
+    pub tally: pooled::Tally<SlotRef>,
+    /// The slice's `MemoryMax`, which `Budget::memory` is left of.
+    pub memory_max: Option<u64>,
+    /// The host's limit, which `Budget::host` is left of, from a recent reading.
+    pub host: Option<HostLimit>,
+}
+
+/// The host's limit a plan reads the count against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostLimit {
+    /// What the slice may hold (`api::HostBudget::limit`).
+    pub limit: u64,
+    /// Whether the host's tasks stall for memory, which leaves nothing.
+    pub stalled: bool,
+}
+
+impl Recount {
+    /// A runner of `memory` starts: `left` is what the count leaves with it.
+    fn start(&mut self, left: &mut Left, memory: u64) {
+        self.tally.start(memory);
+        self.read(left);
+    }
+
+    /// The runners of `slots` stop: `left` is what the count leaves without them.
+    fn stop(&mut self, left: &mut Left, slots: &[SlotRef]) {
+        for slot in slots {
+            self.tally.stop(slot);
+        }
+        self.read(left);
+    }
+
+    /// Sets `left`'s memory and host to what the count leaves now.
+    fn read(&self, left: &mut Left) {
+        let count = self.tally.count();
+        left.memory = self.memory_max.map(|max| self::left(max, count.pooled()));
+        left.host = self
+            .host
+            .map(|host| host::left(host.limit, count.hosted(), host.stalled));
+    }
 }
 
 /// The workflow labels of GitHub-hosted runners, from
@@ -388,7 +437,7 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 pub fn plan(
     repositories: &[Repository],
     profiles: &BTreeMap<String, Profile>,
-    budget: Budget,
+    mut budget: Budget,
     now: SystemTime,
 ) -> Plan {
     let mut decided = Plan::default();
@@ -401,12 +450,8 @@ pub fn plan(
 
     let mut warm = Warm::new(&decided.warm, profiles, budget.held);
     let mut taken = taken_slots(profiles);
-    let mut left = Left {
-        memory: budget.memory,
-        cpu: budget.cpu,
-        host: budget.host,
-    };
-    let mut started = Started::new(&taken, left);
+    let mut budgets = Budgets::new(&mut budget);
+    let mut started = Started::new(&taken, budgets.left);
     let mut slot_bound = SlotBound::default();
     // Under a safety interlock, what is left says nothing of the room there is.
     let drained = (!budget.held).then_some(budget.drained);
@@ -427,7 +472,7 @@ pub fn plan(
         let memory = repository.runner_memory.unwrap_or(profile.memory);
         let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
         let free_index = free_slot(taken, profile, repository, job, &jobs[position + 1..]);
-        let fits = free_index.is_some() && left.fits(memory, cpu);
+        let fits = free_index.is_some() && budgets.left.fits(memory, cpu);
         let turn = Turn {
             repository,
             profile,
@@ -435,7 +480,7 @@ pub fn plan(
             memory,
             cpu,
             free_slot: free_index.is_some(),
-            left,
+            left: budgets.left,
             started: &started,
         };
         if let Some(barrier) = decided.barrier {
@@ -448,7 +493,7 @@ pub fn plan(
         let room = if fits || profile.preparing.is_some() {
             None
         } else {
-            warm.make_room(repository, free_index.is_none(), left, memory, cpu)
+            warm.make_room(repository, free_index.is_none(), &budgets, memory, cpu)
         };
         let index = match (room.as_ref(), free_index) {
             (Some(room), free) => free.or(room.slot).unwrap_or_default(),
@@ -461,15 +506,16 @@ pub fn plan(
                     memory,
                     cpu,
                 };
-                behind.left_waiting(job, decided.barrier, left, &budget, now);
+                behind.left_waiting(job, decided.barrier, budgets.left, &budget, now);
                 continue;
             }
         };
-        let replacing = room.map_or_else(Vec::new, |room| stop_for(room, &mut left, &mut decided));
+        let replacing =
+            room.map_or_else(Vec::new, |room| stop_for(room, &mut budgets, &mut decided));
         taken[index] = true;
         *missing -= 1;
         started.note(&repository.profile, job);
-        left.take(memory, cpu);
+        budgets.take(memory, cpu);
         behind.started(
             &repository.profile,
             profile.caps(),
@@ -489,14 +535,53 @@ pub fn plan(
         ));
     }
     if !budget.held {
-        start_warm(&warm_wanted, profiles, &mut taken, left, &mut decided);
+        start_warm(&warm_wanted, profiles, &mut taken, budgets, &mut decided);
     }
     decided
 }
 
-/// Stops the warm runners whose `room` a start takes, before it: they give back what they took.
-fn stop_for(room: Room, left: &mut Left, decided: &mut Plan) -> Vec<SlotRef> {
-    left.give(room.memory, room.cpu);
+/// What a plan has left, and the count it reads that from again after each start and stop (ADR 0130); without the
+/// count, a start or a stop moves what is left by its take.
+#[derive(Debug, Clone)]
+struct Budgets {
+    left: Left,
+    recount: Option<Recount>,
+}
+
+impl Budgets {
+    /// What `budget` leaves, taking its count to read again.
+    fn new(budget: &mut Budget) -> Self {
+        Self {
+            left: Left {
+                memory: budget.memory,
+                cpu: budget.cpu,
+                host: budget.host,
+            },
+            recount: budget.recount.take(),
+        }
+    }
+
+    /// A runner of `memory` and `cpu` starts.
+    fn take(&mut self, memory: u64, cpu: u64) {
+        self.left.take(memory, cpu);
+        if let Some(recount) = &mut self.recount {
+            recount.start(&mut self.left, memory);
+        }
+    }
+
+    /// The warm runners of `room` stop: they give back what they took, or what the count no longer counts of them,
+    /// which under the growth count may be less.
+    fn give(&mut self, room: &Room) {
+        self.left.give(room.memory, room.cpu);
+        if let Some(recount) = &mut self.recount {
+            recount.stop(&mut self.left, &room.stopped);
+        }
+    }
+}
+
+/// Stops the warm runners whose `room` a start takes, before it, as `Budgets::give` says.
+fn stop_for(room: Room, budgets: &mut Budgets, decided: &mut Plan) -> Vec<SlotRef> {
+    budgets.give(&room);
     for slot in &room.stopped {
         decided.warm.remove(slot);
         decided.decisions.push(Decision::Stop {
@@ -958,13 +1043,13 @@ fn start(
 }
 
 /// Starts the warm runners each repository is short of (`wanted`), at its profile's caps, in the slots and budget
-/// the jobs `left`: one per repository at a time, so a few free slots go to several repositories rather than to the
+/// the jobs left (`budgets`): one per repository at a time, so a few free slots go to several repositories rather than to the
 /// first. None while a job waits for room they would take.
 fn start_warm(
     wanted: &[(&Repository, usize)],
     profiles: &BTreeMap<String, Profile>,
     taken: &mut BTreeMap<&str, Vec<bool>>,
-    mut left: Left,
+    mut budgets: Budgets,
     decided: &mut Plan,
 ) {
     let room_wanted = decided.waiting.values().any(|reason| {
@@ -998,11 +1083,11 @@ fn start_warm(
             let Some(index) = taken.iter().position(|taken| !taken) else {
                 continue;
             };
-            if !left.fits(memory, cpu) {
+            if !budgets.left.fits(memory, cpu) {
                 continue;
             }
             taken[index] = true;
-            left.take(memory, cpu);
+            budgets.take(memory, cpu);
             any = true;
             decided.decisions.push(Decision::Start {
                 slot: SlotRef {
@@ -1265,18 +1350,18 @@ impl<'plan> Warm<'plan> {
     }
 
     /// Picks warm runners of pools other than `repository` whose room lets its next runner, of `needs_memory` and
-    /// `needs_cpu`, start in the budgets `left`: a slot of its profile when it has none (`slot`), and the memory
+    /// `needs_cpu`, start in what `budgets` leave: a slot of its profile when it has none (`slot`), and the memory
     /// and CPU it is short of. Those in its profile go first. `None`, and nothing picked, when all of them would
     /// not do.
     fn make_room(
         &mut self,
         repository: &Repository,
         slot: bool,
-        left: Left,
+        budgets: &Budgets,
         needs_memory: u64,
         needs_cpu: u64,
     ) -> Option<Room> {
-        let short = left.short(needs_memory, needs_cpu);
+        let short = budgets.left.short(needs_memory, needs_cpu);
         let (memory, cpu) = (
             unsigned(short.memory.unwrap_or(0)),
             unsigned(short.cpu.unwrap_or(0)),
@@ -1331,10 +1416,11 @@ impl<'plan> Warm<'plan> {
             room.stopped.push(ref_.clone());
             picked.push(at);
         }
-        // What they give back must let it start: a start never takes what the stops do not free.
-        let mut after = left;
-        after.give(room.memory, room.cpu);
-        if (slot && room.slot.is_none()) || !after.fits(needs_memory, needs_cpu) {
+        // What they give back must let it start: a start never takes what the stops do not free. Under the growth
+        // count, what the count no longer counts of them, which may be less than they take (ADR 0130).
+        let mut after = budgets.clone();
+        after.give(&room);
+        if (slot && room.slot.is_none()) || !after.left.fits(needs_memory, needs_cpu) {
             return None;
         }
         for at in picked {

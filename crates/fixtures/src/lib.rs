@@ -202,6 +202,13 @@ fn status() -> Status {
                 counted: 22 * GIB - 256 * MIB,
                 runners: 3,
             }),
+            // The growth count: what runs uses, and the room kept for it to grow.
+            counted: Some(api::Counted {
+                used: 15 * GIB,
+                kept: Some(7 * GIB - 256 * MIB),
+                jobs: 3,
+                brake: None,
+            }),
             admission: AdmissionPolicy::Measured,
             held: false,
             mirror_memory: 0,
@@ -1350,7 +1357,8 @@ mod tests {
         );
         assert_eq!(
             facts.budget,
-            "21.75G of 24G counted in runnerd.slice by predicted peaks: 22G reserved, 256M pooled"
+            "21.75G of 24G counted in runnerd.slice by predicted peaks: 22G reserved, 256M pooled; what runs uses 15G \
+             and keeps 6.75G for its growth"
         );
         let words: Vec<&str> = facts.slots.iter().map(|slot| slot.word).collect();
         assert_eq!(words, ["running", "warm", "starting", "starting"]);

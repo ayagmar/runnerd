@@ -1281,7 +1281,7 @@ fn a_day_under_a_tenth_of_the_host_on_a_credit_warns_once_and_a_day_without_one_
     assert_eq!(insight.key, warning(NOW + 10 * HOUR).key, "the same day's");
     assert!(
         insight.sentence.contains(
-            "[host] pooled_host = false makes the host's limit count every reservation again"
+            "[host] pooled_count = false makes the budgets count every reservation again"
         ),
         "{}",
         insight.sentence

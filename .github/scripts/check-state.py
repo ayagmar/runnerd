@@ -89,7 +89,6 @@ MARKED = {
     "C1 web Links": "the published link file: codes shrink as they are redeemed, the file and bases are fixed",
     "C2 retired slots": "a profile's slots and its config snapshot: a retired profile keeps its config until its slots are empty",
     "C3 hit_cap oom_killed &&": "two facts the kernel reports separately about a finished run, not a state of it",
-    "C3 policy trace &&": "two independent settings of one replay: whether it has a trace, and its policy",
 }
 
 # Engine's lifecycle fields, exactly: one more fails C4, one fewer fails until this is lowered to match.

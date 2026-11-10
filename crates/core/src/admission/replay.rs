@@ -14,10 +14,10 @@ use crate::sizing::{Measure, Ran};
 use crate::time;
 
 use super::{
-    Arrivals, Backfilled, Band, Barriers, Brake, Copies, CreditRoom, GrowthCount, HIGH_WATER,
-    Hazard, HostReserve, Key, OOMD_UNDER, Policy, PoolReplay, Predictor, Reading, Recorded, Replay,
-    Replaying, RunId, RunKey, RunReplay, RunTrace, STEP, THROTTLES_UNDER, Trace, growth, host,
-    pooled, spread,
+    Arrivals, Backfilled, Band, Barriers, Brake, Copies, CreditRoom, GrowthCount, GuardHold,
+    HIGH_WATER, Hazard, HostReserve, Key, OOMD_UNDER, Policy, PoolReplay, Predictor, Reading,
+    Recorded, Replay, Replaying, RunId, RunKey, RunReplay, RunTrace, STEP, THROTTLES_UNDER, Trace,
+    growth, host, pooled, spread,
 };
 
 /// A job the replay started.
@@ -108,7 +108,7 @@ impl Running<'_> {
 /// until the daemon could name its job; a stale sample counts at its cap; the budget goes by `pooled::count`; the host's
 /// recorded programs bound what starts, with the margin of `host`; and the mark reads the runners' use with the trace's
 /// overhead. It looks every `trace::STEP` and plans every `[host] poll_interval` and at each arrival and end. With
-/// `Replaying::growth`, both budgets read the growth count instead (`pooled::Snapshot::largest`), each start judged by
+/// `Replaying::growth`, both budgets read the growth count instead (`pooled::Snapshot::growth`), each start judged by
 /// the count with it added, and its brake, if on, looks at every plan.
 pub fn simulate<'known>(
     config: &Config,
@@ -583,12 +583,12 @@ impl<'run> Replayer<'run> {
             hazard.over_max.note(slice.checked_sub(max), span);
         }
         if let Some(outside) = trace.outside_at(self.moment) {
-            let available = trace
-                .total
-                .saturating_sub(outside)
-                .saturating_sub(host_slice);
-            hazard.under_throttling += span * u64::from(available < THROTTLES_UNDER);
-            hazard.under_oomd += span * u64::from(available < OOMD_UNDER);
+            // Signed: past what the host has, by how much.
+            let available = signed(trace.total)
+                .saturating_sub(signed(outside))
+                .saturating_sub(signed(host_slice));
+            hazard.under_throttling += span * u64::from(available < signed(THROTTLES_UNDER));
+            hazard.under_oomd += span * u64::from(available < signed(OOMD_UNDER));
             hazard.in_band += span * u64::from(self.host_band.is_short());
             hazard.lowest_available = Some(
                 hazard
@@ -713,19 +713,29 @@ impl<'run> Replayer<'run> {
     /// The count with a runner `starting` that much added, as the next plan would read it: under the credits, the
     /// count with that much more; under the growth count, as much more as it makes the room kept for growth.
     fn count_with(&self, starting: Option<u64>) -> pooled::Count {
-        let mut held = self.held();
-        held.extend(starting.map(|takes| pooled::Runner {
+        let mut runners = self.held();
+        runners.extend(starting.map(|takes| pooled::Runner {
             key: None,
             takes,
             used: Reading::NotYet,
             ran: Some(Duration::ZERO),
             basis: None,
         }));
-        // Braked, the count is plain: no credit stands.
-        let braked = self.braked();
+        // Braked, the growth count rests: its `below` counts.
+        let hold = if self.braked() {
+            pooled::Hold::Held
+        } else {
+            pooled::Hold::Free
+        };
+        self.count_of(&runners, hold)
+    }
+
+    /// The count of `runners`, the growth count's brake holding it as `hold` says.
+    fn count_of(&self, runners: &[pooled::Runner<'_>], hold: pooled::Hold) -> pooled::Count {
         let host = self.host_memory();
+        let measured = self.trace.is_some() && self.policy == Policy::Measured;
         pooled::count(&pooled::Snapshot {
-            runners: &held,
+            runners,
             committed: self.mirror,
             slice: Some(pooled::Slice {
                 memory: self.slice_read(),
@@ -737,16 +747,12 @@ impl<'run> Replayer<'run> {
                     host::Remembered::new(self.host_band, host::Occupancy::Occupied),
                 )
             }),
-            most: if self.trace.is_some() && self.policy == Policy::Measured && !braked {
-                self.most_credit
-            } else {
-                0
-            },
-            host_reserve: self.trace.is_some()
-                && self.policy == Policy::Measured
-                && self.host_reserve == HostReserve::Top2
-                && !braked,
-            largest: self.growth.map(|growth| growth.jobs).filter(|_| !braked),
+            most: if measured { self.most_credit } else { 0 },
+            host_reserve: measured && self.host_reserve == HostReserve::Top2,
+            growth: self.growth.map(|growth| pooled::Growth {
+                hold,
+                ..growth.growth
+            }),
         })
     }
 
@@ -777,17 +783,25 @@ impl<'run> Replayer<'run> {
         self.growth.is_some() && self.brake.braked(instant(self.moment)).is_some()
     }
 
-    /// With the growth count's brake on, takes a plan's look at what each runner uses and the room the count keeps.
+    /// With the growth count's brake on, takes a plan's look at what each runner uses, the room the count keeps and,
+    /// with its guard's hold, whether the count is below its guard's line.
     fn look_at_growth(&mut self) {
         let Some(GrowthCount {
-            jobs,
+            growth,
             brake: Brake::On,
+            guard,
         }) = self.growth
         else {
             return;
         };
         let held = self.held();
-        let room = pooled::growth_room(&held, jobs);
+        let room = pooled::growth_room(&held, growth);
+        let guard = match guard {
+            GuardHold::On if self.count_of(&held, pooled::Hold::Free).kept.is_none() => {
+                growth::Guard::Crossed
+            }
+            GuardHold::On | GuardHold::Off => growth::Guard::Clear,
+        };
         let used: Vec<growth::Use<u64>> = self
             .running
             .iter()
@@ -804,7 +818,7 @@ impl<'run> Replayer<'run> {
                 })
             })
             .collect();
-        self.brake.look(instant(self.moment), used, room);
+        self.brake.look(instant(self.moment), used, room, guard);
     }
 
     /// What the host leaves beside what runs, the mirror's memory counted; `None` without a trace of it.
@@ -982,12 +996,7 @@ impl<'run> Replayer<'run> {
         {
             return 0;
         }
-        let count = self.count();
-        // The growth count reads one figure for both budgets.
-        if count.kept.is_some() {
-            return count.host_credit_room;
-        }
-        self.most_credit.saturating_sub(count.credit)
+        self.count().credit_room
     }
 
     /// How much more the host's credit could take off what runs, as `Budget::host_credit_room`.

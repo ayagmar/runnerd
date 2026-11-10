@@ -83,6 +83,12 @@ pub(crate) fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (year_of_era + era * 400 + u64::from(month <= 2), month, day)
 }
 
+/// A UTC time of day: `15:02 UTC`.
+pub(crate) fn utc_time(at: u64) -> String {
+    let minutes = at % 86_400 / 60;
+    format!("{:02}:{:02} UTC", minutes / 60, minutes % 60)
+}
+
 /// A UTC day as a short label: `Oct 3`.
 pub(crate) fn short_date(at: u64) -> String {
     const MONTHS: [&str; 12] = [

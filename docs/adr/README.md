@@ -40,7 +40,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core | Accepted |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets | Amended by 0091 |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check | Amended by 0037, 0039, 0050, 0055, 0070 |
-| [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag | Amended by 0036, 0037, 0055, 0056, 0058, 0070, 0096, 0099 |
+| [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag | Amended by 0036, 0037, 0055, 0056, 0058, 0070, 0096, 0099, 0130 |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit | Accepted |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage | Amended by 0077 |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time | Amended by 0070 |
@@ -62,7 +62,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch | Amended by 0053, 0077, 0082, 0083 |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache | Accepted |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk | Amended by 0089, 0090 |
-| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache | Amended by 0063, 0070, 0078, 0084, 0096, 0101, 0102, 0108 |
+| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache | Amended by 0063, 0070, 0078, 0084, 0096, 0101, 0102, 0108, 0130 |
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved | Amended by 0096 |
 | [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only | Amended by 0100 |
 | [0058](0058-a-repository-served-by-several-profiles.md) | A repository served by several profiles, each with its own labels | Amended by 0096 |
@@ -106,16 +106,16 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099, 0102 |
 | [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md) | A job may start behind a barrier it cannot cost | Amended by 0098, 0099, 0131 |
 | [0098](0098-a-pool-waits-longer-for-its-first-barrier.md) | A pool waits longer for its first barrier | Amended by 0099, 0104 |
-| [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Amended by 0108 |
+| [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md) | The budget counts jobs that do not peak at once | Amended by 0108, 0130 |
 | [0100](0100-an-insight-for-jobs-held-for-the-hosts-memory.md) | An insight for jobs held for the host's memory | Amended by 0103 |
 | [0101](0101-the-host-reading-includes-swap-admission-ignores-it.md) | The host's reading includes its swap, and admission ignores it | Accepted |
-| [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Amended by 0108 |
-| [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Amended by 0108, 0110 |
+| [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md) | The larger host margin stands only while no waiter fits the plain one | Amended by 0108, 0130 |
+| [0103](0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md) | A job the host limit holds with room free is not short of memory | Amended by 0108, 0110, 0130 |
 | [0104](0104-a-runner-that-connected-and-left-says-nothing-of-the-next-start.md) | A runner that connected and left says nothing of the next start | Accepted |
 | [0105](0105-a-removal-under-way-frees-a-stopped-runners-slot.md) | A removal under way frees a stopped runner's slot | Accepted |
 | [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md) | A tick reads its running jobs after its starts | Accepted |
 | [0107](0107-a-warm-runner-waits-only-where-jobs-just-came.md) | A warm runner waits only where jobs just came | Accepted |
-| [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed |
+| [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed, amended by 0130 |
 | [0109](0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md) | A job that left the queue is followed until GitHub says it is gone | Accepted |
 | [0110](0110-a-jobs-wait-ends-when-its-runner-starts.md) | A job's wait for a slot or the host ends when its runner starts | Accepted |
 | [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Amended by 0127, 0128 |
@@ -136,4 +136,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0126](0126-up-to-four-starts-at-once-one-registration-at-a-time.md) | Up to four starts at once, one registration at a time | Accepted |
 | [0127](0127-reads-are-paced-by-the-rate-limit.md) | GitHub reads are paced by what is left of the rate limit | Amended by 0128 |
 | [0128](0128-each-repository-is-listed-on-its-own-pace.md) | Each repository is listed on its own pace | Accepted |
+| [0130](0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md) | The budgets count what runs uses and keep room for its largest growths | Accepted |
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |

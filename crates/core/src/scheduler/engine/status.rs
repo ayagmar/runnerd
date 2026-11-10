@@ -130,6 +130,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 counted: count.pooled(),
                 runners: count.runners as u64,
             }),
+            counted: self.counted(count),
             admission: match self.config.host.admission {
                 crate::config::Admission::Caps => api::AdmissionPolicy::Caps,
                 crate::config::Admission::Measured => api::AdmissionPolicy::Measured,
@@ -158,6 +159,37 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .any(Waits::cpu_held),
                 }),
         }
+    }
+
+    /// The growth count as the status says it (ADR 0130), `count` being what the budgets read now: `None` with pooling
+    /// off.
+    fn counted(&self, count: crate::admission::pooled::Count) -> Option<api::Counted> {
+        use crate::admission::growth::Braked;
+        if !self.pools() {
+            return None;
+        }
+        let secs = |at: std::time::SystemTime| crate::time::ms(at) / 1000;
+        let brake = match self.measured.braked(self.now()) {
+            Some(Braked::Grew { until, grew, kept }) => Some(api::CountBrake::Grew {
+                grew,
+                kept,
+                until: secs(until),
+            }),
+            Some(Braked::Restarted { until }) => {
+                Some(api::CountBrake::Restarted { until: secs(until) })
+            }
+            Some(Braked::Guarded { until }) => Some(api::CountBrake::Guard {
+                until: Some(secs(until)),
+            }),
+            None if count.kept.is_none() => Some(api::CountBrake::Guard { until: None }),
+            None => None,
+        };
+        Some(api::Counted {
+            used: count.used,
+            kept: count.kept,
+            jobs: crate::admission::pooled::GROWTH_JOBS as u64,
+            brake,
+        })
     }
 
     /// The queued jobs the repositories' pools can take and none holds, and those the plan says no pool serves,

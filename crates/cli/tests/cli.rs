@@ -63,6 +63,7 @@ fn status() -> Status {
             memory_max: Some(16 << 30),
             memory_in_use: 6 << 30,
             pooled: None,
+            counted: None,
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),

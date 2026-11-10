@@ -415,28 +415,48 @@ pub struct Replaying<'known> {
     pub growth: Option<GrowthCount>,
 }
 
-/// How a replay counts by the growth count (`pooled::Snapshot::largest`).
+/// How a replay counts by the growth count (`pooled::Snapshot::growth`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrowthCount {
-    /// How many jobs' growth it keeps room for.
-    pub jobs: usize,
-    /// Whether `growth::Growth` turns the count plain once what runs grows past the room it kept.
+    /// How the count counts; its `hold` is the brake's to set.
+    pub growth: pooled::Growth,
+    /// Whether `growth::Growth` rests the count once what runs grows past the room it kept.
     pub brake: Brake,
+    /// Whether a look below the guard's line rests it for `growth::GUARD_HOLD`; only with `Brake::On`.
+    pub guard: GuardHold,
+}
+
+impl GrowthCount {
+    /// The daemon's: `pooled::GROWTH`, its brake and its guard's hold (ADR 0130).
+    pub const DAEMON: GrowthCount = GrowthCount {
+        growth: pooled::GROWTH,
+        brake: Brake::On,
+        guard: GuardHold::On,
+    };
 }
 
 /// Whether a replay's growth count has its brake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Brake {
-    /// As the density study proposes.
+    /// As the daemon has it.
     On,
     /// To show what the brake costs and what it guards against.
+    Off,
+}
+
+/// Whether a replay's brake holds the growth count back for `growth::GUARD_HOLD` after a look below the guard's line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardHold {
+    /// As the daemon has it.
+    On,
+    /// The guard reads each plan alone, as the density study had it.
     Off,
 }
 
 /// What the host's limit reads of what runs in a replay (ADR 0108).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostReserve {
-    /// Every runner's take: the plain count, as before 0108 and with `[host] pooled_host = false`.
+    /// Every runner's take: the plain count, as before 0108.
     Plain,
     /// As the daemon does: eligible runners at their use, with room kept for the two largest growths
     /// (`pooled::Count::hosted`).
