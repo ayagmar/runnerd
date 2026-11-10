@@ -369,6 +369,7 @@ fn burst_fakes(listing_lag: Duration) -> (FakeGithub, FakeDocker) {
             contention: Duration::ZERO,
             remove_running: Duration::from_millis(1000),
             remove_stopped: Duration::from_millis(300),
+            prepare: Duration::ZERO,
         };
     }
     (github, docker)

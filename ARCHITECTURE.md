@@ -204,7 +204,9 @@ queued → slot → container → removed
    batch folds the starts that came back, and the start is admitted again against what runs, what is in flight and
    what was sampled since the plan; one that no longer fits makes the tick plan again from the same listings once the
    batch is done, up to three plans a tick, rather than holding back the plan's later starts until the next poll. A
-   pool a failure holds back mid-batch launches nothing more, and GitHub's rate limit stops the batch. Once a stop is
+   pool a failure holds back mid-batch launches nothing more, and GitHub's rate limit stops the batch; the batch
+   folds and checks both again, and the stop, once a launch's caches and name are ready, before its build cache
+   opens. Once a stop is
    asked for, no further start, registration or plan runs, and a runner GitHub registered meanwhile is deleted before
    its container starts. Before its plan a tick reads from GitHub only the running jobs admission cannot name yet; it
    reads the others after its last start, once every `poll_interval` however often ticks come, or 2× or 4× that

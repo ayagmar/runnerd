@@ -837,6 +837,8 @@ struct DockerState {
     fail_prepares: u32,
     /// Preparations `fail_prepares` failed.
     prepares_failed: usize,
+    /// How many runners' caches were prepared, or tried to be.
+    prepares: usize,
     /// How many preparations succeed before `fail_prepares` fails the next.
     prepares_before_fault: u32,
     /// Runs once as the next runner's caches are prepared, which the engine admitted already: what the sampler reads,
@@ -964,6 +966,8 @@ struct DockerLatency {
     remove_running: Duration,
     /// The removal of a stopped container.
     remove_stopped: Duration,
+    /// The making of a runner's shared pnpm volume, as its caches are prepared.
+    prepare: Duration,
 }
 
 /// What the fake Docker runs once at a runner start.
@@ -1623,7 +1627,12 @@ impl DockerApi for FakeDocker {
 
     async fn ensure_volume(&self, name: &str) -> Result<(), docker::Error> {
         self.outage().await?;
+        let prepare = self.0.lock().unwrap().latency.prepare;
+        if name.ends_with("-pnpm") && !prepare.is_zero() {
+            tokio::time::sleep(prepare).await;
+        }
         let mut state = self.0.lock().unwrap();
+        state.prepares += usize::from(name.ends_with("-pnpm"));
         if name.ends_with("-pnpm") && state.on_prepare.is_some() {
             if state.prepare_hook_after > 0 {
                 state.prepare_hook_after -= 1;

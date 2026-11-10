@@ -725,6 +725,85 @@ async fn a_failure_that_comes_back_while_the_engine_folds_another_start_holds_ba
     assert_eq!(held_for(&engine), Some(api::HoldCause::Register));
 }
 
+/// Three jobs of `o/r`. GitHub fails the first registration, which comes back while the second start's launch waits
+/// for its caches and the history's write of its name: the pool is held by then, and neither that start nor the third
+/// registers. The bug it catches: a launch that looks at what came back only before its own waits, so one more
+/// registration goes into a pool a failure already holds.
+#[tokio::test]
+async fn a_failure_that_comes_back_while_a_launch_waits_holds_back_that_start() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("start"),
+    );
+    let config = CONFIG.replace("slots = 2", "slots = 3");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    queue(&github, "o/r", 1..=3);
+    github.0.lock().unwrap().fail_registrations = 1;
+    // The first registration fails while the second start's caches are prepared, however loaded the machine.
+    docker.0.lock().unwrap().latency.prepare = Duration::from_millis(20);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "only the failed registration: {:?}",
+        github.calls()
+    );
+    assert_eq!(held_for(&engine), Some(api::HoldCause::Register));
+    assert!(!engine.any_starting(), "no slot is left starting");
+}
+
+/// Three jobs of `o/r`; a detaching stop is asked for as the second start's caches are prepared. That start opens
+/// nothing: no slot but the first start's is taken, and no build cache is open but its runner's; the third is not
+/// even prepared. The bugs it catches: a launch going on past a stop that came during its own waits, so it opens a
+/// build cache and starts a task after the stop; and a launch that looks for a stop only once it waited for Docker
+/// and the history.
+#[tokio::test]
+async fn a_stop_asked_for_while_a_launch_waits_opens_nothing_of_that_start() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("start"),
+    );
+    let config = CONFIG.replace("slots = 2", "slots = 3");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    queue(&github, "o/r", 1..=3);
+    let control = handle.control.clone();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.prepare_hook_after = 1;
+        state.on_prepare = Some(Box::new(move |_| {
+            control.shutdown(Shutdown::Detach);
+        }));
+    }
+    engine.tick(Shutdown::No).await;
+    let launched = engine.launches().after(0);
+    assert_eq!(launched.len(), 1, "only the first start launches");
+    assert_eq!(
+        docker.0.lock().unwrap().prepares,
+        2,
+        "the third start is not prepared"
+    );
+    let taken = engine.slots["app"]
+        .iter()
+        .filter(|slot| !slot.is_free())
+        .count();
+    assert!(
+        taken <= 1,
+        "no slot but the first start's is taken: {taken}"
+    );
+    assert!(
+        engine
+            .build_cache_runners()
+            .iter()
+            .all(|runner| launched.contains(runner)),
+        "no build cache open but the first runner's: {:?}",
+        engine.build_cache_runners()
+    );
+}
+
 /// Six jobs wait for the host's memory. It frees, and a pass launches them, four at a time; GitHub refuses the first
 /// registration for its used-up rate limit, and the client then fails every request at once. The pass launches
 /// nothing once the refusal is back, and every job goes on waiting as it did, the refused one too. The bugs it catches: a pass that checks
@@ -799,10 +878,10 @@ async fn a_pool_held_mid_batch_launches_nothing_more_and_another_pools_start_goe
     assert_eq!(held_for(&engine), Some(api::HoldCause::Register));
 }
 
-/// Two jobs of `o/r`. Docker fails the first runner's start without making its container, and GitHub does not answer
-/// deletes. The second runner starts all the same and the tick ends; the failed start's registration goes once GitHub
-/// answers, and a stop waits for that. The bug it catches: the fold awaiting the delete, which holds every other start
-/// of its batch, and the tick, behind GitHub.
+/// A job of `o/r` and one of `o/s`, each its own pool. Docker fails the first runner's start without making its
+/// container, and GitHub does not answer deletes. The other pool's runner starts all the same and the tick ends; the
+/// failed start's registration goes once GitHub answers, and a stop waits for that. The bug it catches: the fold
+/// awaiting the delete, which holds every other start of its batch, and the tick, behind GitHub.
 #[tokio::test]
 async fn a_failed_starts_registration_is_deleted_without_holding_back_its_batch() {
     let (github, docker, dir) = (
@@ -810,9 +889,10 @@ async fn a_failed_starts_registration_is_deleted_without_holding_back_its_batch(
         FakeDocker::default(),
         TestDir::new("start"),
     );
-    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &two_repositories());
     engine.recover().await.unwrap();
-    queue(&github, "o/r", 1..=2);
+    queue(&github, "o/r", [1]);
+    queue(&github, "o/s", [2]);
     docker.0.lock().unwrap().fail_starts = 1;
     github.hold_deletes();
     let ticked = tokio::time::timeout(Duration::from_secs(30), engine.tick(Shutdown::No)).await;
@@ -823,7 +903,7 @@ async fn a_failed_starts_registration_is_deleted_without_holding_back_its_batch(
     assert_eq!(
         runner_containers(&docker).len(),
         1,
-        "the second runner runs"
+        "the other pool's runner runs"
     );
     assert_eq!(
         registrations(&github).len(),

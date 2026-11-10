@@ -30,7 +30,11 @@ queue of starts does.
   is a later decision, on the e2e's figures. Release deletes stay as concurrent as before (ADR 0113).
 - **Each launch goes by every start that came back.** Before each launch, the batch folds every task that has ended,
   then checks, in order: a stop asked for, GitHub's rate limit used up, a failure that holds the start's pool back
-  since the plan, and an earlier start of the batch deferred. One gate for a tick's starts and a pass's: a pass now
+  since the plan, and an earlier start of the batch deferred. A launch then waits for its slot's caches, the
+  history's write of its name and the mirror, during which more tasks end; so once it is readied, the batch folds
+  again and checks the stop, the limit and the hold again, before the start opens its build cache and its slot
+  becomes `Starting`. That last step waits for nothing, so nothing comes back between the batch's last look and the
+  start. One gate for a tick's starts and a pass's: a pass now
   stops launching once a registration is refused for the rate limit, as a tick did.
   - A pool held mid-batch launches nothing more; its starts in flight finish. The start is skipped, not deferred: other
     pools' starts go on, no replan follows, and in a pass its job keeps its waits. A hold during a hold is no hold
@@ -42,9 +46,8 @@ queue of starts does.
     tick plans again once the batch is done (ADR 0092).
 - **A task checks the stop once it holds the lane**, before its POST, and sends nothing if one was asked for. A stop
   therefore costs no registration and delete for each start waiting for its turn. One GitHub registered as the stop
-  came is deleted before its container starts, as before. A launch checks it too after its own waits (caches, the
-  name's write to the history, the mirror), so a stop that comes during them leaves its slot free and opens no build
-  cache.
+  came is deleted before its container starts, as before. A stop that comes during a launch's own waits leaves its slot free
+  and opens no build cache, as the batch checks again once the launch is readied.
 - **A failed start's registration is deleted in the background** (`abandon`, into ADR 0113's `deletes`): the fold no
   longer waits for GitHub, so one slow DELETE holds back no other start of the batch. A stop waits for it up to
   `STOP_DEADLINE`, and the next runners listing deletes one it left.
