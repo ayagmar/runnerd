@@ -3,8 +3,9 @@
 //! Docker made their container, wait or exit idle; registrations GitHub fails or refuses for its rate limit, and caches
 //! Docker fails to prepare; Docker calls that fail once; log captures that fail or break off; samples of the slice and
 //! the host, short of memory or stalling, also between two starts of one tick; reseeds asked for; reloads, restarts
-//! and stops, also while GitHub registers a runner; time passing. After each tick the named checks below must hold, and once the
-//! sequence drains no runner may be left.
+//! and stops, also while GitHub registers a runner; time passing, with ticks a poll interval apart or sooner, each
+//! listing the repositories due on their own pace (ADR 0128). After each tick the named checks below must hold, and
+//! once the sequence drains no runner may be left.
 //!
 //! The sequences come from a seeded generator, so a failure replays: it prints its seed and the shortest sequence
 //! it shrank to. `RUNNERD_INVARIANT_CASES` runs more cases than the default, `RUNNERD_INVARIANT_SEED` one seed.
@@ -28,6 +29,7 @@ use crate::config::Admission;
 use crate::observe::metrics::Events;
 use crate::scheduler::engine::clock::Clock;
 use crate::scheduler::engine::control::RunningJobs;
+use crate::scheduler::engine::tick::Scope;
 use crate::scheduler::{Decision, IDLE_TIMEOUT, PRIORITY_AFTER};
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
@@ -59,7 +61,11 @@ const CASES: u64 = 64;
 const EVENTS: usize = 40;
 
 /// How far apart the model's ticks are, for the running jobs' reads: a third of the default `poll_interval` (ADR 0124).
+/// A command's tick comes this long after the last.
 const TICK_EVERY: Duration = Duration::from_secs(5);
+
+/// The config's `poll_interval`: the default. A `Tick` comes this long after the last, every repository due.
+const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
 pub(super) struct Rng(pub(super) u64);
@@ -155,6 +161,12 @@ impl Shape {
                 labels: &["self-hosted", "s-app"],
             });
         }
+        // A third repository, whose jobs come rarely: idle while the others are active (ADR 0128).
+        pools.push(PoolShape {
+            repository: "o/t",
+            profile: "heavy",
+            labels: &["self-hosted", "t-app"],
+        });
         pools
     }
 
@@ -266,6 +278,7 @@ impl Labels {
     fn of(self, repository: &str) -> Vec<String> {
         let labels: &[&str] = match (self, repository) {
             (Labels::Heavy, "o/r") => &["self-hosted", "app"],
+            (Labels::Heavy, "o/t") => &["self-hosted", "t-app"],
             (Labels::Heavy, _) => &["self-hosted", "s-app"],
             (Labels::Light, "o/r") => &["r-light"],
             (Labels::Light, _) => &["s-light"],
@@ -305,9 +318,21 @@ enum Step {
     },
     /// GitHub gives a queued job to an idle runner of this machine whose labels it matches.
     Assign(usize),
-    /// As `Assign`, but GitHub's listing of queued jobs still shows the job until the next tick, as it does for a
-    /// few seconds.
+    /// As `Assign`, but GitHub's listing of queued jobs still shows the job for as long as `POLL_INTERVAL` after the
+    /// first runners listing that shows its runner busy, as it does for a few seconds (ADR 0128).
     AssignListed(usize),
+    /// GitHub queues a job of `o/t`, the repository that is otherwise idle.
+    QueueQuiet {
+        labels: Labels,
+    },
+    /// A tick `after` seconds after the last, at most `TICK_EVERY`, as the repository due first brings, whose
+    /// listings went at another time than the others': it lists the repositories due.
+    TickSoon {
+        after: u64,
+    },
+    /// ADR 0107's rule forgets every repository's jobs, as ten minutes on: only a runner holding a job keeps its
+    /// repository active.
+    Quiet,
     /// A running job finishes and its runner exits.
     Finish(usize),
     /// A queued job is cancelled.
@@ -468,7 +493,7 @@ enum ReadFailure {
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
     (0..EVENTS)
-        .map(|_| match rng.below(119) {
+        .map(|_| match rng.below(125) {
             0..=17 => Step::Queue {
                 second: rng.below(3) == 0,
                 labels: match rng.below(10) {
@@ -553,6 +578,17 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 how: [ReadFailure::Gone, ReadFailure::Limited, ReadFailure::Other][rng.index() % 3],
             },
             fault @ 112..=118 => mid_batch(rng, fault),
+            119..=121 => Step::TickSoon {
+                after: [2, 3, 5][rng.index() % 3],
+            },
+            122 => Step::Quiet,
+            123 => Step::QueueQuiet {
+                labels: if rng.below(4) == 0 {
+                    Labels::Typo
+                } else {
+                    Labels::Heavy
+                },
+            },
             _ => Step::Tick,
         })
         .collect()
@@ -585,12 +621,23 @@ fn mid_batch(rng: &mut Rng, fault: u64) -> Step {
     }
 }
 
+/// How a tick of the model comes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Comes {
+    /// `POLL_INTERVAL` after the last, every repository due: it lists them, their runners on their turn.
+    Due,
+    /// This long after the last: it lists the repositories due.
+    Soon(Duration),
+    /// `TICK_EVERY` after the last, brought by a command: it lists every repository and its runners.
+    Command,
+}
+
 /// What GitHub's listing of queued jobs shows of a job a runner just took.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Listing {
     /// It no longer lists it.
     Current,
-    /// It still lists it until the next tick, as it does for a few seconds.
+    /// It still lists it for a while (`Step::AssignListed`).
     Stale,
 }
 
@@ -643,6 +690,9 @@ struct JobModel {
     taken_by: Option<(String, String)>,
     /// A tick saw it queued, so the engine follows it.
     listed: bool,
+    /// A listing of its repository's queued jobs since it queued showed it, served by a pool or not, so the status
+    /// lists it while it stays queued.
+    shown: bool,
     /// A tick saw it running once it was listed and no longer queued: GitHub's details then name its runner,
     /// whatever its log capture said.
     named_by_github: bool,
@@ -724,6 +774,11 @@ struct Seen {
     cancelling: usize,
     /// Ticks that ended with a busy registration no slot holds.
     busy_orphans: usize,
+    /// Ticks that listed one repository's queued jobs but not another's, whose runner a runners listing showed busy
+    /// with a job GitHub still lists queued (ADR 0128).
+    beside_still_listed: usize,
+    /// Ticks that listed one repository's queued jobs alone: the active one, while the others were not due.
+    one_due: usize,
     /// Ticks that ended with a snapshot marked over its limit.
     oversized: usize,
     /// Ticks that ended with a leftover container Docker could not say what to do with.
@@ -764,6 +819,8 @@ impl Seen {
         self.unanswered_closes += case.unanswered_closes;
         self.cancelling += case.cancelling;
         self.busy_orphans += case.busy_orphans;
+        self.beside_still_listed += case.beside_still_listed;
+        self.one_due += case.one_due;
         self.oversized += case.oversized;
         self.unread += case.unread;
         self.mirrors += case.mirrors;
@@ -792,6 +849,11 @@ impl Seen {
             ("a job GitHub stopped answering for", self.unanswered_closes),
             ("a cancelled run's runner", self.cancelling),
             ("a busy orphan registration", self.busy_orphans),
+            (
+                "a listing beside a repository whose taken job GitHub still lists",
+                self.beside_still_listed,
+            ),
+            ("a tick listing one repository alone", self.one_due),
             ("an oversized snapshot", self.oversized),
             ("an unread leftover", self.unread),
             ("the mirror running", self.mirrors),
@@ -837,10 +899,14 @@ struct Case {
     next_job: u64,
     /// Containers that took a job, which are no longer idle.
     took_job: BTreeSet<String>,
-    /// Jobs a runner took that GitHub still lists queued until the next tick.
-    still_listed: BTreeSet<u64>,
-    /// Jobs the last tick listed queued that were cancelled since: a pass plans from that listing.
-    cancelled_since_tick: BTreeSet<u64>,
+    /// Jobs a runner took that GitHub still lists queued, with the model's time of the first runners listing of their
+    /// repository since, which shows the runner busy: GitHub stops listing each `POLL_INTERVAL` after that.
+    still_listed: BTreeMap<u64, Option<Duration>>,
+    /// By repository, the jobs its last listing showed queued that were cancelled since: a plan of a tick that does
+    /// not list it, or of a pass, plans from that listing.
+    cancelled_since_listed: BTreeMap<&'static str, BTreeSet<u64>>,
+    /// How long the model has run: what the ticks' spacing added up to.
+    model: Duration,
     /// Docker calls checked so far.
     calls_seen: usize,
     /// The last reading of the host this daemon's store has, which a restart loses.
@@ -913,8 +979,9 @@ impl Case {
             jobs: BTreeMap::new(),
             next_job: 1,
             took_job: BTreeSet::new(),
-            still_listed: BTreeSet::new(),
-            cancelled_since_tick: BTreeSet::new(),
+            still_listed: BTreeMap::new(),
+            cancelled_since_listed: BTreeMap::new(),
+            model: Duration::ZERO,
             calls_seen: 0,
             host: None,
             mid_batch: Arc::default(),
@@ -1051,6 +1118,31 @@ impl Case {
         }
     }
 
+    /// The seconds between two ticks: what runs beside the engine, as a reseed or a measure, goes on until it calls
+    /// the fakes no more for two rounds, or for at most `QUIET_ROUNDS` rounds, so it never waits on what a step holds.
+    /// A tick that lists only the repositories due yields less on its own than one that lists them all.
+    async fn between_ticks(&mut self) {
+        let calls = || {
+            (
+                self.github.calls().len(),
+                self.docker.0.lock().unwrap().calls.len(),
+            )
+        };
+        let (mut last, mut quiet) = (calls(), 0);
+        for _ in 0..QUIET_ROUNDS {
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let now = calls();
+            quiet = if now == last { quiet + 1 } else { 0 };
+            if quiet == 2 {
+                return;
+            }
+            last = now;
+        }
+    }
+
     /// Counts the jobs the engine closed for GitHub's silence, as the history ends.
     async fn note_closes(&mut self) {
         self.handle.store.flush().await;
@@ -1129,44 +1221,17 @@ impl Case {
     async fn apply(&mut self, step: Step) -> Result<(), Violation> {
         match step {
             Step::Queue { second, labels } => {
-                let repository = if second { "o/s" } else { "o/r" };
-                let id = self.next_job;
-                self.next_job += 1;
-                let name = if matches!(labels, Labels::Light) {
-                    "lint"
-                } else {
-                    "build"
-                };
-                let labels = labels.of(repository);
-                let mut github = self.github.0.lock().unwrap();
-                github.queued.push(QueuedJob {
-                    id,
-                    run_id: id,
-                    name: name.to_owned(),
-                    labels: labels.clone(),
-                    created_at: time::now_ms(),
-                    ..QueuedJob::default()
-                });
-                github.queued_on.insert(id, repository.to_owned());
-                // GitHub answers what started each even run, so the build cache can decide its writes.
-                if id.is_multiple_of(2) {
-                    github
-                        .triggers
-                        .insert(id, build_cache::trigger("push", "main"));
-                }
-                self.jobs.insert(
-                    id,
-                    JobModel {
-                        repository,
-                        name,
-                        labels,
-                        phase: Phase::Queued,
-                        taken_by: None,
-                        listed: false,
-                        named_by_github: false,
-                    },
-                );
+                self.queue(if second { "o/s" } else { "o/r" }, labels);
             }
+            Step::QueueQuiet { labels } => self.queue("o/t", labels),
+            Step::TickSoon { after } => {
+                self.tick_as(Comes::Soon(Duration::from_secs(after)))
+                    .await?;
+            }
+            Step::Quiet => self
+                .engine
+                .warm
+                .testing_learned(crate::scheduler::warm::Learned::default()),
             Step::Assign(pick) => self.assign(pick, Listing::Current).await,
             Step::AssignListed(pick) => self.assign(pick, Listing::Stale).await,
             Step::Finish(pick) => {
@@ -1198,7 +1263,10 @@ impl Case {
                     let job = self.jobs.get_mut(&id).unwrap();
                     job.phase = Phase::Done { ran: None };
                     if job.listed {
-                        self.cancelled_since_tick.insert(id);
+                        self.cancelled_since_listed
+                            .entry(job.repository)
+                            .or_default()
+                            .insert(id);
                     }
                 }
             }
@@ -1265,7 +1333,7 @@ impl Case {
             }
             Step::Reload(change) => {
                 self.reload(change).await?;
-                self.tick().await?;
+                self.tick_as(Comes::Command).await?;
             }
             Step::Restart => {
                 self.restart().await?;
@@ -1368,6 +1436,47 @@ impl Case {
     }
 
     /// Asks for a stop `after` registrations or launches from now, which the step that started it then carries out.
+    /// GitHub queues a job of `repository` asking for `labels`.
+    fn queue(&mut self, repository: &'static str, labels: Labels) {
+        let id = self.next_job;
+        self.next_job += 1;
+        let name = if matches!(labels, Labels::Light) {
+            "lint"
+        } else {
+            "build"
+        };
+        let labels = labels.of(repository);
+        let mut github = self.github.0.lock().unwrap();
+        github.queued.push(QueuedJob {
+            id,
+            run_id: id,
+            name: name.to_owned(),
+            labels: labels.clone(),
+            created_at: time::now_ms(),
+            ..QueuedJob::default()
+        });
+        github.queued_on.insert(id, repository.to_owned());
+        // GitHub answers what started each even run, so the build cache can decide its writes.
+        if id.is_multiple_of(2) {
+            github
+                .triggers
+                .insert(id, build_cache::trigger("push", "main"));
+        }
+        self.jobs.insert(
+            id,
+            JobModel {
+                repository,
+                name,
+                labels,
+                phase: Phase::Queued,
+                taken_by: None,
+                listed: false,
+                shown: false,
+                named_by_github: false,
+            },
+        );
+    }
+
     fn stop_during_start(&mut self, docker_gone: bool, after: u32, at: StopAt) {
         let (control, asked, launches, github) = (
             self.handle.control.clone(),
@@ -1981,7 +2090,7 @@ impl Case {
         {
             let mut github = self.github.0.lock().unwrap();
             if listing == Listing::Stale {
-                self.still_listed.insert(id);
+                self.still_listed.insert(id, None);
             } else {
                 github.queued.retain(|job| job.id != id);
             }
@@ -2352,6 +2461,12 @@ impl Case {
     /// ADR 0091: a detaching stop leaves no runner that took no job registered, adopted ones too, even before a
     /// listing said they were idle: one left would take a job with no daemon to watch it.
     fn a_detach_deregisters_idle_runners(&self) -> Result<(), Violation> {
+        // While GitHub refuses every request for its used-up rate limit, no deregistration gets through: the runners
+        // left keep their containers, which the next start adopts or removes (ADR 0076).
+        let blocked = self.github.0.lock().unwrap().blocked_until;
+        if blocked.is_some_and(|until| until > SystemTime::now()) {
+            return Ok(());
+        }
         let registered: BTreeSet<String> = self
             .github
             .0
@@ -2559,29 +2674,36 @@ impl Case {
         }
     }
 
+    /// A tick `POLL_INTERVAL` after the last, when every repository is due.
     async fn tick(&mut self) -> Result<(), Violation> {
+        self.tick_as(Comes::Due).await
+    }
+
+    /// A tick, as `comes` says, and the checks after it.
+    async fn tick_as(&mut self, comes: Comes) -> Result<(), Violation> {
+        let (by, scope) = match comes {
+            Comes::Due => (POLL_INTERVAL, Scope::Due),
+            Comes::Soon(after) => (after, Scope::Due),
+            Comes::Command => (TICK_EVERY, Scope::Every),
+        };
+        self.model += by;
+        self.between_ticks().await;
+        self.github_lag_ends();
         self.unregistered_runners_exit();
         let was_short = self.engine.host_is_short();
         let calls_before = self.docker.0.lock().unwrap().calls.len();
+        let github_before = self.github.calls().len();
         let seeds_before: BTreeSet<String> = self.engine.seed_memories().into_keys().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
-        for (id, job) in &mut self.jobs {
-            match job.phase {
-                Phase::Queued if self.shape.serves(job.repository, &job.labels).is_some() => {
-                    job.listed = true;
-                }
-                Phase::Running { .. } if job.listed && !self.still_listed.contains(id) => {
-                    job.named_by_github = true;
-                }
-                _ => {}
-            }
-        }
-        self.cancelled_since_tick.clear();
+        let queued_before: BTreeSet<u64> = self.queued().into_iter().collect();
         self.note_busy();
         let uploads_waiting = self.engine.ended_uploads_waiting();
-        // Ticks come every 5 s, a third of `poll_interval`: the running jobs are read at every third (ADR 0124).
-        self.engine.age_running_reads(TICK_EVERY);
-        self.engine.tick(Shutdown::No).await;
+        // Ticks come every 5 s or more, a third of `poll_interval`, or sooner: the running jobs are read at every
+        // third that far apart (ADR 0124).
+        self.engine.age_running_reads(by.min(TICK_EVERY));
+        self.engine.age_listings(by);
+        self.engine.tick_listing(Shutdown::No, scope).await;
+        self.note_listings(github_before, &queued_before);
         let ended = self.engine.ended_upload_runners();
         self.seen.decided_uploads += uploads_waiting
             .iter()
@@ -2591,13 +2713,6 @@ impl Case {
         self.failed_late();
         self.exits_hold_only_what_failed_to_start()?;
         let after = self.status();
-        let listed = std::mem::take(&mut self.still_listed);
-        self.github
-            .0
-            .lock()
-            .unwrap()
-            .queued
-            .retain(|job| !listed.contains(&job.id));
         // From Docker's starts, not the runners' names: a slot's next runner may take the name of one that stopped
         // this second.
         let running: BTreeSet<String> = self
@@ -2647,6 +2762,74 @@ impl Case {
         }
         self.note_states();
         self.no_removal_of_a_running_job()
+    }
+
+    /// GitHub stops listing queued the jobs whose runners took them `POLL_INTERVAL` after the first runners listing
+    /// of their repository since, before the tick at the model's time now lists.
+    fn github_lag_ends(&mut self) {
+        let model = self.model;
+        let ended: BTreeSet<u64> = self
+            .still_listed
+            .iter()
+            .filter(|(_, seen)| seen.is_some_and(|seen| model >= seen + POLL_INTERVAL))
+            .map(|(id, _)| *id)
+            .collect();
+        self.still_listed.retain(|id, _| !ended.contains(id));
+        self.github
+            .0
+            .lock()
+            .unwrap()
+            .queued
+            .retain(|job| !ended.contains(&job.id));
+    }
+
+    /// What the tick's listings, the GitHub calls from `github_before`, showed: each job of `queued_before` is shown, and one a pool
+    /// serves is listed, once its repository's queued jobs were; a running one listed before that its repository's
+    /// listing no longer shows is named by GitHub; a runners listing of a repository starts GitHub's lag for the jobs
+    /// of it that its runners took and it still lists; a repository listed no longer shows the jobs cancelled since
+    /// its last listing.
+    fn note_listings(&mut self, github_before: usize, queued_before: &BTreeSet<u64>) {
+        let calls = self.github.calls();
+        let listed: BTreeSet<&str> = calls[github_before..]
+            .iter()
+            .filter_map(|call| call.strip_prefix("queued "))
+            .collect();
+        let runners_listed: BTreeSet<&str> = calls[github_before..]
+            .iter()
+            .filter_map(|call| call.strip_prefix("runners "))
+            .collect();
+        let unlisted_stale = self
+            .still_listed
+            .iter()
+            .any(|(id, seen)| seen.is_some() && !listed.contains(self.jobs[id].repository));
+        if !listed.is_empty() && unlisted_stale {
+            self.seen.beside_still_listed += 1;
+        }
+        if listed.len() == 1 {
+            self.seen.one_due += 1;
+        }
+        for (id, seen) in &mut self.still_listed {
+            if runners_listed.contains(self.jobs[id].repository) {
+                seen.get_or_insert(self.model);
+            }
+        }
+        for (id, job) in &mut self.jobs {
+            if !listed.contains(job.repository) {
+                continue;
+            }
+            match job.phase {
+                Phase::Queued if queued_before.contains(id) => {
+                    job.shown = true;
+                    job.listed |= self.shape.serves(job.repository, &job.labels).is_some();
+                }
+                Phase::Running { .. } if job.listed && !self.still_listed.contains_key(id) => {
+                    job.named_by_github = true;
+                }
+                _ => {}
+            }
+        }
+        self.cancelled_since_listed
+            .retain(|repository, _| !listed.contains(repository));
     }
 
     /// ADR 0125: a start in flight lives only inside its batch, which a tick or a pass ends before it returns.
@@ -2803,7 +2986,7 @@ impl Case {
             let wanted = self
                 .queued()
                 .into_iter()
-                .chain(self.cancelled_since_tick.iter().copied())
+                .chain(self.cancelled_since_listed.values().flatten().copied())
                 .chain(self.listed_after_runner.iter().copied())
                 .filter(|id| {
                     let job = &self.jobs[id];
@@ -2849,6 +3032,7 @@ impl Case {
             let queued = self
                 .queued()
                 .into_iter()
+                .chain(self.cancelled_since_listed.values().flatten().copied())
                 .chain(self.listed_after_runner.iter().copied())
                 .filter(|id| {
                     let job = &self.jobs[id];
@@ -3387,7 +3571,8 @@ impl Case {
         }
         for id in self.queued() {
             let job = &self.jobs[&id];
-            if self.shape.configures(job.repository)
+            if job.shown
+                && self.shape.configures(job.repository)
                 && job.labels != ["ubuntu-latest"]
                 && !status.queued.iter().any(|listed| listed.id == id)
             {
@@ -3769,6 +3954,15 @@ fn steps_of(seed: u64) -> Vec<Step> {
         // Two ticks, for what the scenario left to end.
         steps.splice(0..0, batch.iter().copied().chain([Step::Tick, Step::Tick]));
     }
+    if seed % 4 == 3 {
+        steps.splice(
+            0..0,
+            A_LISTING_BESIDE_A_NEWLY_BUSY_RUNNER
+                .iter()
+                .copied()
+                .chain([Step::Tick, Step::Tick]),
+        );
+    }
     if seed % 2 == 1 {
         let rarely: &[Step] = match seed % 16 {
             1 => &A_JOB_STAYS_OPEN,
@@ -4034,6 +4228,28 @@ const A_FORCED_PAUSE: [Step; 9] = [
     Step::Elapse,
     Step::Tick,
     Step::Resume { second: false },
+];
+
+/// ADR 0128: `o/s`'s runner takes its job, which GitHub lists still, and a runners listing shows it busy; then a tick
+/// lists `o/r`, active on another phase, and not `o/s`. Each tick comes as the first repository due brings it: `o/r`,
+/// active from its first listing, at 5, 11, 18 and 23 s; `o/s`, idle, at 15 s, and active from there at 20 s.
+const A_LISTING_BESIDE_A_NEWLY_BUSY_RUNNER: [Step; 13] = [
+    HEAVY,
+    Step::Tick,
+    Step::Assign(0),
+    Step::TickSoon { after: 5 },
+    Step::TickSoon { after: 3 },
+    Step::TickSoon { after: 3 },
+    Step::Queue {
+        second: true,
+        labels: Labels::Heavy,
+    },
+    Step::TickSoon { after: 2 },
+    Step::TickSoon { after: 2 },
+    Step::AssignListed(0),
+    Step::TickSoon { after: 3 },
+    Step::TickSoon { after: 2 },
+    Step::TickSoon { after: 3 },
 ];
 
 const A_BUSY_ORPHAN: [Step; 2] = [Step::BusyOrphan, Step::Tick];
