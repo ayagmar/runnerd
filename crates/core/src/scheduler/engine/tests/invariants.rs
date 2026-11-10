@@ -4855,7 +4855,7 @@ async fn a_start_the_tick_did_not_make_keeps_the_plain_margin() {
 /// o/r's jobs. The limit then lifts, and a tick 3 s on lists only what is due: o/r keeps the 5 s cadence its failed
 /// listing had (ADR 0128), so job 1 is not shown yet, and comes back at the tick that lists o/r again.
 #[tokio::test(start_paused = true)]
-async fn a_job_a_failed_listing_forgot_is_shown_again_at_its_repositorys_next_listing() {
+async fn a_job_a_failed_listing_forgot_is_shown_again_at_the_next_listing_of_its_repository() {
     let heavy = Step::Queue {
         second: false,
         labels: Labels::Heavy,
