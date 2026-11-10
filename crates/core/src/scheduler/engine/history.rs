@@ -486,22 +486,34 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// After the tick's starts: asks GitHub for the steps of the running jobs `follow_jobs` did not read, and of
-    /// those of ended runners whose build cache uploads wait, decides their writes, and asks whether the jobs of
-    /// removed runners completed. Each running job is still read once a tick.
-    pub(super) async fn follow_running(&mut self, before: Described) {
+    /// After the tick's starts: asks GitHub for the steps of the running jobs `follow_jobs` did not read, but only
+    /// once every `poll_interval` (`RunningReads`), since the tick's listing began at `anchor`; and for the jobs of
+    /// ended runners whose build cache uploads wait, every tick, since an end is read once and a plan waits for
+    /// nothing here. Decides the writes of the jobs described, closes the build caches of ended runners and asks
+    /// whether the jobs of removed runners completed, every tick.
+    pub(super) async fn follow_running(&mut self, before: Described, anchor: tokio::time::Instant) {
+        let interval = self.config.host.poll_interval;
+        let running = if self.running_reads.due(anchor, interval) {
+            self.running_reads.read(anchor);
+            self.occupied()
+                .filter_map(|(_, occupant)| {
+                    Some((occupant.repository.clone(), occupant.named_job()?))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let ended = self
             .ended_uploads
             .values()
             .map(|ended| (ended.repository.clone(), ended.job));
-        let running: Vec<(String, u64)> = self
-            .occupied()
-            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.named_job()?)))
+        let reads: Vec<(String, u64)> = running
+            .into_iter()
             .chain(ended)
             .filter(|(_, id)| !before.asked.contains(id))
             .collect();
         let mut described = before.details;
-        described.extend(self.describe(running).await.details);
+        described.extend(self.describe(reads).await.details);
         let undecided = self.undecided(&described);
         self.decide_writes(undecided).await;
         self.detach_ended();

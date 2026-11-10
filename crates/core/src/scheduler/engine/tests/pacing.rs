@@ -373,7 +373,7 @@ fn burst_fakes(listing_lag: Duration) -> (FakeGithub, FakeDocker) {
 }
 
 /// Steps `burst` every 100ms until `until` says it is over, or 30 minutes passed.
-async fn play(burst: &mut Burst, until: impl Fn(&Burst, Instant) -> bool) {
+async fn play(burst: &mut Burst, mut until: impl FnMut(&Burst, Instant) -> bool) {
     let began = Instant::now();
     loop {
         let now = Instant::now();
@@ -590,6 +590,93 @@ async fn slow_job_reads_do_not_push_the_next_listing_out() {
     );
 }
 
+/// Four jobs run for an hour while something wakes the engine every 5 s, a third of `poll_interval`. Each running job
+/// is read once every `poll_interval`, not at every tick. The bug it catches: reads tied to the tick, so a faster
+/// tick triples what running jobs cost GitHub for the same steps.
+#[tokio::test(start_paused = true)]
+async fn running_jobs_are_read_every_poll_interval_whatever_the_ticks() {
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    let dir = TestDir::new("running-reads");
+    let config = CONFIG.replace("slots = 2", "slots = 4");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.run = Duration::from_hours(1);
+    burst.queue(4);
+    let run = tokio::spawn(engine.run());
+    let settled = Instant::now() + Duration::from_mins(2);
+    play(&mut burst, |_, now| now >= settled).await;
+    assert_eq!(burst.running.len(), 4, "four jobs run: {:?}", burst.seen);
+
+    let polled = polls(&github.calls());
+    let span = Duration::from_mins(3);
+    let until = Instant::now() + span;
+    let mut last = github.0.lock().unwrap().job_reads;
+    let (mut wake, mut reads) = (Instant::now(), vec![]);
+    while Instant::now() < until {
+        burst.step(Instant::now());
+        if Instant::now() >= wake {
+            handle.control.wake.notify_one();
+            wake += Duration::from_secs(5);
+        }
+        let now = github.0.lock().unwrap().job_reads;
+        if now > last {
+            // A round of reads takes about a second: its first is the round's time.
+            if reads.last().is_none_or(|&(at, _): &(Instant, usize)| {
+                Instant::now() - at > Duration::from_secs(5)
+            }) {
+                reads.push((Instant::now(), 0));
+            }
+            if let Some((_, count)) = reads.last_mut() {
+                *count += now - last;
+            }
+            last = now;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let ticks = polls(&github.calls()) - polled;
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    assert!(ticks >= 30, "the ticks came every 5 s: {ticks} in {span:?}");
+    let gaps: Vec<Duration> = reads.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
+    assert!(
+        reads.len() >= 10 && reads.iter().all(|&(_, count)| count == 4),
+        "each round reads the four jobs once: {reads:?}"
+    );
+    assert!(
+        gaps.iter()
+            .all(|gap| *gap >= Duration::from_secs(15) && *gap <= Duration::from_secs(16)),
+        "rounds of reads left `poll_interval`'s pace: {gaps:?}"
+    );
+}
+
+/// A job a runner took that no listing or capture named is read before every plan, not at the poll's pace: admission
+/// needs its details, and a tick inside the interval of the last read of the running jobs still reads it. The bug it
+/// catches: the pace holding back the read admission waits for, so a start counted a runner's job as nothing.
+#[tokio::test]
+async fn a_job_no_listing_named_is_read_before_each_plan_inside_the_interval() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    github.0.lock().unwrap().failed_jobs.insert(1);
+    let dir = TestDir::new("unnamed-read");
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let first = github.0.lock().unwrap().job_reads;
+    assert!(first > 0, "the first tick reads the job, which fails");
+
+    github.0.lock().unwrap().failed_jobs.clear();
+    engine.tick(Shutdown::No).await;
+    let second = github.0.lock().unwrap().job_reads;
+    assert_eq!(second, first + 1, "the next tick reads it before its plan");
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        github.0.lock().unwrap().job_reads,
+        second,
+        "named now, it is read again only at the poll's pace"
+    );
+}
+
 /// A running job's run is cancelled and its runner does not exit, so the tick `CANCEL_GRACE` later removes it before
 /// it lists, and Docker takes 8 s to. The next listing still comes `poll_interval` after that tick's. The bug it
 /// catches: the next tick counted from the last one's start, so a slow collect before the listing and a quick one
@@ -771,7 +858,8 @@ impl Burst {
 /// `JOBS` short jobs of `o/r` every `PERIOD`, more than its 8 slots take, through the engine's own loop. Prints how
 /// long jobs waited from their queueing to their runner's container start, how long a slot whose job ended waited
 /// for its next runner while listed jobs waited, and what the engine asked GitHub per hour; first with Docker's
-/// events not followed, as before them, then followed.
+/// events not followed, as before them, then followed, then followed with something waking the engine every 5 s, as
+/// a tick a third of `poll_interval` would (ADR 0124).
 #[tokio::test(start_paused = true)]
 #[ignore = "prints a workload's figures; run with --ignored --nocapture"]
 #[allow(clippy::print_stdout, reason = "the figures are its output")]
@@ -783,7 +871,11 @@ async fn workload_figures() {
     const BURSTS: u64 = 6;
     const JOBS: u64 = 40;
     const PERIOD: Duration = Duration::from_mins(5);
-    for followed in [false, true] {
+    for (followed, tick) in [
+        (false, None),
+        (true, None),
+        (true, Some(Duration::from_secs(5))),
+    ] {
         let (github, docker) = burst_fakes(Duration::ZERO);
         if !followed {
             docker.0.lock().unwrap().fail_events = u32::MAX;
@@ -794,10 +886,20 @@ async fn workload_figures() {
         let mut burst = Burst::new(&github, &docker, u64::MAX);
         let run = tokio::spawn(engine.run());
         let began = Instant::now();
+        let mut wake = Instant::now();
         for _ in 0..BURSTS {
             burst.queue(JOBS);
             let next = Instant::now() + PERIOD;
-            play(&mut burst, |_, now| now >= next).await;
+            play(&mut burst, |_, now| {
+                if let Some(tick) = tick
+                    && now >= wake
+                {
+                    handle.control.wake.notify_one();
+                    wake = now + tick;
+                }
+                now >= next
+            })
+            .await;
         }
         let hours = began.elapsed().as_secs_f64() / 3600.0;
         handle.shutdown(Shutdown::Force);
@@ -818,8 +920,13 @@ async fn workload_figures() {
         };
         let seen = &burst.seen;
         println!(
-            "Docker's events {}:",
-            if followed { "followed" } else { "not followed" }
+            "Docker's events {}{}:",
+            if followed { "followed" } else { "not followed" },
+            if tick.is_some() {
+                ", a tick every 5 s"
+            } else {
+                ""
+            }
         );
         println!(
             "  queued to container start: {}",

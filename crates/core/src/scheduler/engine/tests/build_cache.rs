@@ -168,6 +168,7 @@ async fn until_decided(
         if runners.iter().all(|runner| !cache.undecided(runner)) {
             return;
         }
+        engine.age_running_reads(Duration::from_hours(1));
         engine.tick(Shutdown::No).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -658,6 +659,7 @@ async fn a_push_whose_commit_github_cannot_compare_never_writes() {
         200
     );
     for _ in 0..5 {
+        engine.age_running_reads(Duration::from_hours(1));
         engine.tick(Shutdown::No).await;
     }
     assert!(!cache.undecided(&pull), "the pull request was decided");
@@ -897,6 +899,7 @@ async fn a_pull_request_github_cannot_describe_never_writes() {
         200
     );
     for _ in 0..5 {
+        engine.age_running_reads(Duration::from_hours(1));
         engine.tick(Shutdown::No).await;
     }
     assert!(!cache.undecided(&main), "main was decided");

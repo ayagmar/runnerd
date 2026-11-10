@@ -221,6 +221,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.watches.abort_all();
     }
 
+    /// As if the running jobs were last read `by` earlier, so the next tick reads them.
+    pub(super) fn age_running_reads(&mut self, by: Duration) {
+        self.running_reads.age(by);
+    }
+
     /// As if every runner holding uploads ended `by` earlier.
     pub(super) fn age_ended_uploads(&mut self, by: Duration) {
         for ended in self.ended_uploads.values_mut() {
