@@ -6,8 +6,3 @@
 # script.
 #
 engine-lifecycle-fields 19
-
-# Measured: split raised out (slot occupant), which seals what stays, the predictor and the log memos, with private
-# fields.
-C1 core crates/core/src/scheduler/engine/admission.rs:Measured
-

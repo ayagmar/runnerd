@@ -252,37 +252,31 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn host_is_short(&self) -> bool {
-        self.measured.host.is_short()
+        self.measured.host().is_short()
     }
 
     pub(super) fn set_host_short(&mut self) {
-        if self.measured.host == host::HostBand::Plain {
-            self.measured.host = host::HostBand::Larger;
-        }
+        self.measured.set_host_short();
     }
 
     pub(super) fn waits_for_a_slot(&self, job: u64) -> bool {
-        self.measured.job_waits.jobs(WaitFor::Slot).contains(&job)
+        self.measured.waiting(WaitFor::Slot).contains(&job)
     }
 
     pub(super) fn waits_for_the_host(&self, job: u64) -> bool {
-        self.measured.job_waits.jobs(WaitFor::Host).contains(&job)
+        self.measured.waiting(WaitFor::Host).contains(&job)
     }
 
     pub(super) fn wait_for_the_host(&mut self, job: u64) {
-        let mut waiting = self.measured.job_waits.jobs(WaitFor::Host);
-        waiting.insert(job);
-        self.measured
-            .job_waits
-            .open_wait(WaitFor::Host, waiting, crate::time::now_ms());
+        self.measured.wait_for_the_host(job);
     }
 
     pub(super) fn raise(&mut self, runner: String) {
-        self.measured.raised.push(runner);
+        self.measured.raise(runner);
     }
 
     pub(super) fn raised(&self) -> &[String] {
-        &self.measured.raised
+        self.measured.raised()
     }
 
     pub(super) fn measure_is_due(&self, profile: &str) -> bool {
@@ -290,11 +284,11 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn forget_predictor(&mut self) {
-        self.measured.predictor = None;
+        self.measured.set_predictor(None);
     }
 
     pub(super) fn set_predictor(&mut self, predictor: Predictor, read_at: SystemTime) {
-        self.measured.predictor = Some((predictor, read_at));
+        self.measured.set_predictor(Some((predictor, read_at)));
     }
 
     pub(super) fn no_recordings(&self) -> bool {

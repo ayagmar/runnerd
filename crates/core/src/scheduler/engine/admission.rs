@@ -39,24 +39,140 @@ const REREAD: Duration = Duration::from_secs(60);
 /// How far back it reads, in milliseconds: 30 days.
 const HISTORY: u64 = 30 * 24 * 3600 * 1000;
 
-/// What admission keeps between plans.
+/// What admission keeps between plans. Its fields are independent, each written only by its own method here.
+///
+/// Nothing of it survives a restart: the first plan reads the host and the history afresh, and the jobs it finds
+/// waiting start their waits then. A reload keeps it all; the next `rereserve` drops the raises if the reload turned
+/// measured admission off.
 #[derive(Debug, Default)]
 pub(super) struct Measured {
     /// What the last plan saw of the host's memory.
-    pub host: host::HostBand,
+    host: host::HostBand,
     /// The jobs the last plans left waiting for a slot alone or for the host's memory.
-    pub(super) job_waits: OpenWaits,
+    job_waits: OpenWaits,
     /// What predicts the jobs' peaks and usual run times, and when it read the history.
-    pub(super) predictor: Option<(Predictor, SystemTime)>,
+    predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
-    pub high_water: bool,
+    high_water: bool,
     /// The waiting runners `rereserve` raised for a heavier queued job, until they take a job or go. A raise stays
     /// once made, so a pass's raise is still known to the tick after it, which stops those past the budget.
-    pub(super) raised: Vec<String>,
+    raised: Vec<String>,
     /// The job the last plan let no younger job start before, so the change is logged once.
     barrier: Option<u64>,
     /// What the host's limit held at the last plan, so the change is logged once.
     host_holds: HostHolds,
+}
+
+impl Measured {
+    /// What the last plan saw of the host's memory.
+    pub(super) fn host(&self) -> host::HostBand {
+        self.host
+    }
+
+    /// The band this plan saw, for the next; the last plan's.
+    fn set_host(&mut self, band: host::HostBand) -> host::HostBand {
+        std::mem::replace(&mut self.host, band)
+    }
+
+    /// What the host's limit holds back at this plan; what it held at the last.
+    fn set_host_holds(&mut self, holds: HostHolds) -> HostHolds {
+        std::mem::replace(&mut self.host_holds, holds)
+    }
+
+    /// The jobs the last plans left waiting for `kind`.
+    pub(super) fn waiting(&self, kind: WaitFor) -> BTreeSet<u64> {
+        self.job_waits.jobs(kind)
+    }
+
+    /// The jobs a plan has waiting for `kind` now: what ended or went on since the last commit.
+    fn open_wait(&mut self, kind: WaitFor, waiting: BTreeSet<u64>, now: u64) -> Vec<Waited> {
+        self.job_waits.open_wait(kind, waiting, now)
+    }
+
+    /// `job`'s runner is in its slot: its wait, if any, ended now.
+    fn end_wait(&mut self, job: u64, now: u64) -> Option<Waited> {
+        self.job_waits.end_wait(job, now)
+    }
+
+    /// What predicts the jobs' peaks and usual run times, once the history was read.
+    fn predictor(&self) -> Option<&Predictor> {
+        self.predictor.as_ref().map(|(predictor, _)| predictor)
+    }
+
+    /// Whether the predictor was read less than `REREAD` ago.
+    fn predictor_is_fresh(&self) -> bool {
+        self.predictor
+            .as_ref()
+            .is_some_and(|(_, read_at)| read_at.elapsed().is_ok_and(|age| age < REREAD))
+    }
+
+    /// The history was read into `predictor` at `read_at`.
+    fn read_predictor(&mut self, predictor: Predictor, read_at: SystemTime) {
+        self.predictor = Some((predictor, read_at));
+    }
+
+    /// Whether the slice was at the high-water mark at the last plan.
+    pub(super) fn high_water(&self) -> bool {
+        self.high_water
+    }
+
+    /// Whether the slice is at the high-water mark at this plan; whether that changed.
+    fn set_high_water(&mut self, held: bool) -> bool {
+        std::mem::replace(&mut self.high_water, held) != held
+    }
+
+    /// The job this plan lets no younger job start before; whether that changed.
+    fn set_barrier(&mut self, job: Option<u64>) -> bool {
+        std::mem::replace(&mut self.barrier, job) != job
+    }
+
+    /// Whether `rereserve` raised `runner` and it has not taken a job or gone since.
+    fn is_raised(&self, runner: &str) -> bool {
+        self.raised.iter().any(|name| name == runner)
+    }
+
+    /// The raised runners, for `rereserve` to update and give back.
+    fn take_raised(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.raised)
+    }
+
+    /// The raised runners `rereserve` updated.
+    fn keep_raised(&mut self, raised: Vec<String>) {
+        self.raised = raised;
+    }
+
+    /// Measured admission is off: no runner is raised.
+    fn forget_raised(&mut self) {
+        self.raised.clear();
+    }
+}
+
+#[cfg(test)]
+impl Measured {
+    pub(super) fn set_host_short(&mut self) {
+        if self.host == host::HostBand::Plain {
+            self.host = host::HostBand::Larger;
+        }
+    }
+
+    pub(super) fn wait_for_the_host(&mut self, job: u64) {
+        let mut waiting = self.job_waits.jobs(WaitFor::Host);
+        waiting.insert(job);
+        self.job_waits
+            .open_wait(WaitFor::Host, waiting, time::now_ms());
+    }
+
+    pub(super) fn raise(&mut self, runner: String) {
+        self.raised.push(runner);
+    }
+
+    pub(super) fn raised(&self) -> &[String] {
+        &self.raised
+    }
+
+    pub(super) fn set_predictor(&mut self, predictor: Option<(Predictor, SystemTime)>) {
+        self.predictor = predictor;
+    }
 }
 
 /// What the host's limit holds back at a plan.
@@ -197,12 +313,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// without any, jobs are admitted at their caps and nothing starts behind a barrier. Under caps only usual run times
     /// are read from it (ADR 0097).
     pub(super) async fn refresh_predictor(&mut self) {
-        if self
-            .measured
-            .predictor
-            .as_ref()
-            .is_some_and(|(_, read_at)| read_at.elapsed().is_ok_and(|age| age < REREAD))
-        {
+        if self.measured.predictor_is_fresh() {
             return;
         }
         let history = match self
@@ -220,7 +331,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let predictor = Predictor::read(&self.config.sizing, &history, |profile| {
             profiles.get(profile).map(|limits| limits.memory.0)
         });
-        self.measured.predictor = Some((predictor, SystemTime::now()));
+        self.measured.read_predictor(predictor, SystemTime::now());
     }
 
     /// Sets what each repository's next runner reserves, and says what the plan admits by. `free` is the budget
@@ -262,7 +373,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             admitting.free = Some(0);
             return admitting;
         }
-        let Some((predictor, _)) = &self.measured.predictor else {
+        let Some(predictor) = self.measured.predictor() else {
             return admitting;
         };
         let running = self.running();
@@ -338,7 +449,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// runners need only the margin.
     pub(super) fn host_remembered(&self) -> host::Remembered {
         let occupancy = host::Occupancy::of(self.occupied().next().is_some());
-        host::Remembered::new(self.measured.host, occupancy)
+        host::Remembered::new(self.measured.host(), occupancy)
     }
 
     /// Remembers what this plan saw of the host for the next: whether it stalled, whether the larger margin stands
@@ -362,8 +473,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map_or(host::HostBand::Plain, |host| {
                 host::HostBand::after_plan(&host.memory, count.hosted(), stalled, needs)
             });
-        let was_short = self.measured.host.is_short();
-        self.measured.host = band;
+        let was_short = self.measured.set_host(band).is_short();
         let now = time::now_ms();
         let waiting_now: BTreeMap<u64, u64> = waiting
             .iter()
@@ -391,7 +501,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             (true, false) => HostHolds::Counted,
             (true, true) => HostHolds::Short,
         };
-        let held = std::mem::replace(&mut self.measured.host_holds, holds);
+        let held = self.measured.set_host_holds(holds);
         self.store.host_waiting(lacking, now);
         self.note_host_waits(waiting_now.into_keys().collect(), now);
         let size = crate::config::ByteSize;
@@ -437,10 +547,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Remembers which jobs a plan has waiting for the host's memory, and adds the time since the last commit to the
     /// host waits of those that did then (ADR 0103).
     pub(super) fn note_host_waits(&mut self, waiting: BTreeSet<u64>, now: u64) {
-        let waited = self
-            .measured
-            .job_waits
-            .open_wait(WaitFor::Host, waiting, now);
+        let waited = self.measured.open_wait(WaitFor::Host, waiting, now);
         self.record_waited(waited);
     }
 
@@ -450,7 +557,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn note_slots(&mut self, waiting: BTreeSet<u64>) {
         let waited = self
             .measured
-            .job_waits
             .open_wait(WaitFor::Slot, waiting, time::now_ms());
         self.record_waited(waited);
     }
@@ -461,7 +567,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// in the wait it was in.
     pub(super) fn note_pass_waits(&mut self, plan: &Plan, not_carried_out: &BTreeSet<u64>) {
         let still = |kind: WaitFor| -> BTreeSet<u64> {
-            let waiting = self.measured.job_waits.jobs(kind);
+            let waiting = self.measured.waiting(kind);
             waiting.intersection(not_carried_out).copied().collect()
         };
         let mut slots = plan.slot_waiting.clone();
@@ -480,7 +586,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Ends `job`'s slot or host wait, as its runner is in its slot: it waited from the last commit until now, not
     /// until the next commit (ADR 0110).
     pub(super) fn note_started(&mut self, job: u64) {
-        let waited = self.measured.job_waits.end_wait(job, time::now_ms());
+        let waited = self.measured.end_wait(job, time::now_ms());
         self.record_waited(waited.into_iter().collect());
     }
 
@@ -536,10 +642,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             let predictor = self
                 .measured
-                .predictor
-                .as_ref()
+                .predictor()
                 .filter(|_| self.config.host.admission == Admission::Measured);
-            let prediction = predictor.and_then(|(predictor, _)| {
+            let prediction = predictor.and_then(|predictor| {
                 repository
                     .queued
                     .iter()
@@ -567,7 +672,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// labels match, `taken` left out (ADR 0097). Not `listed_demand`: a job it hides for a runner no capture named yet
     /// may still be queued, and GitHub may give it to the new runner.
     pub(super) fn usual_runs(&self, repositories: &mut [Repository], taken: &BTreeSet<u64>) {
-        let Some((predictor, _)) = &self.measured.predictor else {
+        let Some(predictor) = self.measured.predictor() else {
             return;
         };
         for repository in repositories {
@@ -584,7 +689,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// How long `occupant`'s job in `profile` usually keeps it, once that job is known and its runs say.
     pub(super) fn usual_run(&self, occupant: &super::Occupant, profile: &str) -> Option<Duration> {
-        let (predictor, _) = self.measured.predictor.as_ref()?;
+        let predictor = self.measured.predictor()?;
         predictor.usual(occupant.key()?, profile)
     }
 
@@ -626,10 +731,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn rereserve(&mut self) {
         self.find_keys().await;
         if self.config.host.admission != Admission::Measured {
-            self.measured.raised.clear();
+            self.measured.forget_raised();
             return;
         }
-        let Some((predictor, _)) = &self.measured.predictor else {
+        let mut raised = self.measured.take_raised();
+        let Some(predictor) = self.measured.predictor() else {
+            self.measured.keep_raised(raised);
             return;
         };
         let now = time::now_ms();
@@ -640,7 +747,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // as does every runner of a repository with a busy runner whose job is not known yet.
         let mut seen = BTreeSet::new();
         let mut changed = Vec::new();
-        let mut raised = std::mem::take(&mut self.measured.raised);
         for (profile, slots) in &mut self.slots {
             for occupant in slots.iter_mut().flatten() {
                 let key = occupant.key().cloned();
@@ -705,7 +811,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.occupied()
                 .any(|(_, occupant)| !occupant.has_key() && occupant.runner_name == *name)
         });
-        self.measured.raised = raised;
+        self.measured.keep_raised(raised);
         for (runner, admission) in changed {
             self.store.runner_admission(&runner, admission);
         }
@@ -744,10 +850,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let stopping = decisions.iter().any(
                 |decision| matches!(decision, Decision::Stop { slot: other, .. } if *other == slot),
             );
-            if occupant.engaged()
-                || stopping
-                || !self.measured.raised.contains(&occupant.runner_name)
-            {
+            if occupant.engaged() || stopping || !self.measured.is_raised(&occupant.runner_name) {
                 continue;
             }
             info!(
@@ -852,22 +955,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         let job = barrier.map(|barrier| barrier.job);
-        if job != self.measured.barrier {
+        if self.measured.set_barrier(job) {
             if let Some(job) = job {
                 info!("job {job} waited long enough: no younger job starts until its runner fits");
             } else {
                 info!("no job holds younger ones back any more");
             }
-            self.measured.barrier = job;
         }
     }
 
     /// Logs when the slice reaches the high-water mark and when it falls under it.
     pub(super) fn note_high_water(&mut self, admitting: &Admitting) {
-        if admitting.held == self.measured.high_water {
+        if !self.measured.set_high_water(admitting.held) {
             return;
         }
-        self.measured.high_water = admitting.held;
         let slice = admitting.slice.map_or_else(String::new, |memory| {
             format!(" ({})", crate::config::ByteSize(memory))
         });

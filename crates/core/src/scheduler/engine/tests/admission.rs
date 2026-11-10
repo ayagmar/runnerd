@@ -164,6 +164,29 @@ async fn small_predicted_peaks_start_more_runners_than_the_caps_fit() {
     );
 }
 
+/// The history is read once a minute, not every tick: runs it gained since the last read count from the next read.
+#[tokio::test]
+async fn a_history_read_less_than_a_minute_ago_stands() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    engine.recover().await.unwrap();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    history(&handle.store, G, 0).await;
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "the jobs reserve their 4G caps until the history is read again"
+    );
+}
+
 #[tokio::test]
 async fn nothing_starts_while_the_slice_is_at_the_high_water_mark() {
     let (github, docker, dir) = (
@@ -2374,6 +2397,48 @@ async fn a_raised_waiting_runner_stops_only_once_the_pooled_count_is_past_the_bu
         swap: None,
     });
     assert_eq!(engine.over_budget(&[]).len(), 1, "the plain count does not");
+}
+
+/// Caps raise no runner, so one a measured pass raised is not stopped as raised once a reload goes back to caps.
+#[tokio::test]
+async fn a_reload_back_to_caps_stops_no_runner_measured_admission_raised() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = two_settled_jobs(&github, &docker, &dir, &measured()).await;
+    github.0.lock().unwrap().queued = vec![small(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 3, "lint's runner waits");
+    github.0.lock().unwrap().queued = Vec::new();
+    let waiting = engine
+        .occupied()
+        .find(|(_, occupant)| occupant.named_job().is_none())
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .unwrap();
+    engine.raise(waiting);
+    let caps = CONFIG.replace("slots = 2", "slots = 4");
+    engine.reload(Config::parse(&caps).unwrap(), Some(8 * G), None);
+    engine.rereserve().await;
+    // The host's reading is old: the plain count is past the 8G budget, where a raised runner is stopped.
+    roomy_readings(&github, &handle.store, 512 * M);
+    handle.store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000 - 60,
+        total: 64 * G,
+        available: 40 * G,
+        slice: G,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    });
+    assert_eq!(
+        engine.over_budget(&[]),
+        [],
+        "no runner is raised under caps"
+    );
 }
 
 #[tokio::test]
