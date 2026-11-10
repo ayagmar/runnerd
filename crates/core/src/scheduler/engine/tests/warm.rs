@@ -1857,3 +1857,42 @@ async fn a_registration_refused_for_the_rate_limit_holds_no_pool_and_starts_resu
     engine.publish();
     assert_eq!(handle.status.borrow().github_limited_until, None);
 }
+
+/// As above, with all four starts in one batch, in flight together: one is the warm runner `warm = 1` asks for, and
+/// the other two are for the jobs the run is expected to queue, as when they started one at a time. The bug it catches:
+/// a warm start that counts only the runners already placed, so every warm start of a batch is recorded as the
+/// configured one.
+#[tokio::test]
+async fn a_batch_of_warm_starts_records_one_configured_warm_runner() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let config = warm_config().replace("slots = 2", "slots = 4");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
+    for run in 1..=3 {
+        for n in 0..3 {
+            let id = run * 10 + n;
+            handle
+                .store
+                .queued("o/r", &ci_job(id, run, then + run * MINUTE), time::now_ms());
+        }
+    }
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    check_ends(&mut engine).await;
+    github.0.lock().unwrap().queued = vec![ci_job(100, 50, time::now_ms())];
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let history = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let mut purposes: Vec<String> = history
+        .prepare("SELECT purpose FROM runners")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    purposes.sort();
+    assert_eq!(purposes, ["burst", "burst", "job", "warm"]);
+}

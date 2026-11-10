@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::warn;
 
+use super::slot::Holder;
 use super::{Engine, Purpose};
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
@@ -241,12 +242,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels))
                     .count()
             });
+        // A start in flight is a runner with no job yet, as the one it becomes is once placed.
         let waiting = self
-            .occupied()
-            .filter(|(slot, occupant)| {
-                slot.profile == pool.profile
-                    && occupant.repository == pool.repository
-                    && occupant.idle()
+            .slots
+            .get(&pool.profile)
+            .into_iter()
+            .flatten()
+            .filter(|slot| match slot.holder() {
+                Holder::Free => false,
+                Holder::Starting(starting) => starting.repository() == pool.repository,
+                Holder::Runner(occupant) => {
+                    occupant.repository == pool.repository && occupant.idle()
+                }
             })
             .count();
         if waiting.saturating_sub(queued) < configured {

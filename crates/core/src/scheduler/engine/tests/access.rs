@@ -272,6 +272,19 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     /// The runners whose build cache uploads wait.
+    /// The runners whose build cache is open.
+    pub(super) fn build_cache_runners(&self) -> Vec<String> {
+        self.build_cache
+            .as_ref()
+            .map(crate::buildcache::BuildCache::attached)
+            .unwrap_or_default()
+    }
+
+    /// The runners batches launched so far, in launch order.
+    pub(super) fn launches(&self) -> crate::scheduler::engine::start::Launches {
+        self.launches.clone()
+    }
+
     pub(super) fn ended_upload_runners(&self) -> BTreeSet<String> {
         self.ended_uploads.keys().cloned().collect()
     }

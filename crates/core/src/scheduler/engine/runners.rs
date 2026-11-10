@@ -727,9 +727,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter(|until| *until > SystemTime::now())
     }
 
-    /// After a start in `profile` that failed and left nothing in Docker, deletes its `runner`'s registration and
-    /// closes its build cache, and holds back its pool.
-    pub(super) async fn abandon(
+    /// After a start in `profile` that failed and left nothing in Docker, closes its build cache, deletes its
+    /// `runner`'s registration in the background, as a release does, and holds back its pool. A start of its batch
+    /// folded meanwhile does not wait for GitHub; a stop waits for the delete (`finish_deletes`), and the next runners
+    /// listing deletes a registration it left.
+    pub(super) fn abandon(
         &mut self,
         profile: &str,
         repository: &str,
@@ -737,9 +739,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         failure: String,
     ) {
         self.close_build_cache(&runner.name);
-        if let Err(error) = self.github.delete_runner(repository, runner.id).await {
-            warn!("{repository}: cannot delete {}: {error}", runner.name);
-        }
+        let (github, owner) = (self.github.clone(), repository.to_owned());
+        let (id, name) = (runner.id, runner.name.clone());
+        lock(&self.deletes).spawn(async move {
+            if let Err(error) = github.delete_runner(&owner, id).await {
+                warn!("{owner}: cannot delete {name}: {error}");
+            }
+        });
         self.hold(repository, profile, HoldCause::Start, failure);
     }
 

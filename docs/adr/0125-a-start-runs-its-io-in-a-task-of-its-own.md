@@ -1,6 +1,6 @@
 # 0125. A start runs its I/O in a task of its own
 
-Status: **Accepted** (2026-11-10). Amends [0123](0123-a-slots-state-is-one-sealed-value.md): a slot is free,
+Status: **Accepted** (2026-11-10), amended by [0126](0126-up-to-four-starts-at-once-one-registration-at-a-time.md). Amends [0123](0123-a-slots-state-is-one-sealed-value.md): a slot is free,
 starting or held. No wire, schema or config change.
 
 ## Context

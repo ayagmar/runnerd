@@ -1765,11 +1765,11 @@ async fn a_runner_whose_room_the_host_lost_since_the_plan_does_not_start_in_the_
     engine.memory_max = Some(20 * G);
     engine.recover().await.unwrap();
     github.0.lock().unwrap().queued = (1..=2).map(job).collect();
-    // The plan has room for both 4G caps; while the first runner starts, other programs take the host's memory
-    // down to what it alone fits in.
+    // The plan has room for both 4G caps; once the first runner is admitted, before the second launches, other
+    // programs take the host's memory down to what it alone fits in.
     host_at(&handle.store, 0, 20 * G, 0);
     let store = handle.store.clone();
-    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+    docker.0.lock().unwrap().on_prepare = Some(Box::new(move |_| {
         host_at(&store, 0, 8 * G + 100 * M, 0);
     }));
     engine.tick(Shutdown::No).await;
@@ -1943,11 +1943,11 @@ async fn a_start_that_no_longer_fits_does_not_hold_back_the_plans_later_starts()
             .extend([(1, "o/r".to_owned()), (2, "o/r".to_owned())]);
         state.queued_on.insert(3, "o/s".to_owned());
     }
-    // The plan has room for all three; while the first runner starts, other programs take the host's memory down to
-    // what it and a 512M runner fit in, not a second 4G one.
+    // The plan has room for all three; once the first runner is admitted, before the second launches, other
+    // programs take the host's memory down to what it and a 512M runner fit in, not a second 4G one.
     host_at(&handle.store, 0, 20 * G, 0);
     let store = handle.store.clone();
-    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+    docker.0.lock().unwrap().on_prepare = Some(Box::new(move |_| {
         host_at(&store, 0, 9 * G + 100 * M, 0);
     }));
     engine.tick(Shutdown::No).await;
@@ -1968,41 +1968,38 @@ async fn a_start_that_no_longer_fits_does_not_hold_back_the_plans_later_starts()
     );
 }
 
+/// A stop asked for while GitHub registers the first runner of a tick: the starts waiting for their turn to register
+/// send nothing, and the registered one is deleted before its container starts. The bug it catches: a start in
+/// flight registering a runner after the stop, which a detach would leave to take a job, and which holds the stop
+/// back by a registration and a delete each.
 #[tokio::test]
-async fn a_stop_asked_for_while_a_runner_starts_starts_no_more_of_the_tick() {
+async fn a_stop_asked_for_while_a_runner_registers_registers_no_more_of_the_tick() {
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
         TestDir::new("engine"),
     );
-    let config = sized("0G", "4G", "512M").replacen("slots = 1", "slots = 2", 1);
+    let config = CONFIG.replace("slots = 2", "slots = 4");
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
-    engine.memory_max = Some(20 * G);
     engine.recover().await.unwrap();
-    {
-        let mut state = github.0.lock().unwrap();
-        state.queued = vec![job(1), job(2), small_job(3)];
-        state
-            .queued_on
-            .extend([(1, "o/r".to_owned()), (2, "o/r".to_owned())]);
-        state.queued_on.insert(3, "o/s".to_owned());
-    }
-    host_at(&handle.store, 0, 20 * G, 0);
-    // While the first runner starts, the host's memory goes down, which defers the second, and a stop is asked for.
-    let (store, control) = (handle.store.clone(), handle.control.clone());
-    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
-        host_at(&store, 0, 9 * G + 100 * M, 0);
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    let control = handle.control.clone();
+    github.0.lock().unwrap().on_register = Some(Box::new(move |_| {
         control.shutdown(Shutdown::Detach);
     }));
     engine.tick(Shutdown::No).await;
-    // A runner started after the stop could take a job the detach then leaves running.
     assert_eq!(registered(&github.calls()).len(), 1, "{:?}", github.calls());
+    assert_eq!(
+        github.0.lock().unwrap().runners,
+        Vec::new(),
+        "its registration is deleted"
+    );
     let started = docker
         .calls()
         .iter()
         .filter(|call| call.starts_with("start "))
         .count();
-    assert_eq!(started, 1, "{:?}", docker.calls());
+    assert_eq!(started, 0, "{:?}", docker.calls());
 }
 
 /// A pass that runs while a tick follows its jobs plans after the tick took a new listing but before it raised
