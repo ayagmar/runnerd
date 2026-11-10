@@ -149,6 +149,9 @@ pub struct RunnerSlot {
     pub cpu: u64,
     /// How long its job usually keeps it from `started_at`, once that job and its runs are known (ADR 0097).
     pub usual: Option<Duration>,
+    /// The owner of the barrier it started behind (ADR 0131); `None` for one started otherwise, warm, or adopted by a
+    /// restart, which loses it with the waits it relates to.
+    pub behind: Option<u64>,
 }
 
 /// Where slots are, by profile name and slot index (0 is slot 1).
@@ -436,13 +439,8 @@ pub fn plan(
             started: &started,
         };
         if let Some(barrier) = decided.barrier {
-            let candidate = Candidate {
-                profile: &repository.profile,
-                free_slots: taken.iter().filter(|taken| !**taken).count(),
-                usual: repository.usual,
-                caps: profile.caps(),
-            };
-            if !fits || !behind.admits(candidate) {
+            let free_slots = taken.iter().filter(|taken| !**taken).count();
+            if !fits || !behind.admits(repository, profile, free_slots) {
                 turn.behind(barrier, &mut decided);
                 continue;
             }
@@ -472,7 +470,14 @@ pub fn plan(
         *missing -= 1;
         started.note(&repository.profile, job);
         left.take(memory, cpu);
-        behind.started(&repository.profile, profile.caps(), memory, cpu, now);
+        behind.started(
+            &repository.profile,
+            profile.caps(),
+            memory,
+            cpu,
+            decided.barrier,
+            now,
+        );
         decided.decisions.push(start(
             repository,
             job,
@@ -526,6 +531,7 @@ impl<'plan> Behind<'plan> {
                         memory: runner.memory,
                         cpu: runner.cpu,
                         caps: profile.caps(),
+                        passed: runner.behind.is_some(),
                     });
                 }
             }
@@ -561,15 +567,30 @@ impl<'plan> Behind<'plan> {
         self.backfill = Backfill::behind(barrier, job.profile, around, now);
     }
 
-    /// Whether `candidate` may start behind the barrier, counting it if so.
-    fn admits(&mut self, candidate: Candidate<'_>) -> bool {
+    /// Whether a runner of `repository` in `profile`, which has `free_slots`, may start behind the barrier, counting it
+    /// if so.
+    fn admits(&mut self, repository: &Repository, profile: &Profile, free_slots: usize) -> bool {
+        let candidate = Candidate {
+            profile: &repository.profile,
+            free_slots,
+            usual: repository.usual,
+            caps: profile.caps(),
+        };
         let backfill = self.backfill.as_mut();
         backfill.is_some_and(|backfill| backfill.admits(candidate))
     }
 
-    /// Notes a runner started now. It has no job yet: GitHub may give it a shorter one than its pool's longest, so its
-    /// room may come sooner than that says.
-    fn started(&mut self, profile: &'plan str, caps: Caps, memory: u64, cpu: u64, now: SystemTime) {
+    /// Notes a runner started now, behind `barrier` if one stands. It has no job yet: GitHub may give it a shorter one
+    /// than its pool's longest, so its room may come sooner than that says.
+    fn started(
+        &mut self,
+        profile: &'plan str,
+        caps: Caps,
+        memory: u64,
+        cpu: u64,
+        barrier: Option<Barrier>,
+        now: SystemTime,
+    ) {
         self.runners.push(Runner {
             profile,
             started_at: now,
@@ -577,6 +598,7 @@ impl<'plan> Behind<'plan> {
             memory,
             cpu,
             caps,
+            passed: barrier.is_some(),
         });
     }
 }

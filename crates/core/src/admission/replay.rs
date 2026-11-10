@@ -1142,6 +1142,7 @@ impl<'run> Replayer<'run> {
                 memory: self.charge(running),
                 cpu: running.cpu_at(self.moment),
                 caps: self.caps(running.profile),
+                passed: running.backfilled.is_some(),
             })
             .collect()
     }

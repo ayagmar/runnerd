@@ -871,6 +871,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         memory: self.held_by(&footprint).takes,
                         cpu: self.reserves_cpu(&footprint),
                         usual: None,
+                        behind: starting.behind(),
                     })
                 }
                 Holder::Runner(occupant) => Slot::Runner(RunnerSlot {
@@ -881,6 +882,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     memory: self.takes(occupant),
                     cpu: self.reserves_cpu(&occupant.footprint()),
                     usual: self.usual_run(occupant, name),
+                    behind: occupant.engagement.behind(),
                 }),
             })
             .collect();

@@ -12,8 +12,11 @@ use super::Purpose;
 /// How a slot's runner came to be there, and what that says of its job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
-    /// This daemon started it, for this.
-    Started(Purpose),
+    /// This daemon started it, for `purpose`, and behind the barrier of job `behind` if it passed one (ADR 0131).
+    Started {
+        purpose: Purpose,
+        behind: Option<u64>,
+    },
     /// A restart found its container running and adopted it.
     Adopted(Adoption),
 }
@@ -62,8 +65,9 @@ struct TakenJob {
 ///
 /// A restart rebuilds it in `adopted`: adopted and not yet listed, counted busy until a listing says otherwise, with
 /// the job its history row names, a forced pause's deadline as its row kept it, and no key until `find_keys` reads its
-/// record. Whether a listing showed it newly busy or waiting and when its job was found are lost. A reload does not
-/// touch it.
+/// record. Whether a listing showed it newly busy or waiting, when its job was found and the barrier it started behind
+/// are lost: every barrier after a restart matures after it, so a backfill would not count an adopted runner anyway. A
+/// reload does not touch it.
 #[derive(Debug, Clone)]
 pub(super) struct Engagement {
     origin: Origin,
@@ -78,10 +82,11 @@ pub(super) struct Engagement {
 }
 
 impl Engagement {
-    /// A runner this daemon starts for `purpose`: idle, with no job.
-    pub(super) fn started(purpose: Purpose) -> Self {
+    /// A runner this daemon starts for `purpose`, behind the barrier of job `behind` if its plan passed one: idle,
+    /// with no job.
+    pub(super) fn started(purpose: Purpose, behind: Option<u64>) -> Self {
         Self {
-            origin: Origin::Started(purpose),
+            origin: Origin::Started { purpose, behind },
             listing: Listed::Idle,
             job: None,
             key: None,
@@ -208,7 +213,7 @@ impl Engagement {
     /// Why this daemon started it; `None` for one a restart adopted.
     pub(super) fn purpose(&self) -> Option<Purpose> {
         match self.origin {
-            Origin::Started(purpose) => Some(purpose),
+            Origin::Started { purpose, .. } => Some(purpose),
             Origin::Adopted(_) => None,
         }
     }
@@ -217,12 +222,20 @@ impl Engagement {
     /// no listing showed waiting with no job named, whose job may have started before the restart.
     pub(super) fn job_found_here(&self) -> Option<SystemTime> {
         let started_here = match self.origin {
-            Origin::Started(_) | Origin::Adopted(Adoption::Waited) => true,
+            Origin::Started { .. } | Origin::Adopted(Adoption::Waited) => true,
             Origin::Adopted(Adoption::Unknown) => false,
         };
         self.job
             .and_then(|job| job.found_at)
             .filter(|_| started_here)
+    }
+
+    /// The owner of the barrier it started behind; `None` for one started otherwise or adopted by a restart.
+    pub(super) fn behind(&self) -> Option<u64> {
+        match self.origin {
+            Origin::Started { behind, .. } => behind,
+            Origin::Adopted(_) => None,
+        }
     }
 
     /// Its job as admission tells jobs apart, once the history had its record.
