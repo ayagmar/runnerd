@@ -130,7 +130,7 @@ enum Command {
         /// With --causal, how rows count what runs: `plain`, as the daemon does, a row for each --credit; `top2` or
         /// `top3`, a row by what runs uses with room for its two or three largest growths, at least 6G, for both
         /// MemoryMax and the host, and the plain count while the host has under its margin and a quarter of its
-        /// memory available. Repeat it for more rows [default: plain].
+        /// memory available. It picks the rows: list `plain` too to keep the credit rows [default: plain].
         #[arg(long, requires = "causal", value_enum)]
         count: Vec<CountArg>,
         /// With --causal, give the top2 and top3 rows the growth brake: the plain count for 30 minutes once what runs
@@ -352,6 +352,11 @@ fn rows(
     counts: &[CountArg],
     brake: bool,
 ) -> Result<Vec<simulate::Counting>, ExitCode> {
+    if !credits.is_empty() && !counts.is_empty() && !counts.contains(&CountArg::Plain) {
+        return Err(fail(
+            &"--credit needs --count plain beside --count top2 or top3",
+        ));
+    }
     let counts = if counts.is_empty() {
         &[CountArg::Plain][..]
     } else {

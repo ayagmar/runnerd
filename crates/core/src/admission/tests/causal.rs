@@ -704,3 +704,31 @@ fn a_replayed_runner_counts_its_pools_largest_cpu_until_its_job_is_known() {
         "from minute 1 to site's name at minute 10, waited {waited}"
     );
 }
+
+#[test]
+fn a_runner_still_booting_at_a_look_grows_from_nothing_and_engages_the_brake() {
+    // Eight runners boot for five minutes before their jobs start, unsampled and so using nothing at the looks then;
+    // each job uses 1.8G from its start, 14.4G together, past the 10.5G the count kept for three 3.5G starts. Taking a
+    // booting runner's first sample as where it began would hide all of it.
+    let booting = |run: Ran| Ran {
+        started_at: Some(run.queued_at + 5 * MINUTE),
+        ..run
+    };
+    let jobs: Vec<Ran> = eight_and_a_page(30)
+        .into_iter()
+        .take(8)
+        .map(booting)
+        .collect();
+    let mut trace = trace_of(&jobs);
+    for run in trace.runs.values_mut() {
+        run.samples = flat(1800 * M, 40);
+    }
+    let free = replay_counted(&jobs, &trace, 40 * G, Some(TOP3_BRAKED));
+    assert!(free.hazard.braked > 0, "{:?}", free.hazard);
+    let steady = replay_counted(&jobs, &trace_of(&jobs), 40 * G, Some(TOP3_BRAKED));
+    assert_eq!(
+        steady.hazard.braked, 0,
+        "0.5G each is within the room: {:?}",
+        steady.hazard
+    );
+}
