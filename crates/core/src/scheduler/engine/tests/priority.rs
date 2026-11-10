@@ -253,7 +253,7 @@ async fn a_pass_between_ticks_commits_a_wait_from_the_listing_it_plans_from() {
     fixture.engine.tick(Shutdown::No).await;
     // A job of the tick's listing, with a newer listing yet to answer; one small runner ends.
     fixture.engine.set_listed("o/big", vec![big(10)]);
-    fixture.engine.listing += 1;
+    fixture.engine.listing.listing += 1;
     fixture.docker.0.lock().unwrap().containers.remove(0);
     fixture.engine.exits.any();
     fixture.engine.turnover().await;
@@ -1161,7 +1161,7 @@ async fn a_pass_behind_the_barrier(name: &str) -> Fixture {
     fixture
         .engine
         .set_listed("o/small", vec![named(11, name), named(12, name)]);
-    fixture.engine.listing += 1;
+    fixture.engine.listing.listing += 1;
     fixture.docker.0.lock().unwrap().containers.remove(0);
     fixture.engine.exits.any();
     fixture.engine.turnover().await;

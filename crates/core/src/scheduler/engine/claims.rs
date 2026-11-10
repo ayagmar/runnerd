@@ -2,7 +2,9 @@
 //! repository. It owns that value and must not call GitHub or log: `tick` lists the jobs and plans from what is left.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
+use super::engagement::Mark;
 use crate::github::QueuedJob;
 
 /// By repository, the jobs its listings may show queued that this machine's runners took.
@@ -18,7 +20,8 @@ pub(super) struct Claims(BTreeMap<String, RepositoryClaims>);
 struct RepositoryClaims {
     /// Its runners gone that may have taken a listed job without the engine knowing which: one ended before its
     /// log capture named its job, or one whose start failed may have run. Each counts against one listed job of its
-    /// pool until a listing begun after it went answers.
+    /// pool until a listing that ends its mark answers (`Mark::ends`): one begun at least `poll_interval` after the
+    /// listing begun last when it went.
     unnamed: Vec<Unnamed>,
     /// The jobs this machine's runners took whose runners are gone, by the `listing` begun last when they went:
     /// GitHub lists a job queued for a while after a runner took it, so a listing begun before that, or one GitHub
@@ -31,18 +34,18 @@ struct RepositoryClaims {
 struct Unnamed {
     /// The profile of its pool.
     profile: String,
-    /// The `Engine::listing` begun last when it went.
-    listing: u64,
+    /// The listing begun last when it went.
+    went: Mark,
 }
 
 impl Claims {
-    /// A runner of `repository`'s pool in `profile` that may have taken one of its listed jobs went, the engine not
-    /// knowing which, while `listing` was the last listing begun.
-    pub(super) fn spend(&mut self, repository: &str, profile: &str, listing: u64) {
+    /// A runner of `repository`'s pool in `profile` that may have taken one of its listed jobs went while `went` was the
+    /// listing begun last, the engine not knowing which.
+    pub(super) fn spend(&mut self, repository: &str, profile: &str, went: Mark) {
         self.0
             .entry(repository.to_owned())
             .or_default()
-            .spend(profile, listing);
+            .spend(profile, went);
     }
 
     /// A runner of this machine that took `job` of `repository` went, while `listing` was the last listing begun.
@@ -53,16 +56,18 @@ impl Claims {
             .consume(job, listing);
     }
 
-    /// A listing of `repository` begun as `listing` answered with `queued`: the claims older than it end, but for
-    /// the jobs it still shows; a repository left with none has no entry.
+    /// A listing of `repository` begun at `listing` answered with `queued`: the unnamed claims it ends end
+    /// (`Mark::ends`, by `floor`), and the consumed ones older than it but for the jobs it still shows; a repository
+    /// left with none has no entry.
     pub(super) fn listing_answered(
         &mut self,
         repository: &str,
-        listing: u64,
+        listing: Mark,
+        floor: Duration,
         queued: &[QueuedJob],
     ) {
         if let Some(claims) = self.0.get_mut(repository)
-            && claims.answered(listing, queued) == Left::None
+            && claims.answered(listing, floor, queued) == Left::None
         {
             self.0.remove(repository);
         }
@@ -100,10 +105,10 @@ enum Left {
 }
 
 impl RepositoryClaims {
-    fn spend(&mut self, profile: &str, listing: u64) {
+    fn spend(&mut self, profile: &str, went: Mark) {
         self.unnamed.push(Unnamed {
             profile: profile.to_owned(),
-            listing,
+            went,
         });
     }
 
@@ -111,10 +116,11 @@ impl RepositoryClaims {
         self.consumed.insert(job, listing);
     }
 
-    fn answered(&mut self, listing: u64, queued: &[QueuedJob]) -> Left {
-        self.unnamed.retain(|claim| claim.listing >= listing);
+    fn answered(&mut self, listing: Mark, floor: Duration, queued: &[QueuedJob]) -> Left {
+        self.unnamed
+            .retain(|claim| !listing.ends(claim.went, floor));
         self.consumed
-            .retain(|job, since| *since >= listing || queued.iter().any(|q| q.id == *job));
+            .retain(|job, since| *since >= listing.listing || queued.iter().any(|q| q.id == *job));
         if self.unnamed.is_empty() && self.consumed.is_empty() {
             Left::None
         } else {
@@ -135,11 +141,24 @@ impl Claims {
             .get(repository)
             .map_or(0, |claims| claims.unnamed.len())
     }
+
+    /// As if every runner whose claim is unnamed went `by` earlier.
+    pub(super) fn age(&mut self, by: Duration) {
+        for claim in self.0.values_mut().flat_map(|claims| &mut claims.unnamed) {
+            if let Some(at) = claim.went.at.checked_sub(by) {
+                claim.went.at = at;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::Instant;
+
     use super::*;
+
+    const FLOOR: Duration = Duration::from_secs(15);
 
     fn job(id: u64) -> QueuedJob {
         QueuedJob {
@@ -148,10 +167,18 @@ mod tests {
         }
     }
 
+    /// The listing begun as `listing`, `secs` after `start`.
+    fn mark(start: Instant, listing: u64, secs: u64) -> Mark {
+        Mark {
+            listing,
+            at: start + Duration::from_secs(secs),
+        }
+    }
+
     #[test]
     fn an_unnamed_claim_counts_against_its_own_pool_only() {
         let mut claims = Claims::default();
-        claims.spend("o/r", "light", 1);
+        claims.spend("o/r", "light", mark(Instant::now(), 1, 0));
         assert_eq!(claims.unnamed("o/r", "light"), 1);
         assert_eq!(claims.unnamed("o/r", "heavy"), 0, "another pool of o/r");
         assert_eq!(claims.unnamed("o/s", "light"), 0, "another repository");
@@ -159,15 +186,16 @@ mod tests {
 
     #[test]
     fn a_listing_begun_after_a_claim_ends_it_unless_it_still_shows_the_job() {
+        let start = Instant::now();
         let mut claims = Claims::default();
-        claims.spend("o/r", "app", 1);
+        claims.spend("o/r", "app", mark(start, 1, 0));
         claims.consume("o/r", 5, 1);
         claims.consume("o/r", 6, 1);
-        claims.listing_answered("o/r", 1, &[]);
+        claims.listing_answered("o/r", mark(start, 1, 15), FLOOR, &[]);
         assert_eq!(claims.unnamed("o/r", "app"), 1, "a listing begun with it");
         assert!(claims.consumed("o/r", 5), "a listing begun with it");
 
-        claims.listing_answered("o/r", 2, &[job(6)]);
+        claims.listing_answered("o/r", mark(start, 2, 15), FLOOR, &[job(6)]);
         assert_eq!(claims.unnamed("o/r", "app"), 0, "a later listing answered");
         assert!(
             !claims.consumed("o/r", 5),
@@ -175,8 +203,31 @@ mod tests {
         );
         assert!(claims.consumed("o/r", 6), "GitHub still lists it");
 
-        claims.listing_answered("o/r", 3, &[]);
+        claims.listing_answered("o/r", mark(start, 3, 30), FLOOR, &[]);
         assert!(!claims.has("o/r"), "nothing is left of o/r's claims");
+    }
+
+    #[test]
+    fn an_unnamed_claim_outlives_listings_sooner_than_a_poll_interval_after_the_one_before_its_runner_went()
+     {
+        // The runner went while listing 1 was the last begun; o/r is listed every 5 s while active.
+        let start = Instant::now();
+        let mut claims = Claims::default();
+        claims.spend("o/r", "app", mark(start, 1, 0));
+        for (listing, secs) in [(2, 5), (3, 10)] {
+            claims.listing_answered("o/r", mark(start, listing, secs), FLOOR, &[]);
+            assert_eq!(
+                claims.unnamed("o/r", "app"),
+                1,
+                "listing {listing}, {secs} s after listing 1, is within GitHub's lag"
+            );
+        }
+        claims.listing_answered("o/r", mark(start, 4, 15), FLOOR, &[]);
+        assert_eq!(
+            claims.unnamed("o/r", "app"),
+            0,
+            "the first listing a poll interval after listing 1 ends it"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed |
 | [0109](0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md) | A job that left the queue is followed until GitHub says it is gone | Accepted |
 | [0110](0110-a-jobs-wait-ends-when-its-runner-starts.md) | A job's wait for a slot or the host ends when its runner starts | Accepted |
-| [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Amended by 0127 |
+| [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Amended by 0127, 0128 |
 | [0112](0112-no-start-and-no-hold-while-githubs-rate-limit-is-used-up.md) | No start and no hold while GitHub's rate limit is used up | Accepted |
 | [0113](0113-a-released-runners-slot-does-not-wait-for-its-registrations-delete.md) | A released runner's slot does not wait for its registration's delete | Accepted |
 | [0114](0114-a-lifecycle-is-one-value-with-one-owner.md) | A lifecycle is one value with one owner | Accepted |
@@ -134,5 +134,6 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0124](0124-running-jobs-are-read-every-poll-interval.md) | Running jobs are read every poll interval, not every tick | Amended by 0127 |
 | [0125](0125-a-start-runs-its-io-in-a-task-of-its-own.md) | A start runs its I/O in a task of its own | Amended by 0126 |
 | [0126](0126-up-to-four-starts-at-once-one-registration-at-a-time.md) | Up to four starts at once, one registration at a time | Accepted |
-| [0127](0127-reads-are-paced-by-the-rate-limit.md) | GitHub reads are paced by what is left of the rate limit | Accepted |
+| [0127](0127-reads-are-paced-by-the-rate-limit.md) | GitHub reads are paced by what is left of the rate limit | Amended by 0128 |
+| [0128](0128-each-repository-is-listed-on-its-own-pace.md) | Each repository is listed on its own pace | Accepted |
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |

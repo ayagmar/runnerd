@@ -1,8 +1,9 @@
 //! One tick: collects finished work, polls GitHub for runners then queued jobs, plans with `scheduler::plan` and
 //! applies the decisions; and the passes between ticks that start runners for listed jobs in the slots of runners
-//! Docker said stopped, without polling (ADR 0095). It owns the memory budget's arithmetic and deletes this machine's
-//! runners no slot holds; starting and removing a slot's runner is `runners`. It lists every repository at once, a
-//! few requests at a time, and answers the API's commands while it waits for the listings (ADR 0026).
+//! Docker said stopped, without polling (ADR 0095). It owns the memory budget's arithmetic, which repositories a tick
+//! lists and when the next is due (ADR 0128), and deletes this machine's runners no slot holds; starting and removing a
+//! slot's runner is `runners`. It lists the repositories due at once, a few requests at a time, and answers the API's
+//! commands while it waits for the listings (ADR 0026).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -12,13 +13,15 @@ use futures_util::StreamExt;
 use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
+use super::engagement::Mark;
 use super::history::CAPTURE_DRAIN;
+use super::listing_pace::Runners;
 use super::pool_health::PoolHealth;
 use super::presence::RunnersListing;
 use super::runners::{Collected, Removal};
 use super::slot::Holder;
 use super::start::{Carried, StartOutcome};
-use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown};
+use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown, TICK_REST};
 use crate::admission::trace::Reading;
 use crate::admission::{host, pooled};
 use crate::api::AdmissionPolicy;
@@ -196,6 +199,23 @@ pub(super) fn seconds(took: std::time::Duration) -> String {
     format!("{:.1}s", took.as_secs_f64())
 }
 
+/// Which repositories a tick lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Scope {
+    /// Every repository, with its runners: a tick a command, a wake-up or a stop brings, and the first.
+    Every,
+    /// Those due by their own pace, their runners on their turn (ADR 0128): a tick that came when it was due.
+    Due,
+}
+
+/// What a tick lists.
+struct Probes {
+    /// The repositories whose runners it lists: the listed ones by name, then the draining ones.
+    runners: Vec<String>,
+    /// The repositories whose queued jobs it lists, with their pools' labels.
+    queued: Vec<ToList>,
+}
+
 /// One answer of GitHub's per repository.
 type Answers<T> = Vec<(String, Result<T, github::Error>)>;
 
@@ -272,9 +292,43 @@ struct Held {
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
-    /// One tick: collects what finished, lists the runners and queued jobs, follows the running jobs, plans and
-    /// applies the plan. Returns when its listing began, which the next tick's due time counts from (ADR 0111).
+    /// The next tick, as the tests count ticks: a `poll_interval` after the last, listing every repository and its
+    /// runners. Its listings end the claims a listing that much later ends (ADR 0128).
+    #[cfg(test)]
     pub(super) async fn tick(&mut self, mode: Shutdown) -> tokio::time::Instant {
+        self.age_listings(self.config.host.poll_interval);
+        self.tick_listing(mode, Scope::Every).await
+    }
+
+    /// As if every listing had begun, and every claim on a listed job been made, `by` earlier: the repositories'
+    /// due times, the newly busy runners' marks and the unnamed claims of runners gone (ADR 0128).
+    #[cfg(test)]
+    pub(super) fn age_listings(&mut self, by: std::time::Duration) {
+        for (_, state) in self.repositories.iter_listed_mut() {
+            state.pace_mut().age(by);
+        }
+        for occupant in self
+            .slots
+            .values_mut()
+            .flatten()
+            .filter_map(super::Slot::occupant_mut)
+        {
+            occupant.engagement.age_mark(by);
+        }
+        self.claims.age(by);
+        if let Some(at) = self.listing.at.checked_sub(by) {
+            self.listing.at = at;
+        }
+    }
+
+    /// One tick: collects what finished, lists the runners and queued jobs of the repositories `scope` says, follows
+    /// the running jobs, plans and applies the plan. Returns when its listing began, which the due times count from
+    /// (ADR 0111, 0128).
+    pub(super) async fn tick_listing(
+        &mut self,
+        mode: Shutdown,
+        scope: Scope,
+    ) -> tokio::time::Instant {
         let began = SystemTime::now();
         let mut pace = Pace::new();
         self.passes_in_tick = std::time::Duration::ZERO;
@@ -294,15 +348,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.
-        let runners = self.repositories.runners_to_list();
-        let queued = match mode {
-            Shutdown::No => self.to_list(),
-            Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Vec::new(),
-        };
-        // What a runner takes from here on, this listing may still show queued.
-        self.listing += 1;
-        let listing = self.listing;
         let listed_at = tokio::time::Instant::now();
+        let Probes { runners, queued } = self.probes(mode, scope, listed_at);
+        // What a runner takes from here on, this listing may still show queued.
+        self.listing = Mark {
+            listing: self.listing.listing + 1,
+            at: listed_at,
+        };
+        let listing = self.listing;
         let listings = self
             .serving(
                 list(self.github.clone(), self.store.clone(), runners, queued),
@@ -310,7 +363,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             )
             .await;
         pace.lap(Phase::Listing, self.passes_in_tick);
-        self.apply_runners(listings.runners).await;
+        self.apply_runners(listings.runners, listing).await;
         if mode == Shutdown::No {
             self.apply_queued(listings.queued, listing);
             self.refresh_warm().await;
@@ -540,11 +593,101 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         started
     }
 
-    /// Each configured repository with the labels of its pools, whose queued jobs a tick lists.
-    fn to_list(&self) -> Vec<ToList> {
+    /// What a tick in `mode` listing `scope` lists from `at`, each repository it probes noting that it did: in a stop
+    /// every repository's runners and no queued jobs; otherwise, with `Scope::Due`, the repositories due and their
+    /// runners on their turn, and every draining repository's runners.
+    fn probes(&mut self, mode: Shutdown, scope: Scope, at: tokio::time::Instant) -> Probes {
+        let (scope, queued) = match mode {
+            Shutdown::No => (scope, true),
+            Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => (Scope::Every, false),
+        };
+        let due: BTreeSet<String> = self
+            .repositories
+            .iter_listed()
+            .filter(|(name, state)| {
+                scope == Scope::Every || state.pace().is_due(at, self.listing_every(name))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let runners_by = match scope {
+            Scope::Every => Runners::Now,
+            Scope::Due => Runners::ByTurn,
+        };
+        let mut runners = Vec::new();
+        for name in self.repositories.runners_to_list() {
+            let lists = match self.repositories.listed_mut(&name) {
+                Some(state) if due.contains(&name) => state.pace_mut().begin(at, runners_by),
+                Some(_) => false,
+                // Draining: what ends its drain is a runners listing.
+                None => true,
+            };
+            if lists {
+                runners.push(name);
+            }
+        }
+        Probes {
+            runners,
+            queued: if queued {
+                self.to_list(&due)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// How long `repository`'s listings are apart: a third of `poll_interval` while it is active, `poll_interval`
+    /// while it is idle, each as the governor paces it (ADR 0127, 0128).
+    pub(super) fn listing_every(&self, repository: &str) -> std::time::Duration {
+        let poll = self.config.host.poll_interval;
+        if self.listing_active(repository) {
+            self.governor.active_listings_every(poll)
+        } else {
+            self.governor.listings_every(poll)
+        }
+    }
+
+    /// Whether `repository` is listed at the active pace: not paused, and active by ADR 0107's rule, which counts a job
+    /// its listings show queued while they show it, or a runner of it holds a job, as one past `ACTIVE_AFTER` does.
+    /// Only the listings' pace reads this; warm runners go by ADR 0107's rule alone.
+    fn listing_active(&self, repository: &str) -> bool {
+        !self.control.is_paused(repository)
+            && (self.warm.active(repository, time::now_ms())
+                || self
+                    .occupied()
+                    .any(|(_, occupant)| occupant.repository == repository && occupant.engaged()))
+    }
+
+    /// When the next tick after one whose listing began at `anchor` is due: at the earliest repository's due time,
+    /// and at least `TICK_REST` from now, or the shortest interval if that is shorter (ADR 0111, 0128). With no
+    /// repository listed, the idle interval after `anchor`.
+    pub(super) fn next_tick_due(&self, anchor: tokio::time::Instant) -> tokio::time::Instant {
+        let now = tokio::time::Instant::now();
+        let idle = self.governor.listings_every(self.config.host.poll_interval);
+        let (due, shortest) = self.repositories.iter_listed().fold(
+            (None::<tokio::time::Instant>, idle),
+            |(due, shortest), (name, state)| {
+                let every = self.listing_every(name);
+                let at = state.pace().due(every).unwrap_or(now);
+                (Some(due.map_or(at, |due| due.min(at))), shortest.min(every))
+            },
+        );
+        due.unwrap_or(anchor + idle)
+            .max(now + shortest.min(TICK_REST))
+    }
+
+    /// Notes that a runner of `repository` started or went: its next probe lists its runners.
+    pub(super) fn owe_runners_listing(&mut self, repository: &str) {
+        if let Some(state) = self.repositories.listed_mut(repository) {
+            state.pace_mut().runners_owed();
+        }
+    }
+
+    /// Each configured repository in `due` with the labels of its pools, whose queued jobs a tick lists.
+    fn to_list(&self, due: &BTreeSet<String>) -> Vec<ToList> {
         self.config
             .repository_names()
             .into_iter()
+            .filter(|repository| due.contains(repository))
             .map(|repository| ToList {
                 pools: self
                     .config
@@ -716,7 +859,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Notes that a runner of this machine took `job` of `repository` and is gone (`Claims::consumed`).
     pub(super) fn consume(&mut self, repository: &str, job: u64) {
-        self.claims.consume(repository, job, self.listing);
+        self.claims.consume(repository, job, self.listing.listing);
     }
 
     /// The jobs `pool`'s repository's last listing showed queued that may still want a runner (ADR 0018, 0095).
@@ -1051,10 +1194,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         configured.max(self.mirror.running_memory())
     }
 
-    /// Takes each repository's queued jobs from its listing, begun as `listing`. A repository a command removed
+    /// Takes each repository's queued jobs from its listing, begun at `listing`. A repository a command removed
     /// meanwhile is skipped, but the jobs its listing recorded are followed until GitHub says what became of them. A
-    /// claim on a listed job made after the listing began outlives it.
-    fn apply_queued(&mut self, listings: Vec<Listed>, listing: u64) {
+    /// claim on a listed job made after the listing began, or less than `poll_interval` before, outlives it
+    /// (`Mark::ends`).
+    fn apply_queued(&mut self, listings: Vec<Listed>, listing: Mark) {
+        let floor = self.config.host.poll_interval;
         let taken = self.taken();
         for Listed {
             repository,
@@ -1078,7 +1223,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             };
             if listed {
-                self.claims.listing_answered(&repository, listing, &queued);
+                self.claims
+                    .listing_answered(&repository, listing, floor, &queued);
+                for occupant in self
+                    .slots
+                    .values_mut()
+                    .flatten()
+                    .filter_map(super::Slot::occupant_mut)
+                    .filter(|occupant| occupant.repository == repository)
+                {
+                    occupant.engagement.queued_listed(listing, floor);
+                }
             }
             if let Some(state) = self.repositories.listed_mut(&repository) {
                 // Before the plan: a start for the next job must not read the note of one that left the queue.
@@ -1098,17 +1253,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Updates each runner's busy flag from the listings and deletes this host's runners that no slot holds.
-    async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>) {
-        for occupant in self
-            .slots
-            .values_mut()
-            .flatten()
-            .filter_map(super::Slot::occupant_mut)
-        {
-            occupant.engagement.runners_listed();
-        }
+    /// Updates each runner's busy flag from the listings, begun at `listing`, and deletes this host's runners that no
+    /// slot holds. A repository whose runners listing failed has them listed at its next probe.
+    async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>, listing: Mark) {
         for (repository, answer) in listings {
+            if answer.is_err() {
+                self.owe_runners_listing(&repository);
+            }
             // Whether this machine still has a runner registered on it.
             let mut left = false;
             let runners = match answer {
@@ -1135,7 +1286,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
                     Some(occupant) => {
-                        occupant.engagement.listed(runner.busy);
+                        occupant.engagement.listed(runner.busy, listing);
                         left = true;
                     }
                     // Only this machine's names: other machines serve the same repositories.

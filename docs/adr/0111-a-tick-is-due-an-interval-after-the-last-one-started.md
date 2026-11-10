@@ -1,6 +1,7 @@
 # 0111. A tick is due an interval after the last one started
 
-Status: **Accepted** (2026-11-08), amended by [0127](0127-reads-are-paced-by-the-rate-limit.md). Amends [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) and
+Status: **Accepted** (2026-11-08), amended by [0127](0127-reads-are-paced-by-the-rate-limit.md) and
+[0128](0128-each-repository-is-listed-on-its-own-pace.md). Amends [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) and
 [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md): GitHub is polled every `poll_interval` from a tick's
 listing, not its end. No wire, schema or config change.
 

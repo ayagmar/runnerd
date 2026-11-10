@@ -30,7 +30,7 @@ struct Concluded {
 fn concluded(engine: &Engine<FakeGithub, FakeDocker>) -> Concluded {
     Concluded {
         ran: engine.measure_is_due("app"),
-        job_ended: engine.warm.testing_active("o/r", time::now_ms()),
+        job_ended: engine.warm.active("o/r", time::now_ms()),
         claimed: engine.unnamed_claims("o/r"),
     }
 }

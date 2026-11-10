@@ -119,6 +119,9 @@ struct Burst {
     /// Listings of queued jobs so far, and when the world first saw each.
     listings: usize,
     listed_at: Vec<Instant>,
+    /// GitHub's calls seen so far, and when the world first saw each repository's queued jobs listings.
+    calls_seen: usize,
+    listed_at_of: BTreeMap<String, Vec<Instant>>,
     running: Vec<Running>,
     /// The runner containers seen so far, and those that took a job.
     started: BTreeSet<String>,
@@ -142,6 +145,8 @@ impl Burst {
             listed: BTreeSet::new(),
             listings: 0,
             listed_at: Vec::new(),
+            calls_seen: 0,
+            listed_at_of: BTreeMap::new(),
             running: Vec::new(),
             started: BTreeSet::new(),
             assigned: BTreeSet::new(),
@@ -168,6 +173,17 @@ impl Burst {
         }
     }
 
+    /// When the world first saw each listing of `repository`'s queued jobs since `from`.
+    fn listed_since(&self, repository: &str, from: Instant) -> Vec<Instant> {
+        self.listed_at_of
+            .get(repository)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|at| *at >= from)
+            .collect()
+    }
+
     /// Whether every job queued so far ran.
     fn done(&self) -> bool {
         self.seen.taken == self.queued_at.len() && self.running.is_empty()
@@ -188,6 +204,15 @@ impl Burst {
             self.listed_at.push(now);
             self.listed.extend(github.queued.iter().map(|job| job.id));
         }
+        for call in &github.calls[self.calls_seen..] {
+            if let Some(repository) = call.strip_prefix("queued ") {
+                let times = self.listed_at_of.entry(repository.to_owned()).or_default();
+                if times.last() != Some(&now) {
+                    times.push(now);
+                }
+            }
+        }
+        self.calls_seen = github.calls.len();
         self.see_starts(&mut docker, now);
         self.take_jobs(&mut github, &mut docker, now);
         self.end_jobs(&mut github, &mut docker, now);
@@ -534,27 +559,24 @@ async fn a_job_listed_beside_running_jobs_starts_without_waiting_for_their_reads
     }
 }
 
-/// Four long jobs run while GitHub takes 9 s to read a job, as a slow GitHub does: each tick ends with those reads.
-/// Listings still come every `poll_interval` (15 s), counted from each tick's start. Then reads take 20 s, longer
-/// than the interval, and listings come as each tick ends, 2 s apart. The bugs they catch: the next tick counted
-/// from the last one's end, so that every slow read pushed the next listing out by its whole time; and ticks run back
-/// to back, with no rest for GitHub, once one outlasts the interval.
+/// Four jobs of `o/r` run while GitHub takes 9 s, then 20 s, to read each, and `o/s` waits for jobs beside it. `o/s`'s
+/// listings keep `poll_interval`'s pace, counted from their starts, and once the reads outlast it, a tick rests
+/// `TICK_REST` before the next; `o/r`'s, at a third of the interval while its jobs run, are never closer than that. The
+/// bug it catches: the next listing counted from a tick's end, so slow reads pushed every listing out by their own
+/// length (ADR 0111), or an idle repository listed at an active one's pace (ADR 0128). `o/r`, active, is listed
+/// as often as these slow ticks let it, which is the idle pace here.
 #[tokio::test(start_paused = true)]
 async fn slow_job_reads_do_not_push_the_next_listing_out() {
-    /// The gaps between the listings the world saw over `span` from now.
-    async fn gaps(burst: &mut Burst, span: Duration) -> Vec<Duration> {
-        let from = burst.listed_at.len();
-        let until = Instant::now() + span;
-        play(burst, |_, now| now >= until).await;
-        burst.listed_at[from..]
-            .windows(2)
-            .map(|pair| pair[1] - pair[0])
-            .collect()
+    /// The gaps between `repository`'s listings the world saw over `span` from now.
+    async fn gaps(burst: &mut Burst, repository: &str, span: Duration) -> Vec<Duration> {
+        let from = Instant::now();
+        play(burst, |_, now| now >= from + span).await;
+        gaps_of(&burst.listed_since(repository, from))
     }
     let (github, docker) = burst_fakes(Duration::ZERO);
     github.0.lock().unwrap().job_latency = Duration::from_secs(9);
     let dir = TestDir::new("fixed-rate");
-    let config = CONFIG.replace("slots = 2", "slots = 4");
+    let config = two_repositories().replace("slots = 2", "slots = 4");
     let (engine, handle) = engine_with(&github, &docker, &dir, &config);
     let mut burst = Burst::new(&github, &docker, u64::MAX);
     burst.run = Duration::from_hours(1);
@@ -565,22 +587,31 @@ async fn slow_job_reads_do_not_push_the_next_listing_out() {
     assert_eq!(burst.running.len(), 4, "four jobs run: {:?}", burst.seen);
 
     let read = github.0.lock().unwrap().job_reads;
-    let paced = gaps(&mut burst, Duration::from_mins(3)).await;
+    let from = Instant::now();
+    let paced = gaps(&mut burst, "o/s", Duration::from_mins(3)).await;
+    let active = gaps_of(&burst.listed_since("o/r", from));
     assert!(
         github.0.lock().unwrap().job_reads > read,
         "the ticks read the running jobs"
     );
-    // The world steps every 100 ms.
+    // The world steps every 100 ms, and sees a listing of queued jobs 0.3 s later when its tick lists runners first.
     assert!(paced.len() >= 10, "too few listings: {paced:?}");
     assert!(
         paced
             .iter()
-            .all(|gap| gap.abs_diff(Duration::from_secs(15)) <= Duration::from_millis(200)),
-        "listings left `poll_interval`'s pace: {paced:?}"
+            .all(|gap| gap.abs_diff(Duration::from_secs(15)) <= Duration::from_millis(400)),
+        "o/s's listings left `poll_interval`'s pace: {paced:?}"
+    );
+    // A tick whose reads take 9 s holds o/r's next listing too: it comes `TICK_REST` after that tick.
+    assert!(
+        active
+            .iter()
+            .all(|gap| *gap >= Duration::from_millis(4_900)),
+        "o/r's listings came closer than a third of `poll_interval`: {active:?}"
     );
 
     github.0.lock().unwrap().job_latency = Duration::from_secs(20);
-    let slow = gaps(&mut burst, Duration::from_mins(3)).await;
+    let slow = gaps(&mut burst, "o/s", Duration::from_mins(3)).await;
     handle.shutdown(Shutdown::Force);
     run.await.unwrap();
     // A tick reads the jobs for 20.3 s, then rests 2 s; one tick at the switch still read at 9 s.
@@ -646,9 +677,10 @@ async fn running_jobs_are_read_every_poll_interval_whatever_the_ticks() {
         reads.len() >= 10 && reads.iter().all(|&(_, count)| count == 4),
         "each round reads the four jobs once: {reads:?}"
     );
+    // A round's reads begin after its tick's listings, and a tick that lists the runners too reads 0.3 s later.
     assert!(
         gaps.iter()
-            .all(|gap| *gap >= Duration::from_secs(15) && *gap <= Duration::from_secs(16)),
+            .all(|gap| *gap >= Duration::from_millis(14_500) && *gap <= Duration::from_secs(16)),
         "rounds of reads left `poll_interval`'s pace: {gaps:?}"
     );
 }
@@ -681,7 +713,8 @@ async fn a_job_no_listing_named_is_read_before_each_plan_inside_the_interval() {
 }
 
 /// A running job's run is cancelled and its runner does not exit, so the tick `CANCEL_GRACE` later removes it before
-/// it lists, and Docker takes 8 s to. The next listing still comes `poll_interval` after that tick's. The bug it
+/// it lists, and Docker takes 8 s to. The next listing of the paused repository, idle, still comes `poll_interval`
+/// after that tick's. The bug it
 /// catches: the next tick counted from the last one's start, so a slow collect before the listing and a quick one
 /// after brought two listings 7 s apart, closer than the interval.
 #[tokio::test(start_paused = true)]
@@ -710,7 +743,7 @@ async fn a_slow_collect_does_not_bring_the_next_listing_sooner() {
     let mut listings = github
         .calls()
         .iter()
-        .filter(|call| call.starts_with("runners "))
+        .filter(|call| call.starts_with("queued "))
         .count();
     let until =
         Instant::now() + crate::scheduler::engine::control::CANCEL_GRACE + Duration::from_mins(1);
@@ -718,7 +751,7 @@ async fn a_slow_collect_does_not_bring_the_next_listing_sooner() {
         let now = github
             .calls()
             .iter()
-            .filter(|call| call.starts_with("runners "))
+            .filter(|call| call.starts_with("queued "))
             .count();
         if now > listings {
             listings = now;
@@ -1077,6 +1110,44 @@ async fn three_repositories() {
     );
 }
 
+/// How soon an idle repository's first job is seen, its first in the history: `o/r` has a job running, `o/s` none until
+/// one queues at a moment that falls evenly across the 15 s poll, in a fresh engine each time, as ADR 0107's rule on
+/// the wall clock keeps a repository active once a job of it was listed. Prints from its queueing to the listing that
+/// showed it.
+#[allow(clippy::print_stdout, reason = "the figures are its output")]
+async fn the_first_job_of_an_idle_repository() {
+    const RUNS: u32 = 20;
+    let mut waits = Vec::new();
+    for run in 0..RUNS {
+        let (github, docker) = burst_fakes(Duration::ZERO);
+        running_job(&github, &docker, "o/r", 1, 1);
+        let dir = TestDir::new("idle-first-job");
+        let (engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+        let task = tokio::spawn(engine.run());
+        tokio::time::sleep(Duration::from_mins(1) + Duration::from_secs(15) * run / RUNS).await;
+        let before = github.calls().len();
+        {
+            let mut state = github.0.lock().unwrap();
+            state.queued.push(job(100));
+            state.queued_on.insert(100, "o/s".to_owned());
+        }
+        let queued = Instant::now();
+        while !github.calls()[before..]
+            .iter()
+            .any(|call| call == "queued o/s")
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        waits.push(queued.elapsed());
+        handle.shutdown(Shutdown::Force);
+        task.await.unwrap();
+    }
+    println!(
+        "an idle repository's first job, queued to the listing that showed it: {}",
+        figures(waits)
+    );
+}
+
 /// A burst for the figures ADR 0092 and 0095 give, with the latencies the owner's host shows: `BURSTS` bursts of
 /// `JOBS` short jobs of `o/r` every `PERIOD`, more than its 8 slots take, through the engine's own loop. Prints how
 /// long jobs waited from their queueing to their runner's container start, how long a slot whose job ended waited
@@ -1175,6 +1246,7 @@ async fn workload_figures() {
         tenths(&contended.places)
     );
     three_repositories().await;
+    the_first_job_of_an_idle_repository().await;
 }
 
 /// Stops a runner container and says so in Docker's events.
@@ -1373,7 +1445,9 @@ async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
         let dir = TestDir::new("slow-release");
         let (engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
         let run = tokio::spawn(engine.run());
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Between two of o/r's listings, 5 s apart while its runners are busy: a tick that inspects a container as it
+        // stops releases it in its own collect, not in a pass.
+        tokio::time::sleep(Duration::from_secs(6)).await;
         assert!(
             registered(&github.calls()).is_empty(),
             "both slots are busy"
@@ -1650,16 +1724,17 @@ fn gaps_of(times: &[Instant]) -> Vec<Duration> {
     times.windows(2).map(|pair| pair[1] - pair[0]).collect()
 }
 
-/// Four jobs run for an hour while another client drains the rate limit (ADR 0127). The running jobs' reads slow
-/// first, then the listings, one step at a time, and a job queued then still gets its runner at once: its
-/// registration goes out in the tick that lists it, not at some later pace. The bugs it catches: listings slowed
-/// before the job reads, a governor that holds a registration back, and a pace that never reaches the engine's
-/// reads or its ticks.
+/// Four jobs of `o/r` run for an hour beside an idle `o/s` while another client drains the rate limit (ADR 0127). The
+/// running jobs' reads slow first, then the active repository's listings to the idle pace, then every listing, one
+/// step at a time, and a job queued then still gets its runner at once: its registration goes out in the tick that
+/// lists it, not at some later pace. The bugs it catches: listings slowed before the job reads, a governor that holds a
+/// registration back, a pace that never reaches the engine's reads or its listings, and an idle repository the
+/// slowest step leaves at `poll_interval` (ADR 0128).
 #[tokio::test(start_paused = true)]
 async fn job_reads_slow_first_then_listings_and_a_start_still_goes_out() {
     let (github, docker) = burst_fakes(Duration::ZERO);
     let dir = TestDir::new("governor-pace");
-    let config = CONFIG.replace("slots = 2", "slots = 5");
+    let config = two_repositories().replace("slots = 2", "slots = 5");
     let (engine, handle) = engine_with(&github, &docker, &dir, &config);
     let mut burst = Burst::new(&github, &docker, u64::MAX);
     burst.run = Duration::from_hours(1);
@@ -1669,11 +1744,11 @@ async fn job_reads_slow_first_then_listings_and_a_start_still_goes_out() {
     play(&mut burst, |_, now| now >= settled).await;
     assert_eq!(burst.running.len(), 4, "four jobs run: {:?}", burst.seen);
 
-    // 400 left, 30 minutes to the reset, another client spending 25 a minute and the engine as much again: a
-    // thousand projected against 300 of room.
-    github.limit(400, 25);
+    // 1000 left, 30 minutes to the reset, another client spending 25 a minute and the engine more again: about 1700
+    // projected against 900 of room, and enough left after each step for the next one to be judged.
+    github.limit(1000, 25);
     let began = Instant::now();
-    let (mut reads, mut seen) = (vec![began], github.0.lock().unwrap().job_reads);
+    let (mut reads, mut seen) = (Vec::new(), github.0.lock().unwrap().job_reads);
     let until = began + Duration::from_mins(14);
     while Instant::now() < until {
         burst.step(Instant::now());
@@ -1681,15 +1756,11 @@ async fn job_reads_slow_first_then_listings_and_a_start_still_goes_out() {
         read_rounds(&mut reads, count, &mut seen);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let listings: Vec<Instant> = burst
-        .listed_at
-        .iter()
-        .copied()
-        .filter(|&at| at >= began)
-        .collect();
+    let listings = burst.listed_since("o/r", began);
+    let idle = gaps_of(&burst.listed_since("o/s", began));
     let (read_gaps, listing_gaps) = (gaps_of(&reads), gaps_of(&listings));
 
-    // Before anything is judged, the pace of before: reads and listings every 15 s.
+    // Before anything is judged, the pace of before: reads every 15 s, the active repository's listings every 5 s.
     let early = |times: &[Instant], gaps: &[Duration]| {
         times
             .windows(2)
@@ -1698,33 +1769,36 @@ async fn job_reads_slow_first_then_listings_and_a_start_still_goes_out() {
             .map(|(_, gap)| *gap)
             .collect::<Vec<_>>()
     };
-    for gap in early(&reads, &read_gaps)
-        .into_iter()
-        .chain(early(&listings, &listing_gaps))
-    {
-        assert!(gap <= Duration::from_secs(17), "early gap {gap:?}");
+    for gap in early(&reads, &read_gaps) {
+        assert!(gap <= Duration::from_secs(17), "early read gap {gap:?}");
+    }
+    for gap in early(&listings, &listing_gaps) {
+        assert!(gap <= Duration::from_secs(6), "early listing gap {gap:?}");
     }
     // The first slowed gap of each kind: job reads before listings.
-    let first_slow = |times: &[Instant], gaps: &[Duration]| {
+    let first_slow = |times: &[Instant], gaps: &[Duration], least: u64| {
         times
             .windows(2)
             .zip(gaps)
-            .find(|(_, gap)| **gap >= Duration::from_secs(28))
+            .find(|(_, gap)| **gap >= Duration::from_secs(least))
             .map(|(pair, _)| pair[1])
     };
-    let slow_reads = first_slow(&reads, &read_gaps).expect("the reads slowed");
-    let slow_listings = first_slow(&listings, &listing_gaps).expect("the listings slowed");
+    let slow_reads = first_slow(&reads, &read_gaps, 28).expect("the reads slowed");
+    let held = first_slow(&listings, &listing_gaps, 14).expect("o/r's listings slowed");
+    let slow_listings = first_slow(&listings, &listing_gaps, 28).expect("the listings slowed");
     assert!(
-        slow_reads + Duration::from_mins(3) < slow_listings,
-        "reads slowed at {:?}, listings at {:?} after the limit",
+        slow_reads + Duration::from_mins(3) < held && held < slow_listings,
+        "reads slowed at {:?}, o/r's listings to the idle pace at {:?}, every listing at {:?} after the limit",
         slow_reads - began,
+        held - began,
         slow_listings - began
     );
-    // At the end, both at 4× `poll_interval`.
+    // At the end, all at 4× `poll_interval`.
     assert!(
         read_gaps.last().unwrap() >= &Duration::from_secs(58)
-            && listing_gaps.last().unwrap() >= &Duration::from_secs(58),
-        "reads {read_gaps:?}, listings {listing_gaps:?}"
+            && listing_gaps.last().unwrap() >= &Duration::from_secs(58)
+            && idle.last().unwrap() >= &Duration::from_secs(58),
+        "reads {read_gaps:?}, o/r's listings {listing_gaps:?}, o/s's {idle:?}"
     );
 
     // A fifth job: the first listing that shows it is followed by its registration within seconds.
@@ -1735,7 +1809,7 @@ async fn job_reads_slow_first_then_listings_and_a_start_still_goes_out() {
     while registered.is_none() && Instant::now() < queued + Duration::from_mins(3) {
         burst.step(Instant::now());
         for call in &github.calls()[calls..] {
-            if call.starts_with("queued ") {
+            if call.starts_with("queued o/r") {
                 listed.get_or_insert(Instant::now());
             }
             if call.starts_with("register ") {
