@@ -597,8 +597,6 @@ struct Seen {
     runners_starting: usize,
     /// Ticks that ended with a job whose runner went and that GitHub has not said ended.
     closing: usize,
-    /// Ticks that ended with such a job still followed as queued too.
-    closing_and_queued: usize,
     /// Ticks that ended with a runner's build cache uploads waiting for GitHub's word.
     ended_uploads: usize,
     /// Ticks that ended with a cancelled run's runner waiting to exit.
@@ -623,7 +621,6 @@ impl Seen {
         self.exits_freed += case.exits_freed;
         self.runners_starting += case.runners_starting;
         self.closing += case.closing;
-        self.closing_and_queued += case.closing_and_queued;
         self.ended_uploads += case.ended_uploads;
         self.cancelling += case.cancelling;
         self.busy_orphans += case.busy_orphans;
@@ -641,10 +638,6 @@ impl Seen {
             ("a runner that left without a job", self.exits_freed),
             ("a runner started before its job", self.runners_starting),
             ("a job whose runner went, still open", self.closing),
-            (
-                "a job closing and followed as queued",
-                self.closing_and_queued,
-            ),
             ("uploads waiting for GitHub", self.ended_uploads),
             ("a cancelled run's runner", self.cancelling),
             ("a busy orphan registration", self.busy_orphans),
@@ -2028,6 +2021,7 @@ impl Case {
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.no_watch_outlives_its_runner()?;
+        self.no_job_is_followed_as_closing_and_queued()?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
@@ -2045,7 +2039,6 @@ impl Case {
         let counts = self.engine.state_counts();
         let seen = &mut self.seen;
         seen.closing += counts.closing;
-        seen.closing_and_queued += counts.shared_with_queued;
         seen.ended_uploads += counts.ended_uploads;
         seen.cancelling += counts.cancelling;
         seen.busy_orphans += counts.busy_orphans;
@@ -2106,6 +2099,7 @@ impl Case {
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.no_watch_outlives_its_runner()?;
+        self.no_job_is_followed_as_closing_and_queued()?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
@@ -2716,6 +2710,21 @@ impl Case {
                 self,
                 "no_watch_outlives_its_runner",
                 format!("{outlived:?} are watched with no slot"),
+            )
+        }
+    }
+
+    /// A job whose runner went is followed as closing alone, though GitHub may list it queued a while longer: followed
+    /// as queued too, it would be read twice a tick.
+    fn no_job_is_followed_as_closing_and_queued(&self) -> Result<(), Violation> {
+        let shared = self.engine.state_counts().shared_with_queued;
+        if shared == 0 {
+            Ok(())
+        } else {
+            violation(
+                self,
+                "no_job_is_followed_as_closing_and_queued",
+                format!("{shared} jobs are followed as closing and as queued"),
             )
         }
     }
