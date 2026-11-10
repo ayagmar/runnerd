@@ -4748,3 +4748,34 @@ async fn a_runner_started_after_a_restart_never_takes_a_name_nothing_recorded() 
         .map(|found| (found.invariant, found.detail));
     assert_eq!(broken, None);
 }
+
+/// Shrunk from seed 33, which broke main's CI; seed 184 breaks the same way. A heavy runner's launch checks its fit,
+/// then waits for its caches and its name while another runner's container starts and the host is read: that reading
+/// leaves no room for it, so it must check again before it starts. Under a paused clock the batch's tasks run in the
+/// order that shows it on any machine.
+#[tokio::test(start_paused = true)]
+async fn a_start_fits_a_reading_taken_while_its_launch_waited() {
+    let queue = |second, labels| Step::Queue { second, labels };
+    let steps = [
+        Step::Tick,
+        Step::PastRuns,
+        Step::Reload(Change::Policy),
+        queue(false, Labels::Heavy),
+        queue(true, Labels::Heavy),
+        Step::Tick,
+        Step::Assign(0),
+        Step::Assign(3),
+        Step::Finish(1),
+        Step::SampleDuringStart {
+            percent: 50,
+            available: 8,
+            stalled: false,
+        },
+        queue(false, Labels::Heavy),
+        queue(true, Labels::SelfHosted),
+        Step::Assign(5),
+        Step::Lose(4),
+        Step::Reload(Change::CpuOvercommit),
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
