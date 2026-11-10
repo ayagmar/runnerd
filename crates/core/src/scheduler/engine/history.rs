@@ -15,7 +15,9 @@ use super::ledger::{ReadFailure, Unanswered, Wait};
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Meanwhile, Occupant, Slot, watches};
 use crate::admission::Key;
-use crate::docker::{DockerApi, is_declined, is_log_gone, is_not_found, is_not_running};
+use crate::docker::{
+    self, DockerApi, RunnerState, is_declined, is_log_gone, is_not_found, is_not_running,
+};
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
@@ -103,7 +105,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Starts watching a runner's container: records it, samples it, leases its address for the mirror's log, and
     /// captures its job and log. If Docker fails to inspect it, `observe_again` tries on the next tick.
     pub(super) async fn observe(&mut self, slot: &SlotRef, occupant: &Occupant) {
-        let state = match self.docker.inspect(&occupant.container).await {
+        let inspected = self.docker.inspect(&occupant.container).await;
+        self.watch_inspected(slot, occupant, inspected).await;
+    }
+
+    /// `observe`, from Docker's inspect of the runner's container, which a start's task made.
+    pub(super) async fn watch_inspected(
+        &mut self,
+        slot: &SlotRef,
+        occupant: &Occupant,
+        inspected: Result<RunnerState, docker::Error>,
+    ) {
+        let state = match inspected {
             Ok(state) => state,
             Err(error) => {
                 warn!("cannot inspect {}: {error}", occupant.runner_name);

@@ -448,7 +448,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// busy host back to the edge; with no runner in the slice there is no such start to follow, so the first
     /// runners need only the margin.
     pub(super) fn host_remembered(&self) -> host::Remembered {
-        let occupancy = host::Occupancy::of(self.occupied().next().is_some());
+        let occupancy = host::Occupancy::of(self.footprints().next().is_some());
         host::Remembered::new(self.measured.host(), occupancy)
     }
 
@@ -609,16 +609,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// What the runners reserve of the CPU budget, in millicores: under caps each its container's CPU limit, whatever
     /// it reserved under measured admission before a reload, as memory counts it.
     pub(super) fn cpu_in_use(&self) -> u64 {
-        self.occupied()
-            .map(|(_, occupant)| self.reserves_cpu(occupant))
+        self.footprints()
+            .map(|footprint| self.reserves_cpu(&footprint))
             .sum()
     }
 
-    /// What a runner reserves of the CPU budget, in millicores, as `cpu_in_use` counts it.
-    pub(super) fn reserves_cpu(&self, occupant: &super::Occupant) -> u64 {
+    /// What a runner, or a start in flight as the runner it becomes, reserves of the CPU budget, in millicores, as
+    /// `cpu_in_use` counts it.
+    pub(super) fn reserves_cpu(&self, occupant: &super::Footprint<'_>) -> u64 {
         match self.config.host.admission {
             Admission::Caps => occupant.cpus,
-            Admission::Measured => occupant.reserved_cpu(),
+            Admission::Measured => occupant.reserved_cpu,
         }
     }
 

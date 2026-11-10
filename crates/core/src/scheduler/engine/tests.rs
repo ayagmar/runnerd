@@ -656,6 +656,8 @@ struct DockerState {
     held_started: tokio::sync::watch::Sender<bool>,
     /// Runner container starts `held_starts` or `held_started` hold.
     starts_waiting: usize,
+    /// How many of the next runner container starts panic, as a bug in them would.
+    panic_starts: u32,
     /// Volumes a container still uses, which Docker refuses to remove.
     volumes_in_use: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
@@ -921,6 +923,14 @@ impl FakeDocker {
         self.0.lock().unwrap().starts_waiting -= 1;
     }
 
+    /// Whether this runner container start panics, as `panic_starts` says.
+    fn panics(&self) -> bool {
+        let mut state = self.0.lock().unwrap();
+        let panics = state.panic_starts > 0;
+        state.panic_starts = state.panic_starts.saturating_sub(1);
+        panics
+    }
+
     /// Waits until a runner container start is held, however loaded the machine.
     async fn until_start_held(&self) {
         for _ in 0..6000 {
@@ -973,6 +983,11 @@ impl DockerApi for FakeDocker {
         if runner {
             self.wait_to_start(|state| &state.held_starts).await;
         }
+        assert!(
+            !(runner && self.panics()),
+            "the start of {} panics",
+            spec.name
+        );
         let latency = self.0.lock().unwrap().latency.start;
         tokio::time::sleep(latency).await;
         let id = {

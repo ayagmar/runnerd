@@ -2241,6 +2241,7 @@ impl Case {
             .filter(|profile| !seeds_before.contains(*profile))
             .map(|profile| format!("{profile}{SEED_START}"))
             .collect::<Vec<_>>();
+        self.no_slot_is_left_starting()?;
         let read_during_start = self.starts_after_a_reading(&starts);
         let same_reading = read_during_start.is_none();
         let seeded = !seeds.is_empty();
@@ -2264,6 +2265,18 @@ impl Case {
         }
         self.note_states();
         self.no_removal_of_a_running_job()
+    }
+
+    /// ADR 0125: a start in flight lives only inside its batch, which a tick or a pass ends before it returns.
+    fn no_slot_is_left_starting(&self) -> Result<(), Violation> {
+        if self.engine.any_starting() {
+            return violation(
+                self,
+                "no_slot_is_left_starting",
+                "a slot is still starting".to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// Counts the states the checks exist for, as a tick or a pass leaves them.
@@ -2327,6 +2340,7 @@ impl Case {
             .collect();
         let starts: BTreeSet<String> = order.iter().cloned().collect();
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
+        self.no_slot_is_left_starting()?;
         let bound = self.starts_after_a_reading(&order);
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;

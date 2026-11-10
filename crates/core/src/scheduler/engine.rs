@@ -37,6 +37,7 @@ mod runner_exit;
 mod runners;
 mod running_reads;
 mod slot;
+mod start;
 mod status;
 mod stop;
 mod tick;
@@ -242,6 +243,29 @@ enum Meanwhile {
     Commands,
 }
 
+/// What a runner, or a start in flight, takes of the budgets: what `held_by` and `reserves_cpu` count it by, so a
+/// start counts as the runner it becomes.
+#[derive(Debug, Clone, Copy)]
+struct Footprint<'slot> {
+    runner_name: &'slot str,
+    /// Its container's memory cap.
+    memory: u64,
+    /// What it reserves of memory under measured admission.
+    reserved: u64,
+    /// Its container's CPU limit, in millicores.
+    cpus: u64,
+    /// What it reserves of the CPU budget, in millicores.
+    reserved_cpu: u64,
+    /// When it started, or its start was launched.
+    started_at: SystemTime,
+    /// Its job, as admission tells jobs apart.
+    key: Option<&'slot Key>,
+    /// When it took its job, if this daemon saw it do so.
+    job_found_here: Option<SystemTime>,
+    /// What its reservation went by.
+    basis: Option<api::Basis>,
+}
+
 /// A slot's runner and its container.
 #[derive(Debug, Clone)]
 struct Occupant {
@@ -298,6 +322,21 @@ impl Occupant {
     /// Whether another release started it, with another container spec: one that does not say is older.
     fn other_spec(&self) -> bool {
         self.spec.as_deref() != Some(runners::THIS_SPEC)
+    }
+
+    /// What it takes of the budgets.
+    fn footprint(&self) -> Footprint<'_> {
+        Footprint {
+            runner_name: &self.runner_name,
+            memory: self.memory,
+            reserved: self.reserved(),
+            cpus: self.cpus,
+            reserved_cpu: self.reserved_cpu(),
+            started_at: self.started_at,
+            key: self.key(),
+            job_found_here: self.job_found_here(),
+            basis: self.admission.map(|admission| admission.basis),
+        }
     }
 
     /// What it reserves of the budget under measured admission: its cap if it has no admission.
@@ -904,6 +943,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
             })
         })
+    }
+
+    /// What each runner and each start in flight takes of the budgets.
+    fn footprints(&self) -> impl Iterator<Item = Footprint<'_>> {
+        self.slots.values().flatten().filter_map(Slot::footprint)
     }
 
     /// The runner in `slot`, if one is.
