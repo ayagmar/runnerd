@@ -3671,8 +3671,9 @@ const UNSTEADY_STATUS: &[&str] = &["seed_memory", "reseeding"];
 const QUIET_ROUNDS: u32 = 8;
 
 /// Seeds whose trace differed between runs of one binary, over eight runs of each of the first 64 seeds: a comparison
-/// leaves them out. Seed 21 differed once, in where a capture's end reads the runner's files.
-const TRACE_UNSTABLE: &[u64] = &[21];
+/// leaves them out. Seed 21 differed once, in where a capture's end reads the runner's files; seed 53 once, under
+/// load, in where a capture's inspect and exec land.
+const TRACE_UNSTABLE: &[u64] = &[21, 53];
 
 /// Writes each seed's trace under `RUNNERD_INVARIANT_TRACE`, for comparing two commits (see the module's documentation).
 #[tokio::test]

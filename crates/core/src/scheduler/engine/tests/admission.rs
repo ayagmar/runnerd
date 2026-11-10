@@ -1265,7 +1265,7 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
 /// The host's memory read now: 64G with `available` of it, the slice's runners holding `slice` of it without page
 /// cache, and its tasks stalled `stalled` hundredths of a percent of the last 10 s; a Gradle daemon and an emulator
 /// hold the most of it outside the slice.
-fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
+pub(super) fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
     store.host_memory(api::HostMemory {
         at: time::now_ms() / 1000,
         total: 64 * G,

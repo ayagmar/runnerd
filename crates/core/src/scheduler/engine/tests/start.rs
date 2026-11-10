@@ -552,3 +552,104 @@ async fn a_start_whose_task_panics_panics_its_tick() {
         "the tick panics as its start did, rather than leaving the slot starting"
     );
 }
+
+/// An engine with room for two 4G `o/r` runners and a 512M `o/s` one, and jobs 1 and 2 of `o/r` and job 3 of `o/s`
+/// queued, in that order. Docker fails the first runner's start after making its container, and meanwhile other
+/// programs take the host's memory down to what the small runner fits in, not a 4G one.
+async fn three_jobs_whose_first_start_fails_as_the_host_fills(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let config = sized("0G", "4G", "512M").replacen("slots = 1", "slots = 2", 1);
+    let (mut engine, handle) = engine_with(github, docker, dir, &config);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1), job(2), small_job(3)];
+        state
+            .queued_on
+            .extend([(1, "o/r".to_owned()), (2, "o/r".to_owned())]);
+        state.queued_on.insert(3, "o/s".to_owned());
+    }
+    (engine, handle)
+}
+
+fn fail_the_first_start_as_the_host_fills(docker: &FakeDocker, handle: &Handle) {
+    let store = handle.store.clone();
+    let mut state = docker.0.lock().unwrap();
+    state.late_failures.push_back(LateFailure {
+        takes_job: false,
+        cleanup_fails: false,
+    });
+    state.on_start = Some(Box::new(move |_| {
+        admission::host_at(&store, 0, 5 * G, 0);
+    }));
+}
+
+fn small_registered(github: &FakeGithub) -> bool {
+    registered(&github.calls())
+        .iter()
+        .any(|call| call.contains("-small-"))
+}
+
+/// Job 2's start no longer fits once job 1's failed, and job 3's counted on the room job 2's took in the plan: it
+/// waits for the next plan, though it fits. The bug it catches: a deferred start's later ones launching anyway, so a
+/// younger job takes the room an older one waits for. A tick plans again only after a plan that did something, and
+/// a failed start does nothing.
+#[tokio::test]
+async fn a_tick_starts_none_of_its_plans_starts_after_one_that_no_longer_fits() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) =
+        three_jobs_whose_first_start_fails_as_the_host_fills(&github, &docker, &dir).await;
+    admission::host_at(&handle.store, 0, 20 * G, 0);
+    fail_the_first_start_as_the_host_fills(&docker, &handle);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "{:?}", github.calls());
+    assert!(
+        !small_registered(&github),
+        "job 3 waits behind job 2: {:?}",
+        github.calls()
+    );
+}
+
+/// As above, for a pass: the jobs whose starts it deferred go on waiting for the host's memory, as they did before
+/// it. The bugs it catches: a pass launching a deferred start's later ones, and a pass ending the waits of jobs it
+/// did not start.
+#[tokio::test]
+async fn a_pass_starts_none_of_its_plans_starts_after_one_that_no_longer_fits_and_its_jobs_go_on_waiting()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) =
+        three_jobs_whose_first_start_fails_as_the_host_fills(&github, &docker, &dir).await;
+    // Too little memory for any runner: all three wait for it.
+    admission::host_at(&handle.store, 0, 2 * G, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 0, "nothing starts");
+    assert!(
+        (1..=3).all(|job| engine.waits_for_the_host(job)),
+        "every job waits for the host's memory"
+    );
+    admission::host_at(&handle.store, 0, 20 * G, 0);
+    fail_the_first_start_as_the_host_fills(&docker, &handle);
+    assert_eq!(engine.refill().await, 0, "job 1's runner failed to start");
+    assert_eq!(registered(&github.calls()).len(), 1, "{:?}", github.calls());
+    assert!(
+        !small_registered(&github),
+        "job 3 waits behind job 2: {:?}",
+        github.calls()
+    );
+    assert!(
+        engine.waits_for_the_host(2) && engine.waits_for_the_host(3),
+        "jobs 2 and 3 go on waiting for the host's memory"
+    );
+}
