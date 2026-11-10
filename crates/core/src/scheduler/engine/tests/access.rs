@@ -238,6 +238,25 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         }
     }
 
+    /// The runners whose build cache uploads wait for GitHub's word, short of `ENDED_WAIT`.
+    pub(super) fn ended_uploads_waiting(&self) -> BTreeSet<String> {
+        self.ended_uploads
+            .iter()
+            .filter(|(_, ended)| {
+                ended
+                    .ended_at
+                    .elapsed()
+                    .is_ok_and(|waited| waited < crate::scheduler::engine::build_cache::ENDED_WAIT)
+            })
+            .map(|(runner, _)| runner.clone())
+            .collect()
+    }
+
+    /// The runners whose build cache uploads wait.
+    pub(super) fn ended_upload_runners(&self) -> BTreeSet<String> {
+        self.ended_uploads.keys().cloned().collect()
+    }
+
     pub(super) fn no_ended_uploads(&self) -> bool {
         self.ended_uploads.is_empty()
     }
@@ -298,6 +317,22 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     pub(super) fn is_closing(&self, job: u64) -> bool {
         self.closing.contains_key(&job)
+    }
+
+    /// Whether `job` is followed as a queued job.
+    pub(super) fn is_followed_as_queued(&self, job: u64) -> bool {
+        self.queued_jobs.contains_key(&job)
+    }
+
+    /// As if `by` passed on the clocks of the jobs followed: since a closing job's runner was found gone, and since
+    /// GitHub began failing the reads of a queued job that left the queue.
+    pub(super) fn age_followed_jobs(&mut self, by: Duration) {
+        for closing in self.closing.values_mut() {
+            closing.age(by);
+        }
+        for followed in self.queued_jobs.values_mut() {
+            followed.age(by);
+        }
     }
 
     /// As if the runner of `job` was found gone at `ms` since the epoch.

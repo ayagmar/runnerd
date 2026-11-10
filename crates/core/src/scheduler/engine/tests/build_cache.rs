@@ -44,7 +44,7 @@ pub(super) fn engine_with_cache(
     (engine, handle, cache)
 }
 
-fn trigger(event: &str, branch: &str) -> github::RunTrigger {
+pub(super) fn trigger(event: &str, branch: &str) -> github::RunTrigger {
     github::RunTrigger {
         event: event.to_owned(),
         head_branch: Some(branch.to_owned()),
