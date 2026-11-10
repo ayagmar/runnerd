@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::upkeep::Due;
-use super::{Engine, Meanwhile, Occupant, Shutdown};
+use super::{Engine, Meanwhile, Occupant, Shutdown, Slot};
 use crate::admission::host;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -66,7 +66,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .filter(|name| {
                     self.slots
                         .get(*name)
-                        .is_some_and(|slots| slots.iter().all(Option::is_none))
+                        .is_some_and(|slots| slots.iter().all(Slot::is_free))
                 })
                 // A shell mounts the snapshot a reseed replaces.
                 .filter(|name| !self.shell_profiles().contains(name.as_str()))
@@ -153,7 +153,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .get(*name)
                     .and_then(|slots| slots.first())
                     .is_some_and(|slot| {
-                        slot.as_ref().is_none_or(|occupant| {
+                        slot.occupant().is_none_or(|occupant| {
                             occupant.idle() && occupant.started_at < tick_began
                         })
                     })
@@ -242,7 +242,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .get(profile)
             .into_iter()
             .flatten()
-            .flatten()
+            .filter_map(Slot::occupant)
             .map(|occupant| self.takes(occupant))
             .sum();
         let own = runners.saturating_add(self.waiting_seed(profile).unwrap_or(0));
@@ -269,7 +269,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let drained = self
             .slots
             .get(profile)
-            .is_some_and(|slots| slots.iter().all(Option::is_none));
+            .is_some_and(|slots| slots.iter().all(Slot::is_free));
         let waits = self.upkeep.requested_reseed_waits(profile)
             && drained
             && !self.shell_profiles().contains(profile);
@@ -484,7 +484,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// (`CHECK_EVERY` after the last, or running), which waits for every profile's runners. Its warm runners then
     /// stop and none starts.
     pub(super) fn upkeep_waits_for_warm(&self, profile: &str) -> bool {
-        let idle = |slots: &Vec<Option<Occupant>>| slots.iter().flatten().all(Occupant::idle);
+        let idle = |slots: &Vec<Slot>| slots.iter().filter_map(Slot::occupant).all(Occupant::idle);
         // A shell holds back the reseed until it closes, so runners keep serving meanwhile. So does a due reseed
         // with no room for its seed even once they stop: it is not asked for, and may wait long.
         let reseed = self

@@ -12,6 +12,7 @@ use crate::scheduler::engine::Occupant;
 use crate::scheduler::engine::admission::Admitting;
 use crate::scheduler::engine::history::{Capture, Found};
 use crate::scheduler::engine::open_waits::WaitFor;
+use crate::scheduler::engine::slot::Slot;
 use crate::scheduler::engine::upkeep::Due;
 use crate::scheduler::{Hold, Key, Wait, Waits};
 use crate::store::LogPosition;
@@ -26,7 +27,10 @@ pub(super) struct HoldFacts {
 
 impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     pub(super) fn occupants_mut(&mut self) -> impl Iterator<Item = &mut Occupant> {
-        self.slots.values_mut().flatten().flatten()
+        self.slots
+            .values_mut()
+            .flatten()
+            .filter_map(Slot::occupant_mut)
     }
 
     pub(super) fn pool_hold(&self, repository: &str, profile: &str) -> Option<HoldFacts> {
@@ -341,7 +345,12 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     /// As if every forced pause's grace ran out.
     pub(super) fn expire_cancelling(&mut self) {
         let now = tokio::time::Instant::now();
-        for occupant in self.slots.values_mut().flatten().flatten() {
+        for occupant in self
+            .slots
+            .values_mut()
+            .flatten()
+            .filter_map(Slot::occupant_mut)
+        {
             occupant.engagement.expire_cancel(now);
         }
     }
@@ -359,7 +368,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
                 .slots
                 .values()
                 .flatten()
-                .flatten()
+                .filter_map(Slot::occupant)
                 .filter(|occupant| occupant.engagement.is_cancelling())
                 .count(),
             busy_orphans: self.registrations.orphans(),

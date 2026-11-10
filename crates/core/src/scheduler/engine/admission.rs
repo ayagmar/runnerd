@@ -20,8 +20,8 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::Engine;
 use super::open_waits::{OpenWaits, WaitFor, Waited};
+use super::{Engine, Slot};
 use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor, host};
 use crate::api::{self, AdmissionPolicy, Basis};
 use crate::config::Admission;
@@ -712,7 +712,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .slots
                 .values_mut()
                 .flatten()
-                .flatten()
+                .filter_map(Slot::occupant_mut)
                 .find(|occupant| occupant.runner_name == runner)
             {
                 occupant.engagement.keyed(Key {
@@ -748,7 +748,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut seen = BTreeSet::new();
         let mut changed = Vec::new();
         for (profile, slots) in &mut self.slots {
-            for occupant in slots.iter_mut().flatten() {
+            for occupant in slots.iter_mut().filter_map(Slot::occupant_mut) {
                 let key = occupant.key().cloned();
                 let first = key.as_ref().is_some_and(|key| seen.insert(key.clone()));
                 let Some(admission) = &mut occupant.admission else {

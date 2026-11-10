@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use super::history::{CAPTURE_DRAIN, Capture};
 use super::runner_exit::{Exit, Logged, TOOK_JOB};
-use super::{Engagement, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
+use super::{Engagement, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, Slot, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
@@ -461,7 +461,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .slots
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
-            .and_then(Option::take);
+            .and_then(Slot::vacate);
         // Its layer holds what that job cached. A runner that ran a job nobody named leaves the layer to a job
         // unknown, and one that ran none leaves it as it was.
         match left.and_then(|occupant| occupant.key().cloned()) {
@@ -510,8 +510,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .slots
             .get(&slot.profile)
             .and_then(|slots| slots.get(slot.index))
+            .and_then(Slot::occupant)
             .cloned()
-            .flatten()
         else {
             return;
         };
@@ -695,10 +695,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Keeps a slot's runner that took a job after all: it ends as busy runners do. Until its capture names the job,
     /// it counts against one of its pool's listed jobs, which may be the one it took (`claims_a_listed_job`).
     fn keep_busy(&mut self, slot: &SlotRef) {
-        if let Some(Some(entry)) = self
+        if let Some(entry) = self
             .slots
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
+            .and_then(Slot::occupant_mut)
         {
             entry.engagement.kept_busy();
         }
@@ -922,7 +923,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
         {
-            *entry = Some(occupant.clone());
+            entry.place(occupant.clone());
         }
         let (repository, name, number) =
             (&occupant.repository, &occupant.runner_name, slot.index + 1);
