@@ -29,7 +29,7 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Decision, Demand, Plan, Pool, Repository, Scarce, StopReason, matches,
+    Barrier, Decision, Demand, Plan, Pool, Repository, Scarce, StartFor, StopReason, matches,
 };
 use crate::time;
 
@@ -452,20 +452,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         host::Remembered::new(self.measured.host(), occupancy)
     }
 
-    /// Remembers what this plan saw of the host for the next: whether it stalled, whether the larger margin stands
-    /// (`host::short`), and which jobs `waiting` wait for the host's memory. Adds the time since the last plan to the
-    /// waits of those that waited then, tells insights which of them the host lacks room for (ADR 0103), and logs what
-    /// holds them when that changes.
-    pub(super) fn note_host(
-        &mut self,
-        admitting: &Admitting,
-        waiting: &BTreeMap<u64, api::Waiting>,
-    ) {
+    /// Remembers what `plan` saw of the host for the next: whether it stalled, whether the larger margin stands
+    /// (`host::short`), and which jobs wait for the host's memory. Adds the time since the last plan to the waits of
+    /// those that waited then, tells insights which of them the host lacks room for (ADR 0103), and logs what holds
+    /// them when that changes.
+    pub(super) fn note_host(&mut self, admitting: &Admitting, plan: &Plan) {
         let stalled = admitting.host.as_ref().is_some_and(|host| host.stalled);
-        let needs = waiting.values().filter_map(|reason| match reason {
-            api::Waiting::HostMemory { needs, .. } => Some(*needs),
-            _ => None,
+        // A job the plan starts, as the tick's own starts did not, is a waiter the band reads too: one that fits,
+        // whose start the larger margin must not hold back (ADR 0102).
+        let starts = plan.decisions.iter().filter_map(|decision| match decision {
+            Decision::Start {
+                memory,
+                for_: StartFor::Job(_),
+                ..
+            } => Some(*memory),
+            Decision::Start { .. } | Decision::Stop { .. } => None,
         });
+        let needs = plan
+            .waiting
+            .values()
+            .filter_map(|reason| match reason {
+                api::Waiting::HostMemory { needs, .. } => Some(*needs),
+                _ => None,
+            })
+            .chain(starts);
         let count = self.count(self.host_remembered());
         let band = admitting
             .host
@@ -475,7 +485,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             });
         let was_short = self.measured.set_host(band).is_short();
         let now = time::now_ms();
-        let waiting_now: BTreeMap<u64, u64> = waiting
+        let waiting_now: BTreeMap<u64, u64> = plan
+            .waiting
             .iter()
             .filter_map(|(job, reason)| match reason {
                 api::Waiting::HostMemory { needs, .. } => Some((*job, *needs)),

@@ -14,7 +14,9 @@ were waiting. A replay of the host's readings put 222 minutes in that band, and 
 
 - **The larger margin stands while the host stalls, or while jobs wait for the host and none fits the plain margin.**
   `host::short` decides it, in `note_host` after the tick's last plan, from each `Waiting::HostMemory`'s `needs` and
-  `host::left(host::limit(&memory, false), in_use, false)` by the plain count.
+  `host::left(host::limit(&memory, false), in_use, false)` by the plain count. A job that plan starts, whose start the
+  tick did not make, such as one that failed without a backoff, counts as a waiter by its runner's memory: it fits,
+  and the larger margin would hold it back at the next plan.
 - **The room is signed.** `Waiting::HostMemory::free` is clamped to 0 and goes by the plan's margin, so it is not what
   the rule reads: a host past the plain margin fits no waiter, however little it needs.
 - **A waiter between the margins starts at the next plan.** The plan that sees it holds it, the note gives the band
