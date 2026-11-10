@@ -1071,7 +1071,11 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
     }
     match std::process::Command::new("xdg-open").arg(&open).status() {
         Ok(status) if status.success() => {
-            output::line("opened the dashboard in your browser");
+            // The link's code works once and is spent now, so name only where it went.
+            let site = open.split("/login?").next().unwrap_or(&open);
+            output::line(format_args!(
+                "opened the dashboard on {site} in your browser"
+            ));
         }
         _ => {
             return Err(Error::Local(format!(
