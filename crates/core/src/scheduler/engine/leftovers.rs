@@ -172,7 +172,6 @@ mod tests {
             labels: None,
             image: None,
             spec: None,
-            observed: false,
             purpose: None,
         };
         let slot = SlotRef {

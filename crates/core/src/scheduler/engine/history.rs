@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::tick::CONCURRENT_REQUESTS;
-use super::{Engine, Meanwhile, Occupant};
+use super::{Engine, Meanwhile, Occupant, watches};
 use crate::admission::Key;
 use crate::docker::{DockerApi, is_declined, is_log_gone, is_not_found, is_not_running};
 use crate::github::{self, GithubApi, JobDetails};
@@ -58,14 +58,6 @@ impl Closing {
     }
 }
 
-#[cfg(test)]
-impl Recapture {
-    /// Where its capture stored up to, for a test that needs it apart from what the store has.
-    pub(super) fn resume_at(&mut self, position: LogPosition) {
-        self.resume = Some(position);
-    }
-}
-
 impl Closing {
     pub(super) fn now(repository: &str) -> Closing {
         Closing {
@@ -104,33 +96,6 @@ pub(super) enum Capture {
     /// Docker failed the exec or broke its output off, though the container may run on: `recapture` starts it
     /// again. `resume` is where the lines it stored end, if it stored any: the store may not have written them yet.
     Broken { resume: Option<LogPosition> },
-}
-
-/// A runner's log capture that broke off, as `recapture` keeps it until the runner is gone.
-#[derive(Debug)]
-pub(super) struct Recapture {
-    /// Where the lines its captures stored end, as far as they said.
-    resume: Option<LogPosition>,
-    /// Its captures that broke off so far.
-    breaks: u32,
-    /// When it may start again, on Tokio's clock, which tests can advance.
-    at: tokio::time::Instant,
-}
-
-/// How long a runner's log capture waits to start again after its `breaks`-th break: not at all the first time,
-/// then 5 seconds, doubling up to 5 minutes, so an exec Docker keeps failing is not run every tick.
-fn capture_backoff(breaks: u32) -> Duration {
-    if breaks <= 1 {
-        return Duration::ZERO;
-    }
-    Duration::from_secs(5 << (breaks - 2).min(6)).min(Duration::from_mins(5))
-}
-
-/// The later of two log positions.
-fn later(a: Option<LogPosition>, b: Option<LogPosition>) -> Option<LogPosition> {
-    a.into_iter()
-        .chain(b)
-        .max_by_key(|position| (position.page, position.offset))
 }
 
 /// A runner's log capture found its job.
@@ -189,15 +154,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
-        if let Some(entry) = self
-            .slots
-            .values_mut()
-            .flatten()
-            .flatten()
-            .find(|entry| entry.runner_name == occupant.runner_name)
-        {
-            entry.observed = true;
-        }
         let started_at = state
             .started_at
             .unwrap_or_else(|| time::ms(occupant.started_at));
@@ -250,50 +206,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.config.history.log_max.0,
             self.found.0.clone(),
         ));
-        if let Some(old) = self.captures.insert(occupant.runner_name.clone(), task) {
-            old.abort();
-        }
+        self.watches.start(&occupant.runner_name, task);
     }
 
     /// Starts again the log captures that broke off while their container runs, each after a wait that grows with
     /// its breaks (`capture_backoff`), from where its job's stored lines end. Without it, a runner whose capture
     /// broke would lose its job's name, log and record.
     pub(super) async fn recapture(&mut self) {
-        let ended: Vec<String> = self
-            .captures
-            .iter()
-            .filter(|(_, task)| task.is_finished())
-            .map(|(runner, _)| runner.clone())
-            .collect();
         let now = tokio::time::Instant::now();
-        for runner in ended {
-            let Some(task) = self.captures.remove(&runner) else {
-                continue;
-            };
-            if let Ok(Capture::Broken { resume }) = task.await {
-                let recapture = self.recaptures.entry(runner).or_insert(Recapture {
-                    resume: None,
-                    breaks: 0,
-                    at: now,
-                });
-                recapture.breaks += 1;
-                recapture.resume = later(recapture.resume, resume);
-                recapture.at = now + capture_backoff(recapture.breaks);
-            }
-        }
+        self.watches.settle(now).await;
         let due: Vec<(Occupant, Option<LogPosition>)> = self
             .occupied()
             .filter_map(|(_, occupant)| {
-                let recapture = self.recaptures.get(&occupant.runner_name)?;
-                (recapture.at <= now && !self.captures.contains_key(&occupant.runner_name))
-                    .then(|| (occupant.clone(), recapture.resume))
+                let due = self.watches.due(&occupant.runner_name, now)?;
+                Some((occupant.clone(), due.resume))
             })
             .collect();
         for (occupant, resume) in due {
             match self.docker.inspect(&occupant.container).await {
                 Ok(state) if state.running => {
                     let stored = self.stored_position(&occupant.runner_name).await;
-                    let position = later(resume, Some(stored)).unwrap_or(stored);
+                    let position = watches::later(resume, Some(stored)).unwrap_or(stored);
                     info!(
                         "{}: capturing its job and log again from page {} at byte {}",
                         occupant.runner_name, position.page, position.offset
@@ -302,11 +235,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 // Its log ends where the capture broke off; `collect_finished` frees its slot.
                 Ok(_) => {
-                    self.recaptures.remove(&occupant.runner_name);
+                    self.watches.end_breaks(&occupant.runner_name);
                     self.claim_from_worker_log(&occupant).await;
                 }
                 Err(error) if is_not_found(&error) => {
-                    self.recaptures.remove(&occupant.runner_name);
+                    self.watches.end_breaks(&occupant.runner_name);
                 }
                 Err(error) => warn!("cannot inspect {}: {error}", occupant.runner_name),
             }
@@ -365,7 +298,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn observe_again(&mut self) {
         let unobserved: Vec<(SlotRef, Occupant)> = self
             .occupied()
-            .filter(|(_, occupant)| !occupant.is_observed())
+            .filter(|(_, occupant)| !self.watches.is_watched(&occupant.runner_name))
             .map(|(slot, occupant)| (slot, occupant.clone()))
             .collect();
         for (slot, occupant) in unobserved {
@@ -731,7 +664,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// `CAPTURE_DRAIN`.
     pub(super) async fn end_capture(&mut self, runner: &str) {
         self.take_found();
-        if let Some(mut task) = self.captures.remove(runner)
+        if let Some(mut task) = self.watches.take_capture(runner)
             && tokio::time::timeout(CAPTURE_DRAIN, &mut task)
                 .await
                 .is_err()
@@ -750,7 +683,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let now = SystemTime::now();
         self.store
             .runner_removed(&occupant.runner_name, time::ms(now));
-        self.recaptures.remove(&occupant.runner_name);
+        self.watches.forget(&occupant.runner_name);
         self.tracked.send_modify(|tracked| {
             tracked.retain(|container| container.runner != occupant.runner_name);
         });

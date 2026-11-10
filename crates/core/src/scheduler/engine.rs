@@ -8,7 +8,7 @@
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
 //! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
-//! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
+//! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `watches` (how each runner's container is watched: its log capture and what broken ones left), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
 
@@ -36,6 +36,7 @@ mod stop;
 mod tick;
 mod upkeep;
 mod warm;
+mod watches;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -60,6 +61,7 @@ use self::presence::Repositories;
 pub use self::records::RecordSelection;
 use self::registrations::Registrations;
 use self::upkeep::Upkeep;
+use self::watches::Watches;
 use super::{SlotRef, Waits};
 use crate::admission::Key;
 use crate::api;
@@ -264,9 +266,6 @@ struct Occupant {
     /// The release whose container spec it runs; `None` for one adopted from a container of a release before the
     /// label.
     spec: Option<String>,
-    /// Whether `observe` watches it: recorded, sampled and its job captured. Not while Docker fails to inspect its
-    /// container, which each tick tries again.
-    observed: bool,
     /// Why this daemon started it; `None` for one a restart adopted.
     purpose: Option<Purpose>,
 }
@@ -384,11 +383,6 @@ impl Occupant {
     /// Whether it holds a job admission cannot tell apart yet, as when its log capture failed.
     fn runs_unknown_job(&self) -> bool {
         self.engaged() && !self.has_key()
-    }
-
-    /// Whether `observe` watches it. Not while Docker fails to inspect its container.
-    fn is_observed(&self) -> bool {
-        self.observed
     }
 
     fn running_job(&self) -> api::RunningJob {
@@ -511,9 +505,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// The containers the sampler reads.
     tracked: watch::Sender<Vec<Tracked>>,
     found: (mpsc::UnboundedSender<Found>, mpsc::UnboundedReceiver<Found>),
-    captures: BTreeMap<String, JoinHandle<history::Capture>>,
-    /// The runners whose log capture broke off, until they are gone.
-    recaptures: BTreeMap<String, history::Recapture>,
+    /// How each runner's container is watched: its log capture, and what broken ones left.
+    watches: Watches,
     /// Who held which address, for the mirror's log.
     leases: Leases,
     /// How far the mirror's log was counted.
@@ -669,8 +662,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             paths,
             tracked: watch::channel(Vec::new()).0,
             found: mpsc::unbounded_channel(),
-            captures: BTreeMap::new(),
-            recaptures: BTreeMap::new(),
+            watches: Watches::default(),
             leases: Leases::default(),
             mirror_until: MirrorPosition::default(),
             queued_jobs: BTreeMap::new(),

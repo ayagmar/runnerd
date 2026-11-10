@@ -1974,11 +1974,7 @@ async fn until_state(handle: &Handle, job: u64, state: JobState) -> api::Job {
 /// the test may have paused Tokio's.
 async fn until_captures_end(engine: &Engine<FakeGithub, FakeDocker>) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while !engine
-        .captures
-        .values()
-        .all(tokio::task::JoinHandle::is_finished)
-    {
+    while !engine.watches.every_capture_ended() {
         assert!(
             std::time::Instant::now() < deadline,
             "a log capture never ended"
@@ -6454,6 +6450,36 @@ async fn a_log_capture_docker_breaks_off_starts_again_where_its_stored_log_ends(
     engine.tick(Shutdown::No).await;
     assert_eq!(captured(), resumed);
     until_log_lines(&handle, 1, 2).await;
+}
+
+#[tokio::test]
+async fn a_capture_that_reached_log_max_is_not_started_again_while_its_runner_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 12\nhello\nworld\n");
+    // Its exec never ends on its own: only `log_max` ends the capture.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .stuck_captures
+        .insert("container-1".to_owned());
+    let dir = TestDir::new("log-max");
+    let config = CONFIG.replace("[host]", "[history]\nlog_max = \"0.006K\"\n\n[host]");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_captures_end(&engine).await;
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+        until_captures_end(&engine).await;
+    }
+    assert_eq!(
+        docker.0.lock().unwrap().captured.len(),
+        1,
+        "no tick captures its log again or watches it afresh"
+    );
+    let job = handle.store.job(1).await.unwrap().unwrap().summary;
+    assert!(job.log.truncated, "job 1's log stops at log_max");
 }
 
 #[tokio::test]
