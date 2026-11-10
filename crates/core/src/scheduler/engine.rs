@@ -20,6 +20,7 @@ mod clock;
 mod control;
 mod engagement;
 mod exits;
+mod governor;
 mod history;
 mod images;
 mod ledger;
@@ -504,6 +505,8 @@ pub struct Engine<G = Github, D = Docker> {
     last_prune: Option<SystemTime>,
     /// When the running jobs were last read from GitHub, which is once every `poll_interval` (ADR 0124).
     running_reads: running_reads::RunningReads,
+    /// The pace of the reads by what is left of GitHub's rate limit (ADR 0127).
+    governor: governor::Governor,
     /// The records of failed jobs and the shells open in them.
     records: records::RecordState,
     /// The predictor, the high-water mark of measured admission, and what admission saw of the host.
@@ -659,6 +662,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ledger: Ledger::default(),
             last_prune: None,
             running_reads: running_reads::RunningReads::default(),
+            governor: governor::Governor::default(),
             measured: admission::Measured::default(),
             warm: warm::Warm::default(),
             records,
@@ -768,7 +772,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 break mode;
             }
             let interval = if mode == Shutdown::No {
-                self.config.host.poll_interval
+                self.governor.ticks_every(self.config.host.poll_interval)
             } else {
                 Duration::from_secs(5)
             };
@@ -808,6 +812,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             warn!("cannot stop the mirror: {error}");
         }
         info!("stopped");
+    }
+
+    /// Looks at what GitHub's rate limit says before a tick and moves the pace of the reads a step if it calls for it
+    /// (ADR 0127). Registrations and deletes do not ask.
+    fn pace_by_limit(&mut self) {
+        let spend = self.github.spend();
+        if let Some(change) =
+            self.governor
+                .observe(tokio::time::Instant::now(), SystemTime::now(), spend)
+        {
+            info!("{}", change.line(self.config.host.poll_interval));
+        }
     }
 
     /// Waits until the next tick in `mode` is `due`, or something calls for one sooner: a wake-up or a command.

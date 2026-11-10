@@ -23,7 +23,7 @@ use crate::time;
 mod requests;
 
 use requests::Counter;
-pub use requests::{Class, RateLimit, Report, Tally};
+pub use requests::{Class, RateLimit, Report, Spend, Tally};
 
 /// The public API's address.
 pub const API_URL: &str = "https://api.github.com";
@@ -368,6 +368,8 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         run: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// What the reads are paced by (ADR 0127): the rate limit as last read, and the registrations and deletes sent.
+    fn spend(&self) -> Spend;
 }
 
 /// A GitHub API client for one token. Requests on one URL are conditional on its last `ETag`, so an unchanged
@@ -985,6 +987,10 @@ impl GithubApi for Github {
             return Ok(());
         }
         expect_success(Method::POST, &path, response).map(|_| ())
+    }
+
+    fn spend(&self) -> Spend {
+        lock(&self.requests).spend()
     }
 }
 

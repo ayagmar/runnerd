@@ -114,6 +114,8 @@ struct GithubState {
     called: tokio::sync::watch::Sender<usize>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
+    /// The rate limit the answers carry, where a test says.
+    rate_limit: Option<FakeLimit>,
     /// While true, `GET /actions/jobs/{id}` does not answer.
     held_jobs: tokio::sync::watch::Sender<bool>,
     /// While true, `GET /repos/{owner}/{name}` does not answer.
@@ -155,7 +157,51 @@ struct GithubState {
     failed_jobs: BTreeSet<u64>,
 }
 
+/// A rate limit that every request costs one of, as it would count them, and that another client may drain as well.
+struct FakeLimit {
+    /// What was left when it was set.
+    remaining: u64,
+    set_at: tokio::time::Instant,
+    /// Requests, and registrations and deletes among them, that were made before.
+    calls_before: usize,
+    mutations_before: usize,
+    /// What a client of the same token spends a minute.
+    drained_per_minute: u64,
+    /// When the count starts over, on the system's clock, which a test's paused clock does not move.
+    reset: std::time::SystemTime,
+}
+
 impl GithubState {
+    /// What the limit reads now: one request spent for each call and job read since it was set, and the minutes
+    /// of the other client's drain.
+    fn spend(&self) -> github::Spend {
+        let Some(limit) = &self.rate_limit else {
+            return github::Spend::default();
+        };
+        let calls = self.calls.len() + self.job_reads - limit.calls_before;
+        let elapsed = tokio::time::Instant::now().saturating_duration_since(limit.set_at);
+        let drained =
+            u64::try_from(u128::from(limit.drained_per_minute) * elapsed.as_millis() / 60_000)
+                .unwrap();
+        let remaining = limit.remaining.saturating_sub(calls as u64 + drained);
+        github::Spend {
+            rate_limit: Some(github::RateLimit {
+                limit: 5000,
+                remaining,
+                reset: limit.reset,
+            }),
+            mutations: (self.mutations() - limit.mutations_before) as u64,
+        }
+    }
+
+    /// Registrations and deletes asked of GitHub so far.
+    fn mutations(&self) -> usize {
+        self.calls
+            .iter()
+            .filter(|call| call.starts_with("register ") || call.starts_with("delete "))
+            .count()
+    }
+
     fn call(&mut self, call: String) {
         self.trace.push(call.clone());
         self.calls.push(call);
@@ -167,6 +213,21 @@ impl GithubState {
 struct FakeGithub(Arc<Mutex<GithubState>>);
 
 impl FakeGithub {
+    /// From now on the answers carry a rate limit with `remaining` requests left until it resets in 30 minutes, which
+    /// every call and job read costs one of, and which a client of the same token drains by `drained_per_minute`
+    /// more.
+    fn limit(&self, remaining: u64, drained_per_minute: u64) {
+        let mut state = self.0.lock().unwrap();
+        state.rate_limit = Some(FakeLimit {
+            remaining,
+            set_at: tokio::time::Instant::now(),
+            calls_before: state.calls.len() + state.job_reads,
+            mutations_before: state.mutations(),
+            drained_per_minute,
+            reset: std::time::SystemTime::now() + Duration::from_mins(30),
+        });
+    }
+
     fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
     }
@@ -570,6 +631,10 @@ impl GithubApi for FakeGithub {
         let mut state = self.0.lock().unwrap();
         state.call(format!("cancel {repository} {run}"));
         Ok(())
+    }
+
+    fn spend(&self) -> github::Spend {
+        self.0.lock().unwrap().spend()
     }
 }
 
@@ -6971,6 +7036,7 @@ mod access;
 mod admission;
 mod build_cache;
 mod exit;
+mod governor;
 mod invariants;
 mod ledger;
 mod occupant;

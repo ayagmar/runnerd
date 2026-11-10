@@ -1,6 +1,6 @@
 //! What runnerd asks GitHub, counted by class and by what GitHub answered, and the rate limit the last answer gave,
-//! with the words of the log line that reports them. It decides nothing: no request is paced or refused by these
-//! counts, and a count names a class, never a repository, a path or the token. Nothing here survives a restart, and a
+//! with the words of the log line that reports them. It decides nothing: the pace of the reads (ADR 0127) is the
+//! scheduler's, from `Spend`, and a count names a class, never a repository, a path or the token. Nothing here survives a restart, and a
 //! config reload does not touch it: a window starts when the client is made, or when the last line was written.
 
 use std::fmt::Write as _;
@@ -128,6 +128,16 @@ impl RateLimit {
     }
 }
 
+/// What the scheduler paces GitHub's reads by: the limit as the last answer gave it, and how many registrations and
+/// deletes were sent since the client was made, a count no window's line starts over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spend {
+    /// The primary limit's last reading, if any answer carried one.
+    pub rate_limit: Option<RateLimit>,
+    /// Registrations and deletes sent, whatever GitHub answered.
+    pub mutations: u64,
+}
+
 /// What a window counted, and the limit's last reading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -208,6 +218,8 @@ impl Report {
 /// The counts of the window now running.
 pub(super) struct Counter {
     report: Report,
+    /// Registrations and deletes since the client was made.
+    mutations: u64,
     began: Instant,
     /// How long a window runs.
     window: Duration,
@@ -221,6 +233,7 @@ impl Counter {
                 rate_limit: None,
                 window: Duration::ZERO,
             },
+            mutations: 0,
             began: now,
             window,
         }
@@ -228,6 +241,9 @@ impl Counter {
 
     /// A response to a request of `class`, and the limit it carried.
     pub(super) fn record(&mut self, class: Class, status: StatusCode, headers: &HeaderMap) {
+        if matches!(class, Class::Registration | Class::Delete) {
+            self.mutations += 1;
+        }
         let tally = &mut self.report.tallies[class.index()];
         match status {
             StatusCode::NOT_MODIFIED => tally.unchanged += 1,
@@ -239,6 +255,14 @@ impl Counter {
             && let Some(limit) = RateLimit::read(headers)
         {
             self.report.rate_limit = Some(limit);
+        }
+    }
+
+    /// What the scheduler paces by, now.
+    pub(super) fn spend(&self) -> Spend {
+        Spend {
+            rate_limit: self.report.rate_limit,
+            mutations: self.mutations,
         }
     }
 
