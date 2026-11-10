@@ -542,8 +542,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// By repository, the jobs its listings may show that this machine's runners took.
     claims: Claims,
     /// The second in the name of the last runner the engine named: the next one's is later, so no two runners share
-    /// a name, which GitHub, Docker and the history know them by. A restart takes it from the containers and the
-    /// history, so a name ahead of the clock, or a clock that stepped back, is not used again.
+    /// a name, which GitHub, Docker and the history know them by. The history keeps each before the name is used,
+    /// and a restart takes it from there and the containers, so a name ahead of the clock, or a clock that stepped
+    /// back, is not used again.
     named: u64,
 }
 

@@ -200,6 +200,9 @@ impl Writer<'_> {
                 done,
             } => self.sizing_resolved(id, resolution, done),
             Write::Notify { change, done } => self.notify(change, done),
+            Write::RunnerNamed { secs, done } => {
+                let _ = done.send(self.runner_named(secs));
+            }
             Write::Flush(done) => {
                 self.store_host_samples();
                 let _ = done.send(());
@@ -955,8 +958,8 @@ impl Writer<'_> {
     }
 
     /// Runs `write` with its commits synced to disk (`synchronous = FULL`), for what must outlast a power failure:
-    /// an auto sizing change recorded before the config file is written and synced, and what became of it. `None`
-    /// when the database will not sync them.
+    /// an auto sizing change recorded before the config file is written and synced, what became of it, and the second
+    /// a runner was named for. `None` when the database will not sync them.
     fn durably<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
         logged(
             "sync commits to disk",
@@ -1027,6 +1030,20 @@ impl Writer<'_> {
             }
             Ok(())
         })
+    }
+
+    /// Synced to disk: a name a power failure took back would be given again after it.
+    fn runner_named(&self, secs: u64) -> bool {
+        self.durably(|| {
+            self.change("record a runner's name", |_| {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('runner_named', ?1)",
+                    [secs],
+                )?;
+                Ok(())
+            })
+        })
+        .unwrap_or(false)
     }
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without

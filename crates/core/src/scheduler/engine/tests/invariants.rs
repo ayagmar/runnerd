@@ -787,6 +787,9 @@ struct Case {
     /// What the case asked of the fakes, step by step, when traced.
     trace: Option<Vec<String>>,
     step: usize,
+    /// The second every engine of the case starts from as its last runner's, as when each restart comes within one
+    /// second of the clock; 0 for the clock's.
+    names_from: u64,
 }
 
 fn violation(case: &Case, invariant: &'static str, detail: String) -> Result<(), Violation> {
@@ -840,6 +843,7 @@ impl Case {
             began_ms: time::now_ms(),
             trace: None,
             step: 0,
+            names_from: 0,
         }
     }
 
@@ -2022,6 +2026,7 @@ impl Case {
             self.clock,
         );
         self.engine = engine;
+        self.engine.named = self.names_from;
         self.handle = handle;
         // The store keeps the host's reading in memory only, and a sample still to come goes to the old store.
         self.host = None;
@@ -3020,8 +3025,36 @@ impl Case {
             self.tick().await?;
         }
         self.no_runner_is_left()?;
+        self.names_only_rise()?;
         self.history_names_the_pool_that_ran_each_job().await?;
         self.no_job_stays_running().await
+    }
+
+    /// Once drained: each runner GitHub was asked to register is named later than every one before it, across
+    /// restarts too, so no name is used twice whatever the clock says.
+    fn names_only_rise(&self) -> Result<(), Violation> {
+        let named: Vec<String> = self
+            .github
+            .calls()
+            .iter()
+            .filter_map(|call| call.strip_prefix("register "))
+            .map(str::to_owned)
+            .collect();
+        let second = |name: &String| {
+            name.rsplit_once('-')
+                .and_then(|(_, secs)| secs.parse::<u64>().ok())
+        };
+        match named
+            .windows(2)
+            .find(|pair| second(&pair[1]) <= second(&pair[0]))
+        {
+            Some(pair) => violation(
+                self,
+                "names_only_rise",
+                format!("{} was named after {}", pair[1], pair[0]),
+            ),
+            None => Ok(()),
+        }
     }
 
     /// Invariant 4, once drained: every runner runnerd started has gone, from Docker, its slots and GitHub.
@@ -4006,4 +4039,41 @@ async fn a_pass_starts_no_runner_for_a_job_a_failed_start_may_have_taken() {
         Step::Pass,
     ];
     assert_eq!(broken(&steps).await, None);
+}
+
+/// Shrunk from seed 66. The first runner's inspect fails and its container goes, so neither Docker nor its runner
+/// row names it to the daemon that restarts; a runner named later must not take its name. Every engine of the case
+/// names from one second, as when each restart comes within it, so a restart that loses the first runner's name
+/// gives it again, whatever second the case runs in.
+#[tokio::test]
+async fn a_runner_started_after_a_restart_never_takes_a_name_nothing_recorded() {
+    let queue = |second, labels| Step::Queue { second, labels };
+    let steps = [
+        queue(false, Labels::SelfHosted),
+        Step::StartedInspectFails,
+        queue(false, Labels::Typo),
+        Step::RestartLogsFail,
+        Step::CaptureFails { mid_stream: false },
+        queue(true, Labels::Empty),
+        queue(true, Labels::Heavy),
+        Step::RunnerGoes(4),
+        Step::AssignListed(1),
+        Step::RunnerGoes(4),
+        Step::Elapse,
+        Step::RestartInspectFails(3),
+        Step::CaptureFails { mid_stream: false },
+        Step::Reload(Change::SecondRepository),
+        Step::Cancel(7),
+        Step::Assign(4),
+        Step::OpenJobCompletes(2),
+        Step::Stop { docker_gone: false },
+    ];
+    let mut case = Case::new();
+    case.names_from = time::now_ms() / 1000 + 3600;
+    case.engine.named = case.names_from;
+    let broken = run_case(&steps, case)
+        .await
+        .err()
+        .map(|found| (found.invariant, found.detail));
+    assert_eq!(broken, None);
 }

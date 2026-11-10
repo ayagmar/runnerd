@@ -380,6 +380,11 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
+    RunnerNamed {
+        secs: u64,
+        /// Whether it committed.
+        done: oneshot::Sender<bool>,
+    },
     Flush(oneshot::Sender<()>),
 }
 
@@ -780,6 +785,19 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
+    /// Records that this machine named a runner for `secs`, the second its name ends in, before GitHub or Docker
+    /// knows the name: a restart names the next runner later even when nothing else recorded this one. Says whether
+    /// it committed.
+    pub async fn runner_named(&self, secs: u64) -> bool {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::RunnerNamed { secs, done });
+        // Waited for on a blocking thread, as a read is: the runtime then knows the start waits for the disk, and a
+        // paused test clock does not run on meanwhile.
+        tokio::task::spawn_blocking(move || committed.blocking_recv().unwrap_or(false))
+            .await
+            .unwrap_or(false)
+    }
+
     /// Records a repository's visibility as GitHub gave it at `at` (ms), in place of the one recorded before.
     pub fn visibility(&self, repository: String, visibility: api::Visibility, at: u64) {
         self.send(Write::Visibility {
@@ -1054,8 +1072,9 @@ impl Store {
         self.read(read::slot_jobs).await
     }
 
-    /// The latest second any runner name starting with `prefix` carries, of a runner or of a job's runner: the
-    /// engine names runners later after a restart, so no name the history holds is used twice.
+    /// The latest second a runner was named for (`runner_named`), or any runner name starting with `prefix` carries,
+    /// of a runner or of a job's runner: the engine names runners later after a restart, so no name it used before
+    /// is used twice.
     pub async fn last_runner_second(&self, prefix: String) -> Result<Option<u64>, StoreError> {
         self.read(move |db| read::last_runner_second(db, &prefix))
             .await

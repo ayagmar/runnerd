@@ -411,6 +411,15 @@ impl GithubApi for FakeGithub {
                 message: "Bad Gateway".to_owned(),
             });
         }
+        // As GitHub does: a name is one runner's while it is registered.
+        if state.runners.iter().any(|runner| runner.name == name) {
+            return Err(github::Error::Status {
+                method: reqwest::Method::POST,
+                path: "/repos/o/r/actions/runners/generate-jitconfig".to_owned(),
+                status: reqwest::StatusCode::CONFLICT,
+                message: format!("Already exists - A runner with the name {name} already exists."),
+            });
+        }
         if let Some(hook) = state.on_register.take() {
             hook();
         }
@@ -1745,8 +1754,9 @@ async fn a_runner_that_takes_its_job_between_polls_gets_no_twin() {
 
 /// A slot's next runner is named later than every runner the slot had, across a restart too. A name carries a
 /// second, which runs ahead of the clock when a slot started more than one within a second, and is ahead of it after
-/// the clock stepped back. The bug it catches: a restarted engine giving a runner the name of an earlier one of its
-/// slot whose container is gone, which GitHub, Docker and the history (keyed by name) take for the same runner.
+/// the clock stepped back. The first runner's inspect fails, so no runner row names it, and it takes no job. The bug
+/// it catches: a restarted engine giving a runner the name of an earlier one of its slot whose container is gone,
+/// which GitHub, Docker and the history (keyed by name) take for the same runner.
 #[tokio::test]
 async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
@@ -1756,6 +1766,7 @@ async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() 
     let ahead = crate::time::now_ms() / 1000 + 3600;
     engine.named = ahead;
     github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().fail_started_inspects = 1;
     engine.tick(Shutdown::No).await;
     handle.store.flush().await;
     drop((engine, handle));
@@ -1777,6 +1788,80 @@ async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() 
     assert!(
         seconds[1] > seconds[0],
         "the second runner is named later than the first: {seconds:?}"
+    );
+}
+
+/// A stop asked for while GitHub registers a runner named ahead of the clock, as a burst names them, aborts its start,
+/// whose delete GitHub refuses: the registration stays, with no container or runner row naming it, and the restart's
+/// delete of it fails too. The bug it catches: the restarted engine naming its next runner no later than that one,
+/// which within its second takes the name GitHub still holds.
+#[tokio::test]
+async fn a_restart_names_runners_later_than_an_aborted_start_left_on_github() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.named = crate::time::now_ms() / 1000 + 3600;
+    let control = handle.control.clone();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.on_register = Some(Box::new(move || {
+            control.shutdown(Shutdown::Detach);
+        }));
+        state.busy_deletes = 2;
+    }
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    drop((engine, handle));
+
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let seconds: Vec<u64> = github
+        .0
+        .lock()
+        .unwrap()
+        .runners
+        .iter()
+        .map(|runner| runner.name.rsplit_once('-').unwrap().1.parse().unwrap())
+        .collect();
+    assert_eq!(
+        seconds.len(),
+        2,
+        "the aborted start's registration stays, and job 1 gets a runner: {seconds:?}"
+    );
+    assert!(
+        seconds[1] > seconds[0],
+        "the restart names its runner later than the aborted one: {seconds:?}"
+    );
+}
+
+/// The bug it catches: a start going on once the history failed to keep its name's second, which a restart could
+/// then give a later runner.
+#[tokio::test]
+async fn no_runner_starts_under_a_name_the_history_could_not_keep() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    // The history refuses the name's second, as a full disk would.
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_name BEFORE INSERT ON meta WHEN NEW.key = 'runner_named' \
+             BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+    fault.execute_batch("DROP TRIGGER no_name").unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 1 gets its runner once the history keeps names"
     );
 }
 
