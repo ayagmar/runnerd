@@ -1,5 +1,6 @@
 //! How the engine watches each runner's container: not yet, as Docker failed to inspect it; through a live log
-//! capture; waiting to capture again after one broke off; or done, with nothing left to capture. It owns that value
+//! capture; waiting to capture again after one broke off; spent, when one started again after a break ended without
+//! breaking; or done, with nothing left to capture. It owns that value
 //! and must not call Docker, the store or GitHub, or log: `history` inspects, captures and words what came of each.
 
 use std::collections::BTreeMap;
@@ -38,6 +39,10 @@ enum Watch {
     },
     /// Its capture broke off while its container may run on: `recapture` inspects it at `at`.
     Waiting { broke: Broke, at: Instant },
+    /// A capture started again after a break ended without breaking: it read its job's log whole or up to `log_max`,
+    /// or its output ended. Nothing is left to capture, but its job may be left to read from the worker log, which
+    /// `end_breaks` says.
+    Spent { broke: Broke },
     /// Nothing is left to capture: its capture read its job's log whole or up to `log_max`, or its container stopped.
     Done,
 }
@@ -63,7 +68,7 @@ impl Watches {
                 old.abort();
                 broke
             }
-            Some(Watch::Waiting { broke, .. }) => Some(broke),
+            Some(Watch::Waiting { broke, .. } | Watch::Spent { broke }) => Some(broke),
             Some(Watch::Done) | None => None,
         };
         self.0
@@ -71,8 +76,8 @@ impl Watches {
     }
 
     /// Notes how the captures that ended since ended, as of `now`: one that broke off waits to start again for a time
-    /// that grows with its breaks (`capture_backoff`); one that ended done leaves its runner done, unless an earlier
-    /// one broke, which makes it due again at once.
+    /// that grows with its breaks (`capture_backoff`); one that ended done leaves its runner done, or spent if an
+    /// earlier one broke.
     pub(super) async fn settle(&mut self, now: Instant) {
         let ended: Vec<String> = self
             .0
@@ -101,7 +106,7 @@ impl Watches {
                         at: now + capture_backoff(breaks),
                     }
                 }
-                (_, Some(broke)) => Watch::Waiting { broke, at: now },
+                (_, Some(broke)) => Watch::Spent { broke },
                 (_, None) => Watch::Done,
             };
             self.0.insert(runner, watch);
@@ -136,7 +141,7 @@ impl Watches {
         };
         match watch {
             Watch::Live { broke, .. } => broke.take().is_some(),
-            Watch::Waiting { .. } => {
+            Watch::Waiting { .. } | Watch::Spent { .. } => {
                 *watch = Watch::Done;
                 true
             }
@@ -160,7 +165,7 @@ impl Watches {
             Watch::Waiting { broke, at } if *at <= now => Some(Due {
                 resume: broke.resume,
             }),
-            Watch::Waiting { .. } | Watch::Live { .. } | Watch::Done => None,
+            Watch::Waiting { .. } | Watch::Live { .. } | Watch::Spent { .. } | Watch::Done => None,
         }
     }
 }
@@ -171,7 +176,7 @@ impl Watches {
     pub(super) fn replace_capture(&mut self, runner: &str, capture: JoinHandle<Capture>) {
         let broke = match self.0.remove(runner) {
             Some(Watch::Live { broke, .. }) => broke,
-            Some(Watch::Waiting { broke, .. }) => Some(broke),
+            Some(Watch::Waiting { broke, .. } | Watch::Spent { broke }) => Some(broke),
             Some(Watch::Done) | None => None,
         };
         self.0
@@ -193,7 +198,8 @@ impl Watches {
             if let Watch::Live {
                 broke: Some(broke), ..
             }
-            | Watch::Waiting { broke, .. } = watch
+            | Watch::Waiting { broke, .. }
+            | Watch::Spent { broke } = watch
             {
                 broke.resume = Some(position);
             }
@@ -204,7 +210,7 @@ impl Watches {
     pub(super) fn every_capture_ended(&self) -> bool {
         self.0.values().all(|watch| match watch {
             Watch::Live { capture, .. } => capture.is_finished(),
-            Watch::Waiting { .. } | Watch::Done => true,
+            Watch::Waiting { .. } | Watch::Spent { .. } | Watch::Done => true,
         })
     }
 
@@ -381,7 +387,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_capture_started_again_that_ends_is_due_again_at_once_while_its_breaks_last() {
+    async fn a_capture_started_again_that_ends_is_not_due_but_keeps_its_breaks_for_its_record() {
         let mut watches = Watches::default();
         let (task, first) = capture();
         watches.start("r", task);
@@ -391,13 +397,18 @@ mod tests {
         watches.start("r", task);
         end(&watches, "r", again, End::Done).await;
         watches.settle(Instant::now()).await;
-        assert_eq!(
-            due_now(&watches, "r"),
-            Some(due_at(6)),
-            "`recapture` inspects it again"
+        tokio::time::advance(Duration::from_hours(1)).await;
+        watches.settle(Instant::now()).await;
+        assert_eq!(due_now(&watches, "r"), None, "nothing is left to capture");
+        assert!(watches.take_capture("r").is_none(), "no capture runs");
+        assert!(
+            watches.is_watched("r"),
+            "`observe_again` must not watch it afresh"
         );
-        assert!(watches.end_breaks("r"), "its break is still there to end");
-        assert_eq!(due_now(&watches, "r"), None, "its container stopped");
+        assert!(
+            watches.end_breaks("r"),
+            "its break is still there for its record"
+        );
         assert!(!watches.end_breaks("r"), "a second end finds no break");
     }
 
@@ -444,24 +455,27 @@ mod tests {
     }
 
     /// A runner's watch as the engine kept it before `Watches`: a flag on its occupant, a map of captures and a map of
-    /// recaptures.
+    /// recaptures, each with when it is due; `None` once a capture it started ended without breaking.
     #[derive(Debug, Default)]
     struct Old {
         observed: bool,
         capture: bool,
-        recapture: Option<(Option<LogPosition>, u32, Instant)>,
+        recapture: Option<(Option<LogPosition>, u32, Option<Instant>)>,
     }
 
-    /// The engine's old `recapture` bookkeeping for one capture that ended `how`.
+    /// The engine's old `recapture` bookkeeping for one capture that ended `how`, but for a capture started again that
+    /// ends without breaking, which leaves its recapture never due instead of due at once.
     fn old_settle(old: &mut Old, how: End, now: Instant) {
         old.capture = false;
         if let End::Broken(resume) = how {
-            let (earlier, breaks, _) = old.recapture.unwrap_or((None, 0, now));
+            let (earlier, breaks, _) = old.recapture.unwrap_or((None, 0, None));
             old.recapture = Some((
                 later(earlier, resume),
                 breaks + 1,
-                now + capture_backoff(breaks + 1),
+                Some(now + capture_backoff(breaks + 1)),
             ));
+        } else if let Some((_, _, at)) = &mut old.recapture {
+            *at = None;
         }
     }
 
@@ -470,7 +484,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "one arm per engine call, each beside its model of the old fields; split up, they read worse"
     )]
-    async fn a_generated_sequence_reads_as_the_flag_and_two_maps_did() {
+    async fn a_generated_sequence_reads_as_the_flag_and_two_maps_did_but_for_spent_captures() {
         const RUNNERS: [&str; 3] = ["a", "b", "c"];
         // How often the sequences reached what the old fields held at once: a capture beside a recapture, and a
         // release whose record found a break.
@@ -519,9 +533,9 @@ mod tests {
                         for runner in RUNNERS {
                             let model = old.get_mut(runner).unwrap();
                             let at = format!("{at}, recapture of {runner}");
-                            let due = model
-                                .recapture
-                                .filter(|(_, _, due)| *due <= now && !model.capture);
+                            let due = model.recapture.filter(|(_, _, due)| {
+                                due.is_some_and(|due| due <= now) && !model.capture
+                            });
                             assert_eq!(
                                 watches.due(runner, now).map(|due| due.resume),
                                 due.map(|(resume, _, _)| resume),
