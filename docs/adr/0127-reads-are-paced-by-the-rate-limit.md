@@ -1,6 +1,6 @@
 # 0127. GitHub reads are paced by what is left of the rate limit
 
-Status: **Accepted** (2026-11-10). Amends [0124](0124-running-jobs-are-read-every-poll-interval.md) and
+Status: **Accepted** (2026-11-10), amended by [0128](0128-each-repository-is-listed-on-its-own-pace.md). Amends [0124](0124-running-jobs-are-read-every-poll-interval.md) and
 [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md): the interval of the running jobs' reads and of
 scheduled ticks is `poll_interval` times a factor the rate limit sets. No wire, schema or config change.
 

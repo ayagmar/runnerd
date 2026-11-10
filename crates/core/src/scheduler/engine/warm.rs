@@ -77,6 +77,13 @@ impl Warm {
         }
     }
 
+    /// Whether what was learned counts `repository` active at `now` (ms) (`Learned::active`); not before the first
+    /// read.
+    pub(super) fn active(&self, repository: &str, now: u64) -> bool {
+        self.learned()
+            .is_some_and(|learned| learned.active(repository, now))
+    }
+
     /// Notes that `repository` was active at `at` (ms).
     fn note_active(&mut self, repository: &str, at: u64) {
         if let Some(read) = &mut self.read {
@@ -87,12 +94,6 @@ impl Warm {
 
 #[cfg(test)]
 impl Warm {
-    /// Whether what was learned counts `repository` active at `now` (ms).
-    pub(super) fn testing_active(&self, repository: &str, now: u64) -> bool {
-        self.learned()
-            .is_some_and(|learned| learned.active(repository, now))
-    }
-
     /// As if the history had just been read and taught exactly `learned`.
     pub(super) fn testing_learned(&mut self, learned: Learned) {
         self.read = Some(HistoryRead {

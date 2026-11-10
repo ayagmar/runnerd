@@ -115,7 +115,7 @@ fn a_healthy_limit_leaves_the_pace_alone() {
     // 8 requests a minute is 480 an hour against 5000.
     assert_eq!(sim.run(Duration::from_mins(30), 2), []);
     assert_eq!(sim.governor.reads_every(POLL), POLL);
-    assert_eq!(sim.governor.ticks_every(POLL), POLL);
+    assert_eq!(sim.governor.listings_every(POLL), POLL);
 }
 
 /// The bugs it catches: listings slowed before the job reads, a step skipped or taken twice, two steps in one go, and
@@ -141,7 +141,7 @@ fn a_draining_limit_slows_job_reads_first_then_listings_one_step_at_a_time() {
     }
     assert!(moved[0].0 >= SPAN, "judged on two minutes at least");
     assert_eq!(sim.governor.reads_every(POLL), Duration::from_mins(1));
-    assert_eq!(sim.governor.ticks_every(POLL), Duration::from_mins(1));
+    assert_eq!(sim.governor.listings_every(POLL), Duration::from_mins(1));
 }
 
 /// Each pace in turn: what it means for the two intervals.
@@ -406,7 +406,7 @@ fn generated_limits_never_break_the_governors_rules() {
             };
             let paces = [
                 sim.governor.reads_every(POLL),
-                sim.governor.ticks_every(POLL),
+                sim.governor.listings_every(POLL),
             ];
             assert!(
                 paces.iter().all(|pace| (POLL..=POLL * 4).contains(pace)),
@@ -489,7 +489,7 @@ fn with_the_same_demand_all_hour_no_step_is_taken_after_one_is_undone() {
         let mut undone = false;
         while sim.at < Duration::from_mins(59) {
             let reads_factor = sim.governor.reads_every(POLL).as_secs() / POLL.as_secs();
-            let listings_factor = sim.governor.ticks_every(POLL).as_secs() / POLL.as_secs();
+            let listings_factor = sim.governor.listings_every(POLL).as_secs() / POLL.as_secs();
             let per_minute = reads / reads_factor + listings / listings_factor + others + mutations;
             if let Some((_, from, to)) = sim.tick(TICK, per_minute / 4, mutations / 4) {
                 assert!(
@@ -513,7 +513,7 @@ fn with_ticks_further_apart_than_the_window_the_pace_still_eases() {
     let mut sim = Sim::new(2500, Duration::from_mins(59));
     let mut slowest = Step::Steady;
     while sim.at < Duration::from_mins(58) {
-        let by = sim.governor.ticks_every(poll);
+        let by = sim.governor.listings_every(poll);
         // Another client spends 60 a minute for the first 20 minutes.
         let minutes = by.as_secs() / 60;
         let spent = if sim.at < Duration::from_mins(20) {
@@ -560,14 +560,14 @@ fn active_listings_keep_their_own_pace_until_the_step_that_holds_them() {
     let mut sim = Sim::new(1000, Duration::from_mins(30));
     let mut paces = vec![(
         sim.governor.step(),
-        sim.governor.active_listings_every(POLL, third),
+        sim.governor.active_listings_every(POLL),
     )];
     // 60 a minute against 900 left: five steps up.
     for _ in 0..(12 * 4) {
         if sim.tick(TICK, 15, 0).is_some() {
             paces.push((
                 sim.governor.step(),
-                sim.governor.active_listings_every(POLL, third),
+                sim.governor.active_listings_every(POLL),
             ));
         }
     }

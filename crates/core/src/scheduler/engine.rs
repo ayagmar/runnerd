@@ -7,7 +7,7 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `ledger` (the jobs followed on GitHub, queued or closing), `claims` (what a repository's listings may show that this machine's runners took), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
+//! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `listing_pace` (when a repository is listed next), `ledger` (the jobs followed on GitHub, queued or closing), `claims` (what a repository's listings may show that this machine's runners took), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
 //! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `watches` (how each runner's container is watched: its log capture and what broken ones left), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
@@ -26,6 +26,7 @@ mod images;
 mod ledger;
 mod leftovers;
 mod listing;
+mod listing_pace;
 mod mirror;
 mod open_waits;
 mod pool_health;
@@ -60,7 +61,7 @@ pub use self::control::{
     Author, Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown,
     Target, same_slice,
 };
-use self::engagement::Engagement;
+use self::engagement::{Engagement, Mark};
 use self::history::{CAPTURE_DRAIN, Found};
 use self::images::Images;
 use self::ledger::Ledger;
@@ -71,6 +72,7 @@ pub use self::records::RecordSelection;
 use self::registrations::Registrations;
 use self::repository_state::RepositoryState;
 use self::slot::Slot;
+use self::tick::Scope;
 use self::upkeep::Upkeep;
 use self::watches::Watches;
 use super::SlotRef;
@@ -539,9 +541,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// How long the passes this tick's waits for GitHub held took. Each waits for its slowest release: a tick holds
     /// passes until they took `CAPTURE_DRAIN`, or while slots keep turning over it would take minutes to its plan.
     passes_in_tick: Duration,
-    /// How many times the engine began listing GitHub's queued jobs: the listing each answer comes from, and how
-    /// old a claim on a listed job is (`Claims`).
-    listing: u64,
+    /// The listing the engine began last, counted from 1 since its start, and when it began: the listing each answer
+    /// comes from, and how old a claim on a listed job is (`Claims`, `Engagement`).
+    listing: Mark,
     /// By repository, the jobs its listings may show that this machine's runners took.
     claims: Claims,
     /// The second in the name of the last runner the engine named: the next one's is later, so no two runners share
@@ -679,7 +681,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             watcher: None,
             released: BTreeSet::new(),
             passes_in_tick: Duration::ZERO,
-            listing: 0,
+            listing: Mark {
+                listing: 0,
+                at: tokio::time::Instant::now(),
+            },
             named: 0,
             #[cfg(test)]
             launches: start::Launches::default(),
@@ -739,16 +744,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.schedule().await;
     }
 
-    /// Schedules until a shutdown request is carried out, from a recovered engine. A tick is due `poll_interval`
-    /// after the last one's listing started, and at least `TICK_REST` after it ended (ADR 0111). Between ticks, a
-    /// runner whose container Docker says stopped is released at once, and its slot taken by a job the last poll
-    /// listed (`turnover`, ADR 0095); that leaves the next tick when it was due.
+    /// Schedules until a shutdown request is carried out, from a recovered engine. A tick is due when the first
+    /// repository is, each an interval after its last listing started, and at least `TICK_REST` after the last tick
+    /// ended (ADR 0111, 0128); it lists the repositories due. One a command or a wake-up brings sooner lists every
+    /// repository. Between ticks, a runner whose container Docker says stopped is released at once, and its slot taken
+    /// by a job the last poll listed (`turnover`, ADR 0095); that leaves the next tick when it was due.
     async fn schedule(&mut self) {
         self.watcher = Some(exits::Watcher::start(
             self.docker.clone(),
             self.exits.clone(),
         ));
         let mut shown = Shutdown::No;
+        // The first tick lists every repository: none was listed yet.
+        let mut scope = Scope::Every;
         let mode = loop {
             let mode = self.control.mode();
             // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
@@ -765,7 +773,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.collect_recordings().await;
                 began
             } else {
-                self.tick(mode).await
+                self.tick_listing(mode, scope).await
             };
             self.publish();
             // A stop asked for or changed meanwhile goes on at once, before this one counts as done: a second signal
@@ -776,16 +784,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if self.stopped(mode) {
                 break mode;
             }
-            let interval = if mode == Shutdown::No {
-                self.governor.ticks_every(self.config.host.poll_interval)
+            // From the listings' starts, so the tick's own length does not push the next listing out, and two listings
+            // of a repository are never closer than its interval, however long either tick took to collect before
+            // listing.
+            let due = if mode == Shutdown::No {
+                self.next_tick_due(anchor)
             } else {
-                Duration::from_secs(5)
+                let interval = Duration::from_secs(5);
+                (anchor + interval).max(tokio::time::Instant::now() + interval.min(TICK_REST))
             };
-            // From the listing's start, so the tick's own length does not push the next listing out, and two listings
-            // are never closer than `interval`, however long either tick took to collect before listing.
-            let due =
-                (anchor + interval).max(tokio::time::Instant::now() + interval.min(TICK_REST));
-            self.wait_for_tick(mode, due).await;
+            scope = self.wait_for_tick(mode, due).await;
         };
         // Nothing more is started or released: what Docker says now is the next start's.
         self.watcher = None;
@@ -834,20 +842,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Waits until the next tick in `mode` is `due`, or something calls for one sooner: a wake-up or a command.
     /// Runners Docker says stopped meanwhile are released by passes, finished records collected and the jobs
     /// captures name noted, all leaving `due` as it is; during a stop they call for the tick instead, which a detach does not wait for runners.
-    async fn wait_for_tick(&mut self, mode: Shutdown, due: tokio::time::Instant) {
+    /// Says what the tick lists: the repositories due when it came when due, and every repository when it came sooner.
+    async fn wait_for_tick(&mut self, mode: Shutdown, due: tokio::time::Instant) -> Scope {
         loop {
             let exits = self.exits.clone();
             // A due tick and a command go before a pass: passes back to back would otherwise hold them while slots
             // keep turning over.
             tokio::select! {
                 biased;
-                () = tokio::time::sleep_until(due) => return,
-                () = self.control.wake.notified() => return,
+                () = tokio::time::sleep_until(due) => return Scope::Due,
+                () = self.control.wake.notified() => return Scope::Every,
                 // A detaching stop changes nothing more: a command waiting for it fails once the engine is gone.
                 Some(command) = self.commands.recv(), if mode != Shutdown::Detach => {
                     self.command(command).await;
                     self.publish();
-                    return;
+                    return Scope::Every;
                 }
                 // Running on, a record's end changes nothing GitHub must be asked about: the next poll stays when
                 // it was due. A stop returns to see whether it is done.
@@ -855,7 +864,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.collect_recordings().await;
                     self.publish();
                     if mode != Shutdown::No || self.control.mode() != mode {
-                        return;
+                        return Scope::Every;
                     }
                 }
                 // A capture named its runner's job: status says the runner runs it now, not after the next poll.
@@ -865,12 +874,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 () = exits.noted(), if mode != Shutdown::Detach => {
                     if mode != Shutdown::No {
-                        return;
+                        return Scope::Every;
                     }
                     self.turnover().await;
                     self.publish();
                     if self.control.mode() != mode {
-                        return;
+                        return Scope::Every;
                     }
                 }
             }

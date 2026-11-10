@@ -42,7 +42,7 @@ systemctl --user stop runnerd           # exits within 45s; running jobs carry o
 
 ## How it schedules
 
-- It reads the `gh` CLI's token at start, and again when GitHub rejects it. Every [`poll_interval`](../configuration/#host) it asks GitHub for each repository's queued jobs.
+- It reads the `gh` CLI's token at start, and again when GitHub rejects it. Every [`poll_interval`](../configuration/#host) it asks GitHub for each repository's queued jobs, and three times as often for a repository with jobs lately.
 - The pool whose `labels` include every label in a job's `runs-on` serves it: one `[[repositories]]` entry, or one of [several](../configuration/#split-light-and-heavy-jobs).
 - It registers a just-in-time runner and starts it in a free slot of the pool's profile if the slice's `MemoryMax` has room for the profile's `memory` (under [measured admission](../admission/#measured-admission), the job's predicted peak) and, under [CPU admission](../admission/#cpu-admission), the CPU budget has room too.
 - A job that does not fit lets younger ones past, until it has waited 10 minutes for memory or CPU, or 2 if its pool already went first and still has jobs queued. Then [it goes first](../admission/#a-starved-job-goes-first). What it wins is the next runner of its pool: GitHub gives a runner any job its labels match, so another job of that pool may take it.

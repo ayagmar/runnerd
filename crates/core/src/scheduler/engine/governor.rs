@@ -1,7 +1,7 @@
 //! How hard runnerd reads GitHub, by what is left of the rate limit (ADR 0127). It owns the readings of the last
 //! ten minutes and the one pace step they put the reads at. It must not slow a registration or a delete, whatever the
-//! limit says: only `reads_every` and `ticks_every` are read from outside, by the running jobs' reads and the tick's
-//! due time, and nothing that sends a registration or a delete asks it anything. It must not parse a header or word a
+//! limit says: only `reads_every`, `listings_every` and `active_listings_every` are read from outside, by the running
+//! jobs' reads and the repositories' listings (ADR 0128), and nothing that sends a registration or a delete asks it anything. It must not parse a header or word a
 //! count: `github::Github` reads the limit, and the log line is `Change::line`.
 //!
 //! Nothing survives a restart, and a reload keeps what it learned. A new engine starts at `Steady`, the pace of
@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use tokio::time::Instant;
 
+use super::listing_pace::ACTIVE_SHARE;
 use crate::api::duration;
 use crate::github::Spend;
 
@@ -35,8 +36,7 @@ pub(super) enum Step {
     JobReads2,
     /// Running jobs every 4× `poll_interval`.
     JobReads4,
-    /// Active repositories' listings every `poll_interval`. Until listings have a pace of their own that is every
-    /// listing's pace already, so this step changes nothing.
+    /// Active repositories' listings every `poll_interval`, as idle ones', not a third of it (ADR 0128).
     ActiveListings,
     /// Every listing every 2× `poll_interval`.
     Listings2,
@@ -65,8 +65,8 @@ impl Step {
     /// How many times more the reads cost once this step is undone, at most: what its slowing saved.
     fn undo_cost(self) -> u128 {
         match self {
-            // Listings at the third of `poll_interval` they will have.
-            Step::ActiveListings => 3,
+            // Active listings at the share of `poll_interval` they go back to.
+            Step::ActiveListings => u128::from(ACTIVE_SHARE),
             _ => 2,
         }
     }
@@ -157,6 +157,16 @@ fn outlook(step: Step, readings: &VecDeque<Reading>, until_reset: Duration) -> O
     })
 }
 
+/// How long an active repository's listings are apart at `step`: `ACTIVE_SHARE` times per `poll_interval`, until the
+/// step that holds them to an idle one's pace.
+fn active_listings(step: Step, poll_interval: Duration) -> Duration {
+    if step >= Step::ActiveListings {
+        poll_interval * step.listings()
+    } else {
+        poll_interval / ACTIVE_SHARE
+    }
+}
+
 /// Why the pace changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Cause {
@@ -183,8 +193,9 @@ impl Change {
     pub(super) fn line(&self, poll_interval: Duration) -> String {
         let pace = |step: Step| {
             format!(
-                "running jobs every {}, listings every {}",
+                "running jobs every {}, listings every {} while active and {} while idle",
                 duration((poll_interval * step.reads()).as_secs()),
+                duration(active_listings(step, poll_interval).as_secs()),
                 duration((poll_interval * step.listings()).as_secs()),
             )
         };
@@ -288,35 +299,31 @@ impl Governor {
         poll_interval * self.step().reads()
     }
 
-    /// How long scheduled ticks, which list every repository, are apart.
-    pub(super) fn ticks_every(&self, poll_interval: Duration) -> Duration {
+    /// How long an idle repository's listings are apart.
+    pub(super) fn listings_every(&self, poll_interval: Duration) -> Duration {
         poll_interval * self.step().listings()
     }
 
-    /// How long an active repository's listings are apart, given the `wanted` pace of its own: held to the pace of
-    /// every listing once the step that does so is reached.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "listings have no pace of their own until PR 6 (ADR 0128)"
-        )
-    )]
-    pub(super) fn active_listings_every(
-        &self,
-        poll_interval: Duration,
-        wanted: Duration,
-    ) -> Duration {
-        if self.step() >= Step::ActiveListings {
-            self.ticks_every(poll_interval)
-        } else {
-            wanted
-        }
+    /// How long an active repository's listings are apart (`active_listings`).
+    pub(super) fn active_listings_every(&self, poll_interval: Duration) -> Duration {
+        active_listings(self.step(), poll_interval)
     }
 
     /// The pace now: the newest reading's, `Steady` before any.
     pub(super) fn step(&self) -> Step {
         self.readings.back().map_or(Step::Steady, |r| r.step)
+    }
+
+    /// As if the newest reading, taken now, had moved the pace to `step`.
+    #[cfg(test)]
+    pub(super) fn testing_step(&mut self, step: Step) {
+        self.readings.push_back(Reading {
+            at: Instant::now(),
+            step,
+            remaining: 0,
+            reset: SystemTime::UNIX_EPOCH,
+            mutations: 0,
+        });
     }
 
     /// What the readings project now, `until_reset` before the limit starts over.

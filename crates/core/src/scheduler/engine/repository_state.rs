@@ -1,21 +1,25 @@
-//! What the engine keeps of one listed repository: its last listing of queued jobs, and per pool, the health that
-//! holds the pool's runners back and what the pool's next job waits for. It owns those values and must not call
+//! What the engine keeps of one listed repository: its last listing of queued jobs, when it is listed next, and per
+//! pool, the health that holds the pool's runners back and what the pool's next job waits for. It owns those values and must not call
 //! GitHub or Docker, nor log: the engine decides what each listing, failure and plan does to them.
 
 use std::collections::BTreeMap;
 
 use super::listing::Listing;
+use super::listing_pace::ListingPace;
 use super::pool_health::PoolHealth;
 use crate::scheduler::Waits;
 
 /// A repository's state, shared by its pools but for their health and what they wait for.
 ///
 /// Nothing of it survives a restart. A reload keeps it for a repository the config still lists, but drops the health
-/// of a pool whose runners change and the waits of a pool gone; a repository it removes drains with no listing.
+/// of a pool whose runners change and the waits of a pool gone; a repository it removes drains with no listing, and
+/// one it adds back starts afresh, due at once.
 #[derive(Debug, Default)]
 pub(super) struct RepositoryState {
     /// Its queued jobs as its last listing showed them.
     listing: Listing,
+    /// When it is listed next (ADR 0128).
+    pace: ListingPace,
     /// Its pools by profile, each kept while it has a health or a wait.
     pools: BTreeMap<String, PoolState>,
 }
@@ -75,6 +79,16 @@ impl RepositoryState {
     /// Its listing, for a listing's answer or a stop.
     pub(super) fn listing_mut(&mut self) -> &mut Listing {
         &mut self.listing
+    }
+
+    /// When it is listed next.
+    pub(super) fn pace(&self) -> &ListingPace {
+        &self.pace
+    }
+
+    /// When it is listed next, for a probe of it, a start or a release of its runners, or its listing's answer.
+    pub(super) fn pace_mut(&mut self) -> &mut ListingPace {
+        &mut self.pace
     }
 
     /// The health of its pool in `profile`, if a runner there left or failed since.

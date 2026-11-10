@@ -670,6 +670,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return Committed::Failed(launched);
         };
         entry.launch(starting);
+        // Its registration shows in the runners listing, and its runner busy there once it takes its job.
+        self.owe_runners_listing(repository);
         let request = Request {
             repository: repository.to_owned(),
             number,

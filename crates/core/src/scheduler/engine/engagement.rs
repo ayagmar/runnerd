@@ -3,7 +3,9 @@
 //! deadline for it. It owns that value and must not call Docker, GitHub or the store, nor log: the engine reads
 //! those and tells it what each said.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+use tokio::time::Instant;
 
 use crate::admission::Key;
 
@@ -44,9 +46,30 @@ enum Listed {
     Unlisted,
     /// Busy, as the listing before the last already showed it.
     Busy,
-    /// Busy since the last listing, or since GitHub said so after it: the queued jobs listing after it may still show
-    /// the job it took, as GitHub lists one queued for a few seconds after.
-    NewlyBusy,
+    /// Busy since the listing or the answer that `Mark` says: the queued jobs listings of its repository after it may
+    /// still show the job it took, as GitHub lists one queued for a few seconds after. Only a listing of those that
+    /// began after the mark, and at least `poll_interval` after it, ends it (`queued_listed`); a later runners listing
+    /// that shows it busy again leaves the mark as it was.
+    NewlyBusy(Mark),
+}
+
+/// A listing of GitHub's, as the claims on listed jobs count it: its number, counted from 1 since the engine's start,
+/// and when it began on Tokio's clock. A claim is marked with the listing begun last when it was made: a runner first
+/// seen busy, with the runners listing that showed it, or the one before GitHub said so; a runner gone, with the one
+/// before it went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Mark {
+    pub(super) listing: u64,
+    pub(super) at: Instant,
+}
+
+impl Mark {
+    /// Whether a queued jobs listing `self` ends a claim marked with `claim`: it is a later listing, begun at least
+    /// `floor` after the claim's, so GitHub's lag in taking a job off the queued listing has as long as when every
+    /// listing came one `poll_interval` after the last, whatever the listings' pace (ADR 0128).
+    pub(super) fn ends(self, claim: Mark, floor: Duration) -> bool {
+        self.listing > claim.listing && self.at >= claim.at + floor
+    }
 }
 
 /// A job named for a runner, with when this daemon's capture found it.
@@ -67,7 +90,7 @@ struct TakenJob {
 /// the job its history row names, a forced pause's deadline as its row kept it, and no key until `find_keys` reads its
 /// record. Whether a listing showed it newly busy or waiting, when its job was found and the barrier it started behind
 /// are lost: every barrier after a restart matures after it, so a backfill would not count an adopted runner anyway. A
-/// reload does not touch it.
+/// reload does not touch it, so a newly busy runner keeps its mark through one.
 #[derive(Debug, Clone)]
 pub(super) struct Engagement {
     origin: Origin,
@@ -78,7 +101,7 @@ pub(super) struct Engagement {
     /// That job as admission tells jobs apart, once the history had its record.
     key: Option<Key>,
     /// When a forced pause that cancelled its run removes it if it still runs.
-    cancel_by: Option<tokio::time::Instant>,
+    cancel_by: Option<Instant>,
 }
 
 impl Engagement {
@@ -96,7 +119,7 @@ impl Engagement {
 
     /// A runner a restart adopts, running the job its history row names, if any: counted busy until a listing says
     /// otherwise. `cancel_by` is the deadline a forced pause before the restart gave it, as its row kept it.
-    pub(super) fn adopted(job: Option<u64>, cancel_by: Option<tokio::time::Instant>) -> Self {
+    pub(super) fn adopted(job: Option<u64>, cancel_by: Option<Instant>) -> Self {
         Self {
             origin: Origin::Adopted(Adoption::Unknown),
             listing: Listed::Unlisted,
@@ -106,22 +129,25 @@ impl Engagement {
         }
     }
 
-    /// A runners listing is done, whether or not it answered for this runner: the job it may have taken is no
-    /// longer listed queued, or that listing showed the job named since.
-    pub(super) fn runners_listed(&mut self) {
-        if self.listing == Listed::NewlyBusy {
+    /// A listing of its repository's queued jobs begun at `listing` answered: it is no longer newly busy if that
+    /// listing ends its mark (`Mark::ends`).
+    pub(super) fn queued_listed(&mut self, listing: Mark, floor: Duration) {
+        if let Listed::NewlyBusy(mark) = self.listing
+            && listing.ends(mark, floor)
+        {
             self.listing = Listed::Busy;
         }
     }
 
-    /// A runners listing showed it busy or idle. Called after `runners_listed`, for the runners it answered for. The
-    /// first listing that shows an adopted runner busy shows it newly busy, though adoption counted it busy already.
-    /// One that shows an adopted runner waiting with no job named says its next job starts under this daemon.
-    pub(super) fn listed(&mut self, busy: bool) {
+    /// A runners listing that `mark` says showed it busy or idle. The first listing that shows an adopted runner busy
+    /// shows it newly busy, though adoption counted it busy already. One that shows a newly busy runner busy again
+    /// keeps its mark. One that shows an adopted runner waiting with no job named says its next job starts under this
+    /// daemon.
+    pub(super) fn listed(&mut self, busy: bool, mark: Mark) {
         self.listing = match (busy, self.listing) {
             (false, _) => Listed::Idle,
-            (true, Listed::Idle | Listed::Unlisted | Listed::NewlyBusy) => Listed::NewlyBusy,
-            (true, Listed::Busy) => Listed::Busy,
+            (true, Listed::Idle | Listed::Unlisted) => Listed::NewlyBusy(mark),
+            (true, listed @ (Listed::Busy | Listed::NewlyBusy(_))) => listed,
         };
         if let Origin::Adopted(adoption) = &mut self.origin
             && !busy
@@ -131,13 +157,13 @@ impl Engagement {
         }
     }
 
-    /// GitHub said it took a job, as a removal of it refused: newly busy unless a listing showed it busy already. One
-    /// no listing answered for yet stays so, for the first that shows it busy to mark it newly busy.
-    pub(super) fn kept_busy(&mut self) {
+    /// GitHub said it took a job, as a removal of it refused, when `mark` says: newly busy unless a listing showed it
+    /// busy already, and a newly busy one keeps its mark. One no listing answered for yet stays so, for the first that
+    /// shows it busy to mark it newly busy.
+    pub(super) fn kept_busy(&mut self, mark: Mark) {
         self.listing = match self.listing {
-            Listed::Idle => Listed::NewlyBusy,
-            Listed::Busy | Listed::NewlyBusy => Listed::Busy,
-            Listed::Unlisted => Listed::Unlisted,
+            Listed::Idle => Listed::NewlyBusy(mark),
+            listed @ (Listed::Busy | Listed::NewlyBusy(_) | Listed::Unlisted) => listed,
         };
     }
 
@@ -165,7 +191,7 @@ impl Engagement {
     }
 
     /// A forced pause cancelled its run: it is removed if it still runs at `deadline`.
-    pub(super) fn cancelled(&mut self, deadline: tokio::time::Instant) {
+    pub(super) fn cancelled(&mut self, deadline: Instant) {
         self.cancel_by = Some(deadline);
     }
 
@@ -192,11 +218,10 @@ impl Engagement {
         self.listed_busy() || self.job.is_some()
     }
 
-    /// Whether it may be running one of its pool's listed jobs that no capture named yet: the listing that first
-    /// showed it busy can still show that job queued. A listing clears this (`runners_listed`), so a pass between two
-    /// listings keeps counting it.
+    /// Whether it may be running one of its pool's listed jobs that no capture named yet: the listings of its
+    /// repository until `queued_listed` ends it can still show that job queued.
     pub(super) fn claims_a_listed_job(&self) -> bool {
-        self.listing == Listed::NewlyBusy && self.job.is_none()
+        matches!(self.listing, Listed::NewlyBusy(_)) && self.job.is_none()
     }
 
     /// Whether a detaching stop removes it: no job named and either listed idle or adopted, as adoption counts a
@@ -244,7 +269,7 @@ impl Engagement {
     }
 
     /// Whether a forced pause cancelled its run and it still runs past the deadline that gave it to exit.
-    pub(super) fn cancel_overdue(&self, now: tokio::time::Instant) -> bool {
+    pub(super) fn cancel_overdue(&self, now: Instant) -> bool {
         self.cancel_by.is_some_and(|deadline| deadline <= now)
     }
 }
@@ -264,7 +289,7 @@ impl Engagement {
     }
 
     /// As if its capture had found its job `by` earlier.
-    pub(super) fn age_job_start(&mut self, by: std::time::Duration) {
+    pub(super) fn age_job_start(&mut self, by: Duration) {
         if let Some(TakenJob {
             found_at: Some(at), ..
         }) = &mut self.job
@@ -305,15 +330,93 @@ impl Engagement {
         self.key = Some(key);
     }
 
+    /// As if it was first seen busy `by` earlier.
+    pub(super) fn age_mark(&mut self, by: Duration) {
+        if let Listed::NewlyBusy(mark) = &mut self.listing
+            && let Some(at) = mark.at.checked_sub(by)
+        {
+            mark.at = at;
+        }
+    }
+
     /// Whether a forced pause cancelled its run.
     pub(super) fn is_cancelling(&self) -> bool {
         self.cancel_by.is_some()
     }
 
     /// As if its forced pause's grace ran out.
-    pub(super) fn expire_cancel(&mut self, now: tokio::time::Instant) {
+    pub(super) fn expire_cancel(&mut self, now: Instant) {
         if self.cancel_by.is_some() {
             self.cancel_by = Some(now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POLL: Duration = Duration::from_secs(15);
+
+    /// Listing `listing`, begun `secs` after `start`.
+    fn mark(start: Instant, listing: u64, secs: u64) -> Mark {
+        Mark {
+            listing,
+            at: start + Duration::from_secs(secs),
+        }
+    }
+
+    /// A runner this daemon started, which listing 1 shows busy before any capture names its job.
+    fn newly_busy(start: Instant) -> Engagement {
+        let mut engagement = Engagement::started(Purpose::Job, None);
+        engagement.listed(true, mark(start, 1, 0));
+        assert!(engagement.claims_a_listed_job(), "listing 1 marks it");
+        engagement
+    }
+
+    #[test]
+    fn runners_listings_that_show_it_busy_again_leave_its_mark_as_it_was() {
+        // Its repository is listed every 5 s while active, its runners every third probe.
+        let start = Instant::now();
+        let mut engagement = newly_busy(start);
+        for (listing, secs) in [(2, 5), (3, 10)] {
+            engagement.listed(true, mark(start, listing, secs));
+            engagement.queued_listed(mark(start, listing, secs), POLL);
+            assert!(
+                engagement.claims_a_listed_job(),
+                "listing {listing}, {secs} s after the mark, may still show its job"
+            );
+        }
+        engagement.listed(true, mark(start, 4, 15));
+        engagement.queued_listed(mark(start, 4, 15), POLL);
+        assert!(
+            !engagement.claims_a_listed_job(),
+            "the first listing a poll interval after the first mark ends the claim"
+        );
+        assert!(engagement.listed_busy(), "it stays busy");
+    }
+
+    #[test]
+    fn only_a_later_listing_ends_the_claim_however_late_it_answers() {
+        let start = Instant::now();
+        let mut engagement = newly_busy(start);
+        // Listing 1's queued jobs answer long after it began, which is what counts.
+        engagement.queued_listed(mark(start, 1, 60), POLL);
+        assert!(
+            engagement.claims_a_listed_job(),
+            "the listing that marked it may still show its job"
+        );
+    }
+
+    #[test]
+    fn github_saying_a_newly_busy_runner_is_busy_keeps_its_mark() {
+        let start = Instant::now();
+        let mut engagement = newly_busy(start);
+        engagement.kept_busy(mark(start, 3, 10));
+        engagement.queued_listed(mark(start, 4, 15), POLL);
+        assert!(
+            !engagement.claims_a_listed_job(),
+            "the claim ends a poll interval after the first mark, not the refused removal"
+        );
     }
 }

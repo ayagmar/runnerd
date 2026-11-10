@@ -430,6 +430,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
             .and_then(Slot::vacate);
+        // Its registration's delete shows in the runners listing.
+        if let Some(occupant) = &left {
+            self.owe_runners_listing(&occupant.repository);
+        }
         // Its layer holds what that job cached. A runner that ran a job nobody named leaves the layer to a job
         // unknown, and one that ran none leaves it as it was.
         match left.and_then(|occupant| occupant.key().cloned()) {
@@ -669,7 +673,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .and_then(|slots| slots.get_mut(slot.index))
             .and_then(Slot::occupant_mut)
         {
-            entry.engagement.kept_busy();
+            entry.engagement.kept_busy(self.listing);
         }
     }
 

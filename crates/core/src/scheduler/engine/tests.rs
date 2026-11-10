@@ -112,7 +112,8 @@ struct GithubState {
     /// Registrations that named a runner GitHub had registered already, which it refuses.
     duplicate_names: Vec<String>,
     /// While true, deleting a busy runner answers `Busy` and an absent one `NotFound`, as GitHub does, and each runner
-    /// gets an ID never given before: for tests that delete and register runners at random.
+    /// gets an ID never given before and shows in its own repository's listing only: for tests that delete and
+    /// register runners at random.
     strict: bool,
     /// Runners registered so far, for `strict` IDs.
     registrations: u64,
@@ -519,7 +520,7 @@ impl GithubApi for FakeGithub {
 
     async fn jit_config(
         &self,
-        _repository: &str,
+        repository: &str,
         name: &str,
         _labels: &[String],
     ) -> Result<(Runner, JitConfig), github::Error> {
@@ -584,6 +585,10 @@ impl GithubApi for FakeGithub {
             } else {
                 100 + state.runners.len() as u64
             };
+            // As GitHub does, strictly: a runner shows in its own repository's listing only.
+            if state.strict {
+                state.registered_on.insert(id, repository.to_owned());
+            }
             let runner = Runner {
                 id,
                 name: name.to_owned(),
@@ -7223,6 +7228,7 @@ async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the
 mod access;
 mod admission;
 mod build_cache;
+mod cadence;
 mod exit;
 mod governor;
 mod invariants;

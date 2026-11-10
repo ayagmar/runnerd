@@ -235,7 +235,7 @@ async fn a_job_named_during_a_release_is_the_job_its_runner_ran() {
         "slot 1 ran a job, so it is measured"
     );
     assert!(
-        engine.warm.testing_active("o/r", time::now_ms()),
+        engine.warm.active("o/r", time::now_ms()),
         "its repository stays active past the job"
     );
 }
