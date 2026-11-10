@@ -4307,7 +4307,9 @@ fn env_u64(name: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
-#[tokio::test]
+/// On Tokio's paused clock: the listings' due times and the claims' marks are Tokio instants the model ages by its
+/// own time, and real time a case waits behind the others in the batch would move them on top of that.
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::print_stderr,
     reason = "names the failing seed before shrinking, which takes a while and may itself fail"
