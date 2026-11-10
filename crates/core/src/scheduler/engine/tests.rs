@@ -93,6 +93,15 @@ struct GithubState {
     compare_fails: bool,
     /// While true, registering a runner fails.
     register_fails: bool,
+    /// How many of the next registrations fail, as when GitHub answers 502.
+    fail_registrations: u32,
+    /// How many of the next registrations GitHub refuses for its used-up rate limit, which resets 30 minutes on.
+    limit_registrations: u32,
+    /// Registrations `fail_registrations` and `limit_registrations` failed: those that reached a start.
+    registrations_failed: usize,
+    registrations_limited_once: usize,
+    /// Runs once as the next registration succeeds, before GitHub answers: what happens meanwhile.
+    on_register: Option<Box<dyn FnOnce() + Send>>,
     /// While true, deleting a busy runner answers `Busy` and an absent one `NotFound`, as GitHub does, and each runner
     /// gets an ID never given before: for tests that delete and register runners at random.
     strict: bool,
@@ -385,6 +394,26 @@ impl GithubApi for FakeGithub {
         if state.register_fails {
             return Err(github::Error::Token("register fails".to_owned()));
         }
+        if state.limit_registrations > 0 {
+            state.limit_registrations -= 1;
+            state.registrations_limited_once += 1;
+            return Err(github::Error::RateLimited {
+                until: std::time::SystemTime::now() + Duration::from_mins(30),
+            });
+        }
+        if state.fail_registrations > 0 {
+            state.fail_registrations -= 1;
+            state.registrations_failed += 1;
+            return Err(github::Error::Status {
+                method: reqwest::Method::POST,
+                path: "/repos/o/r/actions/runners/generate-jitconfig".to_owned(),
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                message: "Bad Gateway".to_owned(),
+            });
+        }
+        if let Some(hook) = state.on_register.take() {
+            hook();
+        }
         state.registrations += 1;
         let id = if state.strict {
             1000 + state.registrations
@@ -616,6 +645,17 @@ struct DockerState {
     fail_pulls: bool,
     /// How many volumes fail to be made next, as when the disk is full.
     fail_volumes: u32,
+    /// How many of the next runners' caches fail to be prepared: their shared pnpm volume fails to be made, which
+    /// no reseed makes.
+    fail_prepares: u32,
+    /// Preparations `fail_prepares` failed.
+    prepares_failed: usize,
+    /// While true, runner container starts do not answer, before Docker makes the container.
+    held_starts: tokio::sync::watch::Sender<bool>,
+    /// While true, runner container starts do not answer once Docker made and started the container.
+    held_started: tokio::sync::watch::Sender<bool>,
+    /// Runner container starts `held_starts` or `held_started` hold.
+    starts_waiting: usize,
     /// Volumes a container still uses, which Docker refuses to remove.
     volumes_in_use: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
@@ -852,6 +892,46 @@ fn not_found() -> docker::Error {
 }
 
 impl FakeDocker {
+    /// Holds runner container starts before Docker makes their container, until `release_starts`.
+    fn hold_starts(&self) {
+        self.0.lock().unwrap().held_starts.send_replace(true);
+    }
+
+    fn release_starts(&self) {
+        self.0.lock().unwrap().held_starts.send_replace(false);
+    }
+
+    /// Holds runner container starts once Docker made and started their container, until `release_started`.
+    fn hold_started(&self) {
+        self.0.lock().unwrap().held_started.send_replace(true);
+    }
+
+    fn release_started(&self) {
+        self.0.lock().unwrap().held_started.send_replace(false);
+    }
+
+    /// Waits while `held` holds starts.
+    async fn wait_to_start(&self, held: fn(&DockerState) -> &tokio::sync::watch::Sender<bool>) {
+        let mut held = {
+            let mut state = self.0.lock().unwrap();
+            state.starts_waiting += 1;
+            held(&state).subscribe()
+        };
+        let _ = held.wait_for(|held| !held).await;
+        self.0.lock().unwrap().starts_waiting -= 1;
+    }
+
+    /// Waits until a runner container start is held, however loaded the machine.
+    async fn until_start_held(&self) {
+        for _ in 0..6000 {
+            if self.0.lock().unwrap().starts_waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no runner container start was ever held");
+    }
+
     /// Breaks off every stream of events, as a Docker restart does.
     fn break_events(&self) {
         for events in std::mem::take(&mut self.0.lock().unwrap().events) {
@@ -889,83 +969,92 @@ impl DockerApi for FakeDocker {
                 error,
             });
         }
+        let runner = spec.labels.contains_key("runnerd.job");
+        if runner {
+            self.wait_to_start(|state| &state.held_starts).await;
+        }
         let latency = self.0.lock().unwrap().latency.start;
         tokio::time::sleep(latency).await;
-        let mut state = self.0.lock().unwrap();
-        state.call(format!("start {}", spec.name));
-        state
-            .started_on_clock
-            .insert(spec.name.clone(), tokio::time::Instant::now());
-        let refused = |error| {
-            Err(docker::StartError {
-                container: None,
-                may_have_run: false,
-                error,
-            })
-        };
-        if state.fail_starts > 0 {
-            state.fail_starts -= 1;
-            return refused(docker::Error::DockerResponseServerError {
-                status_code: 500,
-                message: state
-                    .refusal
-                    .clone()
-                    .unwrap_or_else(|| "the Engine is busy".to_owned()),
-            });
-        }
-        if state.missing_images.contains(&spec.image) {
-            return refused(docker::Error::DockerResponseServerError {
-                status_code: 404,
-                message: format!("No such image: {}", spec.image),
-            });
-        }
-        let runner = spec.labels.contains_key("runnerd.job");
-        if runner && let Some(hook) = state.on_start.take() {
-            hook(&state);
-            state.hooked_start = Some(spec.name.clone());
-        }
-        let late = runner.then(|| state.late_failures.pop_front()).flatten();
-        let id = match late {
-            // Docker gives every container an ID of its own, though a restart in the same second reuses the name.
-            Some(_) => format!("late-{}-{}", spec.name, state.started_images.len()),
-            None => spec.name.clone(),
-        };
-        if runner && state.fail_started_inspects > 0 {
-            state.fail_started_inspects -= 1;
-            *state.fail_inspects.entry(id.clone()).or_default() += 1;
-        }
-        state.started_images.push(spec.image.clone());
-        state.mounts.insert(spec.name.clone(), spec.mounts.clone());
-        state.envs.insert(spec.name.clone(), spec.env.clone());
-        if let Some(entrypoint) = &spec.entrypoint {
+        let id = {
+            let mut state = self.0.lock().unwrap();
+            state.call(format!("start {}", spec.name));
             state
-                .entrypoints
-                .insert(spec.name.clone(), entrypoint.clone());
-        }
-        state.memory.insert(id.clone(), spec.memory.0);
-        state.started.insert(id.clone(), crate::time::now_ms());
-        state.cpus.insert(id.clone(), u64::from(spec.cpus) * 1000);
-        let mut labels: HashMap<String, String> = spec.labels.clone().into_iter().collect();
-        labels.insert("runnerd.profile".to_owned(), spec.profile.clone());
-        state.containers.push(Container {
-            id: id.clone(),
-            name: spec.name.clone(),
-            running: true,
-            labels,
-        });
-        if runner && state.exit_at_start > 0 {
-            state.exit_at_start -= 1;
-            if let Some(container) = state.containers.last_mut() {
-                container.running = false;
+                .started_on_clock
+                .insert(spec.name.clone(), tokio::time::Instant::now());
+            let refused = |error| {
+                Err(docker::StartError {
+                    container: None,
+                    may_have_run: false,
+                    error,
+                })
+            };
+            if state.fail_starts > 0 {
+                state.fail_starts -= 1;
+                return refused(docker::Error::DockerResponseServerError {
+                    status_code: 500,
+                    message: state
+                        .refusal
+                        .clone()
+                        .unwrap_or_else(|| "the Engine is busy".to_owned()),
+                });
             }
-            state
-                .events
-                .retain(|events| events.send(Ok(id.clone())).is_ok());
-        }
-        let Some(late) = late else {
-            return Ok(id);
+            if state.missing_images.contains(&spec.image) {
+                return refused(docker::Error::DockerResponseServerError {
+                    status_code: 404,
+                    message: format!("No such image: {}", spec.image),
+                });
+            }
+            if runner && let Some(hook) = state.on_start.take() {
+                hook(&state);
+                state.hooked_start = Some(spec.name.clone());
+            }
+            let late = runner.then(|| state.late_failures.pop_front()).flatten();
+            let id = match late {
+                // Docker gives every container an ID of its own, though a restart in the same second reuses the name.
+                Some(_) => format!("late-{}-{}", spec.name, state.started_images.len()),
+                None => spec.name.clone(),
+            };
+            if runner && state.fail_started_inspects > 0 {
+                state.fail_started_inspects -= 1;
+                *state.fail_inspects.entry(id.clone()).or_default() += 1;
+            }
+            state.started_images.push(spec.image.clone());
+            state.mounts.insert(spec.name.clone(), spec.mounts.clone());
+            state.envs.insert(spec.name.clone(), spec.env.clone());
+            if let Some(entrypoint) = &spec.entrypoint {
+                state
+                    .entrypoints
+                    .insert(spec.name.clone(), entrypoint.clone());
+            }
+            state.memory.insert(id.clone(), spec.memory.0);
+            state.started.insert(id.clone(), crate::time::now_ms());
+            state.cpus.insert(id.clone(), u64::from(spec.cpus) * 1000);
+            let mut labels: HashMap<String, String> = spec.labels.clone().into_iter().collect();
+            labels.insert("runnerd.profile".to_owned(), spec.profile.clone());
+            state.containers.push(Container {
+                id: id.clone(),
+                name: spec.name.clone(),
+                running: true,
+                labels,
+            });
+            if runner && state.exit_at_start > 0 {
+                state.exit_at_start -= 1;
+                if let Some(container) = state.containers.last_mut() {
+                    container.running = false;
+                }
+                state
+                    .events
+                    .retain(|events| events.send(Ok(id.clone())).is_ok());
+            }
+            if let Some(late) = late {
+                return Err(late.fail(&mut state, spec, id));
+            }
+            id
         };
-        Err(late.fail(&mut state, spec, id))
+        if runner {
+            self.wait_to_start(|state| &state.held_started).await;
+        }
+        Ok(id)
     }
 
     async fn inspect(&self, container: &str) -> Result<RunnerState, docker::Error> {
@@ -1276,6 +1365,14 @@ impl DockerApi for FakeDocker {
     async fn ensure_volume(&self, name: &str) -> Result<(), docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
+        if state.fail_prepares > 0 && name.ends_with("-pnpm") {
+            state.fail_prepares -= 1;
+            state.prepares_failed += 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: format!("cannot create volume {name}: the Engine is busy"),
+            });
+        }
         if state.fail_volumes > 0 {
             state.fail_volumes -= 1;
             return Err(docker::Error::DockerResponseServerError {
@@ -6785,6 +6882,7 @@ mod presence;
 mod priority;
 mod records;
 mod registrations;
+mod start;
 mod stop;
 mod upkeep;
 mod warm;

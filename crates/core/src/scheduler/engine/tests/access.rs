@@ -108,6 +108,13 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         }
     }
 
+    /// Moves the end of a used-up GitHub rate limit, if one is noted, to `past`.
+    pub(super) fn expire_github_limit(&mut self, past: SystemTime) {
+        if let Some(until) = self.github_limited_until.as_mut() {
+            *until = past;
+        }
+    }
+
     pub(super) fn set_queued(&mut self, repository: &str, jobs: Vec<QueuedJob>) {
         self.repositories
             .listed_mut(repository)
