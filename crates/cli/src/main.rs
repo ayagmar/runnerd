@@ -194,7 +194,8 @@ enum Command {
     reason = "command-line switches, one field each as clap declares them"
 )]
 struct WebArgs {
-    /// Print the links instead of opening one.
+    /// Print the links instead of opening one. Over SSH they are printed anyway: a browser opened there would be the
+    /// remote machine's, and spend the link where nobody sits.
     #[arg(long)]
     no_open: bool,
     /// The address of a proxy in front of the dashboard to log in through instead, such as
@@ -993,6 +994,22 @@ fn qr(text: &str, colour: bool) -> Result<String, Error> {
     }))
 }
 
+/// Opens `open`, a one-time login link, in this machine's browser and says on which origin, not the spent code.
+fn open_in_browser(open: &str) -> Result<(), Error> {
+    match std::process::Command::new("xdg-open").arg(open).status() {
+        Ok(status) if status.success() => {
+            let site = open.split("/login?").next().unwrap_or(open);
+            output::line(format_args!(
+                "opened the dashboard on {site} in your browser"
+            ));
+            Ok(())
+        }
+        _ => Err(Error::Local(format!(
+            "cannot open a browser with xdg-open; open this URL, which works once: {open}"
+        ))),
+    }
+}
+
 /// Opens the dashboard with the one-time login link the daemon writes next to its socket and prints the links for
 /// other devices; or through `base`; or prints them; or QR codes of fresh pairing links; or signs every browser out.
 async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
@@ -1062,27 +1079,20 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
         (None, Some(origin)) => links.open_on(origin),
         (None, None) => (links.local, links.remote),
     };
-    if args.no_open {
+    let over_ssh = std::env::var_os("SSH_CONNECTION").is_some();
+    if over_ssh && !args.no_open {
+        output::line(
+            "over SSH, so no browser opens on this machine; open a link in your own browser, each works once:",
+        );
+    }
+    if args.no_open || over_ssh {
         output::line(&open);
         for link in &others {
             output::line(link);
         }
         return Ok(ExitCode::SUCCESS);
     }
-    match std::process::Command::new("xdg-open").arg(&open).status() {
-        Ok(status) if status.success() => {
-            // The link's code works once and is spent now, so name only where it went.
-            let site = open.split("/login?").next().unwrap_or(&open);
-            output::line(format_args!(
-                "opened the dashboard on {site} in your browser"
-            ));
-        }
-        _ => {
-            return Err(Error::Local(format!(
-                "cannot open a browser with xdg-open; open this URL, which works once: {open}"
-            )));
-        }
-    }
+    open_in_browser(&open)?;
     for link in &others {
         if *link == loopback {
             output::line(format_args!(
