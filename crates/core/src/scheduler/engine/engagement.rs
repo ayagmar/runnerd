@@ -15,7 +15,20 @@ enum Origin {
     /// This daemon started it, for this.
     Started(Purpose),
     /// A restart found its container running and adopted it.
-    Adopted,
+    Adopted(Adoption),
+}
+
+/// What the runners listings showed of an adopted runner since its adoption, which says whether its job started
+/// under this daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    /// No listing showed it waiting with no job named: it may have taken its job while no daemon ran, and the
+    /// capture that names it after the restart does not say when.
+    Unknown,
+    /// A listing showed it waiting with no job named: the job it takes next starts under this daemon. A capture names
+    /// a job before a listing that lags it shows the runner busy, so a listing that shows it idle once its job is
+    /// named says nothing.
+    Waited,
 }
 
 /// What GitHub's runners listings showed of a runner.
@@ -45,8 +58,8 @@ struct TakenJob {
 /// a job by the history's record, which a capture that names the job again does not change.
 ///
 /// A restart rebuilds it in `adopted`: adopted, counted busy until a listing says otherwise, with the job its history
-/// row names and no key until `find_keys` reads its record. Whether a listing showed it newly busy, when its job was
-/// found and a forced pause's deadline are lost. A reload does not touch it.
+/// row names and no key until `find_keys` reads its record. Whether a listing showed it newly busy or waiting, when
+/// its job was found and a forced pause's deadline are lost. A reload does not touch it.
 #[derive(Debug, Clone)]
 pub(super) struct Engagement {
     origin: Origin,
@@ -76,7 +89,7 @@ impl Engagement {
     /// otherwise.
     pub(super) fn adopted(job: Option<u64>) -> Self {
         Self {
-            origin: Origin::Adopted,
+            origin: Origin::Adopted(Adoption::Unknown),
             listing: Listed::Busy,
             job: job.map(|id| TakenJob { id, found_at: None }),
             key: None,
@@ -99,6 +112,12 @@ impl Engagement {
             (true, Listed::Idle | Listed::NewlyBusy) => Listed::NewlyBusy,
             (true, Listed::Busy) => Listed::Busy,
         };
+        if let Origin::Adopted(adoption) = &mut self.origin
+            && !busy
+            && self.job.is_none()
+        {
+            *adoption = Adoption::Waited;
+        }
     }
 
     /// GitHub said it took a job, as a removal of it refused: newly busy unless a listing showed it busy already.
@@ -181,15 +200,20 @@ impl Engagement {
     pub(super) fn purpose(&self) -> Option<Purpose> {
         match self.origin {
             Origin::Started(purpose) => Some(purpose),
-            Origin::Adopted => None,
+            Origin::Adopted(_) => None,
         }
     }
 
-    /// When this daemon's capture found its job; `None` for an adopted runner, whose job started under another daemon.
+    /// When this daemon's capture found its job, if that job started under this daemon: `None` for an adopted runner
+    /// no listing showed waiting with no job named, whose job may have started before the restart.
     pub(super) fn job_found_here(&self) -> Option<SystemTime> {
+        let started_here = match self.origin {
+            Origin::Started(_) | Origin::Adopted(Adoption::Waited) => true,
+            Origin::Adopted(Adoption::Unknown) => false,
+        };
         self.job
             .and_then(|job| job.found_at)
-            .filter(|_| self.was_started_here())
+            .filter(|_| started_here)
     }
 
     /// Its job as admission tells jobs apart, once the history had its record.

@@ -351,7 +351,7 @@ impl Occupant {
         self.engagement.purpose()
     }
 
-    /// When this daemon's capture found its job (`Engagement::job_found_here`).
+    /// When this daemon's capture found its job, if it started under this daemon (`Engagement::job_found_here`).
     fn job_found_here(&self) -> Option<SystemTime> {
         self.engagement.job_found_here()
     }

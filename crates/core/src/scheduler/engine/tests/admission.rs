@@ -2554,6 +2554,138 @@ async fn a_runner_a_restart_adopts_counts_in_full_for_the_rest_of_its_job() {
     assert_eq!(budget.pooled, None, "this daemon did not see them start");
 }
 
+/// A runner a restart adopts that a listing shows waiting, with no job named, takes its job under this daemon: its
+/// job counts as started here, as if this daemon had started the runner.
+#[tokio::test]
+async fn a_runner_a_restart_adopts_that_a_listing_shows_waiting_counts_its_next_job_as_started_here()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    history_of(&handle.store, "build", 1000, 3 * G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        job(1),
+        QueuedJob {
+            name: "e2e".to_owned(),
+            ..job(2)
+        },
+    ];
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    handle.store.flush().await;
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    // The first listing after the restart shows both runners waiting, with no job named.
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    engine.recover().await.unwrap();
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "both wait for the jobs"
+    );
+
+    // Then each takes its job under this daemon.
+    let runners: Vec<String> = engine
+        .occupied()
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .collect();
+    for (job, runner) in (1..).zip(runners) {
+        engine.note_found(&crate::scheduler::engine::history::Found::named(
+            runner, job,
+        ));
+    }
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = Vec::new();
+        for runner in &mut state.runners {
+            runner.busy = true;
+        }
+    }
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.publish();
+    assert!(
+        handle.status.borrow().budget.pooled.is_some(),
+        "both jobs started under this daemon and have settled"
+    );
+}
+
+/// A runner a restart adopts that the listings show busy took its job before the restart, though its capture names
+/// that job only after the first listing: its job does not count as started here.
+#[tokio::test]
+async fn a_runner_a_restart_adopts_busy_does_not_count_a_job_named_later_as_started_here() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    history_of(&handle.store, "build", 1000, 3 * G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        job(1),
+        QueuedJob {
+            name: "e2e".to_owned(),
+            ..job(2)
+        },
+    ];
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    handle.store.flush().await;
+    until_captures_end(&engine).await;
+    drop((engine, handle));
+
+    // Each takes its job while no daemon runs, and the first listing after the restart shows both busy.
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = Vec::new();
+        for runner in &mut state.runners {
+            runner.busy = true;
+        }
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(8 * G);
+    engine.recover().await.unwrap();
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+
+    let runners: Vec<String> = engine
+        .occupied()
+        .map(|(_, occupant)| occupant.runner_name.clone())
+        .collect();
+    for (job, runner) in (1..).zip(runners) {
+        engine.note_found(&crate::scheduler::engine::history::Found::named(
+            runner, job,
+        ));
+    }
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.tick(Shutdown::No).await;
+    first_minute_passes(&mut engine);
+    roomy_readings(&github, &handle.store, 512 * M);
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.pooled,
+        None,
+        "their runners are not known to have started as predicted"
+    );
+}
+
 #[tokio::test]
 async fn a_waiting_runner_a_restart_adopts_counts_in_full_once_it_takes_a_job() {
     let (github, docker, dir) = (
