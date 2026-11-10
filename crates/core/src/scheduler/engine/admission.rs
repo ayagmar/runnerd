@@ -610,7 +610,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .flatten()
                 .find(|occupant| occupant.runner_name == runner)
             {
-                occupant.key = Some(Key {
+                occupant.engagement.keyed(Key {
                     repository: record.summary.repository,
                     workflow: record.summary.workflow,
                     name: record.summary.name,

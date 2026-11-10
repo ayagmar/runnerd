@@ -1093,9 +1093,7 @@ async fn a_runner_not_named_hides(name: &str) -> Fixture {
         .occupants_mut()
         .find(|occupant| occupant.repository == "o/small")
         .unwrap();
-    unnamed.job = None;
-    unnamed.key = None;
-    unnamed.busy = false;
+    unnamed.engagement.unname();
     fixture.engine.tick(Shutdown::No).await;
     fixture
 }

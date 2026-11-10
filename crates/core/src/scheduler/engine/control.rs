@@ -653,10 +653,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             if cancelled {
                 // `collect_finished` removes it once it exits, `kill_cancelled` if it does not.
-                self.cancelling.insert(
-                    occupant.runner_name.clone(),
-                    tokio::time::Instant::now() + CANCEL_GRACE,
-                );
+                if let Some(cancelled) = self
+                    .slots
+                    .values_mut()
+                    .flatten()
+                    .flatten()
+                    .find(|candidate| candidate.runner_name == occupant.runner_name)
+                {
+                    cancelled
+                        .engagement
+                        .cancelled(tokio::time::Instant::now() + CANCEL_GRACE);
+                }
             } else {
                 self.kill(&slot).await;
                 if self
@@ -680,18 +687,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Removes the runners of cancelled runs that did not exit within `CANCEL_GRACE`, every tick until they are gone.
     pub(super) async fn kill_cancelled(&mut self) {
         let now = tokio::time::Instant::now();
-        let running: BTreeSet<String> = self
-            .occupied()
-            .map(|(_, occupant)| occupant.runner_name.clone())
-            .collect();
-        self.cancelling.retain(|name, _| running.contains(name));
         let overdue: Vec<(SlotRef, String)> = self
             .occupied()
-            .filter(|(_, occupant)| {
-                self.cancelling
-                    .get(&occupant.runner_name)
-                    .is_some_and(|deadline| *deadline <= now)
-            })
+            .filter(|(_, occupant)| occupant.engagement.cancel_overdue(now))
             .map(|(slot, occupant)| (slot, occupant.runner_name.clone()))
             .collect();
         for (slot, name) in overdue {

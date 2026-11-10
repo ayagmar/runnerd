@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use super::history::{CAPTURE_DRAIN, Capture};
 use super::runner_exit::{Exit, Logged, TOOK_JOB};
-use super::{Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
+use super::{Engagement, Engine, Occupant, Purpose, STOP_DEADLINE, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, is_being_removed, is_log_gone, is_not_found};
@@ -693,15 +693,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Keeps a slot's runner that took a job after all: it ends as busy runners do. Until its capture names the job,
-    /// it counts against one of its pool's listed jobs, which may be the one it took (`newly_busy`).
+    /// it counts against one of its pool's listed jobs, which may be the one it took (`claims_a_listed_job`).
     fn keep_busy(&mut self, slot: &SlotRef) {
         if let Some(Some(entry)) = self
             .slots
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
         {
-            entry.newly_busy = !entry.busy;
-            entry.busy = true;
+            entry.engagement.kept_busy();
         }
     }
 
@@ -896,19 +895,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_name: name.clone(),
             runner_id: runner.id,
             container,
-            busy: false,
-            newly_busy: false,
             started_at: now,
             memory: spec.memory.0,
             cpus: u64::from(spec.cpus) * 1000,
             admission: Some(admission),
-            job: None,
-            job_started: None,
-            key: None,
             labels: Some(labels),
             image: Some(image),
             spec: Some(THIS_SPEC.to_owned()),
-            purpose: Some(purpose),
+            engagement: Engagement::started(purpose),
         };
         self.place(slot, occupant, purpose, failure).await
     }

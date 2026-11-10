@@ -238,6 +238,98 @@ async fn a_job_named_during_a_release_is_the_job_its_runner_ran() {
     );
 }
 
+/// Whether `slot` of the profile shows a runner busy.
+fn shows_busy(handle: &Handle, slot: usize) -> Option<bool> {
+    let status = handle.status.borrow();
+    let slot = status.profiles[0]
+        .slots
+        .iter()
+        .find(|candidate| candidate.slot == slot)?;
+    Some(slot.runner.as_ref()?.busy)
+}
+
+/// GitHub refuses to drop a waiting runner as it goes, as it just took a job: until the next listing it counts busy,
+/// and as one that may have taken a listed job of its pool, which a pass meanwhile leaves to it.
+#[tokio::test]
+async fn a_waiting_runner_github_keeps_as_it_goes_may_have_taken_a_listed_job() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    idle_runner(&github, &docker);
+    let dir = TestDir::new("kept-busy");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().busy_deletes = 1;
+
+    engine.remove_every_idle().await;
+
+    engine.publish();
+    assert_eq!(
+        shows_busy(&handle, 1),
+        Some(true),
+        "GitHub says it took a job"
+    );
+    engine.set_queued("o/r", vec![job(1)]);
+    assert_eq!(engine.refill().await, 0, "job 1 may be the one it took");
+}
+
+/// A runner the listings showed busy that GitHub keeps as it goes took its job before them: a pass starts a runner
+/// for a listed job beside it.
+#[tokio::test]
+async fn a_runner_listed_busy_github_keeps_as_it_goes_took_no_listed_job() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_runner(&github, &docker, "");
+    let dir = TestDir::new("kept-busy-already");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().busy_deletes = 1;
+
+    engine.remove_every_idle().await;
+
+    assert!(
+        engine.occupied().next().is_some(),
+        "GitHub keeps the adopted runner"
+    );
+    engine.set_queued("o/r", vec![job(1)]);
+    assert_eq!(engine.refill().await, 1, "job 1 gets a runner");
+}
+
+/// A runners listing that fails still ends the claim of a runner the listing before first showed busy: the job it
+/// may have taken would have left the queue by then, so one still listed is another start's.
+#[tokio::test]
+async fn a_runners_listing_that_fails_ends_the_claim_of_a_runner_first_listed_busy_before_it() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let dir = TestDir::new("newly-busy-failed");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    for runner in &mut github.0.lock().unwrap().runners {
+        runner.busy = true;
+    }
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 1 is the one the runner first listed busy may have taken"
+    );
+
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_runners
+        .insert("o/r".to_owned(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "job 1, still listed after the failed listing, gets a runner"
+    );
+}
+
 /// What a runner first listed busy may have taken stays counted until the next listing is applied, not from the top
 /// of the tick that fetches it: a pass while that listing waits must not start a twin for the job it took.
 #[tokio::test]

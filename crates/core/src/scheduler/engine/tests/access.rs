@@ -350,8 +350,8 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     /// As if every forced pause's grace ran out.
     pub(super) fn expire_cancelling(&mut self) {
         let now = tokio::time::Instant::now();
-        for deadline in self.cancelling.values_mut() {
-            *deadline = now;
+        for occupant in self.slots.values_mut().flatten().flatten() {
+            occupant.engagement.expire_cancel(now);
         }
     }
 
@@ -364,7 +364,13 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         StateCounts {
             closing: self.ledger.closing().len(),
             ended_uploads: self.ended_uploads.len(),
-            cancelling: self.cancelling.len(),
+            cancelling: self
+                .slots
+                .values()
+                .flatten()
+                .flatten()
+                .filter(|occupant| occupant.engagement.is_cancelling())
+                .count(),
             busy_orphans: self.registrations.orphans(),
             oversized: self.upkeep.oversized(),
             unread: self.leftovers.unread(),
@@ -412,28 +418,32 @@ pub(super) struct ListedFacts<'engine> {
 impl Occupant {
     /// When its capture found its job; `None` before.
     pub(super) fn job_found_at(&self) -> Option<SystemTime> {
-        self.job_started
+        self.engagement.job_found_at()
     }
 
     pub(super) fn found_job_at(&mut self, at: SystemTime) {
-        self.job_started = Some(at);
+        self.engagement.found_job_at(at);
     }
 
     pub(super) fn age_job_start(&mut self, by: Duration) {
-        self.job_started = self.job_started.map(|at| at - by);
+        self.engagement.age_job_start(by);
     }
 
     /// As a listing shows it busy, with no job named.
     pub(super) fn set_listed_busy(&mut self) {
-        self.busy = true;
+        self.engagement.set_listed_busy();
     }
 
     pub(super) fn has_taken(&mut self, job: u64) {
-        self.job = Some(job);
-        self.busy = true;
+        self.engagement.has_taken(job);
     }
 
     pub(super) fn set_key(&mut self, key: Key) {
-        self.key = Some(key);
+        self.engagement.set_key(key);
+    }
+
+    /// Whether this daemon started it: a restart adopted it otherwise.
+    pub(super) fn was_started_here(&self) -> bool {
+        self.engagement.was_started_here()
     }
 }

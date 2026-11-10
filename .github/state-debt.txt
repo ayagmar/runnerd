@@ -5,10 +5,7 @@
 # a new tag fails too. The last pull request of the work deletes this file and sets ENGINE_LIFECYCLE_LIMIT in the
 # script.
 #
-engine-lifecycle-fields 20
-
-# Slot occupant: split. busy, job and job_started become one value owned by Occupant, in its own leaf file.
-C1 core Occupant
+engine-lifecycle-fields 19
 
 # Repository state: split. Its holds and waits each become one sealed value, the waits last; its listing is one.
 C1 core RepositoryState
