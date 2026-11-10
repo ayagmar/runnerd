@@ -1492,7 +1492,8 @@ async fn jobs_count_a_wait_for_a_slot_only_while_memory_had_room_for_their_runne
 async fn a_job_a_pass_starts_stops_waiting_for_a_slot_when_its_runner_starts() {
     // Catches a pass's start leaving its job charged a slot wait until the next tick, which auto sizing reads as a
     // longer wait than the job had (ADR 0090, 0110). Two slots, three jobs: job 3 waits for a slot until runner 1
-    // ends and the pass after it starts job 3's runner; the next tick comes 300 ms later.
+    // ends and the pass after it starts job 3's runner; the next tick comes 300 ms after the pass. The bound is the
+    // time up to the pass's end, however slow the machine, not a fixed figure.
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
@@ -1508,6 +1509,7 @@ async fn a_job_a_pass_starts_stops_waiting_for_a_slot_when_its_runner_starts() {
     engine.recover().await.unwrap();
     github.0.lock().unwrap().queued = (1..=3).map(job).collect();
     slice_at(&handle.store, 0);
+    let began = std::time::Instant::now();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2);
     docker.0.lock().unwrap().containers[0].running = false;
@@ -1518,13 +1520,15 @@ async fn a_job_a_pass_starts_stops_waiting_for_a_slot_when_its_runner_starts() {
         3,
         "the pass starts job 3's runner"
     );
+    // One millisecond for the history's clock rounding each end of a wait to its millisecond.
+    let until_pass_ended = u64::try_from(began.elapsed().as_millis()).unwrap() + 1;
     tokio::time::sleep(Duration::from_millis(300)).await;
     engine.tick(Shutdown::No).await;
     handle.store.flush().await;
     let waited = waited(&dir, "slot_waited");
     assert!(
-        waited.iter().all(|&ms| ms < 200),
-        "no job waits for a slot past its runner's start: {waited:?}"
+        waited.iter().all(|&ms| ms <= until_pass_ended),
+        "no job waits for a slot past its runner's start, {until_pass_ended} ms in: {waited:?}"
     );
 }
 
