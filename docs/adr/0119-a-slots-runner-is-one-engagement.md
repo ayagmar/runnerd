@@ -23,6 +23,9 @@ keyed by runner name and swept each tick against the slots. A found time without
   runner. Only then does each runner it answered for take its answer. A listing that fails ends a claim as one that
   answers does.
 - The cancel deadline goes with its runner's slot, so `kill_cancelled` no longer sweeps a map by name.
+- An adopted runner's job counts as started here once a listing showed the runner waiting with no job named since
+  its adoption (`Adoption::Waited`). A listing that shows it idle after a capture named its job does not count: the
+  listing lags the capture, so the job may have started while no daemon ran.
 - `Occupant` keeps what does not change once it is placed: its names, container, limits, labels, image and spec. It
   also keeps `admission`, which `rereserve` writes. Its readers delegate to `Engagement`.
 
@@ -33,6 +36,7 @@ touch the value.
 
 ## Consequences
 
-Engine has one lifecycle field fewer. The known gaps of an adopted runner are now explicit in one type: its job never
-counts as started here, it gets no claim if it takes a job before the first listing, and its cancel deadline does not
-outlive a restart. Each is fixed on `Origin::Adopted` or the runner's row in its own change.
+Engine has one lifecycle field fewer. An adopted runner that took its job under this daemon earns pooled credit
+once its job settles, as one this daemon started does. The known gaps of an adopted runner are now explicit in one
+type: it gets no claim if it takes a job before the first listing, and its cancel deadline does not outlive a
+restart. Each is fixed on `Origin::Adopted` or the runner's row in its own change.

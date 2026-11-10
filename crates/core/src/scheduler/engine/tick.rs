@@ -1099,7 +1099,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     key: occupant.key(),
                     takes: held.takes,
                     used: held.used,
-                    // An adopted runner's job started under another daemon.
+                    // An adopted runner's job may have started under another daemon.
                     ran: occupant
                         .job_found_here()
                         .and_then(|started| now.duration_since(started).ok()),
