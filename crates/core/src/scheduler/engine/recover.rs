@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::history::{Closing, Followed};
 use super::leftovers::Unread;
 use super::records::Undecided;
 use super::{Engine, Occupant};
@@ -423,8 +422,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         );
                     }
                     if job.state == api::JobState::Queued {
-                        self.queued_jobs
-                            .insert(job.id, Followed::new(&job.repository));
+                        self.ledger.follow_queued(job.id, &job.repository);
                         continue;
                     }
                     if let Some(runner) = &job.runner {
@@ -433,7 +431,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         }
                         self.store.runner_removed(runner, time::now_ms());
                     }
-                    self.closing.insert(job.id, Closing::now(&job.repository));
+                    self.ledger.close(job.id, &job.repository);
                     self.consume(&job.repository, job.id);
                 }
             }

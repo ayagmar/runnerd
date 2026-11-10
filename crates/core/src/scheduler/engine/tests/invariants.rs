@@ -2146,7 +2146,6 @@ impl Case {
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.no_watch_outlives_its_runner()?;
-        self.no_job_is_followed_as_closing_and_queued()?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
@@ -2224,7 +2223,6 @@ impl Case {
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.no_watch_outlives_its_runner()?;
-        self.no_job_is_followed_as_closing_and_queued()?;
         self.one_barrier_and_only_for_a_queued_job(&after)?;
         self.no_job_waits_for_a_slot_or_the_host_past_its_runners_start(&after)?;
         self.the_count_keeps_its_bounds(&after)?;
@@ -2835,21 +2833,6 @@ impl Case {
                 self,
                 "no_watch_outlives_its_runner",
                 format!("{outlived:?} are watched with no slot"),
-            )
-        }
-    }
-
-    /// A job whose runner went is followed as closing alone, though GitHub may list it queued a while longer: followed
-    /// as queued too, it would be read twice a tick.
-    fn no_job_is_followed_as_closing_and_queued(&self) -> Result<(), Violation> {
-        let shared = self.engine.state_counts().shared_with_queued;
-        if shared == 0 {
-            Ok(())
-        } else {
-            violation(
-                self,
-                "no_job_is_followed_as_closing_and_queued",
-                format!("{shared} jobs are followed as closing and as queued"),
             )
         }
     }

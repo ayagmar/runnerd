@@ -633,10 +633,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         let now = time::now_ms();
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.named_job())
-            .collect();
+        let taken = self.taken();
         let running = self.running();
         let cpu_budget = self.cpu_budget();
         // The first runner of each known job, in slot order, goes by its own runs; its copies have it beside them,
@@ -786,10 +783,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn note_waits(&mut self, held: &[Demand], barrier: Option<Barrier>) {
         let budget = self.cpu_budget();
         let in_use = self.cpu_in_use();
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.named_job())
-            .collect();
+        let taken = self.taken();
         let now = SystemTime::now();
         let pools: Vec<(Pool, BTreeSet<u64>, bool)> = self
             .config
