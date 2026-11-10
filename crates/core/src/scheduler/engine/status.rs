@@ -1,7 +1,7 @@
 //! Publishes `api::Status` after each tick and command, and records the profiles, slots, budget and repositories
 //! that changed as events. It reads engine state and must not change it, besides the status channel.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::{Engine, Shutdown, unix_secs};
 use crate::api;
@@ -163,10 +163,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// The queued jobs the repositories' pools can take and none holds, and those the plan says no pool serves,
     /// oldest first, with why each `waiting`; none of a repository whose last listing failed or was skipped.
     fn queued(&self, waiting: &BTreeMap<u64, api::Waiting>) -> Vec<api::QueuedJob> {
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.named_job())
-            .collect();
+        let taken = self.taken();
         let mut queued: Vec<api::QueuedJob> = self
             .repositories
             .iter_listed()

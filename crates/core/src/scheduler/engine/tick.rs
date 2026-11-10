@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
-use super::history::{CAPTURE_DRAIN, Followed};
+use super::history::CAPTURE_DRAIN;
 use super::pool_health::PoolHealth;
 use super::presence::RunnersListing;
 use super::runners::{Collected, Removal, StartOutcome};
@@ -730,10 +730,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Plans from the last poll's listings, as they stand now.
     pub(super) fn plan(&self) -> (Plan, Admitting) {
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.named_job())
-            .collect();
+        let taken = self.taken();
         let warm = self.warm_targets();
         let mut repositories: Vec<Repository> = self
             .config
@@ -815,25 +812,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Notes that a runner of `repository`'s pool in `profile` may have taken one of its listed jobs without the
     /// engine knowing which (`Claims::unnamed`).
     pub(super) fn spend(&mut self, repository: &str, profile: &str) {
-        let listing = self.listing;
-        self.claims
-            .entry(repository.to_owned())
-            .or_default()
-            .unnamed
-            .push(super::Unnamed {
-                profile: profile.to_owned(),
-                listing,
-            });
+        self.claims.spend(repository, profile, self.listing);
     }
 
     /// Notes that a runner of this machine took `job` of `repository` and is gone (`Claims::consumed`).
     pub(super) fn consume(&mut self, repository: &str, job: u64) {
-        let listing = self.listing;
-        self.claims
-            .entry(repository.to_owned())
-            .or_default()
-            .consumed
-            .insert(job, listing);
+        self.claims.consume(repository, job, self.listing);
     }
 
     /// The jobs `pool`'s repository's last listing showed queued that may still want a runner (ADR 0018, 0095).
@@ -847,7 +831,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         pool: &crate::config::Repository,
         taken: &BTreeSet<u64>,
     ) -> Vec<QueuedJob> {
-        let claims = self.claims.get(&pool.name);
         let busy = self
             .slots
             .get(&pool.profile)
@@ -856,11 +839,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .flatten()
             .filter(|occupant| occupant.repository == pool.name && occupant.claims_a_listed_job())
             .count();
-        let gone = claims
-            .into_iter()
-            .flat_map(|claims| &claims.unnamed)
-            .filter(|claim| claim.profile == pool.profile)
-            .count();
+        let gone = self.claims.unnamed(&pool.name, &pool.profile);
         let unnamed = busy + gone;
         let mut queued = self.listed_unnamed(&pool.name, taken);
         let claimed: BTreeSet<u64> = {
@@ -879,16 +858,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// The jobs listed on `repository` that no runner of this machine is known to have taken: not in `taken`, nor
     /// consumed by a claim.
     pub(super) fn listed_unnamed(&self, repository: &str, taken: &BTreeSet<u64>) -> Vec<QueuedJob> {
-        let claims = self.claims.get(repository);
         self.repositories
             .listed(repository)
             .map(|state| state.listing.jobs())
             .unwrap_or_default()
             .iter()
-            .filter(|job| {
-                !taken.contains(&job.id)
-                    && !claims.is_some_and(|claims| claims.consumed.contains_key(&job.id))
-            })
+            .filter(|job| !taken.contains(&job.id) && !self.claims.consumed(repository, job.id))
             .cloned()
             .collect()
     }
@@ -1166,10 +1141,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// meanwhile is skipped, but the jobs its listing recorded are followed until GitHub says what became of them. A
     /// claim on a listed job made after the listing began outlives it.
     fn apply_queued(&mut self, listings: Vec<Listed>, listing: u64) {
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.named_job())
-            .collect();
+        let taken = self.taken();
         for Listed {
             repository,
             answer,
@@ -1191,14 +1163,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Vec::new()
                 }
             };
-            if listed && let Some(claims) = self.claims.get_mut(&repository) {
-                claims.unnamed.retain(|claim| claim.listing >= listing);
-                claims
-                    .consumed
-                    .retain(|job, since| *since >= listing || queued.iter().any(|q| q.id == *job));
-                if claims.unnamed.is_empty() && claims.consumed.is_empty() {
-                    self.claims.remove(&repository);
-                }
+            if listed {
+                self.claims.listing_answered(&repository, listing, &queued);
             }
             if let Some(state) = self.repositories.listed_mut(&repository) {
                 // Before the plan: a start for the next job must not read the note of one that left the queue.
@@ -1211,14 +1177,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     state.listing.fail();
                 }
             } else {
-                // A job whose runner went is followed as closing alone.
-                for job in recorded
-                    .into_iter()
-                    .filter(|job| !taken.contains(job) && !self.closing.contains_key(job))
-                {
-                    self.queued_jobs
-                        .entry(job)
-                        .or_insert_with(|| Followed::new(&repository));
+                for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
+                    self.ledger.follow_queued(job, &repository);
                 }
             }
         }
@@ -1301,7 +1261,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let repositories = &self.repositories;
         let listed = |name: &str| repositories.is_known(name);
         self.registrations.forget_unlisted(listed);
-        self.claims.retain(|name, _| listed(name));
+        self.claims.forget_unlisted(listed);
     }
 
     /// Warns of a runners listing that failed, and stops draining its repository once GitHub says it is gone, as when

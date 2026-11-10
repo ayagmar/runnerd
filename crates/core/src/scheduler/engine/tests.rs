@@ -4305,11 +4305,6 @@ async fn a_job_whose_runner_ends_during_a_stop_is_not_followed_as_queued_from_th
     github.0.lock().unwrap().runners.clear();
     engine.tick(Shutdown::Graceful).await;
     assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
-    assert_eq!(
-        engine.state_counts().shared_with_queued,
-        0,
-        "job 1 is followed once"
-    );
 }
 
 /// How many times GitHub was asked for job `id`.
@@ -4400,11 +4395,6 @@ async fn a_job_closing_on_a_repository_removed_during_its_listing_is_not_followe
     };
     tokio::join!(engine.tick(Shutdown::No), reload);
     assert!(engine.is_closing(1), "GitHub has not said job 1 ended");
-    assert_eq!(
-        engine.state_counts().shared_with_queued,
-        0,
-        "job 1 is followed once"
-    );
 }
 
 #[tokio::test]

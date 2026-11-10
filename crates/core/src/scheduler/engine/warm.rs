@@ -3,7 +3,7 @@
 //! and says how many warm runners each repository wants. It must not start or stop runners: `plan` decides with what
 //! it says.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use tracing::warn;
@@ -229,10 +229,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 0,
             )
         });
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.named_job())
-            .collect();
+        let taken = self.taken();
         let queued = self
             .repositories
             .listed(&pool.repository)

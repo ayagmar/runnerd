@@ -125,7 +125,7 @@ client → transport → principal → handler → core
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
    `caches` (reseeds, the mirror, the shared caches), `upkeep` (what each profile's measures and reseeds are doing and have due, one value per profile, [ADR 0116](docs/adr/0116-a-profiles-upkeep-is-one-state.md)), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
    whether its job may write), `records` (records of failed jobs and the shells in them),
-   `history` (what the store records), `admission` (what a new runner reserves), `open_waits` (which of a slot's or the host's wait each job is in), `warm` (how many warm runners each
+   `history` (what the store records), `ledger` (the jobs followed on GitHub that no runner here runs, queued or closing, one stage per job, [ADR 0118](docs/adr/0118-a-followed-job-is-in-one-stage.md)), `claims` (what each repository's listings may show that this machine's runners took), `admission` (what a new runner reserves), `open_waits` (which of a slot's or the host's wait each job is in), `warm` (how many warm runners each
    repository wants, from `scheduler::warm`), `control` (`Control` and the commands), `stop` (how far the daemon's stop has got) and `status` (what it
    publishes).
 

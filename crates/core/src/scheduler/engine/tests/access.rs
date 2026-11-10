@@ -74,7 +74,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     /// Whether any claim on `repository`'s listed jobs is remembered.
     pub(super) fn has_claims(&self, repository: &str) -> bool {
-        self.claims.contains_key(repository)
+        self.claims.has(repository)
     }
 
     /// Whether this engine remembers having ended `runner`.
@@ -84,9 +84,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     /// How many runners gone count against a job listed for `repository` without the engine knowing which.
     pub(super) fn unnamed_claims(&self, repository: &str) -> usize {
-        self.claims
-            .get(repository)
-            .map_or(0, |claims| claims.unnamed.len())
+        self.claims.unnamed_of(repository)
     }
 
     pub(super) fn set_held(&mut self, repository: &str, profile: &str, held: Hold) {
@@ -316,30 +314,23 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     }
 
     pub(super) fn is_closing(&self, job: u64) -> bool {
-        self.closing.contains_key(&job)
+        self.ledger.is_closing(job)
     }
 
     /// Whether `job` is followed as a queued job.
     pub(super) fn is_followed_as_queued(&self, job: u64) -> bool {
-        self.queued_jobs.contains_key(&job)
+        self.ledger.is_queued(job)
     }
 
     /// As if `by` passed on the clocks of the jobs followed: since a closing job's runner was found gone, and since
     /// GitHub began failing the reads of a queued job that left the queue.
     pub(super) fn age_followed_jobs(&mut self, by: Duration) {
-        for closing in self.closing.values_mut() {
-            closing.age(by);
-        }
-        for followed in self.queued_jobs.values_mut() {
-            followed.age(by);
-        }
+        self.ledger.age(by);
     }
 
     /// As if the runner of `job` was found gone at `ms` since the epoch.
     pub(super) fn set_closing_since(&mut self, job: u64, ms: u64) {
-        if let Some(closing) = self.closing.get_mut(&job) {
-            closing.found_gone_at(ms);
-        }
+        self.ledger.found_gone_at(job, ms);
     }
 
     /// As if every broken capture last stored up to `position`, ahead of or behind what the store has.
@@ -371,12 +362,7 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
 
     pub(super) fn state_counts(&self) -> StateCounts {
         StateCounts {
-            closing: self.closing.len(),
-            shared_with_queued: self
-                .closing
-                .keys()
-                .filter(|id| self.queued_jobs.contains_key(*id))
-                .count(),
+            closing: self.ledger.closing().len(),
             ended_uploads: self.ended_uploads.len(),
             cancelling: self.cancelling.len(),
             busy_orphans: self.registrations.orphans(),
@@ -407,7 +393,6 @@ pub(super) fn set_plan_short(plan: &mut Admitting, short: bool) {
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct StateCounts {
     pub(super) closing: usize,
-    pub(super) shared_with_queued: usize,
     pub(super) ended_uploads: usize,
     pub(super) cancelling: usize,
     pub(super) busy_orphans: usize,

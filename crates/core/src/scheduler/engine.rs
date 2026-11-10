@@ -7,7 +7,7 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
+//! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `ledger` (the jobs followed on GitHub, queued or closing), `claims` (what a repository's listings may show that this machine's runners took), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
 //! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `watches` (how each runner's container is watched: its log capture and what broken ones left), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
 //! API's commands), `stop` (how far the daemon's stop has got) and `status` (what it publishes).
@@ -15,11 +15,13 @@
 mod admission;
 mod build_cache;
 mod caches;
+mod claims;
 mod clock;
 mod control;
 mod exits;
 mod history;
 mod images;
+mod ledger;
 mod leftovers;
 mod listing;
 mod mirror;
@@ -46,13 +48,15 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use self::claims::Claims;
 use self::clock::Clock;
 pub use self::control::{
     Author, Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown,
     Target, same_slice,
 };
-use self::history::{CAPTURE_DRAIN, Closing, Found};
+use self::history::{CAPTURE_DRAIN, Found};
 use self::images::Images;
+use self::ledger::Ledger;
 use self::leftovers::Leftovers;
 use self::listing::Listing;
 use self::mirror::Mirror;
@@ -394,30 +398,6 @@ impl Occupant {
     }
 }
 
-/// A runner gone that may have taken one of its repository's listed jobs, which no capture named.
-#[derive(Debug)]
-struct Unnamed {
-    /// The profile of its pool.
-    profile: String,
-    /// The `Engine::listing` begun last when it went.
-    listing: u64,
-}
-
-/// What a repository's listings may show queued that this machine's runners took (ADR 0018, 0095). It outlives the
-/// repository's removal from the config, as a listing begun before the removal may answer after it is added back, and
-/// ends with the repository's drain, as nothing lists it after that.
-#[derive(Debug, Default)]
-struct Claims {
-    /// Its runners gone that may have taken a listed job without the engine knowing which: one ended before its
-    /// log capture named its job, or one whose start failed may have run. Each counts against one listed job of its
-    /// pool until a listing begun after it went answers.
-    unnamed: Vec<Unnamed>,
-    /// The jobs this machine's runners took whose runners are gone, by the `listing` begun last when they went:
-    /// GitHub lists a job queued for a while after a runner took it, so a listing begun before that, or one GitHub
-    /// lags on, still shows it. A listing begun after that and showing it no longer drops it.
-    consumed: BTreeMap<u64, u64>,
-}
-
 /// A repository's state, shared by its pools but for their holds and what they wait for CPU.
 #[derive(Debug, Default)]
 struct RepositoryState {
@@ -511,12 +491,11 @@ pub struct Engine<G = Github, D = Docker> {
     leases: Leases,
     /// How far the mirror's log was counted.
     mirror_until: MirrorPosition,
-    /// Jobs recorded queued and not yet taken or closed.
-    queued_jobs: BTreeMap<u64, history::Followed>,
+    /// The jobs followed on GitHub that no runner of this machine runs now: queued, or closing once their runner
+    /// went.
+    ledger: Ledger,
     /// Runners of runs a forced pause cancelled, with when they are removed if they still run.
     cancelling: BTreeMap<String, tokio::time::Instant>,
-    /// Jobs whose runner is gone, waiting for GitHub to report them completed.
-    closing: BTreeMap<u64, Closing>,
     last_prune: Option<SystemTime>,
     /// The records of failed jobs and the shells open in them.
     records: records::RecordState,
@@ -554,7 +533,7 @@ pub struct Engine<G = Github, D = Docker> {
     /// old a claim on a listed job is (`Claims`).
     listing: u64,
     /// By repository, the jobs its listings may show that this machine's runners took.
-    claims: BTreeMap<String, Claims>,
+    claims: Claims,
     /// The second in the name of the last runner the engine named: the next one's is later, so no two runners share
     /// a name, which GitHub, Docker and the history know them by. A restart takes it from the containers and the
     /// history, so a name ahead of the clock, or a clock that stepped back, is not used again.
@@ -665,9 +644,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             watches: Watches::default(),
             leases: Leases::default(),
             mirror_until: MirrorPosition::default(),
-            queued_jobs: BTreeMap::new(),
+            ledger: Ledger::default(),
             cancelling: BTreeMap::new(),
-            closing: BTreeMap::new(),
             last_prune: None,
             measured: admission::Measured::default(),
             warm: warm::Warm::default(),
@@ -684,7 +662,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             passes_in_tick: Duration::ZERO,
             listing: 0,
             named: 0,
-            claims: BTreeMap::new(),
+            claims: Claims::default(),
         };
         engine.publish();
         (
@@ -930,6 +908,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+    }
+
+    /// The jobs this machine's runners took, as their slots' occupants name them: computed where it is read, as a
+    /// runner may take a job, or go, while the engine waits for GitHub.
+    fn taken(&self) -> BTreeSet<u64> {
+        self.occupied()
+            .filter_map(|(_, occupant)| occupant.named_job())
+            .collect()
     }
 
     fn occupied(&self) -> impl Iterator<Item = (SlotRef, &Occupant)> {
