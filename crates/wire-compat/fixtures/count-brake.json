@@ -1,0 +1,15 @@
+{
+  "grew": {
+    "grew": 7516192768,
+    "kept": 6442450944,
+    "kind": "grew",
+    "until": 1800000000
+  },
+  "guard": {
+    "kind": "guard"
+  },
+  "restarted": {
+    "kind": "restarted",
+    "until": 1800000000
+  }
+}

@@ -2,8 +2,16 @@
   "empty": {
     "budget": {
       "admission": "measured",
+      "counted": {
+        "jobs": 3,
+        "used": 4294967296
+      },
       "held": false,
       "host": {
+        "credit": {
+          "bytes": 3221225472,
+          "used": 4294967296
+        },
         "limit": 42949672960,
         "memory": {
           "at": 1761400000,
@@ -44,6 +52,7 @@
       ],
       "slice": "runnerd.slice"
     },
+    "github_limited_until": 1790000000,
     "profiles": [
       {
         "cpus": 4,
@@ -103,6 +112,17 @@
   "full": {
     "budget": {
       "admission": "measured",
+      "counted": {
+        "brake": {
+          "grew": 7516192768,
+          "kept": 6442450944,
+          "kind": "grew",
+          "until": 1800000000
+        },
+        "jobs": 3,
+        "kept": 4294967296,
+        "used": 4294967296
+      },
       "cpu": {
         "budget": 24000,
         "cpus": 16000,
@@ -111,6 +131,10 @@
       },
       "held": false,
       "host": {
+        "credit": {
+          "bytes": 3221225472,
+          "used": 4294967296
+        },
         "limit": 42949672960,
         "memory": {
           "at": 1761400000,
@@ -163,6 +187,7 @@
       "slice": "runnerd.slice",
       "slice_cpus": 16000
     },
+    "github_limited_until": 1790000000,
     "profiles": [
       {
         "cpus": 4,

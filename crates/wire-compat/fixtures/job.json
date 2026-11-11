@@ -42,6 +42,7 @@
       "profile": "halyard",
       "slot": 0
     },
+    "runner_fault": true,
     "state": "completed",
     "steps": [
       {
@@ -136,6 +137,7 @@
       "profile": "halyard",
       "slot": 0
     },
+    "runner_fault": true,
     "state": "completed",
     "steps": [
       {

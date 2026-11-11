@@ -1,5 +1,26 @@
 {
   "full": {
+    "host": [
+      {
+        "credited": 12000,
+        "critical": {
+          "credited": 94,
+          "seconds": 94
+        },
+        "critical_line": 6442450944,
+        "low": {
+          "credited": 1200,
+          "seconds": 3600
+        },
+        "low_line": 20401094656,
+        "lowest": 3221225472,
+        "lowest_credited": 3221225472,
+        "lowest_swap_free": 8589934592,
+        "running": 30000,
+        "since": 1761350400,
+        "until": 1761400000
+      }
+    ],
     "insights": [
       {
         "before": 300,

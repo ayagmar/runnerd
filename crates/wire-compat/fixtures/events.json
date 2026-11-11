@@ -3,6 +3,17 @@
     "at": 1761400000,
     "budget": {
       "admission": "measured",
+      "counted": {
+        "brake": {
+          "grew": 7516192768,
+          "kept": 6442450944,
+          "kind": "grew",
+          "until": 1800000000
+        },
+        "jobs": 3,
+        "kept": 4294967296,
+        "used": 4294967296
+      },
       "cpu": {
         "budget": 24000,
         "cpus": 16000,
@@ -11,6 +22,10 @@
       },
       "held": false,
       "host": {
+        "credit": {
+          "bytes": 3221225472,
+          "used": 4294967296
+        },
         "limit": 42949672960,
         "memory": {
           "at": 1761400000,
@@ -132,6 +147,7 @@
         "profile": "halyard",
         "slot": 0
       },
+      "runner_fault": true,
       "state": "completed",
       "timeline": {
         "cleaned_at": 1761400610,
@@ -195,6 +211,7 @@
         "profile": "halyard",
         "slot": 0
       },
+      "runner_fault": true,
       "state": "completed",
       "timeline": {
         "cleaned_at": 1761400610,
@@ -271,6 +288,7 @@
         "profile": "halyard",
         "slot": 0
       },
+      "runner_fault": true,
       "state": "completed",
       "timeline": {
         "cleaned_at": 1761400610,
