@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.0.29";
+const PREVIOUS: &str = "v0.1.0";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,14 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[
-    // The previous release reads a `host-low` insight kind as its `Unknown` fallback, by the insight's sentence.
-    Accepted {
-        reader: Reader::Previous,
-        item: "insight-kind/host-low",
-        adr: "0108",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -275,11 +268,11 @@ documents! {
     "shell-query": ShellQuery => full(samples::shell_query(), None),
     "savings": Savings => full(samples::savings(), None),
     "memory-bound": MemoryBound => variants(samples::memory_bound()),
-    // Documents the previous release does not have; the release after this one reads their fixtures.
-    new:
     "stopping": Stopping => variants(samples::stopping()),
     "shutdown-answer": ShutdownAnswer => full(samples::shutdown_answer(), None),
     "count-brake": CountBrake => variants(samples::count_brake()),
+    // Documents the previous release does not have; the release after this one reads their fixtures.
+    new:
 }
 
 /// The previous release's samples, one file per document.

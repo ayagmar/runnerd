@@ -46,6 +46,7 @@
           "profile": "halyard",
           "slot": 0
         },
+        "runner_fault": true,
         "state": "completed",
         "timeline": {
           "cleaned_at": 1761400610,

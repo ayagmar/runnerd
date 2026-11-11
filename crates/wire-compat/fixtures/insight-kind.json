@@ -24,6 +24,12 @@
     "kind": "host-held",
     "waited": 2530
   },
+  "host-low": {
+    "day": 1761350400,
+    "kind": "host-low",
+    "lowest": 3221225472,
+    "seconds": 94
+  },
   "near-cap": {
     "auto": "raises",
     "cap": 8589934592,
