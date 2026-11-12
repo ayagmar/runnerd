@@ -19,7 +19,7 @@ clap.workspace = true
 qrcode.workspace = true
 ratatui = { workspace = true, optional = true }
 runnerd-core = { workspace = true, features = ["client"] }
-rustix = { workspace = true, features = ["process", "termios"] }
+rustix = { workspace = true, features = ["event", "process", "termios"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
@@ -35,7 +35,7 @@ tui = ["dep:ratatui", "dep:unicode-width", "tokio/signal"]
 axum.workspace = true
 futures-util.workspace = true
 runnerd-fixtures.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "pty", "termios"] }
+rustix = { workspace = true, features = ["event", "fs", "process", "pty", "termios"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 # cargo binstall downloads the release archive dist builds (named for the crate; the binary sits in a directory of the
