@@ -22,6 +22,7 @@ fn job(state: JobState, conclusion: Option<&str>) -> JobSummary {
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        record_mark: None,
     }
 }
 

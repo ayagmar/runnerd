@@ -79,27 +79,12 @@ impl JobSummary {
     /// that the runner failed reads `runner fault` (`runner_fault`) and counts as failed all the same. A job that left the queue without starting, as one a newer push
     /// cancelled, did not run elsewhere: it reads `cancelled in queue`, or as it concluded.
     pub fn outcome(&self) -> Outcome {
-        let started = self.timeline.started_at.is_some();
-        match (self.state, self.conclusion.as_deref()) {
-            (JobState::Queued, _) => Outcome::new("queued", OutcomeKind::Waiting),
-            (JobState::Running, _) => Outcome::new("running", OutcomeKind::Running),
-            (JobState::Lost, _) => Outcome::new("lost", OutcomeKind::Failed),
-            (JobState::Elsewhere, Some("cancelled")) if !started => {
-                Outcome::new("cancelled in queue", OutcomeKind::Ended)
-            }
-            (JobState::Elsewhere, Some(conclusion)) if !started => Outcome {
-                kind: OutcomeKind::Ended,
-                ..Outcome::concluded(conclusion)
-            },
-            (JobState::Elsewhere, _) => Outcome::new("elsewhere", OutcomeKind::Ended),
-            (JobState::Completed, None) => Outcome::new("completed", OutcomeKind::Ended),
-            (JobState::Completed, Some(conclusion))
-                if self.runner_fault && failed_conclusion(conclusion) =>
-            {
-                Outcome::new("runner fault", OutcomeKind::RunnerFault)
-            }
-            (JobState::Completed, Some(conclusion)) => Outcome::concluded(conclusion),
-        }
+        outcome_of(
+            self.state,
+            self.conclusion.as_deref(),
+            self.timeline.started_at.is_some(),
+            self.runner_fault,
+        )
     }
 
     /// Seconds it waited for a runner: until it started, or until `now` while it may still start. `None` for a job
@@ -227,6 +212,35 @@ impl JobSummary {
     /// Its name as every client writes it: `workflow / job`.
     pub fn title(&self) -> JobTitle<'_> {
         job_title(self.workflow.as_deref(), &self.name, Some(self.id))
+    }
+}
+
+/// [`JobSummary::outcome`] of a job in `state`, concluded `conclusion`, that `started` here or not.
+pub(crate) fn outcome_of(
+    state: JobState,
+    conclusion: Option<&str>,
+    started: bool,
+    runner_fault: bool,
+) -> Outcome {
+    match (state, conclusion) {
+        (JobState::Queued, _) => Outcome::new("queued", OutcomeKind::Waiting),
+        (JobState::Running, _) => Outcome::new("running", OutcomeKind::Running),
+        (JobState::Lost, _) => Outcome::new("lost", OutcomeKind::Failed),
+        (JobState::Elsewhere, Some("cancelled")) if !started => {
+            Outcome::new("cancelled in queue", OutcomeKind::Ended)
+        }
+        (JobState::Elsewhere, Some(conclusion)) if !started => Outcome {
+            kind: OutcomeKind::Ended,
+            ..Outcome::concluded(conclusion)
+        },
+        (JobState::Elsewhere, _) => Outcome::new("elsewhere", OutcomeKind::Ended),
+        (JobState::Completed, None) => Outcome::new("completed", OutcomeKind::Ended),
+        (JobState::Completed, Some(conclusion))
+            if runner_fault && failed_conclusion(conclusion) =>
+        {
+            Outcome::new("runner fault", OutcomeKind::RunnerFault)
+        }
+        (JobState::Completed, Some(conclusion)) => Outcome::concluded(conclusion),
     }
 }
 
@@ -469,19 +483,27 @@ impl SampleSeries {
     /// What the container used from `from` to `to`, from the samples taken after `from` up to `to`: each covers the
     /// interval before it, so steps that meet at a second share no sample. `None` when none was taken in it.
     pub fn usage_between(&self, from: u64, to: u64) -> Option<SampleUsage> {
-        let inside: Vec<&Sample> = self
-            .samples
-            .iter()
-            .filter(|sample| from < sample.at && sample.at <= to)
-            .collect();
-        let count = u64::try_from(inside.len())
-            .ok()
-            .filter(|count| *count > 0)?;
-        Some(SampleUsage {
-            memory_peak: inside.iter().map(|sample| sample.memory).max()?,
-            cpu_average: inside.iter().map(|sample| sample.cpu).sum::<u64>() / count,
-        })
+        usage_of(&samples_between(&self.samples, from, to))
     }
+}
+
+/// The samples of `samples` taken after `from` up to `to`.
+pub(crate) fn samples_between(samples: &[Sample], from: u64, to: u64) -> Vec<&Sample> {
+    samples
+        .iter()
+        .filter(|sample| from < sample.at && sample.at <= to)
+        .collect()
+}
+
+/// What `inside` say together: their highest memory and their CPU averaged; `None` for no sample.
+pub(crate) fn usage_of(inside: &[&Sample]) -> Option<SampleUsage> {
+    let count = u64::try_from(inside.len())
+        .ok()
+        .filter(|count| *count > 0)?;
+    Some(SampleUsage {
+        memory_peak: inside.iter().map(|sample| sample.memory).max()?,
+        cpu_average: inside.iter().map(|sample| sample.cpu).sum::<u64>() / count,
+    })
 }
 
 /// What a container used over a stretch of its run, from [`SampleSeries::usage_between`].

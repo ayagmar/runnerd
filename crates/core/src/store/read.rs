@@ -15,8 +15,6 @@ use crate::admission::trace::{Outside, Point, RunId, RunTrace, Trace};
 use crate::api::{self, EventEnvelope, JobState};
 use crate::sizing;
 
-const DEFAULT_PAGE: u32 = 50;
-const MAX_PAGE: u32 = 500;
 const DAY_MS: u64 = 24 * 3600 * 1000;
 
 /// The most buckets `stats` counts, before `until` or now: 31 days of hours, 4,464 rows for six repositories.
@@ -37,7 +35,7 @@ pub(super) fn state_name(state: JobState) -> &'static str {
     }
 }
 
-fn state(name: &str) -> JobState {
+pub(super) fn state(name: &str) -> JobState {
     match name {
         "running" => JobState::Running,
         "completed" => JobState::Completed,
@@ -55,7 +53,25 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
      coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
-     j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
+     j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault, \
+     CASE WHEN rec.job IS NULL THEN NULL WHEN rec.skipped IS NOT NULL THEN 'skipped' \
+     WHEN rec.removed_at IS NOT NULL THEN 'removed' ELSE 'kept' END \
+     FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id";
+
+/// [`api::RecordMark`] of the job `j` in SQL, from its `records` row `rec`, in `RecordNote::state`'s precedence:
+/// the same expression `SUMMARY` reads.
+const RECORD_MARK: &str = "CASE WHEN rec.job IS NULL THEN NULL WHEN rec.skipped IS NOT NULL THEN 'skipped' \
+     WHEN rec.removed_at IS NOT NULL THEN 'removed' ELSE 'kept' END";
+
+/// How `RECORD_MARK` names a mark.
+fn record_mark(name: &str) -> api::RecordMark {
+    match name {
+        "kept" => api::RecordMark::Kept,
+        "removed" => api::RecordMark::Removed,
+        "skipped" => api::RecordMark::Skipped,
+        _ => api::RecordMark::Unknown,
+    }
+}
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
     let labels: String = row.get(8)?;
@@ -122,6 +138,10 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             truncated: row.get(29)?,
         },
         runner_fault: row.get(44)?,
+        record_mark: row
+            .get::<_, Option<String>>(45)?
+            .as_deref()
+            .map(record_mark),
     })
 }
 
@@ -341,66 +361,181 @@ fn record(db: &Connection, job: u64) -> rusqlite::Result<Option<api::RecordNote>
     .optional()
 }
 
-pub(super) fn jobs(db: &Connection, query: &api::JobQuery) -> rusqlite::Result<api::JobPage> {
-    let mut conditions = Vec::new();
-    let mut values: Vec<Value> = Vec::new();
-    let mut condition = |sql: &str, value: Value| {
-        values.push(value);
-        conditions.push(format!("{sql} ?{}", values.len()));
+/// Runs `read` in one deferred read transaction: a snapshot of the database as of its first read, kept to its last,
+/// so a response assembled from several reads is of one moment. Dropped, it rolls back: it wrote nothing.
+pub(super) fn snapshot<T>(
+    db: &Connection,
+    read: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    let snapshot = db.unchecked_transaction()?;
+    read(&snapshot)
+}
+
+/// The states whose records are final, in SQL.
+const FINAL: &str = "('completed', 'lost', 'elsewhere')";
+
+/// [`api::JobSort::key`] of the job `j` in SQL, in seconds or bytes; NULL while unknown.
+fn sort_key(sort: api::JobSort) -> String {
+    match sort {
+        api::JobSort::Queued => "j.queued_at / 1000".to_owned(),
+        api::JobSort::Wait => "CASE WHEN j.started_at IS NOT NULL \
+             THEN max(j.started_at / 1000 - j.queued_at / 1000, 0) END"
+            .to_owned(),
+        api::JobSort::Run => format!(
+            "CASE WHEN j.state IN {FINAL} AND j.started_at IS NOT NULL AND j.finished_at IS NOT NULL \
+             THEN max(j.finished_at / 1000 - j.started_at / 1000, 0) END"
+        ),
+        api::JobSort::Memory => format!("CASE WHEN j.state IN {FINAL} THEN j.memory_peak END"),
+    }
+}
+
+/// The bytes of the job `j`'s text a page counts ([`api::row_bytes`]), in SQL.
+const ROW_BYTES: &str = "octet_length(j.repository) + coalesce(octet_length(j.workflow), 0) + \
+     octet_length(j.name) + coalesce(octet_length(j.branch), 0) + coalesce(octet_length(j.url), 0) + \
+     octet_length(j.labels)";
+
+/// `text` as a `LIKE` pattern that finds it anywhere, its `%`, `_` and `\` taken as written.
+fn contains_pattern(text: &str) -> String {
+    let mut pattern = String::with_capacity(text.len() + 2);
+    pattern.push('%');
+    for character in text.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
+/// A `WHERE` clause and its values, numbered as they are added.
+#[derive(Default)]
+struct Where {
+    conditions: Vec<String>,
+    values: Vec<Value>,
+}
+
+impl Where {
+    /// Binds `value` and returns its placeholder, `?3`.
+    fn value(&mut self, value: Value) -> String {
+        self.values.push(value);
+        format!("?{}", self.values.len())
+    }
+
+    /// Adds `condition`, each `?` in it the placeholder of `value`.
+    fn add(&mut self, condition: &str, value: Value) {
+        let placeholder = self.value(value);
+        self.conditions.push(condition.replace('?', &placeholder));
+    }
+}
+
+/// The `ORDER BY` of `query`'s page, with the conditions that start it after its cursor or `before`.
+fn order(query: &api::JobQuery, sql: &mut Where) -> String {
+    let integer = |value: u64| Value::Integer(i64::try_from(value).unwrap_or(i64::MAX));
+    let Some(sort) = query.sort else {
+        if let Some(before) = query.before {
+            sql.add("j.id < ?", integer(before));
+        }
+        return "j.id DESC".to_owned();
     };
+    let key = sort_key(sort);
+    let (compare, direction) = match query.order.unwrap_or_default() {
+        api::SortOrder::Desc => ('<', "DESC"),
+        api::SortOrder::Asc => ('>', "ASC"),
+    };
+    if let Some(cursor) = query.check().ok().flatten() {
+        let id = sql.value(integer(cursor.id));
+        match cursor.key {
+            Some(last) => {
+                let last = sql.value(integer(last));
+                sql.conditions.push(format!(
+                    "(({key}) IS NULL OR ({key}) {compare} {last} \
+                     OR (({key}) = {last} AND j.id {compare} {id}))"
+                ));
+            }
+            None => sql
+                .conditions
+                .push(format!("({key}) IS NULL AND j.id {compare} {id}")),
+        }
+    }
+    format!("({key}) IS NULL, ({key}) {direction}, j.id {direction}")
+}
+
+/// One page of jobs as `query` asks, which [`api::JobQuery::check`] passed: each page's IDs and sizes read first,
+/// within its rows and bytes, then each job, all in one snapshot.
+pub(super) fn jobs(db: &Connection, query: &api::JobQuery) -> rusqlite::Result<api::JobList> {
+    let mut sql = Where::default();
+    let text = |text: &String| Value::Text(text.clone());
     if let Some(repository) = &query.repository {
-        condition("j.repository =", Value::Text(repository.clone()));
+        sql.add("j.repository = ?", text(repository));
     }
     if let Some(state) = query.state {
-        condition("j.state =", Value::Text(state_name(state).to_owned()));
+        sql.add("j.state = ?", Value::Text(state_name(state).to_owned()));
     }
     if let Some(conclusion) = &query.conclusion {
-        condition("j.conclusion =", Value::Text(conclusion.clone()));
+        sql.add("j.conclusion = ?", text(conclusion));
     }
     if let Some(workflow) = &query.workflow {
-        condition("j.workflow =", Value::Text(workflow.clone()));
+        sql.add("j.workflow = ?", text(workflow));
     }
     if let Some(name) = &query.name {
-        condition("j.name =", Value::Text(name.clone()));
+        sql.add("j.name = ?", text(name));
     }
-    let ms =
-        |secs: u64| Value::Integer(i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX));
-    if let Some(since) = query.since {
-        condition("j.queued_at >=", ms(since));
+    if let Some(branch) = &query.branch {
+        sql.add("j.branch = ?", text(branch));
     }
-    if let Some(until) = query.until {
-        condition("j.queued_at <", ms(until));
-    }
-    if let Some(before) = query.before {
-        condition(
-            "j.id <",
-            Value::Integer(i64::try_from(before).unwrap_or(i64::MAX)),
+    if let Some(q) = &query.q {
+        sql.add(
+            "(j.name LIKE ? ESCAPE '\\' OR j.workflow LIKE ? ESCAPE '\\' OR j.branch LIKE ? ESCAPE '\\')",
+            Value::Text(contains_pattern(q)),
         );
     }
-    let limit = query.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
-    let filter = if conditions.is_empty() {
+    let integer = |value: u64| Value::Integer(i64::try_from(value).unwrap_or(i64::MAX));
+    let ms = |secs: u64| integer(secs.saturating_mul(1000));
+    if let Some(since) = query.since {
+        sql.add("j.queued_at >= ?", ms(since));
+    }
+    if let Some(until) = query.until {
+        sql.add("j.queued_at < ?", ms(until));
+    }
+    if let Some(record) = query.record {
+        let marks = match record {
+            api::RecordFilter::Any => "'kept', 'removed', 'skipped'",
+            api::RecordFilter::Kept => "'kept'",
+            api::RecordFilter::Removed => "'removed'",
+            api::RecordFilter::Skipped => "'skipped'",
+        };
+        sql.conditions.push(format!("({RECORD_MARK}) IN ({marks})"));
+    }
+    let order = order(query, &mut sql);
+    let filter = if sql.conditions.is_empty() {
         String::new()
     } else {
-        format!("WHERE {}", conditions.join(" AND "))
+        format!("WHERE {}", sql.conditions.join(" AND "))
     };
-    let ids: Vec<u64> = db
-        .prepare(&format!(
-            "SELECT j.id FROM jobs j {filter} ORDER BY j.id DESC LIMIT {}",
-            limit + 1
-        ))?
-        .query_map(params_from_iter(values), |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let more = ids.len() > limit as usize;
-    let mut jobs = Vec::with_capacity(ids.len());
-    for id in ids.into_iter().take(limit as usize) {
-        jobs.extend(summary(db, id)?);
-    }
-    let next = if more {
-        jobs.last().map(|job| job.id)
-    } else {
-        None
-    };
-    Ok(api::JobPage { jobs, next })
+    let values = sql.values;
+    let size = query.page_size();
+    snapshot(db, |db| {
+        let rows: Vec<(u64, u64)> = db
+            .prepare(&format!(
+                "SELECT j.id, {ROW_BYTES} FROM jobs j LEFT JOIN records rec ON rec.job = j.id {filter} \
+                 ORDER BY {order} LIMIT {}",
+                size + 1
+            ))?
+            .query_map(params_from_iter(values), |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut jobs = Vec::new();
+        let mut bytes = 0;
+        for (id, row_bytes) in rows.iter().take(size as usize) {
+            if bytes >= api::JOBS_PAGE_BYTES && !jobs.is_empty() {
+                break;
+            }
+            bytes += row_bytes;
+            jobs.extend(summary(db, *id)?);
+        }
+        let more = rows.len() > jobs.len();
+        Ok(query.answer(jobs, more))
+    })
 }
 
 pub(super) fn job_samples(
@@ -694,7 +829,7 @@ pub(super) fn host_samples(db: &Connection, since: u64) -> rusqlite::Result<Vec<
 }
 
 /// From when the history holds every final job, in ms.
-fn kept_since(db: &Connection) -> rusqlite::Result<u64> {
+pub(super) fn kept_since(db: &Connection) -> rusqlite::Result<u64> {
     db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))
 }
 

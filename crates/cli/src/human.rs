@@ -1014,6 +1014,7 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             bytes(record.bytes)
         ),
         Event::RecordDeleted { job, removed_by } => format!("{job} record {removed_by}"),
+        Event::RecordSkipped { job } => format!("{job} record not kept"),
         Event::SizingChanged { change } => format!("{} {}", change.profile, change.line()),
         Event::RunnerFailed { failure } => format!(
             "{} {}: {}; no runner for {}s",

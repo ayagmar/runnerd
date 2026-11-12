@@ -118,6 +118,12 @@ pub enum Event {
         /// Why.
         removed_by: RecordRemoval,
     },
+    /// A failed job's record was not made (ADR 0135): the job's `record` mark is now `skipped`. Its page says why.
+    #[serde(rename = "record.skipped")]
+    RecordSkipped {
+        /// The job.
+        job: u64,
+    },
     /// Auto sizing wrote a profile's new `memory` and `slots` into the config, and the daemon runs with them.
     #[serde(rename = "sizing.changed")]
     SizingChanged {
@@ -183,6 +189,7 @@ impl Event {
             Event::CacheReseeded { .. } => "cache.reseeded",
             Event::RecordCreated { .. } => "record.created",
             Event::RecordDeleted { .. } => "record.deleted",
+            Event::RecordSkipped { .. } => "record.skipped",
             Event::SizingChanged { .. } => "sizing.changed",
             Event::RunnerFailed { .. } => "runner.failed",
             Event::JobSample { .. } => "job.sample",
@@ -212,7 +219,8 @@ impl Event {
             Event::JobStep { job, .. }
             | Event::JobSample { job, .. }
             | Event::LogLine { job, .. }
-            | Event::RecordDeleted { job, .. } => Some(*job),
+            | Event::RecordDeleted { job, .. }
+            | Event::RecordSkipped { job } => Some(*job),
             Event::RecordCreated { record } => Some(record.job),
             Event::SlotChanged { .. }
             | Event::ProfileChanged { .. }

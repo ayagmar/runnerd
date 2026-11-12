@@ -24,6 +24,7 @@ use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
 
+mod lens;
 mod outline;
 mod prune;
 mod read;
@@ -928,9 +929,25 @@ impl Store {
         Ok(tokio::task::spawn_blocking(move || query(&lock(&reader))).await??)
     }
 
-    /// One page of jobs, newest first.
-    pub async fn jobs(&self, query: api::JobQuery) -> Result<api::JobPage, StoreError> {
+    /// One page of jobs as `query` asks, which [`api::JobQuery::check`] passed (ADR 0135).
+    pub async fn jobs(&self, query: api::JobQuery) -> Result<api::JobList, StoreError> {
         self.read(move |db| read::jobs(db, &query)).await
+    }
+
+    /// What each slot ran over `window` (ADR 0135), with the host samples not yet stored counted as watched time.
+    pub async fn timeline(&self, window: api::Span) -> Result<api::SlotTimeline, StoreError> {
+        let held: Vec<u64> = lock(&self.held).iter().map(|sample| sample.at).collect();
+        self.read(move |db| lens::timeline(db, window, &held, api::SAMPLE_INTERVAL))
+            .await
+    }
+
+    /// Job `id` beside the job `with` names, or its baseline (ADR 0135); `None` without either job.
+    pub async fn compare(
+        &self,
+        id: u64,
+        with: Option<u64>,
+    ) -> Result<Option<api::JobComparison>, StoreError> {
+        self.read(move |db| lens::compare(db, id, with)).await
     }
 
     /// A job with its steps.

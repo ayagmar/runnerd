@@ -381,6 +381,7 @@ async fn run_overview(
                 | Event::CacheReseeded { .. }
                 | Event::RecordCreated { .. }
                 | Event::RecordDeleted { .. }
+                | Event::RecordSkipped { .. }
                 | Event::SizingChanged { .. }
                 | Event::RunnerFailed { .. } => {}
                 Event::BudgetChanged { .. }

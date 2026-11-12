@@ -152,6 +152,7 @@ fn finished(id: u64, state: JobState, conclusion: Option<&str>) -> Event {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            record_mark: None,
         },
     }
 }

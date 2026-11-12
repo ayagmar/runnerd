@@ -291,6 +291,20 @@ documents! {
     "tone": Tone => variants(samples::tone()),
     "doctor-state": DoctorState => variants(samples::doctor_state()),
     "listing-problem": ListingProblem => variants(samples::listing_problem()),
+    "job-list": JobList => full(samples::job_list(), Some(json(api::JobQuery::default().answer(Vec::new(), false)))),
+    "record-mark": RecordMark => variants(samples::record_mark()),
+    "record-filter": RecordFilter => variants(samples::record_filter()),
+    "job-sort": JobSort => variants(samples::job_sort()),
+    "sort-order": SortOrder => variants(samples::sort_order()),
+    "slot-timeline": SlotTimeline => full(samples::slot_timeline(), Some(json(api::SlotTimeline::default()))),
+    "bar-end": BarEnd => variants(samples::bar_end()),
+    "timeline-query": TimelineQuery => full(samples::timeline_query(), None),
+    "job-comparison": JobComparison => full(samples::job_comparison(), None),
+    "baseline": Baseline => variants(samples::baseline()),
+    "unavailable": Unavailable => variants(samples::unavailable()),
+    "figure-kind": FigureKind => variants(samples::figure_kind()),
+    "step-match": StepMatch => variants(samples::step_match()),
+    "compare-query": CompareQuery => full(samples::compare_query(), None),
 }
 
 /// The previous release's samples, one file per document.

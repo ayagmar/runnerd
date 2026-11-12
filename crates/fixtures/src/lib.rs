@@ -10,6 +10,8 @@
 //! GitHub has not answered for, lost, without an end and run elsewhere; auto sizing's plan, with a change next,
 //! a profile a change holds and a `cpus` raise it cannot make; and insights of a job its CPU cap holds back, as a
 //! warning and as a notice, beside the memory pressure one.
+//! The job history's lenses have their own cases in `lens` (searches, the slots' timeline and comparisons) and logs
+//! in `logs`.
 //!
 //! Test support only: client tests depend on it, a client never does, so no client depends on another to share it.
 //! It computes nothing itself; every fact is core's.
@@ -56,8 +58,16 @@ pub const HOST_SHORT: u64 = 9302;
 /// A queued job that fits, behind [`HOST_SHORT`], which waited long enough that no younger job starts before it.
 pub const BEHIND_MEMORY: u64 = 9303;
 
+mod lens;
 mod logs;
 
+pub use lens::{
+    DeltaFact, EndFact, GapFact, LENS_BASELINE, LENS_COMPARED, LENS_FIRST_RUN, LENS_KEPT,
+    LENS_ORPHAN, LENS_REMOVED, LENS_SINCE, LENS_SKIPPED, LENS_UNKNOWN_END, LENS_UNWATCHED,
+    LENS_WATCHED_AGAIN, LENS_WILDCARD, LensFacts, LensHistory, LensSamples, MarkFact,
+    lens_comparison, lens_facts, lens_history, lens_history_at, lens_observed, lens_records,
+    lens_records_at, lens_timeline,
+};
 pub use logs::{
     LOG_EXPIRED, LOG_FAILED, LOG_MISSING, LOG_NOT_OUTLINED, LOG_RUNNING, LOG_TRUNCATED, LogFacts,
     LoggedJob, log_facts, logged_jobs,
@@ -336,6 +346,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        record_mark: None,
     }
 }
 

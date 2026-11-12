@@ -188,6 +188,8 @@ fn router(state: AppState) -> Router {
         .route("/v1/jobs/{id}/log/lines", get(history::styled_lines))
         .route("/v1/jobs/{id}/log/outline", get(history::log_outline))
         .route("/v1/jobs/{id}/log/search", get(history::search_log))
+        .route("/v1/jobs/{id}/compare", get(history::compare))
+        .route("/v1/timeline", get(history::timeline))
         .route("/v1/host/samples", get(history::host_samples))
         .route("/v1/stats", get(history::stats))
         .route("/v1/sizing", get(history::sizing))

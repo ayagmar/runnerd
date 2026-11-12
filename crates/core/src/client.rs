@@ -20,8 +20,9 @@ use tokio::net::UnixStream;
 pub use hyper::{Method, StatusCode};
 
 use crate::api::{
-    Busy, ErrorResponse, EventEnvelope, EventQuery, LogLinesQuery, LogOutline, LogQuery, LogSearch,
-    LogSearchQuery, RunningJob, SHELL_PROTOCOL, ShellQuery, StyledLine,
+    Busy, CompareQuery, ErrorResponse, EventEnvelope, EventQuery, JobComparison, JobList, JobQuery,
+    LogLinesQuery, LogOutline, LogQuery, LogSearch, LogSearchQuery, RunningJob, SHELL_PROTOCOL,
+    ShellQuery, SlotTimeline, StyledLine, TimelineQuery,
 };
 
 /// A shell's terminal on the daemon's socket: raw bytes both ways until either side closes.
@@ -415,6 +416,29 @@ impl Client {
     /// that [`ClientError::is_unsupported`] reads.
     pub async fn log_outline(&self, id: u64) -> Result<LogOutline, ClientError> {
         self.get(&format!("/v1/jobs/{id}/log/outline")).await
+    }
+
+    /// `GET /v1/jobs`: a page of jobs, searched, filtered and sorted (ADR 0135). From a daemon older than search and
+    /// sorting, [`JobList::understood`] is false: it listed every job.
+    pub async fn jobs(&self, query: &JobQuery) -> Result<JobList, ClientError> {
+        self.get_query("/v1/jobs", query).await
+    }
+
+    /// `GET /v1/timeline`: what each slot ran over a window. A daemon without the route fails with an error that
+    /// [`ClientError::is_unsupported`] reads.
+    pub async fn timeline(&self, query: &TimelineQuery) -> Result<SlotTimeline, ClientError> {
+        self.get_query("/v1/timeline", query).await
+    }
+
+    /// `GET /v1/jobs/{id}/compare`: the job beside its baseline, or the job `query` names. A daemon without the
+    /// route fails with an error that [`ClientError::is_unsupported`] reads.
+    pub async fn compare(
+        &self,
+        id: u64,
+        query: &CompareQuery,
+    ) -> Result<JobComparison, ClientError> {
+        self.get_query(&format!("/v1/jobs/{id}/compare"), query)
+            .await
     }
 
     /// `GET /v1/jobs/{id}/log/search`: one page of a search of the job's log.

@@ -183,6 +183,7 @@ impl State {
             | Event::AttentionChanged { .. }
             | Event::RecordCreated { .. }
             | Event::RecordDeleted { .. }
+            | Event::RecordSkipped { .. }
             | Event::SizingChanged { .. }
             | Event::RunnerFailed { .. } => {}
         }
@@ -503,6 +504,7 @@ mod tests {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            record_mark: None,
         }
     }
 

@@ -32,7 +32,7 @@ const SECTION_MAX: u64 = 200;
 const TITLE_MAX: usize = 200;
 
 /// A group's title is read from at most this many bytes of its line.
-const TITLE_SOURCE_MAX: usize = 4 * TITLE_MAX;
+pub(crate) const TITLE_SOURCE_MAX: usize = 4 * TITLE_MAX;
 
 /// How much of a line is read for its time: the runner's timestamp and the space after it.
 const TIME_PREFIX: u64 = 64;
@@ -187,7 +187,7 @@ impl Outliner {
 
 /// A title, such as a group's or a step's name: plain, read from its first [`TITLE_SOURCE_MAX`] bytes and cut to
 /// [`TITLE_MAX`].
-fn title(text: &str) -> String {
+pub(crate) fn title(text: &str) -> String {
     let title = plain(prefix(text, TITLE_SOURCE_MAX));
     prefix(&title, TITLE_MAX).to_owned()
 }

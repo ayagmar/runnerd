@@ -7,18 +7,36 @@ use serde::{Deserialize, Serialize};
 use super::{cpu_time, in_cores};
 use crate::config::ByteSize;
 
+mod compare;
 mod facts;
 mod log;
+mod query;
+mod timeline;
 
+pub use compare::{
+    Baseline, BaselineRead, ChangeKind, CompareQuery, FigureDelta, FigureKind, JobComparison,
+    StepDelta, StepMatch, StepUsage, Unavailable,
+};
 pub use facts::{
     JobTitle, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, RunComparison, SampleUsage,
     job_title,
 };
+#[cfg(feature = "host")]
+pub(crate) use log::TITLE_SOURCE_MAX;
 pub use log::{
     Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,
     LogEvidence, LogGroup, LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch,
     LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
+};
+pub use query::{
+    JOB_SEARCH_MAX, JOBS_PAGE_BYTES, JOBS_PAGE_DEFAULT, JOBS_PAGE_MAX, JobCursor, JobSort,
+    RecordFilter, RecordMark, SortOrder, row_bytes,
+};
+pub use timeline::{
+    BarEnd, Gap, GapKind, Lane, RunnerSpan, SlotKey, SlotTimeline, SlottedBar, SlottedRunner, Span,
+    TIMELINE_BARS_MAX, TIMELINE_DEFAULT, TIMELINE_WINDOW_MAX, TimelineBar, TimelineQuery,
+    TimelineRows,
 };
 
 /// Where a job is in its life, as this daemon saw it.
@@ -87,6 +105,11 @@ pub struct JobSummary {
     /// that has not concluded failed, and in records from before it was kept.
     #[serde(default)]
     pub runner_fault: bool,
+    /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).
+    /// `None` for a job without a record note, and from a daemon older than the mark. Not `record`, which a `Job`
+    /// that flattens this summary holds in full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_mark: Option<RecordMark>,
 }
 
 /// `GET /v1/jobs/{id}`: a job with its steps.
@@ -494,7 +517,8 @@ pub struct Step {
     pub completed_at: Option<u64>,
 }
 
-/// `GET /v1/jobs` query parameters. Jobs come newest first (by ID, which grows with time).
+/// `GET /v1/jobs` query parameters. Jobs come newest first (by ID, which grows with time), or by `sort` (ADR 0135).
+/// [`JobQuery::check`] says which queries the daemon refuses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobQuery {
     /// Only this `owner/name`.
@@ -511,19 +535,57 @@ pub struct JobQuery {
     pub since: Option<u64>,
     /// Only jobs queued before this time.
     pub until: Option<u64>,
-    /// Only jobs with a smaller ID: the `next` of the previous page.
+    /// Only jobs with a smaller ID: the `next` of the previous page. Not with `sort`.
     pub before: Option<u64>,
-    /// At most this many jobs; default 50, at most 500.
+    /// At most this many jobs; default 50, at most 500. A page also ends once it holds
+    /// [`JOBS_PAGE_BYTES`] of text.
     pub limit: Option<u32>,
+    /// Only jobs whose name, workflow or branch holds this text, as written: 1 to [`JOB_SEARCH_MAX`] bytes, ASCII
+    /// letters in either case. The history keeps no commit, so a commit is not searched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Only jobs of runs for this branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Only jobs whose record this says became of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordFilter>,
+    /// Sort by this instead of by ID; a job whose key is unknown comes last either way, ties by ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<JobSort>,
+    /// With `sort`: which way; default largest or latest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<SortOrder>,
+    /// With `sort`: the `cursor` of the previous page, which pages only the sort, direction and filters it was
+    /// made for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
-/// `GET /v1/jobs`: one page of jobs.
+/// One page of jobs, as `GET /v1/jobs` answered before it searched and sorted: what [`JobList`] holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobPage {
-    /// Newest first.
+    /// Newest first, or in the query's sort.
     pub jobs: Vec<JobSummary>,
-    /// Pass as `before` for the next page; `None` on the last page.
+    /// Without `sort`: pass as `before` for the next page; `None` on the last page.
     pub next: Option<u64>,
+}
+
+/// `GET /v1/jobs`: one page of jobs, and how to read the next (ADR 0135). A [`JobPage`] with two fields more, so a
+/// client that reads a `JobPage` reads it too, and one that reads a `JobList` from an older daemon finds them
+/// absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobList {
+    /// The jobs and, without `sort`, `next`.
+    #[serde(flatten)]
+    pub page: JobPage,
+    /// With `sort`: pass as `cursor` for the next page; `None` on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// The query as the daemon read it, its limit and direction filled in; `None` from a daemon that predates
+    /// search and sorting, which ignored them ([`JobList::understood`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<JobQuery>,
 }
 
 /// `GET /v1/jobs/{id}/logs` query parameters. The response is `text/plain`, one log line per line.

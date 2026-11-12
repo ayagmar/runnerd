@@ -223,13 +223,14 @@ impl Writer<'_> {
     }
 
     fn record_skipped(&self, job: u64, why: &str) {
-        logged(
-            "record a skipped record",
+        self.change("record a skipped record", |announced| {
             self.db.execute(
                 "INSERT OR REPLACE INTO records (job, skipped) VALUES (?1, ?2)",
                 params![job, why],
-            ),
-        );
+            )?;
+            announced.push(Event::RecordSkipped { job });
+            Ok(())
+        });
     }
 
     fn record_removed(&self, job: u64, at: u64, by: api::RecordRemoval) {
