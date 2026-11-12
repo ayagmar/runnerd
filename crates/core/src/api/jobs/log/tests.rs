@@ -1,5 +1,5 @@
 use super::outline::{DEPTH_MAX, GROUP_MAX, MARK_MAX};
-use super::search::SCAN_LINES;
+use super::search::{CONTEXT_MAX, SCAN_BYTES, SCAN_LINES};
 use super::*;
 use crate::api::{
     Job, JobMetrics, JobState, JobSummary, LogSummary, RecordNote, RecordRemoval, Step, Timeline,
@@ -173,7 +173,7 @@ fn a_styled_line_has_its_time_and_command_split_off_and_only_closed_styles() {
 }
 
 #[test]
-fn steps_get_their_lines_by_time_and_title_never_by_position() {
+fn steps_get_their_lines_by_time_never_by_title_or_position() {
     let job = job(JobState::Completed, "failure", steps());
     let outline = LogOutline::of(&job, &log());
     assert_eq!(outline.evidence, LogEvidence::Complete);
@@ -190,15 +190,21 @@ fn steps_get_their_lines_by_time_and_title_never_by_position() {
             // Its header shares a second with the checkout and has no title to tell them apart; the group without
             // timestamps between its own groups is its, and so is the user group titled `Run make`, by time.
             (3, lines(15, 26)),
-            // Its header shares a second with step 3; its title is step 4's, and step 5 never ran then.
-            (4, lines(26, 31)),
+            // Its header shares a second with step 3: its title, step 4's name, could be any step's output.
+            (4, lines(28, 31)),
             (5, lines(31, 35)),
             (6, StepLog::Empty),
             (7, lines(35, 37)),
             (8, lines(37, 38)),
         ]
     );
-    assert_eq!(outline.unattributed, [LineRange { from: 12, to: 15 }]);
+    assert_eq!(
+        outline.unattributed,
+        [
+            LineRange { from: 12, to: 15 },
+            LineRange { from: 26, to: 28 }
+        ]
+    );
     let groups: Vec<(u64, Option<u64>, u32, &str)> = outline
         .groups
         .iter()
@@ -395,7 +401,7 @@ fn evidence_is_read_in_order_and_worded_by_core() {
                 saved,
                 ..OutlineParts::default()
             },
-            &mut |_, _| Vec::new(),
+            &mut |_| Vec::new(),
         )
         .evidence
     };
@@ -452,6 +458,26 @@ fn evidence_is_read_in_order_and_worded_by_core() {
         read(&running, StoredLog { lines: 0, ..stored }, None),
         LogEvidence::Running
     );
+    // The cap reached before the first line was stored, while running and after.
+    let capped = StoredLog {
+        lines: 0,
+        truncated: true,
+        kept: false,
+    };
+    assert_eq!(read(&finished, capped, None), LogEvidence::Truncated);
+    assert_eq!(read(&running, capped, None), LogEvidence::Truncated);
+    assert_eq!(
+        read(
+            &finished,
+            StoredLog {
+                truncated: true,
+                ..stored
+            },
+            None
+        ),
+        LogEvidence::Truncated,
+        "a cut log is worth a look, outlined or not"
+    );
     assert_eq!(read(&running, stored, outlined), LogEvidence::Running);
 
     assert_eq!(LogEvidence::Complete.words(), None);
@@ -489,9 +515,7 @@ fn a_newer_daemons_kinds_read_as_unknown() {
 fn search(log: &[String], query: &LogSearchQuery) -> LogSearch {
     let mut search = Search::new(query).unwrap();
     while let Some(read) = search.wants() {
-        let from = usize::try_from(read.from).unwrap().min(log.len());
-        let to = (from + usize::try_from(read.limit).unwrap()).min(log.len());
-        search.read((read.from..).zip(log[from..to].iter().cloned()).collect());
+        search.read(read.of(log));
     }
     search.finish()
 }
@@ -605,7 +629,8 @@ fn a_search_reads_no_more_than_its_budget_per_page() {
         },
     );
     assert_eq!(rest.matches.first(), Some(&SCAN_LINES));
-    let wide = vec!["y".repeat(1 << 20); 6];
+    // A line is read to its first 64 KiB: 4 MiB is 64 of them.
+    let wide = vec!["y".repeat(1 << 20); 100];
     let found = search(
         &wide,
         &LogSearchQuery {
@@ -613,5 +638,185 @@ fn a_search_reads_no_more_than_its_budget_per_page() {
             ..LogSearchQuery::default()
         },
     );
-    assert_eq!(found.next, Some(4), "4 MiB a page");
+    assert_eq!(found.next, Some(64), "4 MiB a page");
+}
+
+#[test]
+fn a_title_or_an_untimed_group_never_gives_a_step_lines() {
+    // Build ends in second 10, and `Run tests` starts and ends in it. In that second Build prints a group titled as
+    // the next step, with an exit code of its own; then the next step's header and its failure follow.
+    let steps = vec![
+        step(1, "Build", Some((0, 10)), "success"),
+        step(2, "Run tests", Some((10, 10)), "failure"),
+    ];
+    let log = vec![
+        at("00:00.5", "##[group]Run make"),
+        at("00:05.0", "compiling"),
+        at("00:10.1", "##[group]Run tests"),
+        at("00:10.1", "##[error]Process completed with exit code 99."),
+        at("00:10.2", "##[endgroup]"),
+        at("00:10.3", "##[endgroup]"),
+        at("00:10.5", "##[group]Run tests"),
+        at("00:10.5", "##[endgroup]"),
+        at("00:10.9", "##[error]Process completed with exit code 1."),
+    ];
+    let failed = job(JobState::Completed, "failure", steps);
+    let outline = LogOutline::of(&failed, &log);
+    assert_eq!(outline.step_lines(1), Some(LineRange { from: 0, to: 2 }));
+    assert_eq!(outline.steps[1].lines, StepLog::Unattributed);
+    let failure = outline.failure.unwrap();
+    assert_eq!(
+        (failure.exit_code, failure.excerpt.as_ref()),
+        (None, None),
+        "neither exit code in that second is known to be the failed step's"
+    );
+    assert_eq!(failure.headline(&failed.steps), "Step 2, Run tests, failed");
+
+    // A group with no timestamps, titled as the next step, before that step's own lines.
+    let steps = vec![
+        step(1, "Build", Some((0, 5)), "success"),
+        step(2, "Test", Some((6, 9)), "failure"),
+    ];
+    let log = vec![
+        at("00:00.5", "##[group]Run make"),
+        at("00:04.0", "built"),
+        "##[group]Test".to_owned(),
+        "##[error]Process completed with exit code 7.".to_owned(),
+        "##[endgroup]".to_owned(),
+        at("00:06.5", "##[group]Run pytest"),
+        at("00:08.0", "##[error]3 tests failed"),
+    ];
+    let outline = LogOutline::of(&job(JobState::Completed, "failure", steps), &log);
+    assert_eq!(outline.step_lines(2), Some(LineRange { from: 5, to: 7 }));
+    assert_eq!(outline.unattributed, [LineRange { from: 2, to: 5 }]);
+    assert_eq!(
+        outline.failure.unwrap().exit_code,
+        None,
+        "the untimed group's exit code is no step's"
+    );
+}
+
+#[test]
+fn marking_dense_matches_or_styles_stays_within_a_lines_runs() {
+    let needle = LogNeedle::new("A").unwrap();
+    let line_max = usize::try_from(LINE_BYTES_MAX).unwrap();
+
+    // Every byte matches: the matches are one marked run.
+    let mut dense = StyledLine::parse(0, &"a".repeat(line_max));
+    assert!(needle.mark(&mut dense), "a line of `a` holds `A`");
+    assert_eq!(dense.runs.len(), 1);
+    assert!(dense.runs[0].mark, "the whole line is the match");
+    assert_eq!(dense.omitted, 0);
+
+    // Every other byte matches: runs stop at their cap and the rest is counted, not dropped unsaid.
+    let mut alternating = StyledLine::parse(1, &"ab".repeat(line_max / 2));
+    assert!(needle.mark(&mut alternating), "`ab` holds `A`");
+    assert_eq!(alternating.runs.len(), RUNS_MAX);
+    assert_eq!(
+        alternating.text().len() as u64 + alternating.omitted,
+        LINE_BYTES_MAX
+    );
+    let size = serde_json::to_vec(&alternating).unwrap().len();
+    assert!(size < 64 << 10, "a marked line is {size} bytes");
+
+    // A colour change on every character, past the line's cap: runs and bytes stop at theirs.
+    let styled = "\u{1b}[31ma\u{1b}[32mb".repeat(1 << 16);
+    let mut colourful = StyledLine::parse(2, &styled);
+    assert_eq!(colourful.runs.len(), RUNS_MAX);
+    assert!(
+        colourful.omitted > styled.len() as u64 - LINE_BYTES_MAX,
+        "past its runs and its bytes, the line says what it leaves out"
+    );
+    assert!(needle.mark(&mut colourful), "its `a`s hold `A`");
+    assert_eq!(colourful.runs.len(), RUNS_MAX);
+}
+
+#[test]
+fn a_search_and_a_failure_read_within_their_bytes_whatever_a_lines_size() {
+    // Lines as long as the capture keeps, each holding the query.
+    let wide = vec![format!("needle {}", "y".repeat(1 << 20)); 100];
+    let mut search = Search::new(&LogSearchQuery {
+        q: "needle".to_owned(),
+        limit: Some(200),
+        context: Some(5),
+        ..LogSearchQuery::default()
+    })
+    .unwrap();
+    let mut handed = 0;
+    while let Some(read) = search.wants() {
+        let lines = read.of(&wide);
+        handed += lines.iter().map(|line| line.text.len() as u64).sum::<u64>();
+        search.read(lines);
+    }
+    let page = search.finish();
+    assert!(
+        handed <= SCAN_BYTES + u64::from(CONTEXT_MAX) * LINE_BYTES_MAX,
+        "a page read {handed} bytes: its budget, then the last match's context"
+    );
+    assert_eq!(
+        (page.matches.len(), page.next),
+        (64, Some(64)),
+        "64 lines are read to 64 KiB each"
+    );
+    assert!(
+        page.lines
+            .iter()
+            .all(|line| line.omitted == wide[0].len() as u64 - LINE_BYTES_MAX),
+        "each line says how much of it is not shown"
+    );
+    let size = serde_json::to_vec(&page).unwrap().len() as u64;
+    assert!(size < SCAN_BYTES + (1 << 20), "a page is {size} bytes");
+
+    // A read never splits a character; what it leaves is counted.
+    let accented = vec!["é".repeat(10)];
+    let cut = LineRead {
+        from: 0,
+        limit: 1,
+        prefix: 5,
+        bytes: u64::MAX,
+    }
+    .of(&accented);
+    assert_eq!((cut[0].text.as_str(), cut[0].omitted), ("éé", 16));
+
+    // A failed step whose lines are as long, styled on every character, and a group titled with a whole one.
+    let steps = vec![step(1, "Run make", Some((0, 10)), "failure")];
+    let mut log = vec![
+        at("00:01.0", "##[group]Run make"),
+        at("00:01.0", &format!("##[group]{}", "t".repeat(1 << 20))),
+        at("00:01.0", "##[endgroup]"),
+    ];
+    log.extend(vec![
+        at("00:02.0", &"\u{1b}[31ma\u{1b}[32mb".repeat(1 << 17));
+        20
+    ]);
+    log.push(at(
+        "00:09.0",
+        "##[error]Process completed with exit code 2.",
+    ));
+    let outline = LogOutline::of(&job(JobState::Completed, "failure", steps), &log);
+    assert!(outline.groups.iter().all(|group| group.title.len() <= 200));
+    let failure = outline.failure.clone().unwrap();
+    assert_eq!(failure.exit_code, Some(2));
+    let excerpt = failure.excerpt.unwrap();
+    assert_eq!(excerpt.len(), 10);
+    assert!(
+        excerpt[..9]
+            .iter()
+            .all(|line| line.omitted > 0 && line.text().len() <= 4 << 10),
+        "an excerpt shows the start of each line and says it is cut"
+    );
+    let size = serde_json::to_vec(&outline).unwrap().len();
+    assert!(size < 256 << 10, "the outline is {size} bytes");
+}
+
+#[test]
+fn a_step_name_reaches_the_headline_without_its_escapes() {
+    let name = "Run \u{1b}]52;c;ZXZpbA==\u{7}make\r\u{1b}[2J";
+    let failed = job(
+        JobState::Completed,
+        "failure",
+        vec![step(1, name, Some((0, 1)), "failure")],
+    );
+    let failure = LogOutline::of(&failed, &[]).failure.unwrap();
+    assert_eq!(failure.headline(&failed.steps), "Step 1, Run make, failed");
 }

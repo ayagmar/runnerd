@@ -86,10 +86,10 @@ pub use jobs::{
     Swap, Timeline, Total, host_margin, job_title,
 };
 pub use jobs::{
-    Color, FailureSummary, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LogEvidence, LogGroup,
-    LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch, LogSearchQuery, MarkKind,
-    OutlineChange, OutlineParts, Outliner, Run, SEARCH_QUERY_MAX, SavedOutline, Search, SearchRead,
-    StepLines, StepLog, StoredLog, StyledLine,
+    Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,
+    LogEvidence, LogGroup, LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch,
+    LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
+    SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, View};
 pub use records::{

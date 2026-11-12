@@ -456,45 +456,34 @@ pub(super) fn log_lines(
     .collect()
 }
 
-/// A stored line's text, read as UTF-8 with anything else replaced: what the capture stores is text, but a history is
-/// a file anyone may have written.
-fn lossy(row: &Row<'_>, index: usize) -> rusqlite::Result<String> {
-    Ok(match row.get_ref(index)? {
-        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
-            String::from_utf8_lossy(bytes).into_owned()
-        }
-        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => String::new(),
-    })
-}
-
-/// Up to `limit` stored lines of a job's log from line `from`, with their numbers; past a gap pruning left, too.
+/// The stored lines of a job's log `read` asks for, their text read as UTF-8 with anything else replaced: what the
+/// capture stores is text, but a history is a file anyone may have written. SQLite hands over only the prefix of
+/// each line asked for, and the rows stop at the byte budget, so no read holds more than it asked for whatever the
+/// lines' size.
 pub(super) fn lines_from(
     db: &Connection,
     job: u64,
-    from: u64,
-    limit: u64,
-) -> rusqlite::Result<Vec<(u64, String)>> {
-    db.prepare_cached(
-        "SELECT line, text FROM log_lines WHERE job = ?1 AND line >= ?2 ORDER BY line LIMIT ?3",
-    )?
-    .query_map(params![job, from, limit], |row| {
-        Ok((row.get(0)?, lossy(row, 1)?))
-    })?
-    .collect()
-}
-
-/// The stored lines of a job's log from line `from` up to, not including, `to`, with their numbers.
-pub(super) fn lines_between(
-    db: &Connection,
-    job: u64,
-    from: u64,
-    to: u64,
-) -> rusqlite::Result<Vec<(u64, String)>> {
-    db.prepare_cached(
-        "SELECT line, text FROM log_lines WHERE job = ?1 AND line >= ?2 AND line < ?3 ORDER BY line",
-    )?
-    .query_map(params![job, from, to], |row| Ok((row.get(0)?, lossy(row, 1)?)))?
-    .collect()
+    read: api::LineRead,
+) -> rusqlite::Result<Vec<api::StoredLine>> {
+    let mut statement = db.prepare_cached(
+        "SELECT line, substr(CAST(text AS BLOB), 1, ?3), octet_length(text) FROM log_lines \
+         WHERE job = ?1 AND line >= ?2 ORDER BY line LIMIT ?4",
+    )?;
+    let mut rows = statement.query(params![job, read.from, read.prefix, read.limit])?;
+    let mut lines = Vec::new();
+    let mut bytes = 0;
+    while bytes < read.bytes
+        && let Some(row) = rows.next()?
+    {
+        let text = match row.get_ref(1)? {
+            ValueRef::Text(text) | ValueRef::Blob(text) => text,
+            ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => &[],
+        };
+        let line = api::StoredLine::cut(row.get(0)?, text, row.get(2)?);
+        bytes += line.text.len() as u64;
+        lines.push(line);
+    }
+    Ok(lines)
 }
 
 /// Every stored line of a job's log, in order.

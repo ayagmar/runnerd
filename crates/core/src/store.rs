@@ -964,7 +964,8 @@ impl Store {
         self.read(move |db| outline::outline(db, job)).await
     }
 
-    /// Up to `limit` styled lines of a job's log from line `from`.
+    /// Up to `limit` styled lines of a job's log from line `from`, fewer once they hold 4 MiB of text; each shows at most
+    /// [`api::LINE_BYTES_MAX`] bytes of its line.
     pub async fn styled_lines(
         &self,
         job: u64,
@@ -982,11 +983,14 @@ impl Store {
         job: u64,
         mut search: api::Search,
     ) -> Result<api::LogSearch, StoreError> {
+        // Each batch is styled and marked where it is read, off the async workers.
         while let Some(want) = search.wants() {
-            let lines = self
-                .read(move |db| read::lines_from(db, job, want.from, want.limit))
+            search = self
+                .read(move |db| {
+                    search.read(read::lines_from(db, job, want)?);
+                    Ok(search)
+                })
                 .await?;
-            search.read(lines);
         }
         Ok(search.finish())
     }

@@ -1498,6 +1498,7 @@ pub(crate) fn styled_line() -> StyledLine {
             bold: true,
             mark: true,
         }],
+        omitted: 1024,
     }
 }
 
@@ -1513,6 +1514,7 @@ pub(crate) fn styled_line_empty() -> StyledLine {
             bold: false,
             mark: false,
         }],
+        omitted: 0,
     }
 }
 

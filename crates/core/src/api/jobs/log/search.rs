@@ -1,13 +1,18 @@
 //! A literal search of a job's stored log: which lines hold a query, with the lines around them, a page at a time.
 //! [`Search`] reads the log in batches its caller fetches, so no request reads more than [`SCAN_LINES`] lines or
-//! [`SCAN_BYTES`] bytes, and says where the next page continues. A search does not follow a growing log: a client
-//! searches again.
+//! [`SCAN_BYTES`] bytes of text, and says where the next page continues. A search does not follow a growing log: a
+//! client searches again.
+//!
+//! It searches a line's message as [`StyledLine`] shows it, not the stored text: without the runner's timestamp, its
+//! `##[…]` command and escape sequences, and only the first [`super::LINE_BYTES_MAX`] bytes of a line. `error` finds
+//! a line that says "error", not every `##[error]` line; the outline's marks list those.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Run, StyledLine};
+use super::{LINE_BYTES_MAX, LineRead, RUNS_MAX, Run, StoredLine, StyledLine};
 
 /// The longest query, in bytes.
 pub const SEARCH_QUERY_MAX: usize = 200;
@@ -33,7 +38,8 @@ const BATCH: u64 = 500;
 /// `GET /v1/jobs/{id}/log/search` query parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogSearchQuery {
-    /// What to find: literal text, 1 to 200 bytes; ASCII letters match in either case.
+    /// What to find in each line's message: literal text, 1 to 200 bytes; ASCII letters match in either case. The
+    /// message is the line as styled, without its timestamp, `##[…]` command or escapes: label it as such.
     pub q: String,
     /// Scan from this line: the `next` of the previous page.
     pub from: Option<u64>,
@@ -46,7 +52,7 @@ pub struct LogSearchQuery {
     pub follow: bool,
 }
 
-/// `GET /v1/jobs/{id}/log/search`: one page of matches.
+/// `GET /v1/jobs/{id}/log/search`: one page of the lines whose message holds a query.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogSearch {
     /// The lines that hold the query, in order.
@@ -63,7 +69,8 @@ pub struct LogSearch {
 /// A query, ready to find.
 #[derive(Debug, Clone)]
 pub struct LogNeedle {
-    bytes: Vec<u8>,
+    /// The query, its ASCII letters lowercase.
+    lower: String,
 }
 
 impl LogNeedle {
@@ -76,67 +83,64 @@ impl LogNeedle {
             return Err(format!("q is longer than {SEARCH_QUERY_MAX} bytes"));
         }
         Ok(LogNeedle {
-            bytes: query.as_bytes().to_vec(),
+            lower: query.to_ascii_lowercase(),
         })
     }
 
-    /// Whether `line` holds the query; if so, its runs are split so each match is a marked run.
+    /// Whether `line` holds the query; if so, its runs are split so each stretch of matches is one marked run.
+    /// Past [`RUNS_MAX`] runs the rest of the line is counted in `omitted`, not shown.
     pub fn mark(&self, line: &mut StyledLine) -> bool {
         let text = line.text();
-        let hay = text.as_bytes();
-        let size = self.bytes.len();
-        let mut found = Vec::new();
-        let mut at = 0;
-        while at + size <= hay.len() {
-            if hay[at..at + size].eq_ignore_ascii_case(&self.bytes) {
-                found.push(at..at + size);
-                at += size;
-            } else {
-                at += 1;
+        // Lowercasing ASCII keeps every byte where it is, so a match is at a character boundary of `text` too.
+        let lower = text.to_ascii_lowercase();
+        let mut found: Vec<Range<usize>> = Vec::new();
+        for (at, matched) in lower.match_indices(self.lower.as_str()) {
+            match found.last_mut() {
+                Some(last) if last.end == at => last.end = at + matched.len(),
+                _ => found.push(at..at + matched.len()),
             }
         }
         if found.is_empty() {
             return false;
         }
-        // A match starts at an ASCII or leading byte and ends after a whole character: both are char boundaries.
-        let mut runs = Vec::new();
+        let mut runs: Vec<Run> = Vec::new();
+        let mut found = found.into_iter().peekable();
         let mut offset = 0;
-        for run in std::mem::take(&mut line.runs) {
+        'runs: for run in &line.runs {
             let end = offset + run.text.len();
-            let mut cut = offset;
-            let piece = |from: usize, to: usize, mark: bool, runs: &mut Vec<Run>| {
-                if from < to {
-                    runs.push(Run {
-                        text: text[from..to].to_owned(),
+            let mut at = offset;
+            while at < end {
+                while found.next_if(|range| range.end <= at).is_some() {}
+                let (to, mark) = match found.peek() {
+                    Some(range) if range.start <= at => (range.end.min(end), true),
+                    Some(range) => (range.start.min(end), false),
+                    None => (end, false),
+                };
+                let full = runs.len() >= RUNS_MAX;
+                match runs.last_mut() {
+                    Some(last)
+                        if (last.color, last.bold, last.mark) == (run.color, run.bold, mark) =>
+                    {
+                        last.text.push_str(&text[at..to]);
+                    }
+                    _ if full => {
+                        line.omitted += (text.len() - at) as u64;
+                        break 'runs;
+                    }
+                    _ => runs.push(Run {
+                        text: text[at..to].to_owned(),
+                        color: run.color,
+                        bold: run.bold,
                         mark,
-                        ..run.clone()
-                    });
+                    }),
                 }
-            };
-            for range in found
-                .iter()
-                .filter(|range| range.start < end && range.end > offset)
-            {
-                let (start, stop) = (range.start.max(offset), range.end.min(end));
-                piece(cut, start, false, &mut runs);
-                piece(start, stop, true, &mut runs);
-                cut = stop;
+                at = to;
             }
-            piece(cut, end, false, &mut runs);
             offset = end;
         }
         line.runs = runs;
         true
     }
-}
-
-/// What [`Search`] wants read next: up to `limit` stored lines from line `from`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SearchRead {
-    /// The first line.
-    pub from: u64,
-    /// How many lines at most.
-    pub limit: u64,
 }
 
 /// Where a search is.
@@ -194,31 +198,39 @@ impl Search {
         })
     }
 
-    /// What to read next; `None` once the page is complete.
-    pub fn wants(&self) -> Option<SearchRead> {
+    /// What to read next; `None` once the page is complete. Scanning reads what is left of the budget; the last
+    /// match's context, at most 5 lines past it.
+    pub fn wants(&self) -> Option<LineRead> {
         match self.stage {
-            Stage::Scanning { next } => Some(SearchRead {
+            Stage::Scanning { next } => Some(LineRead {
                 from: next,
-                limit: BATCH,
+                limit: BATCH.min(SCAN_LINES - self.scanned_lines),
+                prefix: LINE_BYTES_MAX,
+                bytes: SCAN_BYTES - self.scanned_bytes,
             }),
-            Stage::Trailing { from, left, .. } => Some(SearchRead {
+            Stage::Trailing { from, left, .. } => Some(LineRead {
                 from,
                 limit: u64::from(left),
+                prefix: LINE_BYTES_MAX,
+                bytes: u64::MAX,
             }),
             Stage::Done { .. } => None,
         }
     }
 
-    /// Takes the lines read as [`Search::wants`] asked, with their numbers; fewer than asked means the log ends.
-    pub fn read(&mut self, lines: Vec<(u64, String)>) {
-        let asked = self.wants().map_or(0, |read| read.limit);
-        let short = (lines.len() as u64) < asked;
+    /// Takes the lines read as [`Search::wants`] asked; fewer than asked, short of its bytes, means the log ends.
+    pub fn read(&mut self, lines: Vec<StoredLine>) {
+        let asked = self.wants();
+        let text: u64 = lines.iter().map(|line| line.text.len() as u64).sum();
+        let short =
+            asked.is_some_and(|read| (lines.len() as u64) < read.limit && text < read.bytes);
         let mut lines = lines.into_iter();
         if let Stage::Scanning { .. } = self.stage {
-            for (number, text) in lines.by_ref() {
+            for stored in lines.by_ref() {
+                let number = stored.line;
                 self.scanned_lines += 1;
-                self.scanned_bytes += text.len() as u64 + 1;
-                let mut line = StyledLine::parse(number, &text);
+                self.scanned_bytes += stored.text.len() as u64;
+                let mut line = stored.styled();
                 let matched = self.needle.mark(&mut line);
                 if matched {
                     self.found.matches.push(number);
@@ -249,8 +261,9 @@ impl Search {
         }
         // What a stop left of the batch, or the lines read for it, is the last match's context.
         if let Stage::Trailing { resume, .. } = self.stage {
-            for (number, text) in lines.by_ref().take(self.after as usize) {
-                self.found.lines.push(StyledLine::parse(number, &text));
+            for stored in lines.by_ref().take(self.after as usize) {
+                let number = stored.line;
+                self.found.lines.push(stored.styled());
                 self.after -= 1;
                 self.stage = Stage::Trailing {
                     from: number + 1,

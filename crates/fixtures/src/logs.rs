@@ -1,7 +1,7 @@
 //! Jobs' logs as the daemon stores them, and the structure core reads in them (ADR 0133), for the log viewer of every
 //! client: a failed job whose steps' lines are told by time and title (a custom step name, two steps of one name, a
-//! nested group titled like a step, a group without timestamps, set-up and post output, colours, a warning and the
-//! failure), one cut at `history.log_max` before its failure, one still running with groups open, one whose log
+//! nested group titled like a step, a group without timestamps, two headers in a second two steps share, set-up and
+//! post output, colours, a line longer than a styled line shows, a warning and the failure), one cut at `history.log_max` before its failure, one still running with groups open, one whose log
 //! expired with its record kept, one kept by a runnerd that kept no outline, and one with no log at all. Every
 //! outline, line and word is core's: `LogOutline`, `StyledLine` and `FailureSummary::headline`.
 
@@ -11,7 +11,8 @@ use runnerd_core::api::{
 
 use crate::{LEDGER, NOW, job, job_runner, summary};
 
-/// A failed job of halyard/ledger whose every step's lines core can tell but one header's.
+/// A failed job of halyard/ledger whose every step's lines core can tell but two headers', each printed in a second
+/// two steps share.
 pub const LOG_FAILED: u64 = 9401;
 /// The same job, its log cut at `history.log_max` before the failed step.
 pub const LOG_TRUNCATED: u64 = 9402;
@@ -93,6 +94,11 @@ fn failed_log() -> Vec<String> {
         at(41, 0, "##[group]Run ./gradlew test"),
         at(41, 0, "##[endgroup]"),
         at(45, 0, "LedgerTest > balances() \u{1b}[31mFAILED\u{1b}[0m"),
+        at(
+            45,
+            1,
+            &format!("expected: {{\"balances\":[{}0]}}", "0,".repeat(40_000)),
+        ),
         at(49, 9, "##[error]Process completed with exit code 1."),
         at(51, 0, "Post job cleanup."),
         at(51, 5, "##[command]/usr/bin/git version"),
@@ -138,14 +144,7 @@ pub struct LoggedJob {
 /// An outline the daemon assembles from what its store keeps: `parts` beside `lines`, or nothing for a log no
 /// outline was kept of.
 fn assembled(job: &Job, lines: &[String], stored: StoredLog, parts: OutlineParts) -> LogOutline {
-    LogOutline::assemble(job, stored, parts, &mut |from, to| {
-        (from..to)
-            .filter_map(|number| {
-                let text = lines.get(usize::try_from(number).ok()?)?;
-                Some((number, text.clone()))
-            })
-            .collect()
-    })
+    LogOutline::assemble(job, stored, parts, &mut |read| read.of(lines))
 }
 
 /// Every job with a log, in the order of the constants above.
@@ -289,7 +288,13 @@ mod tests {
             ]
         );
         let failed = &jobs[0].outline;
-        assert_eq!(failed.unattributed, [LineRange { from: 12, to: 15 }]);
+        assert_eq!(
+            failed.unattributed,
+            [
+                LineRange { from: 12, to: 15 },
+                LineRange { from: 26, to: 28 }
+            ]
+        );
         assert_eq!(failed.steps[5].lines, StepLog::Empty);
         let facts = log_facts();
         assert_eq!(
@@ -297,6 +302,10 @@ mod tests {
             Some("Step 5, Run ./gradlew test, failed with exit code 1")
         );
         assert_eq!(facts[1].evidence, Some("cut at history.log_max"));
+        assert!(
+            facts[0].lines.iter().any(|line| line.omitted > 0),
+            "a line longer than a styled line shows says so"
+        );
         assert_eq!(
             jobs[3]
                 .outline

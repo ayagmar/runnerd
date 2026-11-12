@@ -1524,9 +1524,7 @@ fn router(fake: Fake) -> Router {
                     };
                     let lines = fake.fixtures.lock().unwrap().log_of(id);
                     while let Some(read) = search.wants() {
-                        let from = usize::try_from(read.from).unwrap().min(lines.len());
-                        let to = (from + usize::try_from(read.limit).unwrap()).min(lines.len());
-                        search.read((read.from..).zip(lines[from..to].iter().cloned()).collect());
+                        search.read(read.of(&lines));
                     }
                     Json(search.finish()).into_response()
                 },

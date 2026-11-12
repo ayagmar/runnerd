@@ -409,9 +409,9 @@ always returns, so the daemon closes and flushes the history.
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
 - A job's log outline (`store::outline`) is written in the transaction that stores the lines it describes, from the
   state the last batch left, so a restart resumes it where the stored lines end; pruning deletes it after the lines.
-  The plain log and `log.line` carry the stored text; `/log/outline`, `/log/lines` and `/log/search` carry no escape
-  sequence, and no request reads more than a bounded part of a log
-  ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)).
+  It is read in one read transaction. The plain log and `log.line` carry the stored text; `/log/outline`, `/log/lines`
+  and `/log/search` carry no escape sequence, and every read of their lines is bounded in bytes, each line to its
+  first 64 KiB ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)).
 - Host samples reach subscribers when taken and the database a minute's worth at a time; reads include the ones not
   yet stored.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as

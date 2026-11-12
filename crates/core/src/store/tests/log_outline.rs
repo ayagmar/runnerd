@@ -5,7 +5,8 @@ use rusqlite::Connection;
 
 use super::{DAY_MS, queued, runner, user_version};
 use crate::api::{
-    self, LogEvidence, LogLinesQuery, LogOutline, LogSearchQuery, MarkKind, Search, StepLog,
+    self, LINE_BYTES_MAX, LineRead, LogEvidence, LogLinesQuery, LogOutline, LogSearchQuery,
+    MarkKind, RUNS_MAX, Search, StepLog,
 };
 use crate::github::{JobDetails, JobStep};
 use crate::store::{LogPosition, Store, VERSION};
@@ -382,7 +383,7 @@ async fn a_v21_history_opens_at_22_with_its_logs_readable_without_an_outline() {
 }
 
 #[tokio::test]
-async fn a_50_mib_log_is_outlined_as_it_is_stored_and_read_within_bounds() {
+async fn a_long_log_of_short_lines_is_outlined_as_it_is_stored_and_read_within_bounds() {
     const LINE: usize = 1024;
     const LINES: u64 = 50 * 1024;
     let dir = TestDir::new("outline-big");
@@ -407,7 +408,10 @@ async fn a_50_mib_log_is_outlined_as_it_is_stored_and_read_within_bounds() {
     assert_eq!(outline.warnings, LINES / 4);
     assert!(outline.capped, "past its bounds, it counts");
     let size = serde_json::to_vec(&outline).unwrap().len();
-    assert!(size < 256 << 10, "the outline of 50 MiB is {size} bytes");
+    assert!(
+        size < 256 << 10,
+        "the outline of 51,200 lines is {size} bytes"
+    );
 
     let search = Search::new(&LogSearchQuery {
         q: "absent".to_owned(),
@@ -436,5 +440,199 @@ async fn a_50_mib_log_is_outlined_as_it_is_stored_and_read_within_bounds() {
     assert_eq!(
         lines.iter().map(|line| line.line).collect::<Vec<_>>(),
         [7, 8, 9]
+    );
+}
+
+/// Reads job 1's outline until `done`, asserting each is of one moment: `of_one_moment(outline)`.
+async fn read_while(
+    store: &Store,
+    done: impl Fn() -> bool,
+    of_one_moment: impl Fn(&LogOutline),
+) -> u32 {
+    let mut reads = 0;
+    while !done() {
+        of_one_moment(&store.log_outline(1).await.unwrap().unwrap());
+        reads += 1;
+    }
+    reads
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_outline_read_while_its_log_grows_is_of_one_moment() {
+    let dir = TestDir::new("outline-growing");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    running(&store, 1);
+    store.flush().await;
+    let writer = tokio::spawn({
+        let store = store.clone();
+        async move {
+            for batch in 0..400 {
+                let group = vec![format!("##[group]batch {batch}"), "##[endgroup]".to_owned()];
+                store.log(1, group, POSITION, u64::MAX).await;
+                store.flush().await;
+            }
+        }
+    });
+    let reads = read_while(
+        &store,
+        || writer.is_finished(),
+        |outline| {
+            assert_eq!(
+                outline.groups.len() as u64 * 2,
+                outline.lines,
+                "every group stored, and no other: {outline:?}"
+            );
+            assert!(
+                outline
+                    .groups
+                    .iter()
+                    .all(|group| group.end.is_some_and(|end| end < outline.lines)),
+                "each group closed in a batch stored with it: {outline:?}"
+            );
+        },
+    )
+    .await;
+    writer.await.unwrap();
+    assert!(reads > 0, "the outline was read while the log grew");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_outline_read_while_its_log_is_pruned_is_of_one_moment() {
+    let dir = TestDir::new("outline-pruned");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    running(&store, 1);
+    // Many short groups in the failed step, each a segment whose first and last lines are read.
+    let mut lines = vec![at(2, "##[group]Run make test")];
+    for group in 0..900 {
+        lines.extend([
+            at(2 + group % 7, &format!("##[group]case {group}")),
+            at(8, "##[endgroup]"),
+        ]);
+    }
+    lines.push(at(9, "##[error]Process completed with exit code 2."));
+    store.log(1, lines, POSITION, u64::MAX).await;
+    finish(&store, 1, "failure");
+    store.flush().await;
+    let whole = store.log_outline(1).await.unwrap().unwrap();
+    assert_eq!(whole.evidence, LogEvidence::Complete);
+    assert_eq!(
+        whole.failure.as_ref().and_then(|failure| failure.exit_code),
+        Some(2)
+    );
+
+    // Pruning deletes from the first line. Here the first half goes and comes back, again and again, so reads land
+    // on either side of many deletions; then the log and its outline go.
+    let pruner = tokio::task::spawn_blocking(move || {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TEMP TABLE first_half AS SELECT * FROM log_lines WHERE job = 1 AND line < 900",
+        )
+        .unwrap();
+        for _ in 0..100 {
+            db.execute_batch(
+                "DELETE FROM log_lines WHERE job = 1 AND line < 900;
+                 INSERT INTO log_lines SELECT * FROM first_half;",
+            )
+            .unwrap();
+        }
+        db.execute("DELETE FROM log_lines WHERE job = 1", [])
+            .unwrap();
+        crate::store::outline::delete(&db, 1).unwrap();
+    });
+    let reads = read_while(
+        &store,
+        || pruner.is_finished(),
+        |outline| {
+            let expired = outline.evidence == LogEvidence::Expired
+                && outline
+                    .steps
+                    .iter()
+                    .all(|step| !matches!(step.lines, StepLog::Lines(_)))
+                && outline
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.exit_code.is_none());
+            assert!(
+                *outline == whole || expired,
+                "an outline is the whole log's or an expired one's: {outline:?}"
+            );
+        },
+    )
+    .await;
+    pruner.await.unwrap();
+    assert!(reads > 0, "the outline was read while the log was pruned");
+}
+
+#[tokio::test]
+async fn a_log_of_capture_sized_lines_is_read_within_bounds() {
+    let dir = TestDir::new("outline-wide");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    running(&store, 1);
+    // 47 lines of about 1 MiB, a colour change on every character, between a step's header and its failure.
+    let wide = "\u{1b}[31ma\u{1b}[32mb".repeat(1 << 16);
+    let mut lines = vec![at(2, "##[group]Run make test")];
+    lines.extend(vec![at(3, &wide); 47]);
+    lines.push(at(9, "##[error]Process completed with exit code 2."));
+    store.log(1, lines, POSITION, 64 << 20).await;
+    finish(&store, 1, "failure");
+    store.flush().await;
+
+    // At the read boundary: a read takes no more than its budget and one line's prefix.
+    let db = Connection::open(&path).unwrap();
+    let read = crate::store::read::lines_from(
+        &db,
+        1,
+        LineRead {
+            from: 0,
+            limit: 500,
+            prefix: LINE_BYTES_MAX,
+            bytes: 1 << 20,
+        },
+    )
+    .unwrap();
+    let bytes: u64 = read.iter().map(|line| line.text.len() as u64).sum();
+    assert!(
+        bytes < (1 << 20) + LINE_BYTES_MAX,
+        "a read of 1 MiB took {bytes}"
+    );
+    assert_eq!(read[1].omitted, at(3, &wide).len() as u64 - LINE_BYTES_MAX);
+
+    let outline = store.log_outline(1).await.unwrap().unwrap();
+    let failure = outline.failure.clone().unwrap();
+    assert_eq!(failure.exit_code, Some(2));
+    assert!(
+        failure
+            .excerpt
+            .iter()
+            .flatten()
+            .take(9)
+            .all(|line| line.omitted > 0),
+        "the excerpt's wide lines say they are cut"
+    );
+    let size = serde_json::to_vec(&outline).unwrap().len();
+    assert!(size < 256 << 10, "the outline is {size} bytes");
+
+    let page = store.styled_lines(1, 0, 1000).await.unwrap();
+    assert_eq!(page.len(), 49, "about 47 MiB is stored, 3 MiB is read");
+    assert!(
+        page.iter().all(|line| line.runs.len() <= RUNS_MAX),
+        "no line past its runs"
+    );
+
+    let search = Search::new(&LogSearchQuery {
+        q: "a".to_owned(),
+        limit: Some(200),
+        context: Some(5),
+        ..LogSearchQuery::default()
+    })
+    .unwrap();
+    let found = store.search_log(1, search).await.unwrap();
+    assert_eq!((found.matches.len(), found.next), (48, None));
+    let size = serde_json::to_vec(&found).unwrap().len();
+    assert!(
+        size < 4 << 20,
+        "a page of marked wide lines is {size} bytes"
     );
 }

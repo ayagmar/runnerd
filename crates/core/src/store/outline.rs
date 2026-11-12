@@ -1,7 +1,8 @@
 //! A job's log outline in the history (ADR 0133). The writer feeds each line it stores to the job's
 //! [`Outliner`], resumed from `log_outlines` and the job's open groups, and keeps what it returns in the transaction
-//! that stores the lines, so a restart resumes where the stored lines end. Reads assemble [`LogOutline`] from it;
-//! pruning deletes it after the lines. Only the writer and pruning write these tables, and nothing here lives between
+//! that stores the lines, so a restart resumes where the stored lines end. Reads assemble [`LogOutline`] from it in
+//! one read transaction, so a batch stored or pruned meanwhile is in all of it or none; pruning deletes it after
+//! the lines. Only the writer and pruning write these tables, and nothing here lives between
 //! two batches of lines.
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -137,8 +138,12 @@ fn stored(db: &Connection, job: u64, line: u64) -> rusqlite::Result<bool> {
         .exists(params![job, line])
 }
 
-/// A job's outline; `None` without the job.
+/// A job's outline, read at one time; `None` without the job.
 pub(super) fn outline(db: &Connection, id: u64) -> rusqlite::Result<Option<LogOutline>> {
+    // Deferred: a snapshot of the database as of the first read, kept to the last. Dropped, it rolls back: it wrote
+    // nothing.
+    let snapshot = db.unchecked_transaction()?;
+    let db: &Connection = &snapshot;
     let Some(job) = read::job(db, id)? else {
         return Ok(None);
     };
@@ -206,8 +211,8 @@ pub(super) fn outline(db: &Connection, id: u64) -> rusqlite::Result<Option<LogOu
         sections,
     };
     let mut failed = None;
-    let outline = LogOutline::assemble(&job, stored_log, parts, &mut |from, to| {
-        read::lines_between(db, id, from, to).unwrap_or_else(|error| {
+    let outline = LogOutline::assemble(&job, stored_log, parts, &mut |want| {
+        read::lines_from(db, id, want).unwrap_or_else(|error| {
             failed.get_or_insert(error);
             Vec::new()
         })
@@ -230,15 +235,24 @@ pub(super) fn delete(db: &Connection, job: u64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Up to `limit` styled lines of a job's log from line `from`.
+/// Text one read of styled lines takes at most, in bytes, past its last line.
+const STYLED_BYTES: u64 = 4 << 20;
+
+/// Up to `limit` styled lines of a job's log from line `from`, fewer once they hold 4 MiB of text.
 pub(super) fn styled_lines(
     db: &Connection,
     job: u64,
     from: u64,
     limit: u64,
 ) -> rusqlite::Result<Vec<api::StyledLine>> {
-    Ok(read::lines_from(db, job, from, limit)?
-        .into_iter()
-        .map(|(line, text)| api::StyledLine::parse(line, &text))
+    let read = api::LineRead {
+        from,
+        limit,
+        prefix: api::LINE_BYTES_MAX,
+        bytes: STYLED_BYTES,
+    };
+    Ok(read::lines_from(db, job, read)?
+        .iter()
+        .map(api::StoredLine::styled)
         .collect())
 }

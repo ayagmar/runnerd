@@ -5,14 +5,15 @@
 //!
 //! Which lines a step printed is best effort: the log does not say. A segment starts at the first outlined line, at
 //! every group and at the runner's `Post job cleanup.` and `Cleaning up orphan processes` lines. It goes to the one
-//! step, at or after the previous segment's, whose stored times hold both its first and its last line's times,
-//! narrowed by an exact `Run …` title when several do. Otherwise no step gets it. Never by position.
+//! step, at or after the previous segment's, whose stored times hold the times of its first and its last line that
+//! has one. A segment no time places, or that several steps' times hold, goes to no step, unless it lies between
+//! two segments of one step. Never by position, and never by a group's title: a step can print any title.
 
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::{LineKind, StyledLine, classify, plain, time_of};
+use super::{LineKind, LineRead, StoredLine, StyledLine, classify, plain, prefix, time_of};
 use crate::api::{Job, RecordNote, RecordState, Step, Tone};
 
 /// Groups nested deeper than this are counted, not kept.
@@ -29,6 +30,18 @@ const SECTION_MAX: u64 = 200;
 
 /// A group's title is cut to this many bytes.
 const TITLE_MAX: usize = 200;
+
+/// A group's title is read from at most this many bytes of its line.
+const TITLE_SOURCE_MAX: usize = 4 * TITLE_MAX;
+
+/// How much of a line is read for its time: the runner's timestamp and the space after it.
+const TIME_PREFIX: u64 = 64;
+
+/// How much of a failed step's line is read for its exit code: the runner's line is short.
+const EXIT_PREFIX: u64 = 256;
+
+/// How much of each line of a failure's excerpt is shown, in bytes; the rest is counted as omitted.
+const EXCERPT_LINE_BYTES: u64 = 4 << 10;
 
 /// How far back from a failed step's last line its exit code is looked for.
 const EXIT_SCAN: u64 = 200;
@@ -172,17 +185,11 @@ impl Outliner {
     }
 }
 
-/// A group's title: plain, cut to [`TITLE_MAX`] bytes.
+/// A title, such as a group's or a step's name: plain, read from its first [`TITLE_SOURCE_MAX`] bytes and cut to
+/// [`TITLE_MAX`].
 fn title(text: &str) -> String {
-    let mut title = plain(text);
-    if title.len() > TITLE_MAX {
-        let mut end = TITLE_MAX;
-        while !title.is_char_boundary(end) {
-            end -= 1;
-        }
-        title.truncate(end);
-    }
-    title
+    let title = plain(prefix(text, TITLE_SOURCE_MAX));
+    prefix(&title, TITLE_MAX).to_owned()
 }
 
 /// Lines from `from` up to, not including, `to`.
@@ -338,7 +345,7 @@ impl FailureSummary {
             return "No step reports the failure".to_owned();
         };
         let mut text = match steps.iter().find(|step| step.number == number) {
-            Some(step) => format!("Step {number}, {}, failed", step.name),
+            Some(step) => format!("Step {number}, {}, failed", title(&step.name)),
             None => format!("Step {number} failed"),
         };
         if let Some(code) = self.exit_code {
@@ -410,28 +417,20 @@ struct Segment {
     /// The times of its first and last lines, in seconds.
     first: Option<u64>,
     last: Option<u64>,
-    /// The title of the group it starts with.
-    title: Option<String>,
 }
 
 impl LogOutline {
-    /// Assembles a job's outline from what the store keeps. `read(from, to)` returns the stored lines from `from` up
-    /// to `to` with their numbers; it is asked for the first and last line of each segment, and for a failed step's
-    /// last lines.
+    /// Assembles a job's outline from what the store keeps, all read at one time. `read` returns the stored lines
+    /// a [`LineRead`] asks for: the start of the first and last line of each segment, and a failed step's last
+    /// lines, the most of them cut to a few hundred bytes.
     pub fn assemble(
         job: &Job,
         stored: StoredLog,
         parts: OutlineParts,
-        read: &mut dyn FnMut(u64, u64) -> Vec<(u64, String)>,
+        read: &mut dyn FnMut(LineRead) -> Vec<StoredLine>,
     ) -> LogOutline {
         let evidence = evidence(job, stored, parts.saved.as_ref());
-        let outlined = matches!(
-            evidence,
-            LogEvidence::Complete
-                | LogEvidence::Running
-                | LogEvidence::Partial
-                | LogEvidence::Truncated
-        );
+        let outlined = stored.kept && parts.saved.is_some();
         let saved = parts.saved.unwrap_or_default();
         let from = if outlined { saved.from } else { stored.lines };
         let segments = if outlined {
@@ -515,14 +514,7 @@ impl LogOutline {
             truncated: job.summary.log.truncated,
             kept: true,
         };
-        LogOutline::assemble(job, stored, parts, &mut |from, to| {
-            (from..to)
-                .filter_map(|number| {
-                    let text = lines.get(usize::try_from(number).ok()?)?;
-                    Some((number, text.clone()))
-                })
-                .collect()
-        })
+        LogOutline::assemble(job, stored, parts, &mut |read| read.of(lines))
     }
 
     /// The lines of step `number`, when known.
@@ -539,6 +531,13 @@ impl LogOutline {
 
 fn evidence(job: &Job, stored: StoredLog, saved: Option<&SavedOutline>) -> LogEvidence {
     let fin = job.summary.state.is_final();
+    if stored.lines > 0 && !stored.kept {
+        return LogEvidence::Expired;
+    }
+    // A log can reach its cap before its first line is stored.
+    if stored.truncated {
+        return LogEvidence::Truncated;
+    }
     if stored.lines == 0 {
         return if fin {
             LogEvidence::Missing
@@ -546,15 +545,10 @@ fn evidence(job: &Job, stored: StoredLog, saved: Option<&SavedOutline>) -> LogEv
             LogEvidence::Running
         };
     }
-    if !stored.kept {
-        return LogEvidence::Expired;
-    }
     let Some(saved) = saved else {
         return LogEvidence::NotOutlined;
     };
-    if stored.truncated {
-        LogEvidence::Truncated
-    } else if saved.from > 0 {
+    if saved.from > 0 {
         LogEvidence::Partial
     } else if !fin {
         LogEvidence::Running
@@ -563,13 +557,29 @@ fn evidence(job: &Job, stored: StoredLog, saved: Option<&SavedOutline>) -> LogEv
     }
 }
 
+/// The stored lines in `range`, each cut to `prefix` bytes.
+fn read_range(
+    read: &mut dyn FnMut(LineRead) -> Vec<StoredLine>,
+    range: LineRange,
+    prefix: u64,
+) -> Vec<StoredLine> {
+    let mut lines = read(LineRead {
+        from: range.from,
+        limit: range.to.saturating_sub(range.from),
+        prefix,
+        bytes: u64::MAX,
+    });
+    lines.retain(|line| line.line < range.to);
+    lines
+}
+
 /// The log from `from` to `lines`, cut at every group and section line.
 fn segments(
     from: u64,
     lines: u64,
     groups: &[LogGroup],
     sections: &[u64],
-    read: &mut dyn FnMut(u64, u64) -> Vec<(u64, String)>,
+    read: &mut dyn FnMut(LineRead) -> Vec<StoredLine>,
 ) -> Vec<Segment> {
     let mut starts: Vec<u64> = std::iter::once(from)
         .chain(groups.iter().map(|group| group.start))
@@ -579,10 +589,16 @@ fn segments(
     starts.sort_unstable();
     starts.dedup();
     let mut time = |line: u64| {
-        read(line, line + 1)
-            .into_iter()
-            .next()
-            .and_then(|(_, text)| time_of(&text))
+        read_range(
+            read,
+            LineRange {
+                from: line,
+                to: line + 1,
+            },
+            TIME_PREFIX,
+        )
+        .first()
+        .and_then(|line| time_of(&line.text))
     };
     starts
         .iter()
@@ -596,21 +612,15 @@ fn segments(
                 },
                 first: time(start),
                 last: time(end - 1),
-                title: groups
-                    .iter()
-                    .find(|group| group.start == start)
-                    .map(|group| group.title.clone()),
             }
         })
         .collect()
 }
 
 /// Whether `step` ran over `at`, in seconds: its stored times are whole seconds, so its last one is held to its end.
-fn holds(step: &Step, at: Option<u64>) -> bool {
-    let Some(started) = step.started_at else {
-        return false;
-    };
-    at.is_none_or(|at| at >= started && step.completed_at.is_none_or(|end| at <= end))
+fn holds(step: &Step, at: u64) -> bool {
+    step.started_at
+        .is_some_and(|started| at >= started && step.completed_at.is_none_or(|end| at <= end))
 }
 
 /// Each step's lines, by index into `steps`: the segments it got, with any between them.
@@ -618,26 +628,18 @@ fn attribute(steps: &[Step], segments: &[Segment]) -> Vec<Option<LineRange>> {
     let mut ranges: Vec<Option<LineRange>> = vec![None; steps.len()];
     let mut earliest = 0;
     for segment in segments {
-        let candidates: Vec<usize> = (earliest..steps.len())
-            .filter(|&index| {
-                let step = &steps[index];
-                holds(step, segment.first) && holds(step, segment.last)
-            })
+        let times: Vec<u64> = [segment.first, segment.last]
+            .into_iter()
+            .flatten()
             .collect();
-        let chosen = match candidates.as_slice() {
-            [only] => Some(*only),
-            [] => None,
-            several => {
-                let titled: Vec<usize> = several
-                    .iter()
-                    .copied()
-                    .filter(|&index| segment.title.as_deref() == Some(steps[index].name.as_str()))
-                    .collect();
-                match titled.as_slice() {
-                    [only] => Some(*only),
-                    _ => None,
-                }
-            }
+        if times.is_empty() {
+            continue;
+        }
+        let mut candidates = (earliest..steps.len())
+            .filter(|&index| times.iter().all(|&at| holds(&steps[index], at)));
+        let chosen = match (candidates.next(), candidates.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
         };
         if let Some(index) = chosen {
             earliest = index;
@@ -676,7 +678,7 @@ fn gaps<'range>(lines: u64, ranges: impl Iterator<Item = &'range LineRange>) -> 
 fn failure(
     job: &Job,
     steps: &[StepLines],
-    read: &mut dyn FnMut(u64, u64) -> Vec<(u64, String)>,
+    read: &mut dyn FnMut(LineRead) -> Vec<StoredLine>,
 ) -> FailureSummary {
     let step = job
         .steps
@@ -692,29 +694,31 @@ fn failure(
                 _ => None,
             })
     });
-    let tail: Vec<StyledLine> = range
-        .map(|range| {
-            read(range.to.saturating_sub(EXIT_SCAN).max(range.from), range.to)
-                .into_iter()
-                .map(|(number, text)| StyledLine::parse(number, &text))
-                .collect()
-        })
-        .unwrap_or_default();
-    let exit_code = tail.iter().rev().find_map(|line| {
-        (line.kind == LineKind::Error)
-            .then(|| line.text())
-            .and_then(|text| {
-                text.strip_prefix(EXIT)?
-                    .strip_suffix('.')?
-                    .parse::<i64>()
-                    .ok()
+    let last = |count: u64, range: LineRange| LineRange {
+        from: range.to.saturating_sub(count).max(range.from),
+        to: range.to,
+    };
+    let exit_code = range.and_then(|range| {
+        read_range(read, last(EXIT_SCAN, range), EXIT_PREFIX)
+            .iter()
+            .rev()
+            .map(StoredLine::styled)
+            .find_map(|line| {
+                (line.kind == LineKind::Error)
+                    .then(|| line.text())
+                    .and_then(|text| {
+                        text.strip_prefix(EXIT)?
+                            .strip_suffix('.')?
+                            .parse::<i64>()
+                            .ok()
+                    })
             })
     });
-    let excerpt = range.map(|_| {
-        let skip = tail
-            .len()
-            .saturating_sub(usize::try_from(EXCERPT).unwrap_or(usize::MAX));
-        tail[skip..].to_vec()
+    let excerpt = range.map(|range| {
+        read_range(read, last(EXCERPT, range), EXCERPT_LINE_BYTES)
+            .iter()
+            .map(StoredLine::styled)
+            .collect()
     });
     let shell = job
         .record
