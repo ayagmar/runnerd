@@ -39,8 +39,6 @@ use draw::Theme;
 const FRAME: Duration = Duration::from_millis(33);
 /// How long the feed waits between attempts to reach a daemon that went away.
 const RETRY: Duration = Duration::from_secs(2);
-/// How long the keys thread waits on the terminal before it looks for resizes and `stop` again.
-const KEYS_POLL: Duration = Duration::from_millis(100);
 /// How far back the slice's charts start.
 const HOST_HISTORY: u64 = 30 * 60;
 /// The window of the health figures: the last day.
@@ -142,30 +140,20 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
         .map_err(|error| local(&error))
 }
 
-/// Gives the terminal back for good: raw mode and the alternate screen off, the cursor shown.
-fn give_back(mut terminal: ratatui::DefaultTerminal) -> std::io::Result<()> {
+/// Gives the terminal back for good.
+fn give_back(terminal: ratatui::DefaultTerminal) -> std::io::Result<()> {
     let restored = output::restore();
-    let shown = terminal.show_cursor();
-    if shown.is_err() {
-        // Its drop would try again and print the failure on stderr, which panics when stderr is the terminal gone.
-        std::mem::forget(terminal);
-    }
-    restored.and(shown)
+    // Its drop shows the cursor, which `restore` did, and prints a failure on stderr, which panics when stderr is a
+    // terminal gone.
+    std::mem::forget(terminal);
+    restored
 }
 
 /// What the terminal answered, a terminal that is gone counting as done: there is nothing left to draw on or give
-/// back. Once hung up, or its other end closed, its writes and modes fail with EIO, and `/dev/tty`, which crossterm
-/// opens when stdin no longer answers as a terminal, with ENXIO.
+/// back.
 fn unless_gone(result: std::io::Result<()>) -> std::io::Result<()> {
-    use rustix::io::Errno;
     match result {
-        Err(error)
-            if [Errno::IO, Errno::NXIO]
-                .iter()
-                .any(|gone| error.raw_os_error() == Some(gone.raw_os_error())) =>
-        {
-            Ok(())
-        }
+        Err(error) if output::gone(&error) => Ok(()),
         result => result,
     }
 }
@@ -345,56 +333,65 @@ fn short(error: &ClientError) -> String {
     }
 }
 
-/// Reads keys on a thread of its own, since the terminal's reads block. Its end ends the TUI, as it means no more
-/// keys and so no `q`. Crossterm reads a terminal that is gone (hung up, or its other end closed) again and again
-/// without returning, so the thread polls the terminal itself, ends once the poll finds it gone, and asks crossterm
-/// only for what is already waiting.
+/// Reads keys on a thread of its own, since the terminal's reads block, and waits on a second one for that terminal
+/// to go away (hung up, or its other end closed). Either thread ending ends the TUI: no keys means no `q`. The wait
+/// is apart from the reads because crossterm, once it has read part of a sequence such as `ESC [`, reads a terminal
+/// that is gone again and again without returning.
 struct Keys {
     stop: Arc<AtomicBool>,
-    /// Never sent: it resolves when the thread drops its sender, however the thread ends.
-    ended: oneshot::Receiver<Infallible>,
+    /// Never sent, like `watched`: each resolves when its thread drops the sender, however the thread ends.
+    read: oneshot::Receiver<Infallible>,
+    watched: oneshot::Receiver<Infallible>,
 }
 
 impl Keys {
     fn spawn(send: UnboundedSender<Msg>) -> Keys {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
-        let (ending, ended) = oneshot::channel();
+        let (reading, read) = oneshot::channel();
         std::thread::spawn(move || {
-            let _ending = ending;
-            let Ok(input) = keyboard() else { return };
+            let _reading = reading;
             while !stopped.load(Ordering::Relaxed) {
-                if gone(&input) {
-                    return;
+                // Polled, not read, so that `stop` is seen within a tenth of a second.
+                match terminal::poll(Duration::from_millis(100)) {
+                    Ok(false) => continue,
+                    Ok(true) => {}
+                    Err(_) => return,
                 }
-                // Every key waiting, and a resize, which crossterm sees only when asked.
-                loop {
-                    match terminal::poll(Duration::ZERO) {
-                        Ok(true) => {}
-                        Ok(false) => break,
-                        Err(_) => return,
-                    }
-                    let msg = match terminal::read() {
-                        Ok(TerminalEvent::Key(key)) => Msg::Key(key),
-                        Ok(TerminalEvent::Resize(..)) => Msg::Resize,
-                        Ok(_) => continue,
-                        Err(_) => return,
-                    };
-                    if send.send(msg).is_err() {
-                        return;
-                    }
+                let msg = match terminal::read() {
+                    Ok(TerminalEvent::Key(key)) => Msg::Key(key),
+                    Ok(TerminalEvent::Resize(..)) => Msg::Resize,
+                    Ok(_) => continue,
+                    Err(_) => return,
+                };
+                if send.send(msg).is_err() {
+                    return;
                 }
             }
         });
-        Keys { stop, ended }
+        let (watching, watched) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _watching = watching;
+            if let Ok(input) = keyboard() {
+                wait_gone(&input);
+            }
+        });
+        Keys {
+            stop,
+            read,
+            watched,
+        }
     }
 
-    /// Once the thread ended; cancel-safe.
+    /// Once either thread ended; cancel-safe.
     async fn ended(&mut self) {
-        let _ = (&mut self.ended).await;
+        tokio::select! {
+            _ = &mut self.read => {}
+            _ = &mut self.watched => {}
+        }
     }
 
-    /// Tells the thread to stop and does not wait for it: the process exits next, which ends a read in progress.
+    /// Tells the reader to stop and does not wait for it: the process exits next, which ends a read in progress.
     fn stop(self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -413,17 +410,12 @@ fn keyboard() -> std::io::Result<OwnedFd> {
     Ok(tty.into())
 }
 
-/// Waits up to `KEYS_POLL` for a key; true if the terminal is gone instead.
-fn gone(input: &OwnedFd) -> bool {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    let mut fds = [PollFd::new(input, PollFlags::IN)];
-    let timeout = Timespec::try_from(KEYS_POLL).ok();
-    match poll(&mut fds, timeout.as_ref()) {
-        Ok(_) => fds[0]
-            .revents()
-            .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL),
-        Err(error) => error != rustix::io::Errno::INTR,
-    }
+/// Returns once `input` is gone. It asks for no events, so a key does not wake it; the kernel reports a hangup, an
+/// error and a closed descriptor whatever was asked.
+fn wait_gone(input: &OwnedFd) {
+    use rustix::event::{PollFd, PollFlags, poll};
+    let mut fds = [PollFd::new(input, PollFlags::empty())];
+    while poll(&mut fds, None) == Err(rustix::io::Errno::INTR) {}
 }
 
 /// Makes the requests the reducer asks for, each in a task of its own whose answer comes back as a message, so the

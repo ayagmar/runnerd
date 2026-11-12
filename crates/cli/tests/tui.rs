@@ -127,18 +127,20 @@ enum Session {
     /// The leader of a session of its own whose controlling terminal it is, as a login shell over SSH: closing it
     /// hangs it up, and the kernel sends SIGHUP and SIGCONT.
     Leader,
+    /// As `Job`, but reading keys from a second terminal, as `runnerctl tui < /dev/pts/N` does.
+    Split,
 }
 
-/// `runnerctl tui` on a pseudo-terminal of 100×30.
-struct Tui {
-    child: Child,
+/// A pseudo-terminal of 100×30, with what it shows copied into `output`.
+struct Pty {
     /// The terminal's other end; `None` once closed.
     master: Option<Arc<File>>,
     output: Arc<Mutex<Vec<u8>>>,
 }
 
-impl Tui {
-    fn start(socket: &Path, session: Session) -> Tui {
+impl Pty {
+    /// The terminal and its end for a child's stdio.
+    fn open() -> (Pty, File) {
         let master =
             openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
         grantpt(&master).unwrap();
@@ -159,8 +161,49 @@ impl Tui {
             .write(true)
             .open(name.to_str().unwrap())
             .unwrap();
+        let master = Arc::new(File::from(master));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        // A weak hold, so that dropping `Pty::master` closes the terminal: the reader lets go within a poll.
+        let (reader, read) = (Arc::downgrade(&master), output.clone());
+        std::thread::spawn(move || read_all(&reader, &read));
+        let pty = Pty {
+            master: Some(master),
+            output,
+        };
+        (pty, slave)
+    }
+
+    fn master(&self) -> &File {
+        self.master.as_deref().expect("the terminal is open")
+    }
+
+    /// Closes the terminal's other end, as sshd does when the connection drops.
+    fn close(&mut self) {
+        self.master = None;
+    }
+}
+
+/// `runnerctl tui` on a pseudo-terminal.
+struct Tui {
+    child: Child,
+    /// Its stdout and stderr, and its stdin unless `keyboard` is there.
+    screen: Pty,
+    /// Its stdin, when on a terminal of its own.
+    keyboard: Option<Pty>,
+}
+
+impl Tui {
+    fn start(socket: &Path, session: Session) -> Tui {
+        let (screen, slave) = Pty::open();
+        let (keyboard, stdin) = match session {
+            Session::Split => {
+                let (keyboard, stdin) = Pty::open();
+                (Some(keyboard), stdin)
+            }
+            Session::Job | Session::Leader => (None, slave.try_clone().unwrap()),
+        };
         let mut command = match session {
-            Session::Job => {
+            Session::Job | Session::Split => {
                 let mut command = Command::new(env!("CARGO_BIN_EXE_runnerctl"));
                 command.process_group(0);
                 command
@@ -178,41 +221,45 @@ impl Tui {
             .arg("tui")
             .env("TERM", "xterm-256color")
             .env_remove("NO_COLOR")
-            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdin(Stdio::from(stdin))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave))
             .spawn()
             .unwrap();
-        let master = Arc::new(File::from(master));
-        let output = Arc::new(Mutex::new(Vec::new()));
-        // A weak hold, so that dropping `Tui::master` closes the terminal: the reader lets go within a poll.
-        let (reader, read) = (Arc::downgrade(&master), output.clone());
-        std::thread::spawn(move || read_all(&reader, &read));
         Tui {
             child,
-            master: Some(master),
-            output,
+            screen,
+            keyboard,
         }
     }
 
-    fn master(&self) -> &File {
-        self.master.as_deref().expect("the terminal is open")
+    /// The terminal it reads keys from, which raw mode is about.
+    fn keys(&self) -> &Pty {
+        self.keyboard.as_ref().unwrap_or(&self.screen)
     }
 
-    /// Closes the terminal's other end, as sshd does when the connection drops.
+    /// Closes every terminal it has.
     fn close(&mut self) {
-        self.master = None;
+        self.screen.close();
+        self.close_keyboard();
+    }
+
+    /// Closes the terminal it reads keys from, when that is not its screen.
+    fn close_keyboard(&mut self) {
+        if let Some(keyboard) = &mut self.keyboard {
+            keyboard.close();
+        }
     }
 
     /// Whether the terminal is in raw mode: no line editing, no echo.
     fn raw(&self) -> bool {
-        let modes = tcgetattr(self.master()).unwrap().local_modes;
+        let modes = tcgetattr(self.keys().master()).unwrap().local_modes;
         !modes.intersects(LocalModes::ICANON | LocalModes::ECHO)
     }
 
     /// Whether the terminal is as a shell wants it: line editing and echo.
     fn cooked(&self) -> bool {
-        let modes = tcgetattr(self.master()).unwrap().local_modes;
+        let modes = tcgetattr(self.keys().master()).unwrap().local_modes;
         modes.contains(LocalModes::ICANON | LocalModes::ECHO)
     }
 
@@ -225,7 +272,7 @@ impl Tui {
 
     /// Everything written since `from`, and the new length.
     fn written_since(&self, from: usize) -> (String, usize) {
-        let output = self.output.lock().unwrap();
+        let output = self.screen.output.lock().unwrap();
         (
             String::from_utf8_lossy(&output[from.min(output.len())..]).into_owned(),
             output.len(),
@@ -233,7 +280,7 @@ impl Tui {
     }
 
     fn written(&self) -> usize {
-        self.output.lock().unwrap().len()
+        self.screen.output.lock().unwrap().len()
     }
 
     fn signal(&self, signal: Signal) {
@@ -241,7 +288,7 @@ impl Tui {
     }
 
     fn key(&self, bytes: &[u8]) {
-        self.master().write_all(bytes).unwrap();
+        self.keys().master().write_all(bytes).unwrap();
     }
 
     fn exited(&mut self) -> bool {
@@ -304,6 +351,7 @@ fn started_in(dir: &TempDir, session: Session) -> Tui {
 /// Leaving the alternate screen, which a restored terminal must have done last.
 const LEAVE: &str = "\x1b[?1049l";
 const ENTER: &str = "\x1b[?1049h";
+const SHOW_CURSOR: &str = "\x1b[?25h";
 
 #[test]
 fn sigterm_quits_and_gives_the_terminal_back() {
@@ -393,4 +441,30 @@ fn a_hangup_while_suspended_ends_the_tui_once_continued() {
     tui.close();
     wait("runnerctl to exit", || tui.exited());
     assert!(tui.succeeded(), "a terminal gone ends the TUI as q does");
+}
+
+#[test]
+fn losing_the_keyboard_mid_sequence_ends_the_tui() {
+    let dir = TempDir::new();
+    let mut tui = started_in(&dir, Session::Split);
+    // Half an escape sequence, which crossterm reads and then waits on for the rest.
+    tui.key(b"\x1b[");
+    std::thread::sleep(Duration::from_millis(200));
+    tui.close_keyboard();
+    wait("runnerctl to exit", || tui.exited());
+    assert!(tui.succeeded(), "a terminal gone ends the TUI as q does");
+}
+
+#[test]
+fn losing_the_keyboard_gives_the_screen_back() {
+    let dir = TempDir::new();
+    let mut tui = started_in(&dir, Session::Split);
+    tui.close_keyboard();
+    wait("runnerctl to exit", || tui.exited());
+    assert!(tui.succeeded(), "a terminal gone ends the TUI as q does");
+    wait("the screen given back", || {
+        let (written, _) = tui.written_since(0);
+        let after = &written[written.rfind(ENTER).unwrap()..];
+        after.contains(LEAVE) && after.contains(SHOW_CURSOR)
+    });
 }
