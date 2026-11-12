@@ -8,7 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{BuildCacheCounts, Column, JobPage, JobState, View};
+use runnerd_core::api::{BuildCacheCounts, Column, JobPage, JobState, Section, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
 use super::super::app::{App, Effect, Msg, View as AppView};
@@ -271,7 +271,7 @@ fn the_tabs_follow_core_s_views_and_each_digit_opens_its_tab() {
         .collect();
     assert_eq!(shown.first(), Some(&"Overview"), "{}", rows[0]);
     assert!(
-        shown.contains(&"Records") && shown.contains(&"Sizing"),
+        shown.contains(&"Jobs") && shown.contains(&"Capacity"),
         "{}",
         rows[0]
     );
@@ -292,12 +292,41 @@ fn the_tabs_follow_core_s_views_and_each_digit_opens_its_tab() {
         );
     }
     // A different order of core's views is a different order of tabs and of keys.
-    let swapped = [View::Records, View::Overview, View::Config, View::Sizing];
+    let swapped = [View::Jobs, View::Overview, View::Settings, View::Capacity];
     let tabs: Vec<_> = AppView::tabs_of(&swapped)
         .into_iter()
         .map(|(_, tui)| tui)
         .collect();
-    assert_eq!(tabs, [AppView::Records, AppView::Overview, AppView::Sizing]);
+    assert_eq!(tabs, [AppView::History, AppView::Overview, AppView::Sizing]);
+}
+
+#[test]
+fn a_views_digit_again_opens_its_next_section_and_the_tab_names_it() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let jobs = AppView::tabs()
+        .iter()
+        .position(|(view, _)| *view == View::Jobs)
+        .unwrap();
+    let digit = char::from_digit(u32::try_from(jobs + 1).unwrap(), 10).unwrap();
+    let mut opened = Vec::new();
+    for _ in 0..3 {
+        app.update(key(KeyCode::Char(digit)));
+        opened.push(app.view);
+    }
+    assert_eq!(
+        opened,
+        [AppView::History, AppView::Records, AppView::History],
+        "each section core lists for Jobs, in its order, then round again"
+    );
+    app.update(key(KeyCode::Char(digit)));
+    let (rows, _) = frame(&app);
+    let tab = format!(
+        " {digit} {} · {} ",
+        View::Jobs.title(),
+        Section::Records.title()
+    );
+    assert!(rows[0].contains(&tab), "{tab}: {}", rows[0]);
 }
 
 #[test]
@@ -317,12 +346,12 @@ fn the_footer_and_the_help_name_the_views_the_keys_open() {
         .unwrap_or_else(|| panic!("help lists {digits}: {rows:?}"));
     assert!(row.contains(&names), "help names the views {names}: {row}");
     // Keys follow the order of the tabs, whatever it is, and the names follow the keys.
-    let swapped = AppView::tabs_of(&[View::Records, View::Overview, View::Config, View::Sizing]);
+    let swapped = AppView::tabs_of(&[View::Jobs, View::Overview, View::Settings, View::Capacity]);
     assert_eq!(
         view_keys(&swapped),
         (
             "1 2 3".to_owned(),
-            "records, overview, sizing; o and h too".to_owned()
+            "jobs, overview, capacity; o and h too".to_owned()
         )
     );
 }
@@ -347,7 +376,8 @@ fn the_history_and_records_tables_are_headed_as_core_names_their_columns() {
             Column::Queued,
         ],
     );
-    app.update(key(KeyCode::Char('3')));
+    // From the history, the Jobs key again opens its next section.
+    app.update(key(KeyCode::Char('2')));
     app.update(Msg::Records(daemon.records.clone()));
     let (rows, _) = frame(&app);
     assert_heads(
@@ -405,7 +435,7 @@ fn a_job_with_cache_hits_and_refused_uploads_shows_both() {
 fn records_near_max_total_say_so_as_core_does() {
     let (daemon, facts) = fixtures();
     let mut app = app(&daemon);
-    app.update(key(KeyCode::Char('3')));
+    super::open_records(&mut app);
     app.update(Msg::Records(daemon.records.clone()));
     let (rows, _) = frame(&app);
     let all = rows.join("\n");
@@ -440,7 +470,7 @@ fn the_overview_says_what_the_months_job_minutes_would_have_cost_as_core_words_i
 fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
     let (daemon, _) = fixtures();
     let mut app = app(&daemon);
-    app.update(key(KeyCode::Char('4')));
+    app.update(key(KeyCode::Char('3')));
     let sizing = runnerd_fixtures::sizing(NOW);
     let plan = sizing.auto_plan.clone().unwrap();
     app.update(Msg::Sizing(sizing.clone()));

@@ -35,6 +35,7 @@ use runnerd_core::api::{
 use runnerd_core::api::{
     Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
 };
+use runnerd_core::api::{Attention, DoctorState, attention_items};
 use runnerd_core::api::{
     AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
     WaitSpread, WeekWaits,
@@ -82,6 +83,9 @@ pub struct Fixtures {
     pub doctor_delay: std::time::Duration,
     /// Why `GET /v1/doctor` fails, as the daemon's 500; `None`, it answers.
     pub doctor_error: Option<String>,
+    /// What `GET /v1/doctor` answers; `None`, the demo's own. One not run or failed is a 503 with its state's line,
+    /// as the daemon answers it.
+    pub doctor: Option<Doctor>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -632,6 +636,7 @@ impl Fixtures {
                     }],
                     paused: false,
                     queued_jobs: 0,
+                    listing: None,
                 },
                 RepositoryStatus {
                     name: "halyard/storefront".to_owned(),
@@ -647,6 +652,7 @@ impl Fixtures {
                     }],
                     paused: false,
                     queued_jobs: 1,
+                    listing: None,
                 },
             ],
             queued: vec![QueuedJob {
@@ -732,6 +738,7 @@ impl Fixtures {
             sizing: None,
             doctor_delay: std::time::Duration::ZERO,
             doctor_error: None,
+            doctor: None,
         }
     }
 
@@ -1424,6 +1431,53 @@ fn remove_records(fixtures: &mut Fixtures, chosen: impl Fn(&Record) -> bool) -> 
     }
 }
 
+/// The doctor's checks, run 3 minutes before `now` for the config the fake runs with.
+fn doctor(fixtures: &Fixtures) -> Doctor {
+    Doctor {
+        checks: vec![
+            Check { name: "Docker".to_owned(), status: CheckStatus::Pass, detail: "29.1.3, reachable".to_owned(), fix: None },
+            Check { name: "sysbox".to_owned(), status: CheckStatus::Pass, detail: "sysbox-runc registered".to_owned(), fix: None },
+            Check {
+                name: "slice".to_owned(),
+                status: CheckStatus::Warn,
+                detail: "runnerd.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
+                fix: Some("systemctl edit runnerd.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
+            },
+            Check {
+                name: "repository".to_owned(),
+                status: CheckStatus::Warn,
+                detail: "halyard/docs is public: anyone who opens a pull request on it can run code on this host, and their jobs share runnerd's caches with your trusted jobs".to_owned(),
+                fix: Some("serve private repositories only; for a public one, have GitHub require approval before it runs workflows from fork pull requests (the repository's Actions settings)".to_owned()),
+            },
+            Check {
+                name: "config file".to_owned(),
+                status: CheckStatus::Warn,
+                detail: "/home/forge/.config/runnerd/runnerd.toml has mode 644, so other users can read it, and any notification secret the dashboard saves in it".to_owned(),
+                fix: Some("chmod 600 '/home/forge/.config/runnerd/runnerd.toml'".to_owned()),
+            },
+        ],
+        state: Some(DoctorState::Ready { at: fixtures.now - 180 }),
+    }
+}
+
+/// What needs attention, as core words it from the fake's status, doctor and insights; the revision is a hash of the
+/// content, so it changes when the content does, as the daemon's does.
+fn attention(fixtures: &Fixtures) -> Attention {
+    let items = attention_items(
+        &fixtures.status,
+        &doctor(fixtures),
+        Some(&insights(fixtures)),
+        fixtures.now,
+    );
+    let revision = serde_json::to_string(&items)
+        .unwrap()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    Attention::new("demo".to_owned(), revision, items)
+}
+
 fn router(fake: Fake) -> Router {
     Router::new()
         .route(
@@ -1657,32 +1711,20 @@ fn router(fake: Fake) -> Router {
                 if let Some(message) = error {
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { message })).into_response();
                 }
-                Json(Doctor {
-                    checks: vec![
-                        Check { name: "Docker".to_owned(), status: CheckStatus::Pass, detail: "29.1.3, reachable".to_owned(), fix: None },
-                        Check { name: "sysbox".to_owned(), status: CheckStatus::Pass, detail: "sysbox-runc registered".to_owned(), fix: None },
-                        Check {
-                            name: "slice".to_owned(),
-                            status: CheckStatus::Warn,
-                            detail: "runnerd.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
-                            fix: Some("systemctl edit runnerd.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
-                        },
-                        Check {
-                            name: "repository".to_owned(),
-                            status: CheckStatus::Warn,
-                            detail: "halyard/docs is public: anyone who opens a pull request on it can run code on this host, and their jobs share runnerd's caches with your trusted jobs".to_owned(),
-                            fix: Some("serve private repositories only; for a public one, have GitHub require approval before it runs workflows from fork pull requests (the repository's Actions settings)".to_owned()),
-                        },
-                        Check {
-                            name: "config file".to_owned(),
-                            status: CheckStatus::Warn,
-                            detail: "/home/forge/.config/runnerd/runnerd.toml has mode 644, so other users can read it, and any notification secret the dashboard saves in it".to_owned(),
-                            fix: Some("chmod 600 '/home/forge/.config/runnerd/runnerd.toml'".to_owned()),
-                        },
-                    ],
-                })
-                .into_response()
+                let fixtures = fake.fixtures.lock().unwrap();
+                let answer = fixtures.doctor.clone().unwrap_or_else(|| doctor(&fixtures));
+                match &answer.state {
+                    Some(state @ (DoctorState::NotRun | DoctorState::Failed { .. })) => {
+                        let message = state.line(fixtures.now).unwrap_or_default();
+                        (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { message })).into_response()
+                    }
+                    _ => Json(answer).into_response(),
+                }
             }),
+        )
+        .route(
+            "/v1/attention",
+            get(|State(fake): State<Fake>| async move { Json(attention(&fake.fixtures.lock().unwrap())) }),
         )
         .route("/v1/events", get(events))
         .with_state(fake)

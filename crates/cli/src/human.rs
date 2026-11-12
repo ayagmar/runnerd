@@ -933,7 +933,8 @@ pub(crate) fn notify_test(tested: &NotifyTest, paint: Paint) -> String {
     out
 }
 
-/// One line for an event, as `watch` prints when its output is not a terminal. `None` for live samples.
+/// One line for an event, as `watch` prints when its output is not a terminal. `None` for live samples, log lines and
+/// a new revision of what needs attention.
 pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<String> {
     let kind = envelope.event.kind();
     let text = match &envelope.event {
@@ -1018,7 +1019,10 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             "{} {}: {}; no runner for {}s",
             failure.repository, failure.profile, failure.error, failure.held_for
         ),
-        Event::JobSample { .. } | Event::HostSample { .. } | Event::LogLine { .. } => return None,
+        Event::JobSample { .. }
+        | Event::HostSample { .. }
+        | Event::LogLine { .. }
+        | Event::AttentionChanged { .. } => return None,
     };
     Some(format!(
         "{} {text}",
@@ -1059,6 +1063,7 @@ mod tests {
                 }],
                 paused: true,
                 queued_jobs: 2,
+                listing: None,
             },
         };
         assert_eq!(

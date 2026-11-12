@@ -70,6 +70,7 @@ fn repository(name: &str, profile: &str) -> RepositoryStatus {
         }],
         paused: false,
         queued_jobs: 0,
+        listing: None,
     }
 }
 
@@ -178,6 +179,12 @@ fn event(id: Option<u64>, event: Event) -> Msg {
 
 fn key(code: KeyCode) -> Msg {
     Msg::Key(KeyEvent::from(code))
+}
+
+/// Opens the records from the overview: the Jobs key twice, its second section. The effects of the second.
+fn open_records(app: &mut App) -> Vec<Effect> {
+    app.update(key(KeyCode::Char('2')));
+    app.update(key(KeyCode::Char('2')))
 }
 
 /// The jobs `effects` open.
@@ -513,7 +520,7 @@ fn records(jobs: &[u64]) -> Records {
 #[test]
 fn records_near_max_total_say_so_first_on_a_narrow_heading() {
     let mut app = app();
-    app.update(key(KeyCode::Char('3')));
+    open_records(&mut app);
     let mut near = records(&[42, 43]);
     near.limits.max_total = 700 << 20;
     app.update(Msg::Records(near));
@@ -527,7 +534,7 @@ fn records_near_max_total_say_so_first_on_a_narrow_heading() {
 #[test]
 fn a_refused_pause_asks_over_a_removal_which_comes_back_once_answered() {
     let mut app = app();
-    app.update(key(KeyCode::Char('3')));
+    open_records(&mut app);
     app.update(Msg::Records(records(&[42, 43])));
     app.update(key(KeyCode::Char('j')));
     app.update(key(KeyCode::Char('d')));
@@ -567,7 +574,7 @@ fn a_refused_pause_asks_over_a_removal_which_comes_back_once_answered() {
 #[test]
 fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
     let mut app = app();
-    assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Records]);
+    assert_eq!(open_records(&mut app), vec![Effect::Records]);
     app.update(Msg::Records(records(&[42, 43])));
     app.update(key(KeyCode::Char('j')));
     let listed = screen(&app, 80, 24, false);
@@ -675,7 +682,7 @@ fn sizing() -> Sizing {
 #[test]
 fn sizing_advice_is_written_into_the_config_only_after_y() {
     let mut app = app();
-    assert_eq!(app.update(key(KeyCode::Char('4'))), vec![Effect::Sizing]);
+    assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Sizing]);
     app.update(Msg::Sizing(sizing()));
     assert_eq!(
         app.update(key(KeyCode::Char('a'))),
@@ -736,7 +743,7 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
 #[test]
 fn a_refused_pause_asks_over_a_resize_which_comes_back_once_answered() {
     let mut app = app();
-    app.update(key(KeyCode::Char('4')));
+    app.update(key(KeyCode::Char('3')));
     app.update(Msg::Sizing(sizing()));
     app.update(key(KeyCode::Char('j')));
     app.update(key(KeyCode::Char('a')));
@@ -1929,7 +1936,7 @@ fn the_help_shows_every_key_in_an_80_by_24_terminal() {
 #[test]
 fn an_empty_records_view_says_in_full_how_records_are_kept() {
     let mut app = app();
-    app.update(key(KeyCode::Char('3')));
+    open_records(&mut app);
     app.update(Msg::Records(records(&[])));
     let shown: String = screen(&app, 80, 24, false)
         .split_whitespace()
@@ -2183,7 +2190,7 @@ fn a_job_s_page_compares_it_with_the_same_job_s_latest_runs() {
 fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
     let mut app = app();
-    app.update(key(KeyCode::Char('4')));
+    app.update(key(KeyCode::Char('3')));
     let mut sizing = sizing();
     sizing.auto = true;
     sizing.auto_plan = Some(AutoPlan {
@@ -2705,7 +2712,7 @@ fn a_step_shows_the_duration_it_has_and_none_it_lacks() {
 #[test]
 fn a_sizing_row_of_a_job_without_a_name_says_a_job() {
     let mut app = app();
-    app.update(key(KeyCode::Char('4')));
+    app.update(key(KeyCode::Char('3')));
     let mut unnamed = sizing();
     for profile in &mut unnamed.profiles {
         profile.jobs[0].workflow = None;

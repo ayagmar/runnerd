@@ -838,6 +838,7 @@ fn repository(name: &str) -> api::RepositoryStatus {
         }],
         paused: false,
         queued_jobs: 0,
+        listing: None,
     }
 }
 

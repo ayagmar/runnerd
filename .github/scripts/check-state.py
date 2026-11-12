@@ -50,6 +50,8 @@ ROOTS = (
     "crates/core/src/observe/metrics.rs:Sampler",
     "crates/daemon/src/api/notify.rs:Target",
     "crates/daemon/src/api/events.rs:Events",
+    "crates/daemon/src/api/doctor_cache.rs:Last",
+    "crates/daemon/src/api/attention.rs:Snapshot",
     "crates/cli/src/tui/app.rs:App",
     "crates/cli/src/watch.rs:State",
     "crates/web/src/auth.rs:Credentials",

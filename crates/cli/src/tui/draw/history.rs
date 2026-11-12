@@ -21,10 +21,10 @@ pub(super) fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, th
     heading(
         frame,
         title,
-        api::View::History.title(),
+        api::Section::History.title(),
         history_note(
             filters,
-            usize::from(title.width).saturating_sub(api::View::History.title().width() + 2),
+            usize::from(title.width).saturating_sub(api::Section::History.title().width() + 2),
         ),
         theme,
     );

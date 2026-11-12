@@ -20,6 +20,8 @@ xdg-open "$(head -n 1 "$XDG_RUNTIME_DIR/runnerd.web")"
 
 The browser stays signed in for 30 days after its last visit. `runnerctl web --sign-out-all` makes a new session secret (`dashboard-session` beside the job history), which signs every browser out and ends every earlier link and QR code. Writes such as a pause also need the dashboard's own `Origin`, so another site open in the browser cannot send them. Memory and CPU are sampled every 2 s, so a shorter peak does not show.
 
+The navigation has five views: Overview, Jobs (History and Records), Insights, Capacity (Sizing and Caches) and Settings (Config).
+
 | Page | Shows |
 |---|---|
 | Overview | slots running, jobs waiting, the p95 wait over 24 hours, failures (red only when a runner failed, not when a job's tests do); each waiting job with why it waits; the memory budget as a bar, hatched where the host or [measured admission](../admission/#measured-admission) closes it; a card per slot; the latest jobs; pause and resume per repository, which lasts across restarts |
@@ -147,7 +149,7 @@ Peaks cover each job's recent runs, CPU peaks only runs at the profile's current
 
 ## Terminal dashboard
 
-`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views, `1` to `4`, are Overview, History, Records and Sizing. `enter` opens a job: its timeline, latest runs, steps, memory and CPU against the caps, and the log, followed while the job runs.
+`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views, `1` to `3`, are Overview, Jobs and Capacity; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records. `enter` opens a job: its timeline, latest runs, steps, memory and CPU against the caps, and the log, followed while the job runs.
 
 <Tui
   name="overview-96"
@@ -161,7 +163,7 @@ Peaks cover each job's recent runs, CPU peaks only runs at the profile's current
 
 | Key | |
 |---|---|
-| `1` `2` `3` `4` | overview, history, records, sizing; `o` and `h` open the first two too |
+| `1` `2` `3` | overview, jobs, capacity; again for the view's next section; `o` and `h` open the overview and history too |
 | `tab`, `j` `k` or arrows, `PgDn` `PgUp` | the overview's pane; move in it, or scroll a log; by ten |
 | `enter`, `esc` | open the selected job; back |
 | `p` `r`, `P` `U` | pause or resume the selected repository, or every one; a pause refused while a job runs asks before forcing it |

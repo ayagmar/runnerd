@@ -4,7 +4,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, Insight, InsightKind, Insights, RepositoryWaits, RunLink, Tone, View, WaitSpread,
+    Digest, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits, RunLink, Tone, View,
+    WaitSpread,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -131,7 +132,7 @@ fn waits(waits: &[RepositoryWaits]) -> Markup {
                     thead {
                         tr {
                             th scope="col" { "Repository" }
-                            th scope="col" .number { "Jobs" }
+                            th scope="col" .number { (JOBS_HEADING) }
                             th scope="col" .number { "Median" }
                             th scope="col" .number { "p95" }
                             th scope="col" .number { "Warm median" }

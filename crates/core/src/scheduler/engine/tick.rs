@@ -1288,6 +1288,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     fn apply_queued(&mut self, listings: Vec<Listed>, listing: Mark) {
         let floor = self.config.host.poll_interval;
         let taken = self.taken();
+        let now = self.now();
         for Listed {
             repository,
             answer,
@@ -1295,6 +1296,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         } in listings
         {
             let mut listed = false;
+            let mut failed = None;
             let queued = match answer {
                 Ok(queued) => {
                     listed = true;
@@ -1305,7 +1307,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Vec::new()
                 }
                 Err(error) => {
-                    warn!("{repository}: cannot list queued jobs: {error}");
+                    // What clients are told: GitHub's text could echo what was sent, the token included.
+                    warn!(
+                        "{repository}: cannot list queued jobs: {}",
+                        super::listing::problem(&error).why()
+                    );
+                    failed = Some(error);
                     Vec::new()
                 }
             };
@@ -1329,6 +1336,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         waits.retain(|job| queued.iter().any(|listed| listed.id == job));
                     }
                     state.listing_mut().answer(queued);
+                } else if let Some(error) = &failed {
+                    state.listing_mut().fail_with(error, now);
                 } else {
                     state.listing_mut().fail();
                 }

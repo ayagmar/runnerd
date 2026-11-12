@@ -24,7 +24,7 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
         heading(
             frame,
             title,
-            api::View::Sizing.title(),
+            api::Section::Sizing.title(),
             String::new(),
             theme,
         );
@@ -46,7 +46,7 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
     heading(
         frame,
         title,
-        api::View::Sizing.title(),
+        api::Section::Sizing.title(),
         fit_details(
             [(0, format!("{} of history", duration(sizing.covered())))]
                 .into_iter()
@@ -56,7 +56,7 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
                     format!("auto sizing {}", if sizing.auto { "on" } else { "off" }),
                 )])
                 .collect(),
-            usize::from(title.width).saturating_sub(api::View::Sizing.title().width() + 2),
+            usize::from(title.width).saturating_sub(api::Section::Sizing.title().width() + 2),
         ),
         theme,
     );

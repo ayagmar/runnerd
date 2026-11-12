@@ -1508,6 +1508,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1515,6 +1516,7 @@ name = "runnerd-fixtures"
 version = "0.1.0"
 dependencies = [
  "runnerd-core",
+ "serde_json",
 ]
 
 [[package]]

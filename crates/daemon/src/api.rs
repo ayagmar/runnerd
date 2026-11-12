@@ -1,8 +1,9 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
 //! no scheduling state of its own and returns no secret but a pairing link. History reads are in `history`, the event stream in
-//! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`, records and the shells
-//! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path; `notify` sends
+//! `events`, pause, resume, reseed, cache clean, the config file and the doctor's route in `control`, records and the
+//! shells in them in `records`. `doctor_cache` keeps the doctor's last run of the host and `attention` what needs
+//! attention, each in one worker of its own. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path; `notify` sends
 //! `[notify]`'s notifications and never returns a target's URL or headers. Signing
 //! every browser out of the dashboard and making its pairing links go through `runnerd_web::Sessions`, which owns
 //! them; a pairing link is the one secret the API returns, to the owner only.
@@ -31,8 +32,10 @@ use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
 
+mod attention;
 mod auto;
 mod control;
+mod doctor_cache;
 mod events;
 mod history;
 mod notify;
@@ -81,9 +84,15 @@ pub(crate) struct ConfigSource {
     pub auto_every: std::time::Duration,
     /// How the notifier paces itself and reads the local time: `notify::SETUP`, or a test's.
     pub notify: notify::Setup,
+    /// How the doctor reads the host and how often: `doctor_cache::SETUP`, or a test's.
+    pub doctor: doctor_cache::Setup,
+    /// How often the attention worker looks: `attention::TIMING`, or a test's.
+    pub attention: attention::Timing,
 }
 
+pub(crate) use attention::TIMING as ATTENTION;
 pub(crate) use auto::EVERY as AUTO_SIZING_EVERY;
+pub(crate) use doctor_cache::setup as doctor_setup;
 pub(crate) use notify::SETUP as NOTIFY;
 
 /// The config file as last read or written.
@@ -100,8 +109,9 @@ struct AppState {
     /// Set when the server stops, so streams that would never end do.
     stopping: watch::Receiver<bool>,
     config: Arc<Mutex<ConfigText>>,
-    /// Signalled each time `config` is replaced, for the notifier.
-    config_replaced: Arc<tokio::sync::Notify>,
+    /// `config::revision` of `config`'s text, sent each time it is replaced: the notifier, the doctor and the attention
+    /// worker each follow it with a receiver of their own.
+    config_revision: Arc<watch::Sender<String>>,
     memory_max: MemoryMax,
     cpus: SliceCpus,
     sync_dir: SyncDir,
@@ -109,6 +119,10 @@ struct AppState {
     sessions: Arc<Sessions>,
     /// `[web]` as the config read at start said, which the dashboard runs with until a restart.
     dashboard: Dashboard,
+    /// The doctor's last run of the host.
+    doctors: doctor_cache::Doctors,
+    /// What needs attention, as its worker last published it.
+    attention: watch::Receiver<runnerd_core::api::Attention>,
 }
 
 /// The authenticated sender of a request.
@@ -162,6 +176,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/config", put(control::replace_config))
         .route("/v1/config/check", post(control::check_config))
         .route("/v1/doctor", get(control::doctor))
+        .route("/v1/attention", get(attention::attention))
         .route("/v1/shutdown", post(shutdown))
         .route("/v1/dashboard", get(dashboard))
         .route("/v1/dashboard/sign-out", post(sign_out_dashboard))
@@ -336,26 +351,34 @@ async fn serve_for(
             .and_then(|parsed| parsed.web.open)
             .map(|open| open.to_string()),
     };
+    let doctor_cache::Cache { doctors, worker } = doctor_cache::cache(config.doctor);
+    let (attention, attention_receiver) = watch::channel(attention::first(&handle.status.borrow()));
     let state = AppState {
         handle,
         owner,
         stopping: stopping_receiver,
+        config_revision: Arc::new(watch::Sender::new(runnerd_core::config::revision(
+            &config.text,
+        ))),
         config: Arc::new(Mutex::new(ConfigText {
             path: config.path,
             text: config.text,
         })),
-        config_replaced: Arc::default(),
         memory_max: config.memory_max,
         cpus: config.cpus,
         sync_dir: config.sync_dir,
         sessions,
         dashboard,
+        doctors,
+        attention: attention_receiver,
     };
+    tokio::spawn(doctor_cache::run(state.clone(), worker));
+    tokio::spawn(attention::run(state.clone(), attention, config.attention));
     tokio::spawn(auto::run(state.clone(), config.auto_every));
     tokio::spawn(notify::run(notify::Notifier {
         store: state.handle.store.clone(),
         config: state.config.clone(),
-        replaced: state.config_replaced.clone(),
+        replaced: state.config_revision.subscribe(),
         stopping: state.stopping.clone(),
         setup: config.notify,
     }));

@@ -288,7 +288,8 @@ async fn config(State(app): State<App>, Query(query): Query<ConfigQuery>) -> Res
 /// `GET /config/doctor`: the doctor's region, which the config page asks for once it shows. A daemon that fails or
 /// does not answer in time is a region that says so, since Datastar applies only 200 responses.
 async fn config_doctor(State(app): State<App>) -> Response {
-    Html(views::config::doctor(&app.daemon.get("/v1/doctor").await).into_string()).into_response()
+    let doctor = app.daemon.get("/v1/doctor").await;
+    Html(views::config::doctor(&doctor, now()).into_string()).into_response()
 }
 
 async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {

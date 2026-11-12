@@ -258,6 +258,8 @@ fn main() -> ExitCode {
             web,
         }) => runtime().and_then(|runtime| {
             let served = runtime.block_on(serve(config, socket, &web));
+            // The doctor's commands still running end now, with what they started, rather than outlive the daemon.
+            doctor::stop_commands();
             // A blocking task still running, such as a doctor's check of a Docker that hangs, does not hold the exit.
             runtime.shutdown_timeout(EXIT_GRACE);
             served
@@ -892,6 +894,8 @@ async fn serve(
         sync_dir: api::sync_dir,
         auto_every: api::AUTO_SIZING_EVERY,
         notify: api::NOTIFY,
+        doctor: api::doctor_setup(),
+        attention: api::ATTENTION,
     };
     let server = tokio::spawn(api::serve(
         listener,

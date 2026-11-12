@@ -2,7 +2,7 @@
 //! job page's, where a record's shell opens.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Column, Records, Status, Tone, View};
+use runnerd_core::api::{Column, Records, Section, Status, Tone};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, page, profile_class, time_ago};
@@ -29,10 +29,10 @@ impl RecordsView {
 /// The whole page.
 pub(crate) fn render(view: &RecordsView) -> Markup {
     let main = html! {
-        h1.visually-hidden { (View::Records.title()) }
+        h1.visually-hidden { (Section::Records.title()) }
         (section(&view.status, &view.records, view.now))
     };
-    page(View::Records.title(), Some(Page::Records), None, &main)
+    page(Section::Records.title(), Some(Page::Records), None, &main)
 }
 
 /// The records of failed jobs, each removable, and the limits they are kept within.
@@ -40,7 +40,7 @@ pub(crate) fn section(status: &Status, records: &Records, now: u64) -> Markup {
     html! {
         section #records .records aria-labelledby="records-title" {
             div.section-head {
-                h2 #records-title { (View::Records.title()) }
+                h2 #records-title { (Section::Records.title()) }
                 p class=(if records.summary_tone() == Tone::Warn { "muted over-limit" } else { "muted" }) { (format::sentence(&records.summary())) }
                 @if !records.records.is_empty() {
                     button.button-quiet type="button"

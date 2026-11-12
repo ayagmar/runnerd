@@ -1,8 +1,9 @@
 //! What a figure or label means for the reader, as every client colours it: core decides the meaning, clients only
 //! pick the colour (a CSS class, an ANSI code, a ratatui style).
 
-/// What a shown fact means for the reader.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a shown fact means for the reader. On the wire in kebab-case, as an attention item carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Tone {
     /// All is well, or a change for the better.
     Good,

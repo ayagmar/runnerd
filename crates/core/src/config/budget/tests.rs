@@ -86,7 +86,8 @@ fn a_warning_is_its_own_tone_and_lets_doctor_pass() {
     assert_eq!(warn.status.tone(), Tone::Warn);
     assert!(
         Doctor {
-            checks: vec![warn.clone()]
+            checks: vec![warn.clone()],
+            state: None,
         }
         .passed(),
         "a warning passes"

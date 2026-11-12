@@ -1,21 +1,30 @@
-//! What the last listing of one repository's queued jobs showed: nothing known, the jobs it listed, or those jobs gone
-//! stale once a stop ended the listings. It owns that value and must not call GitHub or log: `tick` lists the jobs
-//! and words what came of each listing.
+//! What the last listing of one repository's queued jobs showed: nothing known, the jobs it listed, those jobs gone
+//! stale once a stop ended the listings, or why the listings fail. It owns that value and must not call GitHub or log:
+//! `tick` lists the jobs and words what came of each listing in the log; `api::ListingFailure` words a failure for
+//! clients.
 
-use crate::github::QueuedJob;
+use std::time::SystemTime;
+
+use crate::api;
+use crate::github::{self, QueuedJob};
 
 /// A repository's queued jobs as its listings last showed them.
 ///
-/// Nothing of it survives a restart: every repository starts unknown. A reload keeps it for a repository the config
-/// still lists; one it removes drains with no listing, and one added back starts unknown.
+/// Nothing of it survives a restart: every repository starts unknown, so a failure is forgotten. A reload keeps it for
+/// a repository the config still lists; one it removes drains with no listing, and one added back starts unknown.
 #[derive(Debug, Default)]
 pub(super) struct Listing(Shown);
 
 #[derive(Debug, Default)]
 enum Shown {
-    /// No listing has answered since the start, or the last one failed or the rate limit stopped it.
+    /// No listing has answered since the start, or the rate limit stopped the last one.
     #[default]
     Unknown,
+    /// The listings fail, the first of this streak at `since`, the last for `problem`.
+    Failed {
+        since: SystemTime,
+        problem: api::ListingProblem,
+    },
     /// The jobs the last listing answered with.
     Listed(Vec<QueuedJob>),
     /// The jobs the last listing answered with before a stop ended the listings: what was queued then, not now.
@@ -28,9 +37,35 @@ impl Listing {
         self.0 = Shown::Listed(jobs);
     }
 
-    /// A listing failed or the rate limit stopped it: what was queued is no longer known.
+    /// The rate limit stopped a listing: what was queued is no longer known, and nothing says the listing fails.
     pub(super) fn fail(&mut self) {
         self.0 = Shown::Unknown;
+    }
+
+    /// A listing failed at `at` with `error`: what was queued is no longer known. A failure after a failure keeps when
+    /// the streak began. The rate limit is no failure of the listing: `fail`.
+    pub(super) fn fail_with(&mut self, error: &github::Error, at: SystemTime) {
+        let problem = problem(error);
+        self.0 = match &self.0 {
+            Shown::Failed { since, .. } => Shown::Failed {
+                since: *since,
+                problem,
+            },
+            Shown::Unknown | Shown::Listed(_) | Shown::Stale(_) => {
+                Shown::Failed { since: at, problem }
+            }
+        };
+    }
+
+    /// Why the listings fail, while they do, as clients read it.
+    pub(super) fn failure(&self) -> Option<api::ListingFailure> {
+        match &self.0 {
+            Shown::Failed { since, problem } => Some(api::ListingFailure {
+                since: crate::time::ms(*since) / 1000,
+                problem: problem.clone(),
+            }),
+            Shown::Unknown | Shown::Listed(_) | Shown::Stale(_) => None,
+        }
     }
 
     /// A stop ended the listings: the jobs listed last go stale.
@@ -45,7 +80,7 @@ impl Listing {
     pub(super) fn replace_jobs(&mut self, jobs: Vec<QueuedJob>) {
         self.0 = match &self.0 {
             Shown::Listed(_) => Shown::Listed(jobs),
-            Shown::Unknown | Shown::Stale(_) => Shown::Stale(jobs),
+            Shown::Unknown | Shown::Failed { .. } | Shown::Stale(_) => Shown::Stale(jobs),
         };
     }
 
@@ -53,7 +88,7 @@ impl Listing {
     pub(super) fn listed(&self) -> Option<&[QueuedJob]> {
         match &self.0 {
             Shown::Listed(jobs) => Some(jobs),
-            Shown::Unknown | Shown::Stale(_) => None,
+            Shown::Unknown | Shown::Failed { .. } | Shown::Stale(_) => None,
         }
     }
 
@@ -72,8 +107,31 @@ impl Listing {
     pub(super) fn jobs(&self) -> &[QueuedJob] {
         match &self.0 {
             Shown::Listed(jobs) | Shown::Stale(jobs) => jobs,
-            Shown::Unknown => &[],
+            Shown::Unknown | Shown::Failed { .. } => &[],
         }
+    }
+}
+
+/// What a failed listing tells clients of `error`: its class and GitHub's status, never GitHub's text, which could
+/// echo what was sent.
+pub(super) fn problem(error: &github::Error) -> api::ListingProblem {
+    match error {
+        github::Error::Token(_) => api::ListingProblem::NoToken,
+        github::Error::Status { status, .. } if status.as_u16() == 401 => {
+            api::ListingProblem::Unauthorized
+        }
+        github::Error::Status { status, .. } if matches!(status.as_u16(), 403 | 404 | 410) => {
+            api::ListingProblem::Refused {
+                status: status.as_u16(),
+            }
+        }
+        github::Error::Status { status, .. } => api::ListingProblem::Failed {
+            status: status.as_u16(),
+        },
+        github::Error::Http { .. } => api::ListingProblem::Unreachable,
+        github::Error::Decode { .. } => api::ListingProblem::Unexpected,
+        // `tick` takes the rate limit apart before; were one to come here, nothing more is known.
+        github::Error::RateLimited { .. } => api::ListingProblem::Unknown,
     }
 }
 
@@ -133,6 +191,49 @@ mod tests {
         assert!(
             !listing.no_longer_shows(2),
             "a failed listing says nothing of job 2"
+        );
+    }
+
+    fn bad_gateway() -> github::Error {
+        github::Error::Status {
+            method: reqwest::Method::GET,
+            path: "/repos/o/r/actions/runs".to_owned(),
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            message: "upstream said: token ghp_secret".to_owned(),
+        }
+    }
+
+    #[test]
+    fn failures_keep_when_they_began_until_an_answer_or_a_rate_limit_ends_them() {
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        let later = start + std::time::Duration::from_secs(60);
+        let mut listing = Listing::default();
+        assert_eq!(listing.failure(), None, "never listed is no failure");
+        listing.fail_with(&bad_gateway(), start);
+        listing.fail_with(&github::Error::Token("gh is logged out".to_owned()), later);
+        assert_eq!(
+            listing.failure(),
+            Some(api::ListingFailure {
+                since: 1000,
+                problem: api::ListingProblem::NoToken,
+            }),
+            "the streak's start, the last failure's class, no text of it"
+        );
+        assert!(listing.jobs().is_empty(), "a failed listing keeps no job");
+        listing.answer(vec![job(1)]);
+        assert_eq!(listing.failure(), None, "an answer clears it");
+        listing.fail_with(&bad_gateway(), later);
+        listing.fail();
+        assert_eq!(
+            listing.failure(),
+            None,
+            "a rate limit says nothing of a failure"
+        );
+        listing.fail_with(&bad_gateway(), later);
+        assert_eq!(
+            listing.failure().map(|failure| failure.since),
+            Some(1060),
+            "a new streak starts over"
         );
     }
 

@@ -100,7 +100,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md) | Under measured admission, slots follow waits for a slot alone and Docker's disk | Amended by 0096, 0110 |
 | [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s | Amended by 0092 |
 | [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) | Idle removals and deferred starts stay off the start path, and a job's wait says where it went | Amended by 0095, 0106, 0111, 0126 |
-| [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Accepted |
+| [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Amended by 0132 |
 | [0094](0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md) | A profile's upkeep stops its runners only for a reseed that will replace the snapshot | Accepted |
 | [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md) | Docker's events wake a pass that refills a slot whose runner ended | Amended by 0096, 0111, 0113, 0126 |
 | [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md) | A job starved of memory or CPU goes first | Amended by 0097, 0098, 0099, 0102 |
@@ -138,4 +138,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0128](0128-each-repository-is-listed-on-its-own-pace.md) | Each repository is listed on its own pace | Accepted |
 | [0130](0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md) | The budgets count what runs uses and keep room for its largest growths | Accepted |
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |
+| [0132](0132-one-attention-list-core-words.md) | One attention list that core words, with a cached doctor and five views | Accepted |
 | [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Accepted |

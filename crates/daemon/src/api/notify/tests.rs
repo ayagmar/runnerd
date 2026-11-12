@@ -19,7 +19,7 @@ use runnerd_core::api::{
 use runnerd_core::config::{Config, DayTime};
 use runnerd_core::github::QueuedJob;
 use runnerd_core::store::Store;
-use tokio::sync::{Mutex, Notify, watch};
+use tokio::sync::{Mutex, watch};
 
 use super::{
     ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, parse_offset,
@@ -164,18 +164,18 @@ fn failed(id: u64) -> Event {
 struct Running {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
-    /// What a replaced config signals, as `PUT /v1/config` and auto sizing do.
-    replaced: Arc<Notify>,
+    /// The config's revision, which a replaced config sends, as `PUT /v1/config` and auto sizing do.
+    replaced: watch::Sender<String>,
 }
 
 impl Running {
     async fn start(store: &Store, config: &Arc<Mutex<ConfigText>>) -> Running {
         let (stop, stopping) = watch::channel(false);
-        let replaced = Arc::new(Notify::new());
+        let (replaced, revision) = watch::channel(String::new());
         let task = tokio::spawn(run(Notifier {
             store: store.clone(),
             config: config.clone(),
-            replaced: replaced.clone(),
+            replaced: revision,
             stopping,
             setup: SETUP,
         }));
@@ -1068,7 +1068,7 @@ async fn a_target_added_by_a_reload_gets_the_first_failure_after_it() {
 
     // A phone added while a job runs; that job's failure is the next event.
     config.lock().await.text = webhook(&format!("http://{}/hook", endpoint.address));
-    notifier.replaced.notify_one();
+    notifier.replaced.send_replace("reloaded".to_owned());
     tokio::time::sleep(Duration::from_millis(200)).await;
     store.event(failed(1));
     endpoint.wait_for(1).await;

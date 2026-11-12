@@ -26,7 +26,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::testdir::Dir;
 
 use super::notify::{Setup, Timing};
-use super::{ConfigSource, MemoryMax, SyncDir, bind, serve, serve_for, sync_dir};
+use super::{ConfigSource, MemoryMax, SyncDir, bind, doctor_cache, serve, serve_for, sync_dir};
+
+mod attention;
 
 mod log;
 
@@ -169,7 +171,8 @@ async fn fake_engine(
     }
 }
 
-fn status() -> Status {
+/// The status a test daemon starts with: nothing queued or failing.
+pub(super) fn status() -> Status {
     Status {
         version: "0.1.0".to_owned(),
         shutting_down: false,
@@ -231,6 +234,8 @@ struct Daemon {
     served: tokio::task::JoinHandle<()>,
     /// The dashboard's credentials, which a test's dashboard shares.
     sessions: Arc<runnerd_web::Sessions>,
+    /// The engine's status as the API reads it.
+    status: Arc<watch::Sender<Status>>,
 }
 
 impl Daemon {
@@ -280,6 +285,65 @@ async fn start_serving(
     memory_max: MemoryMax,
     text: &str,
 ) -> Daemon {
+    start_doctored(
+        dir,
+        owner,
+        engine,
+        sync_dir,
+        memory_max,
+        text,
+        passing_doctor(),
+        ATTENTION_TIMING,
+    )
+    .await
+}
+
+/// The attention worker's pace in tests: a look every 100 ms, the insights read at most once a second.
+const ATTENTION_TIMING: super::attention::Timing = super::attention::Timing {
+    every: Duration::from_millis(100),
+    insights: Duration::from_secs(1),
+};
+
+/// A doctor that finds the host ready at once, without reading it.
+fn passing_doctor() -> doctor_cache::Setup {
+    doctor_cache::Setup {
+        read: Arc::new(|_: Option<&Config>, _: &Path, _| {
+            vec![runnerd_core::api::Check {
+                name: "Docker".to_owned(),
+                status: runnerd_core::api::CheckStatus::Pass,
+                detail: "reachable".to_owned(),
+                fix: None,
+            }]
+        }),
+        timing: DOCTOR_TIMING,
+    }
+}
+
+/// The doctor's pace in tests: a run answers a request for a second, none comes by itself, one may take 2 s, and a
+/// request waits 3 s for one.
+const DOCTOR_TIMING: doctor_cache::Timing = doctor_cache::Timing {
+    fresh: Duration::from_secs(1),
+    refresh: Duration::from_hours(1),
+    stale: Duration::from_hours(1),
+    deadline: Duration::from_secs(2),
+    answer: Duration::from_secs(3),
+};
+
+/// `start_serving`, with `doctor` reading the host and the attention worker at `attention`'s pace.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each test sets the few it is about"
+)]
+async fn start_doctored(
+    dir: &Path,
+    owner: Option<u32>,
+    engine: bool,
+    sync_dir: SyncDir,
+    memory_max: MemoryMax,
+    text: &str,
+    doctor: doctor_cache::Setup,
+    attention: super::attention::Timing,
+) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) =
@@ -293,6 +357,7 @@ async fn start_serving(
         drop(commands);
     }
     let (sender, receiver) = watch::channel(status());
+    let sender = Arc::new(sender);
     let handle = Handle {
         status: receiver,
         control: control.clone(),
@@ -317,6 +382,8 @@ async fn start_serving(
         sync_dir,
         auto_every: Duration::from_millis(20),
         notify: NOTIFY,
+        doctor,
+        attention,
     };
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
     let sessions_kept = sessions.clone();
@@ -330,6 +397,7 @@ async fn start_serving(
     let stopped = async {
         let _ = stopped.await;
     };
+    let status = sender.clone();
     let served = tokio::spawn(async move {
         let _sender = sender;
         match owner {
@@ -353,6 +421,7 @@ async fn start_serving(
         stop,
         served,
         sessions: sessions_kept,
+        status,
     }
 }
 
@@ -1390,6 +1459,7 @@ async fn every_route_refuses_other_users() {
         client.post("http://runnerd/v1/config/check").body(EXAMPLE),
         client.put("http://runnerd/v1/config").body(EXAMPLE),
         client.get("http://runnerd/v1/doctor"),
+        client.get("http://runnerd/v1/attention"),
     ];
     for request in requests {
         let response = request.send().await.unwrap();
@@ -1826,8 +1896,21 @@ fn budget(memory_in_use: u64) -> Event {
     }
 }
 
-/// Reads `count` events from an SSE response.
+/// Reads `count` events from an SSE response, leaving out `attention.changed`, which the attention worker sends
+/// whenever what it shows changes, such as when the doctor's first run ends.
 async fn read_events(response: &mut reqwest::Response, count: usize) -> Vec<EventEnvelope> {
+    read_stream(response, count, |envelope| {
+        !matches!(envelope.event, Event::AttentionChanged { .. })
+    })
+    .await
+}
+
+/// Reads `count` events `kept` keeps from an SSE response.
+async fn read_stream(
+    response: &mut reqwest::Response,
+    count: usize,
+    kept: impl Fn(&EventEnvelope) -> bool,
+) -> Vec<EventEnvelope> {
     let mut text = String::new();
     let mut events = Vec::new();
     while events.len() < count {
@@ -1840,7 +1923,10 @@ async fn read_events(response: &mut reqwest::Response, count: usize) -> Vec<Even
         while let Some(end) = text.find("\n\n") {
             let block: String = text.drain(..end + 2).collect();
             if let Some(data) = block.lines().find_map(|line| line.strip_prefix("data: ")) {
-                events.push(serde_json::from_str(data).unwrap());
+                let envelope: EventEnvelope = serde_json::from_str(data).unwrap();
+                if kept(&envelope) {
+                    events.push(envelope);
+                }
             }
         }
     }

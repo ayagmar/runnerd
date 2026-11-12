@@ -216,7 +216,7 @@ documents! {
     "paused": Paused => full(samples::paused(), None),
     "config-file": ConfigFile => full(samples::config_file(), None),
     "config-check": ConfigCheck => full(samples::config_check(), None),
-    "doctor": Doctor => full(samples::doctor(), None),
+    "doctor": Doctor => full(samples::doctor(), Some(json(samples::doctor_empty()))),
     "dashboard": Dashboard => full(samples::dashboard(), Some(json(api::Dashboard { open: None }))),
     "pairings": Pairings => full(samples::pairings(), None),
     "job-page": JobPage => full(samples::job_page(), None),
@@ -283,6 +283,14 @@ documents! {
     "log-search": LogSearch => full(samples::log_search(), Some(json(api::LogSearch::default()))),
     "log-lines-query": LogLinesQuery => full(samples::log_lines_query(), None),
     "log-search-query": LogSearchQuery => full(samples::log_search_query(), None),
+    "attention": Attention => full(samples::attention(), Some(json(samples::attention_empty()))),
+    "attention-kind": AttentionKind => variants(samples::attention_kind()),
+    "subject": Subject => variants(samples::subject()),
+    "fix": Fix => variants(samples::fix()),
+    "view": View => variants(samples::view()),
+    "tone": Tone => variants(samples::tone()),
+    "doctor-state": DoctorState => variants(samples::doctor_state()),
+    "listing-problem": ListingProblem => variants(samples::listing_problem()),
 }
 
 /// The previous release's samples, one file per document.
