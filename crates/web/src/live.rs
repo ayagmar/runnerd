@@ -375,7 +375,9 @@ async fn run_overview(
                     data.add_host_sample(sample);
                     status_changed |= status_read.elapsed() >= STATUS_AGE;
                 }
+                // The overview draws no attention list yet (ADR 0132).
                 Event::LogLine { .. }
+                | Event::AttentionChanged { .. }
                 | Event::CacheReseeded { .. }
                 | Event::RecordCreated { .. }
                 | Event::RecordDeleted { .. }

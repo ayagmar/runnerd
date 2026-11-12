@@ -111,6 +111,7 @@ fn status() -> Status {
             }],
             paused: false,
             queued_jobs: 1,
+            listing: None,
         }],
         queued: vec![QueuedJob {
             id: 9002,
@@ -405,6 +406,7 @@ async fn get_doctor() -> axum::Json<Doctor> {
                 fix: Some("install sysbox".to_owned()),
             },
         ],
+        state: None,
     })
 }
 

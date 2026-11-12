@@ -140,13 +140,17 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let mut spans = vec![Span::styled(" runnerd ", bold())];
     let version = Span::styled(format!("{}  ", app.live.status.version), theme.dim());
-    for (key, (shown, view)) in (1..).zip(View::tabs()) {
-        let style = if app.view == view {
-            selected()
+    for (key, (shown, _)) in (1..).zip(View::tabs()) {
+        if app.view.group() == Some(shown) {
+            // A view of several sections names the one open.
+            let title = match app.view.section().filter(|_| View::of(shown).len() > 1) {
+                Some(section) => format!(" {key} {} · {} ", shown.title(), section.title()),
+                None => format!(" {key} {} ", shown.title()),
+            };
+            spans.push(Span::styled(title, selected()));
         } else {
-            Style::new()
-        };
-        spans.push(Span::styled(format!(" {key} {} ", shown.title()), style));
+            spans.push(Span::raw(format!(" {key} {} ", shown.title())));
+        }
     }
     if let Some(open) = &app.job {
         spans.push(Span::styled(
@@ -307,8 +311,9 @@ pub(super) fn view_keys(tabs: &[(api::View, View)]) -> (String, String) {
 fn help(frame: &mut Frame<'_>, area: Rect) {
     let (digits, views) = view_keys(&View::tabs());
     // At most 20, so it fits a terminal of 24 rows.
-    let keys: [(&str, &str); 16] = [
+    let keys: [(&str, &str); 17] = [
         (digits.as_str(), views.as_str()),
+        ("digit again", "the view's next section, such as records"),
         ("tab", "overview: slots, waiting, repositories, latest"),
         ("j k ↓ ↑", "move, or scroll the log"),
         ("PgDn PgUp", "move by ten"),

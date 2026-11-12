@@ -15,7 +15,7 @@ use crate::tui::app::App;
 
 /// The records of failed jobs, each a stopped runner `runnerctl shell` opens a shell in.
 pub(super) fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
-    let name = api::View::Records.title();
+    let name = api::Section::Records.title();
     let [title, table_area, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),

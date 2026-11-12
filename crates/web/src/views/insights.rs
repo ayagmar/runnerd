@@ -131,7 +131,7 @@ fn waits(waits: &[RepositoryWaits]) -> Markup {
                     thead {
                         tr {
                             th scope="col" { "Repository" }
-                            th scope="col" .number { "Jobs" }
+                            th scope="col" .number { "Jobs" } // not the view's name
                             th scope="col" .number { "Median" }
                             th scope="col" .number { "p95" }
                             th scope="col" .number { "Warm median" }

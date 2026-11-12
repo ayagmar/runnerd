@@ -892,6 +892,8 @@ async fn serve(
         sync_dir: api::sync_dir,
         auto_every: api::AUTO_SIZING_EVERY,
         notify: api::NOTIFY,
+        doctor: api::doctor_setup(),
+        attention: api::ATTENTION,
     };
     let server = tokio::spawn(api::serve(
         listener,

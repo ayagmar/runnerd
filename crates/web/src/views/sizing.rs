@@ -6,7 +6,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Sizing, Tone, View, job_title,
+    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -40,7 +40,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
         .sum();
     let main = html! {
         div.page-head {
-            h1.visually-hidden { (View::Sizing.title()) }
+            h1.visually-hidden { (Section::Sizing.title()) }
             p.figures {
                 span.big { (jobs) " jobs" }
                 span.muted { " since " (format::date(sizing.since)) }
@@ -52,7 +52,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
             (profile_section(sizing, profile, index))
         }
     };
-    page(View::Sizing.title(), Some(Page::Sizing), None, &main)
+    page(Section::Sizing.title(), Some(Page::Sizing), None, &main)
 }
 
 /// Whether auto sizing is on, its rules in words, and per profile what its next look changes, or until when a recent
@@ -162,7 +162,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                 h2 #(id) { span.swatch aria-hidden="true" {} (profile.name) }
                 dl.facts {
                     div { dt { "Memory" } dd { (format::bytes(profile.memory)) " × " (profile.slots) } }
-                    div { dt { "Jobs" } dd { (profile.starts.total()) } }
+                    div { dt { "Jobs" } dd { (profile.starts.total()) } } // not the view's name
                     div { dt { "Slots busy" } dd { (profile.busy) "%" } }
                     div { dt { "Waited p50 / p95" } dd { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) } }
                     @if profile.starts.warm > 0 {

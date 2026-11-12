@@ -110,6 +110,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .collect();
                 api::RepositoryStatus {
                     pools,
+                    listing: self
+                        .repositories
+                        .listed(&name)
+                        .and_then(|state| state.listing().failure()),
                     paused: self.control.is_paused(&name),
                     queued_jobs: queued.iter().filter(|job| job.repository == name).count(),
                     name,

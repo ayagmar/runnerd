@@ -145,6 +145,13 @@ pub enum Event {
         /// The sample.
         sample: HostSample,
     },
+    /// Live: what needs attention changed (ADR 0132); read `GET /v1/attention` for it. Sent on every change, also when
+    /// one item replaces another; a client that missed it reads the snapshot when it connects again.
+    #[serde(rename = "attention.changed")]
+    AttentionChanged {
+        /// The snapshot's new `revision`.
+        revision: u64,
+    },
     /// Live: a line of a running job's log was stored. Only sent with `logs=true`.
     #[serde(rename = "log.line")]
     LogLine {
@@ -178,6 +185,7 @@ impl Event {
             Event::RunnerFailed { .. } => "runner.failed",
             Event::JobSample { .. } => "job.sample",
             Event::HostSample { .. } => "host.sample",
+            Event::AttentionChanged { .. } => "attention.changed",
             Event::LogLine { .. } => "log.line",
         }
     }
@@ -186,7 +194,10 @@ impl Event {
     pub fn is_durable(&self) -> bool {
         !matches!(
             self,
-            Event::JobSample { .. } | Event::HostSample { .. } | Event::LogLine { .. }
+            Event::JobSample { .. }
+                | Event::HostSample { .. }
+                | Event::AttentionChanged { .. }
+                | Event::LogLine { .. }
         )
     }
 
@@ -210,7 +221,8 @@ impl Event {
             | Event::CacheReseeded { .. }
             | Event::SizingChanged { .. }
             | Event::RunnerFailed { .. }
-            | Event::HostSample { .. } => None,
+            | Event::HostSample { .. }
+            | Event::AttentionChanged { .. } => None,
         }
     }
 }

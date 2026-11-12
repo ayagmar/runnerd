@@ -3,7 +3,7 @@
 //! each is found in its row or element, read as text. The dashboard reads the wall clock, so only facts that do not
 //! change with it are checked: no ages, and no waits or run times of jobs still going.
 
-use runnerd_core::api::{Column, View};
+use runnerd_core::api::{Column, Section, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, TIMED_OUT, daemon, facts};
 
 use super::{Dashboard, fake};
@@ -331,6 +331,56 @@ fn in_order(html: &str, names: &[&str]) {
             .find(name)
             .unwrap_or_else(|| panic!("{name} after {at}: {shown}"));
         at += found + name.len();
+    }
+}
+
+/// Each view of several sections opens on its first, and every page of it links to each, named as core names them
+/// (ADR 0132): no page left out of the regrouped navigation.
+#[tokio::test]
+async fn every_section_of_a_view_is_one_link_away_on_each_of_its_pages() {
+    let (dashboard, cookie, _, _) = dashboard().await;
+    let path = |section: Section| match section {
+        Section::History => "/history",
+        Section::Records => "/records",
+        Section::Sizing => "/sizing",
+        Section::Caches => "/caches",
+        Section::Config => "/config",
+    };
+    let home = dashboard.page(&cookie, "/").await.body;
+    for view in View::ALL {
+        let sections = view.sections();
+        if let Some(first) = sections.first() {
+            assert!(
+                home.contains(&format!("href=\"{}\"", path(*first))),
+                "{} opens on {}",
+                view.title(),
+                first.title()
+            );
+        }
+        if sections.len() < 2 {
+            continue;
+        }
+        for shown in sections {
+            let body = dashboard.page(&cookie, path(*shown)).await.body;
+            let nav = &body[body
+                .find("nav class=\"sections\"")
+                .unwrap_or_else(|| panic!("{} has its sections", shown.title()))..];
+            for section in sections {
+                assert!(
+                    nav.contains(&format!("href=\"{}\"", path(*section))),
+                    "{} links {}",
+                    shown.title(),
+                    section.title()
+                );
+            }
+            in_order(
+                nav,
+                &sections
+                    .iter()
+                    .map(|section| section.title())
+                    .collect::<Vec<_>>(),
+            );
+        }
     }
 }
 

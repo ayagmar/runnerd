@@ -16,7 +16,8 @@
 //! | `GET /v1/config` | [`ConfigFile`] |
 //! | `POST /v1/config/check` | TOML in, [`ConfigCheck`] |
 //! | `PUT /v1/config` | TOML in, [`ConfigCheck`]; 422 [`ConfigCheck`] when invalid |
-//! | `GET /v1/doctor` | [`Doctor`] |
+//! | `GET /v1/doctor` | [`Doctor`]; 503 [`ErrorResponse`] while no run has finished |
+//! | `GET /v1/attention` | [`Attention`]; 404 from a daemon before 0.2 |
 //! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 [`ShutdownAnswer`] |
 //! | `GET /v1/dashboard` | [`Dashboard`] |
 //! | `POST /v1/dashboard/sign-out` | none, 204 |
@@ -46,6 +47,7 @@
 use serde::{Deserialize, Serialize};
 
 mod admission;
+mod attention;
 mod budget;
 mod control;
 mod events;
@@ -63,12 +65,15 @@ mod tone;
 mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
+pub use attention::{
+    ATTENTION_MAX, Attention, AttentionItem, AttentionKind, Fix, Subject, attention_items,
+};
 pub use budget::{
     BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, Reading, SlotPart,
 };
 pub use control::{
-    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
-    RunningJob,
+    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
+    ReplaceQuery, RunningJob,
 };
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use insights::{
@@ -91,7 +96,7 @@ pub use jobs::{
     LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
-pub use labels::{Column, View};
+pub use labels::{Column, Section, View};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
@@ -489,6 +494,76 @@ pub struct RepositoryStatus {
     pub paused: bool,
     /// Its jobs in `Status::queued`: queued ones none of its runners took yet, those no pool serves too.
     pub queued_jobs: usize,
+    /// Why its queued jobs cannot be listed, while the listings fail (ADR 0132); absent while they answer, before the
+    /// first, while GitHub's rate limit stops them, and from a daemon before 0.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<ListingFailure>,
+}
+
+/// Why runnerd cannot list a repository's queued jobs (ADR 0132): what class of failure GitHub's answer was, never its
+/// text. The engine keeps it until a listing answers or a reload removes the repository; a restart forgets it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListingFailure {
+    /// When the listings began to fail, in seconds since the Unix epoch.
+    pub since: u64,
+    /// Why the last one failed.
+    pub problem: ListingProblem,
+}
+
+/// What a failed listing ran into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum ListingProblem {
+    /// runnerd could read no GitHub token.
+    NoToken,
+    /// GitHub refused the token: 401.
+    Unauthorized,
+    /// GitHub answered 403, 404 or 410: the token may not read the repository's Actions, cannot see it, or it is gone.
+    Refused {
+        /// The HTTP status.
+        status: u16,
+    },
+    /// GitHub answered another error status, such as a 5xx.
+    Failed {
+        /// The HTTP status.
+        status: u16,
+    },
+    /// No answer came: the network, DNS or TLS failed.
+    Unreachable,
+    /// The answer was not what GitHub sends.
+    Unexpected,
+    /// A problem from a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ListingProblem {
+    /// Whether it is the token's, and so every repository's: none read, or GitHub refused it.
+    pub fn is_token(&self) -> bool {
+        matches!(self, ListingProblem::NoToken | ListingProblem::Unauthorized)
+    }
+}
+
+impl ListingFailure {
+    /// What fails, as every client says it: `Cannot list halyard/ledger's queued jobs: GitHub answers 404; the token
+    /// cannot see the repository, or it is gone`.
+    pub fn line(&self, repository: &str) -> String {
+        let why = match &self.problem {
+            ListingProblem::NoToken => "runnerd has no GitHub token".to_owned(),
+            ListingProblem::Unauthorized => "GitHub refuses runnerd's token (401)".to_owned(),
+            ListingProblem::Refused { status: 403 } => {
+                "GitHub answers 403; the token may not read the repository's Actions".to_owned()
+            }
+            ListingProblem::Refused { status } => format!(
+                "GitHub answers {status}; the token cannot see the repository, or it is gone"
+            ),
+            ListingProblem::Failed { status } => format!("GitHub answers {status}"),
+            ListingProblem::Unreachable => "GitHub does not answer".to_owned(),
+            ListingProblem::Unexpected => "GitHub's answer is not what runnerd reads".to_owned(),
+            ListingProblem::Unknown => "for a reason this client does not know".to_owned(),
+        };
+        format!("Cannot list {repository}'s queued jobs: {why}")
+    }
 }
 
 /// One of a repository's pools: its runners in one profile.
@@ -702,6 +777,13 @@ pub enum WaitKind {
 }
 
 impl Waiting {
+    /// Whether runnerd cannot start the job with the config it runs with: its repository is paused, or no pool serves
+    /// its labels. Not that nothing ever will: a resume or a config change can, and another machine's runner may take
+    /// it. A backoff ends by itself, and a reason this client does not know says nothing (ADR 0132).
+    pub fn cannot_start(&self) -> bool {
+        matches!(self, Waiting::Paused | Waiting::NoPool { .. })
+    }
+
     /// What it waits on.
     pub fn kind(&self) -> WaitKind {
         match self {

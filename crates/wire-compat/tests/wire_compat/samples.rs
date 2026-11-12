@@ -10,25 +10,26 @@
 //! - Every enum gets one item per variant, and a `match` that fails to compile when a variant is added.
 
 use runnerd_core::api::{
-    Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, AutoNote, AutoPlan, Basis, Bucket,
-    Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind,
-    CacheSize, CacheVolume, Caches, Check, CheckStatus, Color, ConfigCheck, ConfigFile, CountBrake,
-    Counted, CpuAdmission, CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event,
-    EventEnvelope, EventQuery, FailureSummary, HoldCause, Holder, HostBudget, HostCredit,
-    HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples, HostSpan, Insight,
-    InsightKind, Insights, InsightsQuery, Job, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner,
-    JobSizing, JobState, JobSummary, LineKind, LineRange, LogEvidence, LogGroup, LogLinesQuery,
-    LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary, LongWait, MarkKind,
-    MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing,
-    PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled, Pressure,
-    PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits,
-    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery,
-    RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run, RunLink, RunnerFailure,
-    RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity,
-    ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold,
-    SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats,
-    StatsQuery, StatsRow, Status, Step, StepLines, StepLog, Stopping, StyledLine, Swap, Timeline,
-    Usd, WaitSpread, Waiting, WeekWaits,
+    Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, Attention, AttentionItem,
+    AttentionKind, AutoNote, AutoPlan, Basis, Bucket, Budget, BuildCacheCounts, BuildCacheStats,
+    Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check,
+    CheckStatus, Color, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission, CpuBudget,
+    Dashboard, Delivery, Digest, Doctor, DoctorState, ErrorResponse, Event, EventEnvelope,
+    EventQuery, FailureSummary, Fix, HoldCause, Holder, HostBudget, HostCredit, HostHazard,
+    HostMemory, HostSample, HostSampleQuery, HostSamples, HostSpan, Insight, InsightKind, Insights,
+    InsightsQuery, Job, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState,
+    JobSummary, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence, LogGroup,
+    LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary, LongWait,
+    MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery,
+    Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled,
+    Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record,
+    RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
+    ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run, RunLink,
+    RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings,
+    SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing,
+    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread,
+    Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, StepLines, StepLog, Stopping,
+    StyledLine, Subject, Swap, Timeline, Tone, Usd, View, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -60,6 +61,9 @@ pub(crate) fn status_empty() -> Status {
         brake: None,
     });
     status.budget.cpu = None;
+    for repository in &mut status.repositories {
+        repository.listing = None;
+    }
     status.budget.slice_cpus = None;
     status.queued[0].profile = None;
     status.queued[0].waiting = None;
@@ -181,6 +185,10 @@ fn repository_status() -> RepositoryStatus {
         }],
         paused: false,
         queued_jobs: 1,
+        listing: Some(ListingFailure {
+            since: 1_761_399_000,
+            problem: ListingProblem::Refused { status: 404 },
+        }),
     }
 }
 
@@ -423,7 +431,222 @@ pub(crate) fn doctor() -> Doctor {
             fix: Some("start Docker".to_owned()),
         })
         .collect();
-    Doctor { checks }
+    Doctor {
+        checks,
+        state: Some(DoctorState::Ready { at: 1_761_400_000 }),
+    }
+}
+
+/// A doctor from a daemon that says nothing of its run's state.
+pub(crate) fn doctor_empty() -> Doctor {
+    Doctor {
+        state: None,
+        ..doctor()
+    }
+}
+
+pub(crate) fn doctor_state() -> Vec<DoctorState> {
+    let every = vec![
+        DoctorState::NotRun,
+        DoctorState::Ready { at: 1_761_400_000 },
+        DoctorState::Stale { at: 1_761_390_000 },
+        DoctorState::Failed {
+            at: 1_761_400_000,
+            error: "it took longer than 2m".to_owned(),
+        },
+    ];
+    for state in &every {
+        match state {
+            DoctorState::NotRun
+            | DoctorState::Ready { .. }
+            | DoctorState::Stale { .. }
+            | DoctorState::Failed { .. }
+            // What a client reads a later daemon's state as; no daemon sends it, so it has no sample.
+            | DoctorState::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn listing_problem() -> Vec<ListingProblem> {
+    let every = vec![
+        ListingProblem::NoToken,
+        ListingProblem::Unauthorized,
+        ListingProblem::Refused { status: 403 },
+        ListingProblem::Failed { status: 502 },
+        ListingProblem::Unreachable,
+        ListingProblem::Unexpected,
+    ];
+    for problem in &every {
+        match problem {
+            ListingProblem::NoToken
+            | ListingProblem::Unauthorized
+            | ListingProblem::Refused { .. }
+            | ListingProblem::Failed { .. }
+            | ListingProblem::Unreachable
+            | ListingProblem::Unexpected
+            // What a client reads a later daemon's problem as; no daemon sends it, so it has no sample.
+            | ListingProblem::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn attention() -> Attention {
+    Attention {
+        revision: 1_761_400_000_123,
+        items: vec![
+            AttentionItem {
+                key: "cannot-start:paused:tidewater/halyard".to_owned(),
+                kind: AttentionKind::CannotStart,
+                tone: Tone::Bad,
+                title: "runnerd cannot start 1 queued job of tidewater/halyard with the current configuration: \
+                        tidewater/halyard is paused"
+                    .to_owned(),
+                subject: Subject::Repository {
+                    name: "tidewater/halyard".to_owned(),
+                },
+                since: Some(1_761_400_000),
+                fix: Some(Fix::Command {
+                    command: "runnerctl resume tidewater/halyard".to_owned(),
+                }),
+            },
+            attention_item_empty(),
+        ],
+        omitted: 3,
+    }
+}
+
+/// A snapshot with nothing left out, and an item with no evidence time or fix.
+pub(crate) fn attention_empty() -> Attention {
+    Attention {
+        revision: 1_761_400_000_123,
+        items: vec![attention_item_empty()],
+        omitted: 0,
+    }
+}
+
+fn attention_item_empty() -> AttentionItem {
+    AttentionItem {
+        key: "doctor-unavailable".to_owned(),
+        kind: AttentionKind::DoctorUnavailable,
+        tone: Tone::Quiet,
+        title: "Host checks have not finished yet".to_owned(),
+        subject: Subject::Host,
+        since: None,
+        fix: None,
+    }
+}
+
+pub(crate) fn attention_kind() -> Vec<AttentionKind> {
+    let every = vec![
+        AttentionKind::CannotStart,
+        AttentionKind::HostMemory,
+        AttentionKind::Doctor,
+        AttentionKind::DoctorUnavailable,
+        AttentionKind::Insight,
+        AttentionKind::GithubListing,
+        AttentionKind::GithubAuth,
+        AttentionKind::RateLimited,
+    ];
+    for kind in &every {
+        match kind {
+            AttentionKind::CannotStart
+            | AttentionKind::HostMemory
+            | AttentionKind::Doctor
+            | AttentionKind::DoctorUnavailable
+            | AttentionKind::Insight
+            | AttentionKind::GithubListing
+            | AttentionKind::GithubAuth
+            | AttentionKind::RateLimited
+            // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
+            | AttentionKind::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn subject() -> Vec<Subject> {
+    let every = vec![
+        Subject::Job {
+            id: 42,
+            repository: "tidewater/halyard".to_owned(),
+            name: "build".to_owned(),
+        },
+        Subject::Repository {
+            name: "tidewater/halyard".to_owned(),
+        },
+        Subject::Check {
+            name: "slice".to_owned(),
+        },
+        Subject::Insight {
+            key: "long-waits:halyard".to_owned(),
+        },
+        Subject::Host,
+        Subject::Github,
+    ];
+    for subject in &every {
+        match subject {
+            Subject::Job { .. }
+            | Subject::Repository { .. }
+            | Subject::Check { .. }
+            | Subject::Insight { .. }
+            | Subject::Host
+            | Subject::Github
+            // What a client reads a later daemon's subject as; no daemon sends it, so it has no sample.
+            | Subject::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn fix() -> Vec<Fix> {
+    let every = vec![
+        Fix::Command {
+            command: "runnerctl resume tidewater/halyard".to_owned(),
+        },
+        Fix::Config {
+            key: "repositories.labels".to_owned(),
+        },
+        Fix::Open {
+            view: View::Capacity,
+        },
+        Fix::Text {
+            text: "start Docker".to_owned(),
+        },
+    ];
+    for fix in &every {
+        match fix {
+            Fix::Command { .. } | Fix::Config { .. } | Fix::Open { .. } | Fix::Text { .. } => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn view() -> Vec<View> {
+    let every = View::ALL.to_vec();
+    for view in &every {
+        match view {
+            View::Overview | View::Jobs | View::Insights | View::Capacity | View::Settings => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn tone() -> Vec<Tone> {
+    let every = vec![
+        Tone::Good,
+        Tone::Warn,
+        Tone::Bad,
+        Tone::Neutral,
+        Tone::Quiet,
+    ];
+    for tone in &every {
+        match tone {
+            Tone::Good | Tone::Warn | Tone::Bad | Tone::Neutral | Tone::Quiet => {}
+        }
+    }
+    every
 }
 
 fn check_status() -> Vec<CheckStatus> {
@@ -1352,6 +1575,9 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             line: 7,
             text: "Compiling runnerd".to_owned(),
         },
+        Event::AttentionChanged {
+            revision: 1_761_400_000_124,
+        },
     ];
     for event in &every {
         match event {
@@ -1372,7 +1598,8 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             | Event::RunnerFailed { .. }
             | Event::JobSample { .. }
             | Event::HostSample { .. }
-            | Event::LogLine { .. } => {}
+            | Event::LogLine { .. }
+            | Event::AttentionChanged { .. } => {}
         }
     }
     every

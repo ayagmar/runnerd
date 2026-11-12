@@ -26,7 +26,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::testdir::Dir;
 
 use super::notify::{Setup, Timing};
-use super::{ConfigSource, MemoryMax, SyncDir, bind, serve, serve_for, sync_dir};
+use super::{ConfigSource, MemoryMax, SyncDir, bind, doctor_cache, serve, serve_for, sync_dir};
+
+mod attention;
 
 mod log;
 
@@ -231,6 +233,8 @@ struct Daemon {
     served: tokio::task::JoinHandle<()>,
     /// The dashboard's credentials, which a test's dashboard shares.
     sessions: Arc<runnerd_web::Sessions>,
+    /// The engine's status as the API reads it.
+    status: Arc<watch::Sender<Status>>,
 }
 
 impl Daemon {
@@ -280,6 +284,51 @@ async fn start_serving(
     memory_max: MemoryMax,
     text: &str,
 ) -> Daemon {
+    start_doctored(
+        dir,
+        owner,
+        engine,
+        sync_dir,
+        memory_max,
+        text,
+        passing_doctor(),
+    )
+    .await
+}
+
+/// A doctor that finds the host ready at once, without reading it.
+fn passing_doctor() -> doctor_cache::Setup {
+    doctor_cache::Setup {
+        read: Arc::new(|_: Option<&Config>, _: &Path, _| {
+            vec![runnerd_core::api::Check {
+                name: "Docker".to_owned(),
+                status: runnerd_core::api::CheckStatus::Pass,
+                detail: "reachable".to_owned(),
+                fix: None,
+            }]
+        }),
+        timing: DOCTOR_TIMING,
+    }
+}
+
+/// The doctor's pace in tests: a run answers a request for a second, none comes by itself, and one may take 2 s.
+const DOCTOR_TIMING: doctor_cache::Timing = doctor_cache::Timing {
+    fresh: Duration::from_secs(1),
+    refresh: Duration::from_hours(1),
+    stale: Duration::from_hours(1),
+    deadline: Duration::from_secs(2),
+};
+
+/// `start_serving`, with `doctor` reading the host.
+async fn start_doctored(
+    dir: &Path,
+    owner: Option<u32>,
+    engine: bool,
+    sync_dir: SyncDir,
+    memory_max: MemoryMax,
+    text: &str,
+    doctor: doctor_cache::Setup,
+) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) =
@@ -293,6 +342,7 @@ async fn start_serving(
         drop(commands);
     }
     let (sender, receiver) = watch::channel(status());
+    let sender = Arc::new(sender);
     let handle = Handle {
         status: receiver,
         control: control.clone(),
@@ -317,6 +367,11 @@ async fn start_serving(
         sync_dir,
         auto_every: Duration::from_millis(20),
         notify: NOTIFY,
+        doctor,
+        attention: super::attention::Timing {
+            every: Duration::from_millis(100),
+            insights: Duration::from_secs(1),
+        },
     };
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
     let sessions_kept = sessions.clone();
@@ -330,6 +385,7 @@ async fn start_serving(
     let stopped = async {
         let _ = stopped.await;
     };
+    let status = sender.clone();
     let served = tokio::spawn(async move {
         let _sender = sender;
         match owner {
@@ -353,6 +409,7 @@ async fn start_serving(
         stop,
         served,
         sessions: sessions_kept,
+        status,
     }
 }
 

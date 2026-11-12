@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
-use runnerd_core::api::{self, JobSummary, Status, View};
+use runnerd_core::api::{self, JobSummary, Section, Status, View};
 
 use crate::assets;
 use crate::format;
@@ -21,7 +21,7 @@ pub(crate) mod overview;
 pub(crate) mod records;
 pub(crate) mod sizing;
 
-/// The pages in the navigation: core's views, in its order.
+/// The dashboard's pages: core's views, each a page or a group of its sections' pages (ADR 0132).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     Overview,
@@ -34,15 +34,37 @@ pub(crate) enum Page {
 }
 
 impl Page {
+    /// The page a view opens on: its own, or its first section's.
     fn of(view: View) -> Page {
-        match view {
-            View::Overview => Page::Overview,
-            View::History => Page::History,
-            View::Records => Page::Records,
-            View::Sizing => Page::Sizing,
-            View::Insights => Page::Insights,
-            View::Caches => Page::Caches,
-            View::Config => Page::Config,
+        match view.sections().first() {
+            Some(section) => Page::of_section(*section),
+            None => match view {
+                View::Insights => Page::Insights,
+                _ => Page::Overview,
+            },
+        }
+    }
+
+    fn of_section(section: Section) -> Page {
+        match section {
+            Section::History => Page::History,
+            Section::Records => Page::Records,
+            Section::Sizing => Page::Sizing,
+            Section::Caches => Page::Caches,
+            Section::Config => Page::Config,
+        }
+    }
+
+    /// The view it is in.
+    fn view(self) -> View {
+        match self {
+            Page::Overview => View::Overview,
+            Page::Insights => View::Insights,
+            Page::History => Section::History.view(),
+            Page::Records => Section::Records.view(),
+            Page::Sizing => Section::Sizing.view(),
+            Page::Caches => Section::Caches.view(),
+            Page::Config => Section::Config.view(),
         }
     }
 
@@ -154,7 +176,15 @@ pub(crate) fn page(
     live: Option<&Live<'_>>,
     main: &Markup,
 ) -> Markup {
-    let nav = View::ALL.map(|view| (Page::of(view), Page::of(view).path(), view.title()));
+    let nav = View::ALL.map(|view| (view, Page::of(view).path(), view.title()));
+    let view = active.map(Page::view);
+    // The sections of the view shown, when it has several: every page of the group stays one click away.
+    let sections: Vec<_> = view
+        .map(View::sections)
+        .unwrap_or_default()
+        .iter()
+        .map(|section| (Page::of_section(*section), section.title()))
+        .collect();
 
     html! {
         (DOCTYPE)
@@ -184,8 +214,8 @@ pub(crate) fn page(
                         "runnerd"
                     }
                     nav aria-label="Dashboard" {
-                        @for (page, href, label) in nav {
-                            @if active == Some(page) {
+                        @for (shown, href, label) in nav {
+                            @if view == Some(shown) {
                                 a href=(href) aria-current="page" { (label) }
                             } @else {
                                 a href=(href) { (label) }
@@ -206,6 +236,17 @@ pub(crate) fn page(
                         svg viewBox="0 0 20 20" aria-hidden="true" {
                             circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" {}
                             path d="M10 2a8 8 0 0 1 0 16z" fill="currentColor" {}
+                        }
+                    }
+                }
+                @if sections.len() > 1 {
+                    nav.sections aria-label=(view.map_or("", View::title)) {
+                        @for (page, label) in &sections {
+                            @if active == Some(*page) {
+                                a href=(page.path()) aria-current="page" { (label) }
+                            } @else {
+                                a href=(page.path()) { (label) }
+                            }
                         }
                     }
                 }

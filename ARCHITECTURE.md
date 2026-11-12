@@ -44,7 +44,10 @@ flowchart TB
 
 - `api`, `config`: build without `host`. Every client reads these. `api::View` and `api::Column` name the views and table columns every client uses, `Health::figures` and
   `JobMetrics::totals` word the overview's health figures and what a job used
-  ([ADR 0093](docs/adr/0093-clients-share-views-columns-and-health-figures.md)). `api::jobs::log` reads a job's log as
+  ([ADR 0093](docs/adr/0093-clients-share-views-columns-and-health-figures.md)). The five views (Overview, Jobs,
+  Insights, Capacity, Settings) each list their `api::Section`s, and `api::attention_items` decides and words what
+  needs attention from the status, the doctor's run and the insights
+  ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)). `api::jobs::log` reads a job's log as
   structure: it styles each stored line, builds the outline a line at a time (`Outliner`), tells each step's lines by
   their times and the steps' and words a failure from what is stored, and searches a page at a time
   ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)). `api::savings` prices this machine's job minutes
@@ -87,9 +90,11 @@ flowchart TB
   ([ADR 0083](docs/adr/0083-turborepo-and-nx-from-the-build-cache.md)).
 
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
-notifications, each kind of target a `Sender` in a module of its own), `init`, `doctor`, `simulate`, and
+notifications, each kind of target a `Sender` in a module of its own, `api/doctor_cache` keeps the doctor's last run
+for the config running, and `api/attention` the attention snapshot, each in one worker), `init`, `doctor`, `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
-check), `views` (one per page: overview, history, records, sizing, insights, caches, config, and a job), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
+check), `views` (one per page: overview, history, records, sizing, insights, caches, config, and a job; the navigation
+names the five views and the sections of the one shown), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
 `assets` (the files the pages load, the web app manifest and icons included).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
@@ -295,6 +300,7 @@ always returns, so the daemon closes and flushes the history.
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>` with the scope's ref and the key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
+| Doctor's checks and attention | in memory: the doctor's last run in `api/doctor_cache`, the attention snapshot in `api/attention`; a restart starts with the doctor not run and a new revision, and forgets why listings failed ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)) |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
 | Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, each log's outline, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and for a slot alone, and how much of its wait passed while no runnerd ran; times in ms |
@@ -318,6 +324,9 @@ always returns, so the daemon closes and flushes the history.
   [ADR 0060](docs/adr/0060-clients-show-what-core-computes-about-the-host.md)). Every client's parity test draws
   the same fixtures (`crates/fixtures`) and asserts core's facts, and the boundary check fails on a client's own
   formatter or classifier ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)).
+- What needs attention is one snapshot with one owner, listed only on evidence that holds now; its revision moves
+  whenever its content does and `attention.changed` says so. Doctor checks that are not current are never shown or
+  passed as an all clear ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)).
 - Clients never talk to Docker or GitHub; they talk to the daemon.
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,

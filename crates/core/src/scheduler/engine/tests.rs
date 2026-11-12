@@ -5829,6 +5829,7 @@ fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus 
         }],
         paused,
         queued_jobs,
+        listing: None,
     }
 }
 
@@ -5895,6 +5896,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
                 }],
                 paused: false,
                 queued_jobs: 0,
+                listing: None,
             }
         }]
     );
@@ -7543,4 +7545,63 @@ async fn a_slot_whose_volume_was_cleaned_no_longer_attracts_its_job() {
     engine.publish();
     assert_eq!(runner_in(&handle, 2), None);
     assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/r"));
+}
+
+/// A listing that fails is in the status as its class and status code, never GitHub's text; the rate limit is no
+/// failure of it, and an answer clears it (ADR 0132).
+#[tokio::test]
+async fn a_failing_listing_is_published_without_githubs_words_until_one_answers() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    let listing = |handle: &Handle| {
+        handle.status.borrow().repositories[0]
+            .listing
+            .as_ref()
+            .map(|failure| failure.problem.clone())
+    };
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_queued
+        .insert("o/r".to_owned());
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        listing(&handle),
+        Some(api::ListingProblem::Failed { status: 502 })
+    );
+    let written = serde_json::to_string(&*handle.status.borrow()).unwrap();
+    assert!(
+        !written.contains("bad gateway"),
+        "GitHub's words stay out: {written}"
+    );
+    {
+        let mut state = github.0.lock().unwrap();
+        state.failed_queued.clear();
+        state.rate_limited = Some(std::time::SystemTime::now() + Duration::from_millis(200));
+    }
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        listing(&handle),
+        None,
+        "a rate limit is no failure of the listing"
+    );
+    github.0.lock().unwrap().rate_limited = None;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_queued
+        .insert("o/r".to_owned());
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(listing(&handle).is_some(), "failing again");
+    github.0.lock().unwrap().failed_queued.clear();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(listing(&handle), None, "an answer clears it");
 }

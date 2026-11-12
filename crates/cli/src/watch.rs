@@ -180,6 +180,7 @@ impl State {
             Event::HostSample { sample } => self.host = Some(sample.clone()),
             Event::CacheReseeded { .. }
             | Event::LogLine { .. }
+            | Event::AttentionChanged { .. }
             | Event::RecordCreated { .. }
             | Event::RecordDeleted { .. }
             | Event::SizingChanged { .. }
@@ -683,6 +684,7 @@ mod tests {
             pools: vec![pool("jvm"), pool("light")],
             paused: false,
             queued_jobs: 1,
+            listing: None,
         });
         let mut queued = summary(JobState::Queued);
         queued.runner = None;

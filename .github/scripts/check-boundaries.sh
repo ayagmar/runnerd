@@ -78,16 +78,19 @@ else
   status=1
 fi
 
-# The names of the views (`api::View`) are core's: a client that writes one as a string literal of its own, rather than
-# calling `View::title`, can drift from the others. Same files and exceptions for tests as above.
-views=$(sed -n '/pub fn title(self) -> &.static str {/,/^    }/p' crates/core/src/api/labels.rs | head -12 | grep -o '=> "[^"]*"' | sed 's/=> "//; s/"$//')
+# The names of the views and their sections (`api::View`, `api::Section`) are core's: a client that writes one as a
+# string literal of its own, rather than calling `title`, can drift from the others. Same files and exceptions for tests
+# as above; a line that uses one of the words for something else, such as a count of jobs, says so with a comment
+# `// not the view's name`.
+views=$(sed -n '/^impl \(View\|Section\) {/,/^}/p' crates/core/src/api/labels.rs |
+  sed -n '/pub fn title(self) -> &.static str {/,/^    }/p' | grep -o '=> "[^"]*"' | sed 's/=> "//; s/"$//')
 pattern=$(printf '%s\n' "$views" | sed 's/.*/"&"/' | paste -sd'|' -)
 spelled=$(find crates/cli/src crates/web/src crates/daemon/src -name '*.rs' ! -name tests.rs ! -name testing.rs \
   ! -name testdir.rs ! -name parity.rs ! -path '*/tests/*' -exec awk -v pattern="$pattern" \
-  'FNR == 1 { done = 0 } /^mod tests \{/ { done = 1 } !done && $0 !~ /^ *\/\// && $0 ~ pattern { print FILENAME ":" FNR ": " $0 }' {} +)
+  'FNR == 1 { done = 0 } /^mod tests \{/ { done = 1 } !done && $0 !~ /^ *\/\// && $0 !~ /\/\/ not the view.s name$/ && $0 ~ pattern { print FILENAME ":" FNR ": " $0 }' {} +)
 if [ -n "$spelled" ]; then
   printf '%s\n' "$spelled" >&2
-  echo "a view's name is written out: use api::View::title" >&2
+  echo "a view's or a section's name is written out: use api::View::title or api::Section::title" >&2
   status=1
 else
   echo "view names: ok"

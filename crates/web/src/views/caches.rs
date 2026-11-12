@@ -2,7 +2,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    BUILD_CACHE_TOOLS, CacheHistory, CacheKind, CacheVolume, Caches, Status, View,
+    BUILD_CACHE_TOOLS, CacheHistory, CacheKind, CacheVolume, Caches, Section, Status,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -59,7 +59,7 @@ pub(crate) fn render(view: &CachesView) -> Markup {
     let total: u64 = view.caches.volumes.iter().map(|volume| volume.bytes).sum();
     let main = html! {
         div.page-head {
-            h1.visually-hidden { (View::Caches.title()) }
+            h1.visually-hidden { (Section::Caches.title()) }
             p.figures title="Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." {
                 span.big { (format::bytes(total)) }
                 span.muted {
@@ -71,7 +71,7 @@ pub(crate) fn render(view: &CachesView) -> Markup {
         }
         (volumes(view))
     };
-    page(View::Caches.title(), Some(Page::Caches), None, &main)
+    page(Section::Caches.title(), Some(Page::Caches), None, &main)
 }
 
 /// A card per volume: its size, its bound, and its size over time.

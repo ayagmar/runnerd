@@ -199,9 +199,9 @@ pub(crate) enum View {
 }
 
 impl View {
-    /// The views the TUI has, in core's order, each with core's name for it: tab `n` and key `n` open the `n`th. A
-    /// view core lists that the TUI lacks is left out, and a view added to core fails to compile here until it is
-    /// either drawn or left out.
+    /// The views the TUI has, in core's order, each with core's name for it: tab `n` and key `n` open the `n`th, on
+    /// its first section the TUI draws; the key again opens its next. A view or section core lists that the TUI lacks
+    /// is left out, and one added to core fails to compile here until it is either drawn or left out.
     pub(crate) fn tabs() -> Vec<(runnerd_core::api::View, View)> {
         View::tabs_of(&runnerd_core::api::View::ALL)
     }
@@ -210,21 +210,51 @@ impl View {
     pub(crate) fn tabs_of(
         order: &[runnerd_core::api::View],
     ) -> Vec<(runnerd_core::api::View, View)> {
-        use runnerd_core::api::View as Core;
         order
             .iter()
-            .copied()
-            .filter_map(|view| {
-                let ours = match view {
-                    Core::Overview => View::Overview,
-                    Core::History => View::History,
-                    Core::Records => View::Records,
-                    Core::Sizing => View::Sizing,
-                    Core::Insights | Core::Caches | Core::Config => return None,
-                };
-                Some((view, ours))
-            })
+            .filter_map(|view| Some((*view, *View::of(*view).first()?)))
             .collect()
+    }
+
+    /// The TUI's views of core's `view`, in the order of its sections.
+    pub(crate) fn of(view: runnerd_core::api::View) -> Vec<View> {
+        use runnerd_core::api::{Section, View as Core};
+        let drawn = |section: &Section| match section {
+            Section::History => Some(View::History),
+            Section::Records => Some(View::Records),
+            Section::Sizing => Some(View::Sizing),
+            Section::Caches | Section::Config => None,
+        };
+        match view {
+            Core::Overview => vec![View::Overview],
+            Core::Insights => Vec::new(),
+            Core::Jobs | Core::Capacity | Core::Settings => {
+                view.sections().iter().filter_map(drawn).collect()
+            }
+        }
+    }
+
+    /// Core's view it is part of; none for a job's.
+    pub(crate) fn group(self) -> Option<runnerd_core::api::View> {
+        use runnerd_core::api::{Section, View as Core};
+        match self {
+            View::Overview => Some(Core::Overview),
+            View::History => Some(Section::History.view()),
+            View::Records => Some(Section::Records.view()),
+            View::Sizing => Some(Section::Sizing.view()),
+            View::Job => None,
+        }
+    }
+
+    /// Core's name of its section, for a view that is one.
+    pub(crate) fn section(self) -> Option<runnerd_core::api::Section> {
+        use runnerd_core::api::Section;
+        match self {
+            View::History => Some(Section::History),
+            View::Records => Some(Section::Records),
+            View::Sizing => Some(Section::Sizing),
+            View::Overview | View::Job => None,
+        }
     }
 }
 
@@ -837,8 +867,15 @@ impl App {
             KeyCode::Char('h') => return self.show(View::History),
             KeyCode::Char(digit @ '1'..='9') => {
                 let tab = usize::from(u8::try_from(digit).unwrap_or(b'1') - b'1');
-                if let Some((_, view)) = View::tabs().get(tab) {
-                    return self.show(*view);
+                if let Some((group, first)) = View::tabs().get(tab) {
+                    // Again on the view shown: its next section.
+                    let sections = View::of(*group);
+                    let next = sections
+                        .iter()
+                        .position(|view| *view == self.view)
+                        .and_then(|at| sections.get((at + 1) % sections.len()))
+                        .unwrap_or(first);
+                    return self.show(*next);
                 }
             }
             KeyCode::Esc if self.view == View::Job => return self.show(self.back),

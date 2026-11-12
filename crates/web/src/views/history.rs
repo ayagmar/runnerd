@@ -4,7 +4,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Bucket, Column, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsSummary, Status, View,
+    Bucket, Column, JobPage, JobQuery, JobState, Section, Stats, StatsQuery, StatsSummary, Status,
 };
 use runnerd_core::client::{Client, ClientError};
 use serde::{Deserialize, Serialize};
@@ -160,12 +160,12 @@ fn days(stats: &Stats, now: u64) -> Vec<StatsSummary> {
 /// The whole page.
 pub(crate) fn render(history: &History) -> Markup {
     let main = html! {
-        h1.visually-hidden { (View::History.title()) }
+        h1.visually-hidden { (Section::History.title()) }
         (filters(history))
         (trends(history))
         (jobs(history))
     };
-    page(View::History.title(), Some(Page::History), None, &main)
+    page(Section::History.title(), Some(Page::History), None, &main)
 }
 
 /// The filters, as links: each sets one filter and keeps the others, so they work without scripts and a filtered
@@ -400,7 +400,7 @@ fn headline(days: &[StatsSummary]) -> Markup {
     let each = |value: &dyn Fn(&StatsSummary) -> String| days.iter().map(value).collect::<Vec<_>>();
     let figures = [
         (
-            "Jobs",
+            "Jobs", // not the view's name
             total.jobs.to_string(),
             each(&|day| day.jobs.to_string()),
         ),
@@ -444,7 +444,7 @@ fn jobs(history: &History) -> Markup {
     });
     html! {
         section.jobs aria-labelledby="jobs-title" {
-            h2 #jobs-title .visually-hidden { "Jobs" }
+            h2 #jobs-title .visually-hidden { "Jobs" } // not the view's name
             @if history.page.jobs.is_empty() {
                 p.muted { "No jobs match." }
             } @else {

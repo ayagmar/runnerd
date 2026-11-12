@@ -386,6 +386,19 @@ impl Client {
         sender.send_request(request).await.map_err(transport)
     }
 
+    /// `GET /v1/attention`: what needs attention (ADR 0132). `None` from a daemon without the route, before 0.2, which a
+    /// client shows as not supported, never as nothing to attend to.
+    pub async fn attention(&self) -> Result<Option<crate::api::Attention>, ClientError> {
+        match self.get("/v1/attention").await {
+            Ok(attention) => Ok(Some(attention)),
+            Err(ClientError::Api {
+                status: StatusCode::NOT_FOUND,
+                ..
+            }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// `GET /v1/jobs/{id}/logs`: the job's log, as lines. Unless followed, each part of the body must come within the
     /// request timeout.
     pub async fn logs(&self, id: u64, query: &LogQuery) -> Result<Lines, ClientError> {
@@ -809,6 +822,39 @@ mod tests {
             "resumed after 7, and says it was opened again"
         );
         assert_eq!(*seen.lock().unwrap(), [None, Some("7".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn attention_from_a_daemon_without_the_route_is_not_supported_and_otherwise_read() {
+        let old = Fake::serve(
+            Router::new().fallback(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(crate::api::ErrorResponse {
+                        message: "no such endpoint".to_owned(),
+                    }),
+                )
+            }),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        assert_eq!(old.client.attention().await.unwrap(), None);
+        let new = Fake::serve(
+            Router::new().route(
+                "/v1/attention",
+                get(|| async { axum::Json(crate::api::Attention::new(4, Vec::new())) }),
+            ),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            new.client
+                .attention()
+                .await
+                .unwrap()
+                .map(|attention| attention.revision),
+            Some(4)
+        );
     }
 
     #[tokio::test]

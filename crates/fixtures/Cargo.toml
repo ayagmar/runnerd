@@ -12,5 +12,9 @@ publish = false
 [dependencies]
 runnerd-core.workspace = true
 
+[dev-dependencies]
+# Reads `FUTURE_ATTENTION` as a client would.
+serde_json.workspace = true
+
 [lints]
 workspace = true

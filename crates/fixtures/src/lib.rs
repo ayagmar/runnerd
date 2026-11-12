@@ -146,6 +146,7 @@ fn repository(name: &str, pool: PoolStatus, queued_jobs: usize) -> RepositorySta
         pools: vec![pool],
         paused: false,
         queued_jobs,
+        listing: None,
     }
 }
 
@@ -1306,6 +1307,186 @@ fn slot_facts(status: &Status) -> Vec<SlotFact> {
         .collect()
 }
 
+/// The doctor's run 3 minutes before [`NOW`] for the config the daemon runs with (ADR 0132): sysbox fails, the slice
+/// warns, two checks of one name (`repository`) warn, Docker passes and kvm is a note.
+pub fn doctor() -> api::Doctor {
+    let check = |name: &str, status, detail: &str, fix: Option<&str>| api::Check {
+        name: name.to_owned(),
+        status,
+        detail: detail.to_owned(),
+        fix: fix.map(str::to_owned),
+    };
+    api::Doctor {
+        checks: vec![
+            check("Docker", api::CheckStatus::Pass, "29.1.3, reachable", None),
+            check(
+                "sysbox",
+                api::CheckStatus::Fail,
+                "sysbox-runc is not a Docker runtime",
+                Some("sudo systemctl restart sysbox docker"),
+            ),
+            check(
+                "slice",
+                api::CheckStatus::Warn,
+                "runnerd.slice has MemoryMax=24G but no MemoryHigh",
+                Some("systemctl --user edit runnerd.slice, then add MemoryHigh=22G under [Slice]"),
+            ),
+            check(
+                "repository",
+                api::CheckStatus::Warn,
+                "halyard/docs is public: anyone who opens a pull request on it can run code on this host",
+                Some("serve private repositories only"),
+            ),
+            check(
+                "repository",
+                api::CheckStatus::Warn,
+                "halyard/archive is public: anyone who opens a pull request on it can run code on this host",
+                Some("serve private repositories only"),
+            ),
+            check("kvm", api::CheckStatus::Info, "/dev/kvm is there", None),
+        ],
+        state: Some(api::DoctorState::Ready { at: NOW - 180 }),
+    }
+}
+
+/// [`doctor`] in each state that is not current: never run since the start, failed on its deadline, stale for a
+/// config replaced since, and a state from a newer daemon. None of them may read as all clear.
+pub fn doctor_not_current() -> Vec<api::Doctor> {
+    [
+        api::DoctorState::NotRun,
+        api::DoctorState::Failed {
+            at: NOW - 30,
+            error: "it took longer than 2m 00s".to_owned(),
+        },
+        api::DoctorState::Stale { at: NOW - 7200 },
+        api::DoctorState::Unknown,
+    ]
+    .into_iter()
+    .map(|state| api::Doctor {
+        state: Some(state),
+        ..doctor()
+    })
+    .collect()
+}
+
+/// The fixtures with GitHub failing (ADR 0132): ledger's listing answered 404 for the last 10 minutes and
+/// storefront's gets no answer, beside the used-up rate limit.
+pub fn github_failing() -> Daemon {
+    let mut daemon = daemon();
+    for repository in &mut daemon.status.repositories {
+        repository.listing = Some(match repository.name.as_str() {
+            LEDGER => api::ListingFailure {
+                since: NOW - 600,
+                problem: api::ListingProblem::Refused { status: 404 },
+            },
+            _ => api::ListingFailure {
+                since: NOW - 90,
+                problem: api::ListingProblem::Unreachable,
+            },
+        });
+    }
+    daemon
+}
+
+/// The fixtures with GitHub refusing runnerd's token (401) for every repository: one item, not one each.
+pub fn github_refused() -> Daemon {
+    let mut daemon = daemon();
+    for repository in &mut daemon.status.repositories {
+        repository.listing = Some(api::ListingFailure {
+            since: NOW - 300,
+            problem: api::ListingProblem::Unauthorized,
+        });
+    }
+    daemon
+}
+
+/// The fixtures with halyard/storefront paused: its queued jobs wait for a resume.
+pub fn paused() -> Daemon {
+    let mut daemon = daemon();
+    for repository in &mut daemon.status.repositories {
+        repository.paused = repository.name == STOREFRONT;
+    }
+    for queued in &mut daemon.status.queued {
+        if queued.repository == STOREFRONT && queued.waiting != Some(Waiting::RunnerStarting) {
+            queued.waiting = Some(Waiting::Paused);
+        }
+    }
+    daemon
+}
+
+/// `GET /v1/attention` at revision 1 for `daemon`, `doctor` and the insights at [`NOW`]: core's items
+/// (`api::attention_items`). For the fixtures: the doctor's failure, the token or the listings, labels no pool serves,
+/// the long wait for the host's memory, the warning insights and the rate limit.
+pub fn attention(daemon: &Daemon, doctor: &api::Doctor) -> api::Attention {
+    api::Attention::new(
+        1,
+        api::attention_items(&daemon.status, doctor, Some(&insights(NOW)), NOW),
+    )
+}
+
+/// More than an attention list holds: 60 doctor warnings, of which [`api::ATTENTION_MAX`] are listed.
+pub fn crowded_attention() -> api::Attention {
+    let mut doctor = doctor();
+    doctor.checks = (1..=60)
+        .map(|n| api::Check {
+            name: format!("volume {n:02}"),
+            status: api::CheckStatus::Warn,
+            detail: format!("runnerd-node-slot-{n} is over its size"),
+            fix: None,
+        })
+        .collect();
+    attention(&daemon(), &doctor)
+}
+
+/// `GET /v1/attention` from a newer daemon: a kind, a tone, a subject and a fix this version does not know, beside an
+/// item it does. A client shows the first by its title, neutral, without a link or a fix.
+pub const FUTURE_ATTENTION: &str = r#"{
+  "revision": 1792677787001,
+  "items": [
+    {"key": "disk-full", "kind": "disk-full", "tone": "alarm", "title": "Docker's disk is 98% full",
+     "subject": {"kind": "volume", "name": "runnerd-pnpm"}, "since": 1792677000,
+     "fix": {"kind": "wizard", "steps": 3}},
+    {"key": "doctor:sysbox", "kind": "doctor", "tone": "bad", "title": "sysbox: sysbox-runc is not a Docker runtime",
+     "subject": {"kind": "check", "name": "sysbox"}, "fix": {"kind": "open", "view": "timeline"}}
+  ],
+  "omitted": 2
+}"#;
+
+/// One attention item as every client states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionFact {
+    /// What a client keys it by.
+    pub key: String,
+    /// Its line.
+    pub title: String,
+    /// What it means.
+    pub tone: Tone,
+    /// What clears it, in core's words (`api::Fix::line`).
+    pub fix: Option<String>,
+    /// How old its evidence is (`api::ago`); `None` when unknown.
+    pub since: Option<String>,
+}
+
+/// The facts of `attention`, as core words them at [`NOW`], in its order; and what a client that shows `shown` items
+/// says of the rest.
+pub fn attention_facts(
+    attention: &api::Attention,
+    shown: usize,
+) -> (Vec<AttentionFact>, Option<String>) {
+    let facts = attention
+        .items
+        .iter()
+        .map(|item| AttentionFact {
+            key: item.key.clone(),
+            title: item.title.clone(),
+            tone: item.tone,
+            fix: item.fix.as_ref().map(api::Fix::line),
+            since: item.since.map(|at| api::ago(at, NOW)),
+        })
+        .collect();
+    (facts, attention.more(shown))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1387,5 +1568,65 @@ mod tests {
             "{}",
             facts.savings_30_days
         );
+    }
+
+    /// What needs attention in the fixtures holds each source, in core's order, and the awkward cases say so.
+    #[test]
+    fn the_attention_fixtures_hold_every_source_and_the_awkward_cases() {
+        let kinds = |attention: &api::Attention| -> Vec<api::AttentionKind> {
+            attention.items.iter().map(|item| item.kind).collect()
+        };
+        let attention = attention(&github_failing(), &doctor());
+        let found = kinds(&attention);
+        for kind in [
+            api::AttentionKind::Doctor,
+            api::AttentionKind::GithubListing,
+            api::AttentionKind::CannotStart,
+            api::AttentionKind::HostMemory,
+            api::AttentionKind::Insight,
+            api::AttentionKind::RateLimited,
+        ] {
+            assert!(found.contains(&kind), "{kind:?} in {found:?}");
+        }
+        assert_eq!(attention.items[0].key, "doctor:sysbox", "the failure first");
+        assert!(
+            !attention
+                .items
+                .iter()
+                .any(|item| item.key.starts_with("insight:host-held")),
+            "the host-held insight is the host-memory item"
+        );
+        assert_eq!(
+            kinds(&super::attention(&github_refused(), &doctor()))
+                .iter()
+                .filter(|kind| **kind == api::AttentionKind::GithubAuth)
+                .count(),
+            1,
+            "one item for a refused token"
+        );
+        assert!(
+            super::attention(&paused(), &doctor())
+                .items
+                .iter()
+                .any(|item| item.key == "cannot-start:paused:halyard/storefront"),
+            "a paused repository's jobs"
+        );
+        for doctor in doctor_not_current() {
+            let unavailable = kinds(&super::attention(&daemon(), &doctor));
+            assert!(
+                unavailable.contains(&api::AttentionKind::DoctorUnavailable)
+                    && !unavailable.contains(&api::AttentionKind::Doctor),
+                "{:?}: says so, with none of the old checks",
+                doctor.state
+            );
+        }
+        let crowded = crowded_attention();
+        assert_eq!(crowded.items.len(), api::ATTENTION_MAX);
+        assert!(crowded.omitted > 0, "some are left out");
+        let (_, more) = attention_facts(&crowded, 3);
+        assert!(more.is_some(), "and N more");
+        let future: api::Attention = serde_json::from_str(FUTURE_ATTENTION).unwrap();
+        assert_eq!(future.items[0].kind, api::AttentionKind::Unknown);
+        assert_eq!(future.items[1].fix, None, "a view this version lacks");
     }
 }

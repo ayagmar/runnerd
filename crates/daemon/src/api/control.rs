@@ -1,5 +1,5 @@
 //! The control routes: pause (of one repository or all, forced or not) and resume, reseed, cache clean, the config
-//! file (show, check, replace and reload) and the doctor, with the sizing advice. Every handler takes the
+//! file (show, check, replace and reload) and the doctor's checks, which `doctor_cache` keeps. Every handler takes the
 //! authenticated principal. The engine carries out what changes scheduling through `Control`; this module only
 //! writes the config file, atomically, after it validated it.
 
@@ -11,12 +11,11 @@ use axum::Json;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery, ReplaceQuery};
+use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, DoctorState, PauseQuery, ReplaceQuery};
 use runnerd_core::config::{Config, keep_secrets, mask_secrets, revision};
 use runnerd_core::scheduler::engine::{
     Author, Commit, ControlError, RunningJobs, RunningSlots, Target, same_slice,
 };
-use runnerd_core::sizing::Window;
 use tracing::info;
 
 use super::{AppState, Authenticated, ConfigText, MemoryMax, SyncDir, error};
@@ -327,8 +326,8 @@ pub(super) async fn replace(
     checked.warnings.extend(warning);
     checked.revision = Some(revision(&text));
     file.text = text;
-    // The notifier reads it once this lock is let go: a target added starts from now.
-    state.config_replaced.notify_one();
+    // Its readers read it once this lock is let go: a notify target added starts from now, and the doctor runs again.
+    state.config_revision.send_replace(revision(&file.text));
     Ok(checked)
 }
 
@@ -383,27 +382,16 @@ fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Op
     Ok(sync_dir(dir).err())
 }
 
+/// `GET /v1/doctor`: the doctor's checks of the config running, from its last run when that is recent, else from one
+/// run for the request (ADR 0132). 503 while no run has finished, or the last failed.
 pub(super) async fn doctor(_: Authenticated, State(state): State<AppState>) -> Response {
-    let (text, path) = {
-        let file = state.config.lock().await;
-        (file.text.clone(), file.path.clone())
-    };
-    // The host and the job history at once: each takes a while.
-    let host = tokio::task::spawn_blocking(move || {
-        let config = Config::parse(&text).ok();
-        let host = crate::doctor::Host::read(config.as_ref(), Some(&path));
-        (config, host)
-    });
-    let sizing = super::history::sizing_now(&state, Window::new(None, super::history::now()));
-    let (read, sizing) = tokio::join!(host, sizing);
-    match read {
-        Ok((config, mut host)) => {
-            host.sizing = Some(sizing);
-            Json(Doctor {
-                checks: crate::doctor::checks(&host, config.as_ref()),
-            })
-            .into_response()
-        }
-        Err(join_error) => failed(&join_error),
+    let revision = || state.config_revision.borrow().clone();
+    let report = state.doctors.current(revision).await;
+    match report.state.as_ref() {
+        Some(unavailable @ (DoctorState::NotRun | DoctorState::Failed { .. })) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &unavailable.line(super::history::now()).unwrap_or_default(),
+        ),
+        _ => Json(report).into_response(),
     }
 }

@@ -916,6 +916,9 @@ async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
     if json {
         print_json(&doctor)?;
     } else {
+        if let Some(line) = doctor.state.as_ref().and_then(|state| state.line(now())) {
+            output::line(line);
+        }
         for check in &doctor.checks {
             output::line(check);
         }

@@ -1,48 +1,88 @@
 //! The names every client gives the same thing: its views and the columns of a table of jobs. A client lays a name
 //! out, upper-cases it or fits it; it does not spell its own.
 
-/// A page of the web dashboard, a view of `runnerctl tui`, in the order every client lists them: the views that
-/// look at the present, then the history and what it advises, then the host and its config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A group of pages of the web dashboard, a group of views of `runnerctl tui`, in the order every client lists them:
+/// what runs now, the jobs, what the history says, the machine's room and the daemon's settings (ADR 0132).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum View {
-    /// Budget, slots, the queue and the latest jobs.
+    /// Budget, slots, the queue, what needs attention and the latest jobs.
     Overview,
-    /// Finished and running jobs, filtered.
-    History,
-    /// The records of failed jobs.
-    Records,
-    /// What each profile's jobs use and what to set.
-    Sizing,
+    /// Finished and running jobs, and the records of failed ones.
+    Jobs,
     /// What the history says: jobs that got slower, are flaky or near their cap.
     Insights,
-    /// The cache volumes and the build cache.
-    Caches,
-    /// The daemon's config.
-    Config,
+    /// What each profile's jobs use and what to set, and the caches.
+    Capacity,
+    /// The daemon's config and the host's checks.
+    Settings,
 }
 
 impl View {
     /// Every view, in order.
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 5] = [
         View::Overview,
-        View::History,
-        View::Records,
-        View::Sizing,
+        View::Jobs,
         View::Insights,
-        View::Caches,
-        View::Config,
+        View::Capacity,
+        View::Settings,
     ];
 
     /// What clients call it.
     pub fn title(self) -> &'static str {
         match self {
             View::Overview => "Overview",
-            View::History => "History",
-            View::Records => "Records",
-            View::Sizing => "Sizing",
+            View::Jobs => "Jobs",
             View::Insights => "Insights",
-            View::Caches => "Caches",
-            View::Config => "Config",
+            View::Capacity => "Capacity",
+            View::Settings => "Settings",
+        }
+    }
+
+    /// Its sections, in order: the first is what opening the view shows. A view of one page has none.
+    pub fn sections(self) -> &'static [Section] {
+        match self {
+            View::Overview | View::Insights => &[],
+            View::Jobs => &[Section::History, Section::Records],
+            View::Capacity => &[Section::Sizing, Section::Caches],
+            View::Settings => &[Section::Config],
+        }
+    }
+}
+
+/// A page inside a [`View`] of several, as every client names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// Finished and running jobs, filtered.
+    History,
+    /// The records of failed jobs.
+    Records,
+    /// What each profile's jobs use and what to set.
+    Sizing,
+    /// The cache volumes and the build cache.
+    Caches,
+    /// The daemon's config and the host's checks.
+    Config,
+}
+
+impl Section {
+    /// What clients call it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::History => "History",
+            Section::Records => "Records",
+            Section::Sizing => "Sizing",
+            Section::Caches => "Caches",
+            Section::Config => "Config",
+        }
+    }
+
+    /// The view it is a section of.
+    pub fn view(self) -> View {
+        match self {
+            Section::History | Section::Records => View::Jobs,
+            Section::Sizing | Section::Caches => View::Capacity,
+            Section::Config => View::Settings,
         }
     }
 }

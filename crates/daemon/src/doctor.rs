@@ -1,10 +1,14 @@
 //! `runnerd doctor`: what the host is missing to run runners, each with the fix. It reads the host and changes
-//! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones.
+//! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones. Every
+//! command it runs and every request to Docker ends within [`READ_DEADLINE`]: one past it is killed or dropped, and its
+//! check says so, so a read of the host is bounded however the host hangs (ADR 0132).
 
 use std::collections::BTreeMap;
+use std::io::{self, Read as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use runnerd_core::admission::host;
 use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
@@ -153,12 +157,13 @@ impl Host {
                 name,
                 state: read_daemon(name),
             });
-            let sysbox_unit = Command::new("systemctl")
-                .args(["show", "sysbox.service", "--property=LoadState", "--value"])
-                .output()
-                .is_ok_and(|output| {
-                    output.status.success() && output.stdout.trim_ascii() == b"loaded"
-                });
+            let sysbox_unit = output(Command::new("systemctl").args([
+                "show",
+                "sysbox.service",
+                "--property=LoadState",
+                "--value",
+            ]))
+            .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"loaded");
             let memory = {
                 let paths = Paths::default();
                 let slice = config.map(|config| config.host.slice.as_str());
@@ -250,6 +255,82 @@ fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+/// How long one command the doctor runs, or one read of Docker and the registries behind it, may take.
+pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(20);
+
+/// `command`'s output, as `Command::output` gives it, with no input; killed past [`READ_DEADLINE`].
+fn output(command: &mut Command) -> io::Result<Output> {
+    output_within(command, READ_DEADLINE)
+}
+
+/// `output` with its own deadline.
+fn output_within(command: &mut Command, deadline: Duration) -> io::Result<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Read as it runs, so a full pipe never stops it.
+    let drain = |pipe: Option<Box<dyn io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut read = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut read);
+            }
+            read
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn io::Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn io::Read + Send>),
+    );
+    let until = Instant::now() + deadline;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            // The readers end when whatever else holds the pipes lets go; nothing waits for them.
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "it did not finish within {}",
+                    api::duration(deadline.as_secs())
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// `read`, with its error as text, given up past [`READ_DEADLINE`]: dropping the future ends its requests.
+async fn bounded<T, E: std::fmt::Display>(
+    read: impl Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(READ_DEADLINE, read).await {
+        Ok(read) => read.map_err(|error| error.to_string()),
+        Err(_) => Err(format!(
+            "Docker did not answer within {}",
+            api::duration(READ_DEADLINE.as_secs())
+        )),
+    }
+}
+
 /// Whether `name` runs as its systemd unit or, as a source build starts it, as a bare process.
 fn read_kernel() -> Option<Kernel> {
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
@@ -266,10 +347,8 @@ fn read_kernel() -> Option<Kernel> {
 
 fn read_daemon(name: &str) -> DaemonState {
     // One unit per call: `systemctl is-active` with several units succeeds when any one runs.
-    let unit = Command::new("systemctl")
-        .args(["is-active", "--quiet", name])
-        .status()
-        .is_ok_and(|status| status.success());
+    let unit = output(Command::new("systemctl").args(["is-active", "--quiet", name]))
+        .is_ok_and(|output| output.status.success());
     if unit {
         return DaemonState::Unit;
     }
@@ -325,9 +404,7 @@ fn read_docker() -> Result<DockerFacts, String> {
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    let info = runtime
-        .block_on(async { Docker::connect()?.info().await })
-        .map_err(|error| error.to_string())?;
+    let info = runtime.block_on(bounded(async { Docker::connect()?.info().await }))?;
     let mut runtimes: Vec<String> = info.runtimes.unwrap_or_default().into_keys().collect();
     runtimes.sort();
     Ok(DockerFacts {
@@ -378,12 +455,17 @@ fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> 
         let docker = Docker::connect().map_err(|error| error.to_string())?;
         // At once: an image Docker lacks costs a round trip to its registry.
         Ok(runtime
-            .block_on(futures_util::future::join_all(images.iter().map(
-                async |(reference, image)| {
-                    let result = read(&docker, reference, image).await;
-                    (reference.clone(), result.map_err(|error| error.to_string()))
-                },
-            )))
+            .block_on(bounded(async {
+                Ok::<_, String>(
+                    futures_util::future::join_all(images.iter().map(
+                        async |(reference, image)| {
+                            let result = read(&docker, reference, image).await;
+                            (reference.clone(), result.map_err(|error| error.to_string()))
+                        },
+                    ))
+                    .await,
+                )
+            }))?
             .into_iter()
             .collect())
     };
@@ -400,9 +482,9 @@ fn read_records() -> Result<u64, String> {
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    let images = runtime
-        .block_on(async { Docker::connect()?.images(record::LABEL).await })
-        .map_err(|error| error.to_string())?;
+    let images = runtime.block_on(bounded(async {
+        Docker::connect()?.images(record::LABEL).await
+    }))?;
     Ok(images.iter().map(|image| image.bytes).sum())
 }
 
@@ -417,10 +499,13 @@ fn images(config: &Config) -> BTreeMap<String, &Image> {
 
 fn read_slice(slice: &str) -> Result<Slice, String> {
     let value = |property: &str| {
-        let output = Command::new("systemctl")
-            .args(["show", slice, &format!("--property={property}"), "--value"])
-            .output()
-            .map_err(|error| format!("systemctl: {error}"))?;
+        let output = output(Command::new("systemctl").args([
+            "show",
+            slice,
+            &format!("--property={property}"),
+            "--value",
+        ]))
+        .map_err(|error| format!("systemctl: {error}"))?;
         if !output.status.success() {
             return Err(format!(
                 "systemctl show {slice} failed: {}",
@@ -441,26 +526,24 @@ fn read_slice(slice: &str) -> Result<Slice, String> {
 }
 
 fn read_gh_scopes() -> Result<Vec<String>, String> {
-    let output = Command::new("gh")
-        .args([
-            "auth",
-            "status",
-            "--hostname",
-            "github.com",
-            "--json",
-            "hosts",
-            "--jq",
-            // Prefixed, so an account without scopes prints a line where none logged in prints nothing.
-            r#".hosts["github.com"][]? | select(.active) | "active:" + (.scopes // "")"#,
-        ])
-        .output()
-        .map_err(|error| format!("cannot run gh: {error}"))?;
+    let output = output(Command::new("gh").args([
+        "auth",
+        "status",
+        "--hostname",
+        "github.com",
+        "--json",
+        "hosts",
+        "--jq",
+        // Prefixed, so an account without scopes prints a line where none logged in prints nothing.
+        r#".hosts["github.com"][]? | select(.active) | "active:" + (.scopes // "")"#,
+    ]))
+    .map_err(|error| format!("cannot run gh: {error}"))?;
     gh_scopes(&output)
 }
 
 /// The scopes in what `read_gh_scopes`'s `gh auth status` printed: `Err` when no account is logged in, which `gh`
 /// says on stderr while it succeeds.
-fn gh_scopes(output: &std::process::Output) -> Result<Vec<String>, String> {
+fn gh_scopes(output: &Output) -> Result<Vec<String>, String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let scopes = stdout.trim().strip_prefix("active:");
     let (true, Some(scopes)) = (output.status.success(), scopes) else {
@@ -490,17 +573,15 @@ fn first_line(stderr: &[u8]) -> String {
 
 /// What GitHub says of `repository`'s visibility, through `gh`.
 fn read_visibility(repository: &str) -> Result<String, String> {
-    let output = Command::new("gh")
-        .args([
-            "api",
-            "--hostname",
-            "github.com",
-            &format!("repos/{repository}"),
-            "--jq",
-            ".visibility",
-        ])
-        .output()
-        .map_err(|error| format!("cannot run gh: {error}"))?;
+    let output = output(Command::new("gh").args([
+        "api",
+        "--hostname",
+        "github.com",
+        &format!("repos/{repository}"),
+        "--jq",
+        ".visibility",
+    ]))
+    .map_err(|error| format!("cannot run gh: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "gh api repos/{repository} failed: {}",
