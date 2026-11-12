@@ -24,6 +24,7 @@ use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
 
+mod outline;
 mod prune;
 mod read;
 mod write;
@@ -65,6 +66,18 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "ALTER TABLE jobs ADD COLUMN runner_fault INTEGER NOT NULL DEFAULT 0;",
     ),
     (21, "ALTER TABLE runners ADD COLUMN cancel_by INTEGER;"),
+    (
+        22,
+        "CREATE TABLE log_outlines (job INTEGER PRIMARY KEY NOT NULL, from_line INTEGER NOT NULL, \
+         errors INTEGER NOT NULL, warnings INTEGER NOT NULL, groups_kept INTEGER NOT NULL, \
+         marks_kept INTEGER NOT NULL, sections_kept INTEGER NOT NULL, dropped INTEGER NOT NULL, \
+         hidden INTEGER NOT NULL);\n\
+         CREATE TABLE log_groups (job INTEGER NOT NULL, start INTEGER NOT NULL, end_line INTEGER, \
+         depth INTEGER NOT NULL, title TEXT NOT NULL, PRIMARY KEY (job, start)) WITHOUT ROWID;\n\
+         CREATE INDEX log_groups_open ON log_groups (job, start) WHERE end_line IS NULL;\n\
+         CREATE TABLE log_marks (job INTEGER NOT NULL, line INTEGER NOT NULL, kind TEXT NOT NULL, \
+         PRIMARY KEY (job, line)) WITHOUT ROWID;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -944,6 +957,38 @@ impl Store {
     ) -> Result<Vec<(u64, String)>, StoreError> {
         self.read(move |db| read::log_lines(db, job, from, limit))
             .await
+    }
+
+    /// A job's log as structure (ADR 0133); `None` without the job.
+    pub async fn log_outline(&self, job: u64) -> Result<Option<api::LogOutline>, StoreError> {
+        self.read(move |db| outline::outline(db, job)).await
+    }
+
+    /// Up to `limit` styled lines of a job's log from line `from`.
+    pub async fn styled_lines(
+        &self,
+        job: u64,
+        from: u64,
+        limit: u64,
+    ) -> Result<Vec<api::StyledLine>, StoreError> {
+        self.read(move |db| outline::styled_lines(db, job, from, limit))
+            .await
+    }
+
+    /// One page of a search of a job's log, each batch of lines its own read, so the search never holds the reader
+    /// for a whole log.
+    pub async fn search_log(
+        &self,
+        job: u64,
+        mut search: api::Search,
+    ) -> Result<api::LogSearch, StoreError> {
+        while let Some(want) = search.wants() {
+            let lines = self
+                .read(move |db| read::lines_from(db, job, want.from, want.limit))
+                .await?;
+            search.read(lines);
+        }
+        Ok(search.finish())
     }
 
     /// Up to `limit` durable events after `after`, oldest first.

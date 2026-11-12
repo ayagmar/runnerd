@@ -161,6 +161,7 @@ JSON over `$XDG_RUNTIME_DIR/runnerd.sock` (`curl --unix-socket`), mode 0600: onl
 | `POST /v1/shutdown` with `{"force": false}` | `202`; `true` kills running jobs |
 | `GET /v1/jobs?repository=&state=&conclusion=&workflow=&name=&since=&until=&before=&limit=` | jobs, newest first; `next` is the next page's `before` |
 | `GET /v1/jobs/{id}`, `.../samples`, `.../logs?from=&follow=` | a job with timeline, steps and metrics; its samples; its log, open until the job is final with `follow=true` |
+| `GET /v1/jobs/{id}/log/outline`, `.../log/lines?from=&limit=&follow=`, `.../log/search?q=&from=&limit=&context=` | its log's groups, marks, each step's lines and a failed job's summary; its lines styled, one JSON object per line; a page of a literal search, `next` where the next one starts |
 | `POST /v1/notify/test?target=` | a test message to every `[notify]` target or the one named; `404` without targets |
 | `GET /v1/records`, `DELETE /v1/records/{job}`, `DELETE /v1/records?all=true`, `?older_than=2d` | the records; the ones removed (a record with a shell open stays; by job it answers `409`) |
 | `POST /v1/records/{job}/shell?step=&cols=&rows=` with `Connection: Upgrade`, `Upgrade: runnerd-tty` | `101`, then raw terminal bytes both ways; `409` when the budget is full |

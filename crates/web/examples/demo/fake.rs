@@ -39,6 +39,7 @@ use runnerd_core::api::{
     AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
     WaitSpread, WeekWaits,
 };
+use runnerd_core::api::{LogLinesQuery, LogOutline, LogSearchQuery, Search, StyledLine};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
 
@@ -54,6 +55,8 @@ pub struct Fixtures {
     pub jobs: Vec<Job>,
     pub samples: BTreeMap<u64, Vec<Sample>>,
     pub logs: BTreeMap<u64, Vec<String>>,
+    /// Jobs reachable by ID only, not listed, each with its log and its outline: the log viewer's awkward cases.
+    pub logged: BTreeMap<u64, runnerd_fixtures::LoggedJob>,
     pub host: Vec<HostSample>,
     pub stats: Vec<StatsRow>,
     pub caches: Caches,
@@ -710,6 +713,10 @@ impl Fixtures {
             jobs,
             samples,
             logs,
+            logged: runnerd_fixtures::logged_jobs()
+                .into_iter()
+                .map(|logged| (logged.job.summary.id, logged))
+                .collect(),
             host,
             stats,
             caches,
@@ -849,6 +856,27 @@ fn find_job(fake: &Fake, id: u64) -> Option<Job> {
         .iter()
         .find(|job| job.summary.id == id)
         .cloned()
+        .or_else(|| fixtures.logged.get(&id).map(|logged| logged.job.clone()))
+}
+
+impl Fixtures {
+    /// A job's stored log lines.
+    fn log_of(&self, id: u64) -> Vec<String> {
+        self.logs
+            .get(&id)
+            .or_else(|| self.logged.get(&id).map(|logged| &logged.lines))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// A job's outline, as the daemon's store keeps it.
+    fn outline_of(&self, id: u64) -> Option<LogOutline> {
+        if let Some(logged) = self.logged.get(&id) {
+            return Some(logged.outline.clone());
+        }
+        let job = self.jobs.iter().find(|job| job.summary.id == id)?;
+        Some(LogOutline::of(job, &self.log_of(id)))
+    }
 }
 
 /// What the history says: ledger's tests got slower on main, storefront's end-to-end job is flaky, ledger's
@@ -1456,9 +1484,51 @@ fn router(fake: Fake) -> Router {
             get(
                 |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<LogQuery>| async move {
                     let fixtures = fake.fixtures.lock().unwrap();
-                    let lines = fixtures.logs.get(&id).cloned().unwrap_or_default();
+                    let lines = fixtures.log_of(id);
                     let from = usize::try_from(query.from.unwrap_or(0)).unwrap().min(lines.len());
                     lines[from..].iter().map(|line| line.clone() + "\n").collect::<String>()
+                },
+            ),
+        )
+        .route(
+            "/v1/jobs/{id}/log/outline",
+            get(|State(fake): State<Fake>, UrlPath(id): UrlPath<u64>| async move {
+                let outline = fake.fixtures.lock().unwrap().outline_of(id);
+                outline.map_or_else(|| not_found("no such job"), |outline| Json(outline).into_response())
+            }),
+        )
+        .route(
+            // A page; `follow` is not followed here.
+            "/v1/jobs/{id}/log/lines",
+            get(
+                |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<LogLinesQuery>| async move {
+                    let lines = fake.fixtures.lock().unwrap().log_of(id);
+                    let from = usize::try_from(query.from.unwrap_or(0)).unwrap().min(lines.len());
+                    let to = (from + usize::try_from(query.page()).unwrap()).min(lines.len());
+                    let body: String = (from..to)
+                        .map(|line| serde_json::to_string(&StyledLine::parse(line as u64, &lines[line])).unwrap() + "\n")
+                        .collect();
+                    ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], body)
+                },
+            ),
+        )
+        .route(
+            "/v1/jobs/{id}/log/search",
+            get(
+                |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<LogSearchQuery>| async move {
+                    let mut search = match Search::new(&query) {
+                        Ok(search) => search,
+                        Err(message) => {
+                            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { message })).into_response();
+                        }
+                    };
+                    let lines = fake.fixtures.lock().unwrap().log_of(id);
+                    while let Some(read) = search.wants() {
+                        let from = usize::try_from(read.from).unwrap().min(lines.len());
+                        let to = (from + usize::try_from(read.limit).unwrap()).min(lines.len());
+                        search.read((read.from..).zip(lines[from..to].iter().cloned()).collect());
+                    }
+                    Json(search.finish()).into_response()
                 },
             ),
         )

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use rusqlite::types::Value;
+use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use tracing::warn;
 
@@ -453,6 +453,47 @@ pub(super) fn log_lines(
     .query_map(params![job, from, limit], |row| {
         Ok((row.get(0)?, row.get(1)?))
     })?
+    .collect()
+}
+
+/// A stored line's text, read as UTF-8 with anything else replaced: what the capture stores is text, but a history is
+/// a file anyone may have written.
+fn lossy(row: &Row<'_>, index: usize) -> rusqlite::Result<String> {
+    Ok(match row.get_ref(index)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => String::new(),
+    })
+}
+
+/// Up to `limit` stored lines of a job's log from line `from`, with their numbers; past a gap pruning left, too.
+pub(super) fn lines_from(
+    db: &Connection,
+    job: u64,
+    from: u64,
+    limit: u64,
+) -> rusqlite::Result<Vec<(u64, String)>> {
+    db.prepare_cached(
+        "SELECT line, text FROM log_lines WHERE job = ?1 AND line >= ?2 ORDER BY line LIMIT ?3",
+    )?
+    .query_map(params![job, from, limit], |row| {
+        Ok((row.get(0)?, lossy(row, 1)?))
+    })?
+    .collect()
+}
+
+/// The stored lines of a job's log from line `from` up to, not including, `to`, with their numbers.
+pub(super) fn lines_between(
+    db: &Connection,
+    job: u64,
+    from: u64,
+    to: u64,
+) -> rusqlite::Result<Vec<(u64, String)>> {
+    db.prepare_cached(
+        "SELECT line, text FROM log_lines WHERE job = ?1 AND line >= ?2 AND line < ?3 ORDER BY line",
+    )?
+    .query_map(params![job, from, to], |row| Ok((row.get(0)?, lossy(row, 1)?)))?
     .collect()
 }
 

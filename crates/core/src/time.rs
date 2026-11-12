@@ -1,14 +1,17 @@
 //! Timestamps as GitHub and Docker write them (RFC 3339 in UTC, such as `2026-10-22T19:27:25Z` or
 //! `2026-10-22T19:27:25.233122085Z`), and the clock as runnerd records it. Pure functions apart from `now_ms`.
 
+#[cfg(feature = "host")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Milliseconds since the Unix epoch, now.
+#[cfg(feature = "host")]
 pub(crate) fn now_ms() -> u64 {
     ms(SystemTime::now())
 }
 
 /// Milliseconds since the Unix epoch of a time.
+#[cfg(feature = "host")]
 pub(crate) fn ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).map_or(0, |since| {
         u64::try_from(since.as_millis()).unwrap_or(u64::MAX)

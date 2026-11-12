@@ -44,7 +44,10 @@ flowchart TB
 
 - `api`, `config`: build without `host`. Every client reads these. `api::View` and `api::Column` name the views and table columns every client uses, `Health::figures` and
   `JobMetrics::totals` word the overview's health figures and what a job used
-  ([ADR 0093](docs/adr/0093-clients-share-views-columns-and-health-figures.md)). `api::savings` prices this machine's job minutes
+  ([ADR 0093](docs/adr/0093-clients-share-views-columns-and-health-figures.md)). `api::jobs::log` reads a job's log as
+  structure: it styles each stored line, builds the outline a line at a time (`Outliner`), tells each step's lines by
+  their times and the steps' and words a failure from what is stored, and searches a page at a time
+  ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)). `api::savings` prices this machine's job minutes
   at GitHub's per-minute rates and words the figure ([ADR 0072](docs/adr/0072-job-minutes-priced-at-github-hosted-rates.md));
   the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
   engine asks GitHub for once a day in a task of its own, off the tick.
@@ -294,7 +297,7 @@ always returns, so the daemon closes and flushes the history.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and for a slot alone, and how much of its wait passed while no runnerd ran; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, each log's outline, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and for a slot alone, and how much of its wait passed while no runnerd ran; times in ms |
 
 ## Invariants
 
@@ -404,6 +407,11 @@ always returns, so the daemon closes and flushes the history.
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
+- A job's log outline (`store::outline`) is written in the transaction that stores the lines it describes, from the
+  state the last batch left, so a restart resumes it where the stored lines end; pruning deletes it after the lines.
+  The plain log and `log.line` carry the stored text; `/log/outline`, `/log/lines` and `/log/search` carry no escape
+  sequence, and no request reads more than a bounded part of a log
+  ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)).
 - Host samples reach subscribers when taken and the database a minute's worth at a time; reads include the ones not
   yet stored.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use super::outline::Outlining;
 use super::read::{self, secs};
 use super::{
     Downtime, HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord,
@@ -796,6 +797,7 @@ impl Writer<'_> {
             [job],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+        let mut outlining = None;
         for line in lines {
             if truncated {
                 break;
@@ -809,6 +811,11 @@ impl Writer<'_> {
                 "INSERT OR IGNORE INTO log_lines (job, line, text) VALUES (?1, ?2, ?3)",
                 params![job, count, line],
             )?;
+            let outlining = match &mut outlining {
+                Some(outlining) => outlining,
+                None => outlining.insert(Outlining::load(&self.db, job, count)?),
+            };
+            outlining.line(count, &line)?;
             announced.push(Event::LogLine {
                 job,
                 line: count,
@@ -816,6 +823,9 @@ impl Writer<'_> {
             });
             count += 1;
             bytes += size;
+        }
+        if let Some(outlining) = outlining {
+            outlining.save()?;
         }
         self.db.execute(
             "UPDATE jobs SET log_lines = ?2, log_bytes = ?3, log_truncated = ?4, \

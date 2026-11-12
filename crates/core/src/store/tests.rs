@@ -17,6 +17,7 @@ use crate::observe::metrics::{CpuHeld, Events};
 use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
+mod log_outline;
 mod waits;
 
 fn queued(id: u64) -> QueuedJob {

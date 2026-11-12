@@ -8,10 +8,17 @@ use super::{cpu_time, in_cores};
 use crate::config::ByteSize;
 
 mod facts;
+mod log;
 
 pub use facts::{
     JobTitle, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, RunComparison, SampleUsage,
     job_title,
+};
+pub use log::{
+    Color, FailureSummary, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LogEvidence, LogGroup,
+    LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch, LogSearchQuery, MarkKind,
+    OutlineChange, OutlineParts, Outliner, Run, SEARCH_QUERY_MAX, SavedOutline, Search, SearchRead,
+    StepLines, StepLog, StoredLog, StyledLine,
 };
 
 /// Where a job is in its life, as this daemon saw it.

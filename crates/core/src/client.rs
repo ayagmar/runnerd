@@ -20,8 +20,8 @@ use tokio::net::UnixStream;
 pub use hyper::{Method, StatusCode};
 
 use crate::api::{
-    Busy, ErrorResponse, EventEnvelope, EventQuery, LogQuery, RunningJob, SHELL_PROTOCOL,
-    ShellQuery,
+    Busy, ErrorResponse, EventEnvelope, EventQuery, LogLinesQuery, LogOutline, LogQuery, LogSearch,
+    LogSearchQuery, RunningJob, SHELL_PROTOCOL, ShellQuery, StyledLine,
 };
 
 /// A shell's terminal on the daemon's socket: raw bytes both ways until either side closes.
@@ -45,6 +45,9 @@ impl Default for Timeouts {
         }
     }
 }
+
+/// What the daemon answers, with 404, a route it does not serve.
+const NO_SUCH_ENDPOINT: &str = "no such endpoint";
 
 /// How long to wait before reconnecting a stream the daemon closed.
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
@@ -93,6 +96,18 @@ impl fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
+
+impl ClientError {
+    /// Whether the daemon does not serve the route at all, as one older than the route answers: the client reads
+    /// that as "not supported", never as an empty answer.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(
+            self,
+            ClientError::Api { status, message, .. }
+                if *status == StatusCode::NOT_FOUND && message == NO_SUCH_ENDPOINT
+        )
+    }
+}
 
 fn transport(error: impl fmt::Display) -> ClientError {
     ClientError::Transport(error.to_string())
@@ -383,6 +398,39 @@ impl Client {
         Ok(Lines::new(response.into_body(), idle))
     }
 
+    /// `GET /v1/jobs/{id}/log/outline`: the job's log as structure. A daemon without the route fails with an error
+    /// that [`ClientError::is_unsupported`] reads.
+    pub async fn log_outline(&self, id: u64) -> Result<LogOutline, ClientError> {
+        self.get(&format!("/v1/jobs/{id}/log/outline")).await
+    }
+
+    /// `GET /v1/jobs/{id}/log/search`: one page of a search of the job's log.
+    pub async fn search_log(
+        &self,
+        id: u64,
+        query: &LogSearchQuery,
+    ) -> Result<LogSearch, ClientError> {
+        self.get_query(&format!("/v1/jobs/{id}/log/search"), query)
+            .await
+    }
+
+    /// `GET /v1/jobs/{id}/log/lines`: the job's log as styled lines, a page or followed. Unless followed, each part
+    /// of the body must come within the request timeout.
+    pub async fn styled_lines(
+        &self,
+        id: u64,
+        query: &LogLinesQuery,
+    ) -> Result<StyledLines, ClientError> {
+        let path = with_query(&format!("/v1/jobs/{id}/log/lines"), query)?;
+        let response = self
+            .in_time(self.send(Method::GET, &path, None, None))
+            .await?;
+        let idle = (!query.follow).then_some(self.timeouts.request);
+        Ok(StyledLines {
+            lines: Lines::new(response.into_body(), idle),
+        })
+    }
+
     /// `GET /v1/events`: the event stream, resumed after `last_id` when given.
     pub async fn events(
         &self,
@@ -479,6 +527,25 @@ impl Lines {
                     }
                 }
                 None => self.done = true,
+            }
+        }
+    }
+}
+
+/// `GET /v1/jobs/{id}/log/lines`, read line by line.
+#[derive(Debug)]
+pub struct StyledLines {
+    lines: Lines,
+}
+
+impl StyledLines {
+    /// The next line; `None` once the body ended. Fails as [`Lines::next`] does, or on a line that is not one.
+    pub async fn next(&mut self) -> Result<Option<StyledLine>, ClientError> {
+        loop {
+            match self.lines.next().await? {
+                Some(line) if line.is_empty() => {}
+                Some(line) => return decode(line.as_bytes()).map(Some),
+                None => return Ok(None),
             }
         }
     }

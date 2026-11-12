@@ -38,5 +38,4 @@ pub mod store;
 mod sync;
 #[cfg(all(test, any(feature = "host", feature = "client")))]
 mod testdir;
-#[cfg(feature = "host")]
 mod time;
