@@ -315,6 +315,11 @@ impl RecordNote {
 }
 
 impl RecordState<'_> {
+    /// What a record found gone from Docker says, on its job's page and for `record.gone`.
+    pub fn gone_words() -> &'static str {
+        "removed outside runnerd, when and why unknown"
+    }
+
     /// Its words, before when it was removed for a removed one: `not kept: too little free disk`, `removed past
     /// max_age`, or `record kept, 2G`.
     pub fn line(&self) -> String {
@@ -323,7 +328,7 @@ impl RecordState<'_> {
             RecordState::Removed { by, .. } => {
                 by.map_or_else(|| "removed".to_owned(), |by| by.to_string())
             }
-            RecordState::Gone { .. } => RecordRemoval::Outside.to_string(),
+            RecordState::Gone { .. } => RecordState::gone_words().to_owned(),
             RecordState::Kept { bytes: Some(bytes) } => {
                 format!("record kept, {}", ByteSize(*bytes))
             }

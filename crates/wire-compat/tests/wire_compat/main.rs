@@ -49,15 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[
-    // Only `record.deleted` carries it, for a record found gone from Docker; the previous release's client drops
-    // that event, as it drops every event it cannot read. The job's note says it in `gone_at`, which it ignores.
-    Accepted {
-        reader: Reader::Previous,
-        item: "record-removal/outside",
-        adr: "0135",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;

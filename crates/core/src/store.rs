@@ -815,7 +815,7 @@ impl Store {
 
     /// Records that Docker listed the records of `jobs`, and no others, at `at` (ms): a record the history notes as
     /// kept whose job is not among them was removed outside runnerd, and is noted gone and announced as
-    /// `record.deleted`. Only an inventory Docker answered is sent; one it did not changes nothing.
+    /// `record.gone`. Only an inventory Docker answered is sent; one it did not changes nothing.
     pub fn records_listed(&self, jobs: Vec<u64>, at: u64) {
         self.send(Write::RecordsListed { jobs, at });
     }

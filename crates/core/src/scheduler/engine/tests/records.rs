@@ -1687,15 +1687,18 @@ async fn a_kept_record_docker_no_longer_lists_is_noted_gone_once_docker_answers(
             .unwrap()
             .into_iter()
             .filter_map(|event| match event.event {
-                api::Event::RecordDeleted { job, removed_by } => Some((job, removed_by)),
+                api::Event::RecordGone { job } => Some(job),
+                api::Event::RecordDeleted { job, .. } => {
+                    panic!("job {job}: runnerd removed no record")
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(announced().await, [(10, api::RecordRemoval::Outside)]);
+    assert_eq!(announced().await, [10]);
 
     // A later listing finds it gone again, and says nothing new.
     engine.recover().await.unwrap();
     handle.store.flush().await;
-    assert_eq!(announced().await, [(10, api::RecordRemoval::Outside)]);
+    assert_eq!(announced().await, [10]);
 }

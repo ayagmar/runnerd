@@ -178,7 +178,7 @@ A forced pause cancels the runs of the repository's running jobs, other jobs of 
 
 ### Events
 
-`job.queued`, `job.started`, `job.step` and `job.finished` follow a job. `slot.changed`, `budget.changed`, `profile.changed`, `profile.removed`, `repository.changed` and `repository.removed` carry the state after a change, not each transition. `cache.reseeded` marks a new snapshot, `record.created`, `record.deleted` and `record.skipped` a record's fate, `sizing.changed` an [auto sizing](../admission/#auto-sizing) write, and `runner.failed` a runner that could not be registered or started (once, until one of the repository's runners takes a job). `job.sample`, `host.sample`, `log.line` (`logs=true`) and `attention.changed`, which carries `GET /v1/attention`'s `instance` and new `revision`, are live.
+`job.queued`, `job.started`, `job.step` and `job.finished` follow a job. `slot.changed`, `budget.changed`, `profile.changed`, `profile.removed`, `repository.changed` and `repository.removed` carry the state after a change, not each transition. `cache.reseeded` marks a new snapshot, `record.created`, `record.deleted`, `record.skipped` and `record.gone` (its image removed outside runnerd) a record's fate, `sizing.changed` an [auto sizing](../admission/#auto-sizing) write, and `runner.failed` a runner that could not be registered or started (once, until one of the repository's runners takes a job). `job.sample`, `host.sample`, `log.line` (`logs=true`) and `attention.changed`, which carries `GET /v1/attention`'s `instance` and new `revision`, are live.
 
 Every other event has an ID. Send the last one seen as `Last-Event-ID` and the stream resumes after it, across daemon restarts.
 

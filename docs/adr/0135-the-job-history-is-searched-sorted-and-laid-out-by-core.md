@@ -1,7 +1,7 @@
 # 0135. The job history is searched, sorted and laid out by core
 
 Status: **Accepted** (2026-11-12). Extends `GET /v1/jobs`; adds `GET /v1/timeline`, `GET /v1/jobs/{id}/compare`, the
-`record.skipped` event and the types in `api::jobs::query`, `api::jobs::timeline` and `api::jobs::compare`. Schema
+`record.skipped` and `record.gone` events and the types in `api::jobs::query`, `api::jobs::timeline` and `api::jobs::compare`. Schema
 23: daemon sessions and a record's `gone_at`.
 
 ## Context
@@ -49,11 +49,12 @@ and answers no `applied`; `JobList::understood` is false, and a client must not 
 **The record mark.** `JobSummary::record_mark` is `kept`, `removed` or `skipped`, from the history's record note in
 `RecordNote::state`'s precedence, read in the same `SELECT` as the row. Core words it and gives its tone. It is not
 named `record`: a `Job` flattens its summary and already has `record`, the note in full. Every change to a note
-announces an event: `record.created`, `record.deleted`, and the new `record.skipped`. The mark is what the history
+announces an event: `record.created`, `record.deleted`, and the new `record.skipped` and `record.gone`. The mark is what the history
 says, kept true by Docker's listing: each time the engine lists the record images and Docker answers, the store's
 writer notes every record noted kept whose image is not listed as gone (`RecordNote::gone_at`, when runnerd found it
-gone), marks it `removed`, words it `removed outside runnerd, when and why unknown` and announces `record.deleted` with
-`removed_by` `outside`. The writer does it after every write sent before, so a record runnerd just made or removed is
+gone), marks it `removed`, words it `removed outside runnerd, when and why unknown` and announces `record.gone`.
+`record.deleted` stays runnerd's own removals: its `removed_by` has no fallback in 0.1.0, so a new reason there would
+be a value an older client cannot read, where a new event type is one it skips (ADR 0061). The writer does it after every write sent before, so a record runnerd just made or removed is
 noted first. A listing Docker did not answer changes nothing. A record whose job the history no longer has is in `GET /v1/records`, with its
 repository, profile, workflow and name from the image's labels; it is in no job list and its `GET /v1/jobs/{id}`
 answers 404.
@@ -87,11 +88,11 @@ and samples are read only for a comparison that has one: the first 500 steps of 
 as its first 800 bytes, add up to 128 KiB. `steps_cut` says when steps were left out. A change is
 `Warn` or `Good` past 10% and a floor (5 s for times) for costs only; unknown reads `Quiet`.
 
-**Two versions.** This daemon with a client of 0.1.0: new fields and the `record.skipped` event are ignored, `JobPage`
-still reads. Its client drops a `record.deleted` with `removed_by` `outside`, which it cannot read, as it drops every
-event it cannot read, and reads a gone record's note as kept, as it did; the wire check accepts that one break. A new client with a 0.1.0 daemon: the list is not `understood`, `/v1/timeline` and `/compare` answer
-`404 no such endpoint`, which `ClientError::is_unsupported` reads as not supported. Every new enum reads a value it
-does not know as `Unknown` or `Other`.
+**Two versions.** This daemon with a client of 0.1.0: new fields and the `record.skipped` and `record.gone` events
+are ignored, `JobPage` still reads, and a gone record's note reads as kept, as it did. A new client with a 0.1.0
+daemon: the list is not `understood`, `/v1/timeline` and `/compare` answer `404 no such endpoint`, which
+`ClientError::is_unsupported` reads as not supported. Every new enum reads a value it does not know as `Unknown` or
+`Other`.
 
 ## Consequences
 

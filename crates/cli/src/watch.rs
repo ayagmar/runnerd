@@ -183,6 +183,7 @@ impl State {
             | Event::AttentionChanged { .. }
             | Event::RecordCreated { .. }
             | Event::RecordDeleted { .. }
+            | Event::RecordGone { .. }
             | Event::RecordSkipped { .. }
             | Event::SizingChanged { .. }
             | Event::RunnerFailed { .. } => {}

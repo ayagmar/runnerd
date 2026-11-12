@@ -1024,15 +1024,13 @@ pub(crate) fn record_removal() -> Vec<RecordRemoval> {
         RecordRemoval::Size,
         RecordRemoval::Age,
         RecordRemoval::User,
-        RecordRemoval::Outside,
     ];
     for removal in &every {
         match removal {
             RecordRemoval::Count
             | RecordRemoval::Size
             | RecordRemoval::Age
-            | RecordRemoval::User
-            | RecordRemoval::Outside => {}
+            | RecordRemoval::User => {}
         }
     }
     every
@@ -1567,6 +1565,7 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             removed_by: RecordRemoval::Age,
         },
         Event::RecordSkipped { job: 43 },
+        Event::RecordGone { job: 44 },
         Event::SizingChanged {
             change: sizing_change(),
         },
@@ -1606,6 +1605,7 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             | Event::RecordCreated { .. }
             | Event::RecordDeleted { .. }
             | Event::RecordSkipped { .. }
+            | Event::RecordGone { .. }
             | Event::SizingChanged { .. }
             | Event::RunnerFailed { .. }
             | Event::JobSample { .. }

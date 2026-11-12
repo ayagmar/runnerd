@@ -278,10 +278,7 @@ impl Writer<'_> {
                     "UPDATE records SET gone_at = ?2 WHERE job = ?1",
                     params![job, at],
                 )?;
-                announced.push(Event::RecordDeleted {
-                    job,
-                    removed_by: api::RecordRemoval::Outside,
-                });
+                announced.push(Event::RecordGone { job });
             }
             Ok(())
         });

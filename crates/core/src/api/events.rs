@@ -118,6 +118,13 @@ pub enum Event {
         /// Why.
         removed_by: RecordRemoval,
     },
+    /// A record's image was found gone from Docker, removed outside runnerd (ADR 0135): the job's `record` mark is now
+    /// `removed`, and its note's `gone_at` says when runnerd found it. When and why it went are not known.
+    #[serde(rename = "record.gone")]
+    RecordGone {
+        /// The job whose record it was.
+        job: u64,
+    },
     /// A failed job's record was not made (ADR 0135): the job's `record` mark is now `skipped`. Its page says why.
     #[serde(rename = "record.skipped")]
     RecordSkipped {
@@ -189,6 +196,7 @@ impl Event {
             Event::CacheReseeded { .. } => "cache.reseeded",
             Event::RecordCreated { .. } => "record.created",
             Event::RecordDeleted { .. } => "record.deleted",
+            Event::RecordGone { .. } => "record.gone",
             Event::RecordSkipped { .. } => "record.skipped",
             Event::SizingChanged { .. } => "sizing.changed",
             Event::RunnerFailed { .. } => "runner.failed",
@@ -220,6 +228,7 @@ impl Event {
             | Event::JobSample { job, .. }
             | Event::LogLine { job, .. }
             | Event::RecordDeleted { job, .. }
+            | Event::RecordGone { job }
             | Event::RecordSkipped { job } => Some(*job),
             Event::RecordCreated { record } => Some(record.job),
             Event::SlotChanged { .. }

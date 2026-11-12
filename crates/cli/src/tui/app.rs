@@ -784,7 +784,9 @@ impl App {
                     effects.push(Effect::Sizing);
                 }
             }
-            Event::RecordCreated { .. } | Event::RecordDeleted { .. }
+            Event::RecordCreated { .. }
+            | Event::RecordDeleted { .. }
+            | Event::RecordGone { .. }
                 if self.view == View::Records =>
             {
                 effects.push(Effect::Records);
@@ -832,7 +834,11 @@ impl App {
             Event::RecordCreated { record } if record.job == id => {
                 effects.push(Effect::RefreshJob(id));
             }
-            Event::RecordDeleted { job, .. } | Event::RecordSkipped { job } if *job == id => {
+            Event::RecordDeleted { job, .. }
+            | Event::RecordGone { job }
+            | Event::RecordSkipped { job }
+                if *job == id =>
+            {
                 effects.push(Effect::RefreshJob(id));
             }
             _ => {}
