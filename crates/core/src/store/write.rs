@@ -261,10 +261,18 @@ impl Writer<'_> {
         });
     }
 
-    /// Notes as gone each record noted kept whose job is not in `listed`, the records Docker has, and announces it.
+    /// Notes as gone each record noted kept whose job is not in `listed`, the records Docker has, and announces it;
+    /// one noted gone that is in `listed` is kept again.
     /// After every write sent before, so a record runnerd made or removed is noted as such first.
     fn records_listed(&self, listed: &[u64], at: u64) {
         self.change("note the records gone from Docker", |announced| {
+            // One noted gone that Docker lists again is kept again: its image is there, and a shell opens in it.
+            for job in listed {
+                self.db.execute(
+                    "UPDATE records SET gone_at = NULL WHERE job = ?1 AND gone_at IS NOT NULL",
+                    [job],
+                )?;
+            }
             let kept: Vec<u64> = self
                 .db
                 .prepare(

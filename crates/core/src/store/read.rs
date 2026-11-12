@@ -617,20 +617,33 @@ pub(super) fn jobs(db: &Connection, query: &api::JobQuery) -> rusqlite::Result<a
     let size = query.page_size();
     let row_bytes = row_bytes();
     snapshot(db, |db| {
-        let rows: Vec<(u64, u64, u64)> = db
+        // Counted only for a sorted list, which says how many the filters admit, and in a read of its own: a count
+        // beside the page's rows would make every page read the whole filtered history, the default order's too.
+        let total: u64 = if query.pages() {
+            0
+        } else {
+            db.query_row(
+                &format!(
+                    "SELECT count(*) FROM jobs j LEFT JOIN records rec ON rec.job = j.id {filter}"
+                ),
+                params_from_iter(values.clone()),
+                |row| row.get(0),
+            )?
+        };
+        let rows: Vec<(u64, u64)> = db
             .prepare(&format!(
-                "SELECT j.id, {row_bytes}, count(*) OVER () FROM jobs j \
+                "SELECT j.id, {row_bytes} FROM jobs j \
                  LEFT JOIN records rec ON rec.job = j.id {filter} ORDER BY {order} LIMIT {}",
                 size + 1
             ))?
             .query_map(params_from_iter(values), |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?))
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut jobs = Vec::new();
         let mut shortened = Vec::new();
         let mut bytes = 0;
-        for (id, row_bytes, _) in rows.iter().take(size as usize) {
+        for (id, row_bytes) in rows.iter().take(size as usize) {
             if !jobs.is_empty() && bytes + row_bytes > api::JOBS_PAGE_BYTES {
                 break;
             }
@@ -642,7 +655,6 @@ pub(super) fn jobs(db: &Connection, query: &api::JobQuery) -> rusqlite::Result<a
                 jobs.push(job);
             }
         }
-        let total = rows.first().map_or(0, |row| row.2);
         let more = rows.len() > jobs.len();
         Ok(query.answer(jobs, more, total, shortened))
     })

@@ -1702,3 +1702,47 @@ async fn a_kept_record_docker_no_longer_lists_is_noted_gone_once_docker_answers(
     handle.store.flush().await;
     assert_eq!(announced().await, [10]);
 }
+
+#[tokio::test]
+async fn a_record_noted_gone_that_docker_lists_again_is_kept() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("records-back");
+    // Each daemon's first listing: the image there, gone, then back, as after Docker's data was restored.
+    let mut notes = Vec::new();
+    for images in [
+        vec![record_image(10, 60)],
+        vec![],
+        vec![record_image(10, 60)],
+    ] {
+        docker.0.lock().unwrap().images = images;
+        let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+        if notes.is_empty() {
+            handle.store.queued(
+                "o/r",
+                &QueuedJob {
+                    id: 10,
+                    run_id: 10,
+                    name: "build".to_owned(),
+                    ..QueuedJob::default()
+                },
+                crate::time::now_ms(),
+            );
+            handle.store.flush().await;
+        }
+        engine.recover().await.unwrap();
+        handle.store.flush().await;
+        notes.push(note(&handle, 10).await.unwrap());
+    }
+    let states: Vec<_> = notes.iter().map(api::RecordNote::state).collect();
+    assert!(
+        matches!(
+            states[..],
+            [
+                api::RecordState::Kept { .. },
+                api::RecordState::Gone { .. },
+                api::RecordState::Kept { .. }
+            ]
+        ),
+        "kept, gone while Docker lacks its image, kept once Docker lists it again: {states:?}"
+    );
+}
