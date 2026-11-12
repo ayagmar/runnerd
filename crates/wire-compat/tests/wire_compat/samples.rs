@@ -10,33 +10,35 @@
 //! - Every enum gets one item per variant, and a `match` that fails to compile when a variant is added.
 
 use runnerd_core::api::{
-    Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, Attention, AttentionItem,
-    AttentionKind, AutoNote, AutoPlan, BarEnd, Baseline, Basis, Bucket, Budget, BuildCacheCounts,
-    BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume,
-    Caches, Check, CheckStatus, Color, CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted,
-    CpuAdmission, CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorState, ErrorResponse,
-    Event, EventEnvelope, EventQuery, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause,
-    Holder, HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery,
-    HostSamples, HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobComparison,
-    JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort, JobState,
-    JobSummary, Lane, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence, LogGroup,
-    LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary, LongWait,
-    MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery,
-    Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled,
-    Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record,
-    RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
-    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run,
-    RunLink, RunnerFailure, RunnerSpan, RunnerStatus, RunningJob, Sample, SampleSeries,
-    SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownAnswer,
-    ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert,
-    Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started, Starts, Stats, StatsQuery,
-    StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch, Stopping, StyledLine,
-    Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View, WaitSpread,
-    Waiting, WeekWaits,
+    ActionOutcome, ActionPreview, ActionQuery, ActionRefusal, ActionResult, Activity,
+    ActivityQuery, Admission, AdmissionPolicy, Advice, Attention, AttentionItem, AttentionKind,
+    AutoNote, AutoPlan, BarEnd, Baseline, Basis, Bucket, Budget, BuildCacheCounts, BuildCacheStats,
+    Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check,
+    CheckStatus, Color, CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission,
+    CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorState, ErrorResponse, Event,
+    EventEnvelope, EventQuery, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause, Holder,
+    HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples,
+    HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobAction, JobActions,
+    JobComparison, JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort,
+    JobState, JobSummary, Lane, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence,
+    LogGroup, LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary,
+    LongWait, MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest,
+    NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period,
+    PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob,
+    Record, RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records,
+    RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize,
+    RevertCause, Run, RunLink, RunnerFailure, RunnerSpan, RunnerStatus, RunningJob, Sample,
+    SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
+    ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused,
+    SizingRevert, Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started, Starts, Stats,
+    StatsQuery, StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch, Stopping,
+    StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View,
+    WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
     Status {
+        job_actions: JobActions::On,
         version: "0.0.0".to_owned(),
         shutting_down: true,
         stopping: Some(Stopping::LeavesJobs),
@@ -2104,4 +2106,132 @@ pub(crate) fn step_match() -> Vec<StepMatch> {
 
 pub(crate) fn compare_query() -> CompareQuery {
     CompareQuery { with: Some(41) }
+}
+
+pub(crate) fn action_preview() -> ActionPreview {
+    ActionPreview {
+        message: "Cancel run 900 (attempt 2) of tidewater/halyard? GitHub cancels the whole run."
+            .to_owned(),
+        action: JobAction::Cancel,
+        job: 42,
+        repository: "tidewater/halyard".to_owned(),
+        run: 900,
+        attempt: Some(2),
+        title: "Cancel run 900 (attempt 2) of tidewater/halyard?".to_owned(),
+        scope: "GitHub cancels the whole run.".to_owned(),
+        notes: vec!["This job has finished.".to_owned()],
+        siblings: vec![job_summary()],
+        siblings_note:
+            "runnerd knows 1 other job of this run; GitHub may have more, on other runners."
+                .to_owned(),
+        confirm_label: "Cancel run".to_owned(),
+        confirm: Some("0f3a9c5e7b2d4f6a8c1e3b5d7f9a2c4e".to_owned()),
+    }
+}
+
+pub(crate) fn action_result() -> ActionResult {
+    ActionResult {
+        action: JobAction::Rerun,
+        job: 42,
+        repository: "tidewater/halyard".to_owned(),
+        run: 900,
+        outcome: ActionOutcome::Refused,
+        status: Some(403),
+        refusal: Some(ActionRefusal::RateLimited),
+        until: Some(1_790_000_000),
+        message: "GitHub's rate limit is used up.".to_owned(),
+    }
+}
+
+/// A result whose outcome is unknown and that had no answer: what serializing skips left out.
+pub(crate) fn action_result_empty() -> ActionResult {
+    ActionResult {
+        outcome: ActionOutcome::Unknown,
+        status: None,
+        refusal: None,
+        until: None,
+        ..action_result()
+    }
+}
+
+pub(crate) fn action_query() -> ActionQuery {
+    ActionQuery {
+        force: true,
+        confirm: Some("rerun-failed:tidewater/halyard:900:42".to_owned()),
+        failed: true,
+    }
+}
+
+pub(crate) fn job_action() -> Vec<JobAction> {
+    let every = vec![JobAction::Cancel, JobAction::Rerun, JobAction::RerunFailed];
+    for action in &every {
+        match action {
+            JobAction::Cancel | JobAction::Rerun | JobAction::RerunFailed
+            // What a client reads a later daemon's action as; no daemon sends it, so it has no sample.
+            | JobAction::Unsupported => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn action_outcome() -> Vec<ActionOutcome> {
+    let every = vec![
+        ActionOutcome::Accepted,
+        ActionOutcome::AlreadyFinished,
+        ActionOutcome::Refused,
+        ActionOutcome::Unknown,
+    ];
+    for outcome in &every {
+        match outcome {
+            ActionOutcome::Accepted
+            | ActionOutcome::AlreadyFinished
+            | ActionOutcome::Refused
+            | ActionOutcome::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn action_refusal() -> Vec<ActionRefusal> {
+    let every = vec![
+        ActionRefusal::NoToken,
+        ActionRefusal::Unreachable,
+        ActionRefusal::Unauthorized,
+        ActionRefusal::Forbidden,
+        ActionRefusal::NotFound,
+        ActionRefusal::Conflict,
+        ActionRefusal::Unprocessable,
+        ActionRefusal::RateLimited,
+        ActionRefusal::Withdrawn,
+        ActionRefusal::Failed,
+    ];
+    for refusal in &every {
+        match refusal {
+            ActionRefusal::NoToken
+            | ActionRefusal::Unreachable
+            | ActionRefusal::Unauthorized
+            | ActionRefusal::Forbidden
+            | ActionRefusal::NotFound
+            | ActionRefusal::Conflict
+            | ActionRefusal::Unprocessable
+            | ActionRefusal::RateLimited
+            | ActionRefusal::Withdrawn
+            | ActionRefusal::Failed
+            // What a client reads a later daemon's class as; no daemon sends it, so it has no sample.
+            | ActionRefusal::Other => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn job_actions() -> Vec<JobActions> {
+    let every = vec![JobActions::On, JobActions::Off];
+    for actions in &every {
+        match actions {
+            JobActions::On | JobActions::Off
+            // What a client reads a daemon without the field, or a later state, as; no daemon sends it.
+            | JobActions::Unsupported => {}
+        }
+    }
+    every
 }

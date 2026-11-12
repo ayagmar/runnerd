@@ -76,6 +76,7 @@ use self::tick::Scope;
 use self::upkeep::Upkeep;
 use self::watches::Watches;
 use super::SlotRef;
+use crate::actions::JobActions;
 use crate::admission::Key;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -181,6 +182,8 @@ pub struct Handle {
     /// What the slots' Docker Engines may keep together, in bytes, from the last measure (`cache::docker_disk`);
     /// `None` before the first. Auto sizing adds no slot without it (ADR 0090).
     pub disk: watch::Receiver<Option<u64>>,
+    /// The owner's job actions, sent through the engine's GitHub client but never on its loop (ADR 0134).
+    pub actions: JobActions,
 }
 
 impl Handle {
@@ -617,7 +620,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             store.clone(),
         );
         let control = Arc::new(control);
+        control.set_action_policy(
+            api::JobActions::configured(config.github.job_actions),
+            config
+                .repositories
+                .iter()
+                .map(|repository| repository.name.clone())
+                .collect(),
+        );
+        let github = Arc::new(github);
+        let actions = JobActions::new(
+            github.clone(),
+            store.clone(),
+            control.clone(),
+            crate::actions::LIMITS,
+        );
         let (status, receiver) = watch::channel(api::Status {
+            job_actions: api::JobActions::configured(config.github.job_actions),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             stopping: None,
@@ -641,7 +660,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // An earlier run may have left the mirror up, so the first idle tick stops it.
             mirror: Mirror::unknown(config.mirror_memory()),
             config,
-            github: Arc::new(github),
+            github,
             docker: Arc::new(docker),
             names,
             runner_prefix: identity.prefix(),
@@ -713,6 +732,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 records: records_receiver,
                 build_cache,
                 disk: disk_receiver,
+                actions,
             },
         )
     }

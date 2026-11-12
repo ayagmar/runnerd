@@ -3,6 +3,7 @@
 //! never shows in `Debug` output or errors.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -10,7 +11,13 @@ use axum::Router;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
-use super::{Class, Conditional, Deleted, Error, Github, GithubApi, QueuedJob, Token};
+use futures_util::StreamExt as _;
+use futures_util::future::BoxFuture;
+
+use super::{
+    ActionFailure, Class, Conditional, Deleted, Error, Github, GithubApi, JobActionRequest,
+    QueuedJob, RunNow, Token,
+};
 use crate::sync::lock;
 
 const TOKEN: &str = "ghp_sentinelTokenValue0123456789";
@@ -594,6 +601,321 @@ async fn deleting_a_runner_tells_gone_and_busy_apart() {
     );
     assert_eq!(github.delete_runner("o/r", 3).await.unwrap(), Deleted::Busy);
     assert!(github.delete_runner("o/r", 4).await.is_err());
+}
+
+/// Lets every job action go.
+fn go() -> BoxFuture<'static, bool> {
+    Box::pin(async { true })
+}
+
+/// A body that starts and never ends.
+fn endless() -> axum::body::Body {
+    axum::body::Body::from_stream(
+        futures_util::stream::once(async { Ok::<_, std::io::Error>("{\"id\":") })
+            .chain(futures_util::stream::pending()),
+    )
+}
+
+/// GitHub acknowledges a job action with 201 or 202 and a body that may be empty, `{}`, or slow to come: the status
+/// is the answer, the body is never read, and each is sent once. A refusal is its status alone, whatever its body
+/// says (ADR 0134).
+#[tokio::test]
+async fn a_job_action_is_its_status_its_body_unread_and_it_is_sent_once() {
+    let (url, seen) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs/10/cancel" => (StatusCode::ACCEPTED, endless()).into_response(),
+        "/repos/o/r/actions/jobs/11/rerun" => (StatusCode::CREATED, json("{}")).into_response(),
+        "/repos/o/r/actions/runs/10/rerun-failed-jobs" => {
+            (StatusCode::CREATED, "not json at all").into_response()
+        }
+        _ => (
+            StatusCode::FORBIDDEN,
+            r#"{"message":"Resource not accessible with ghp_FAKE_SENTINEL_0123"}"#,
+        )
+            .into_response(),
+    })
+    .await;
+    let github = client(&url);
+    let github = &github;
+    let sent = |request| async move {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            github.job_action("o/r", request, &go),
+        )
+        .await
+        .expect("answered without waiting for the body")
+    };
+    assert_eq!(
+        sent(JobActionRequest::CancelRun { run: 10 }).await,
+        Ok(202),
+        "a 202 whose body never ends is accepted"
+    );
+    assert_eq!(sent(JobActionRequest::RerunJob { job: 11 }).await, Ok(201));
+    assert_eq!(
+        sent(JobActionRequest::RerunFailed { run: 10 }).await,
+        Ok(201)
+    );
+    let refused = sent(JobActionRequest::RerunJob { job: 12 }).await;
+    assert_eq!(refused, Err(ActionFailure::Status { status: 403 }));
+    assert!(
+        !format!("{refused:?}").contains("FAKE_SENTINEL"),
+        "GitHub's text stays in Github"
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 4, "each sent once: {seen:?}");
+    assert!(seen.iter().all(|seen| seen.method == Method::POST));
+}
+
+/// A run's attempt and whether it completed, for a job action; a failure as its status alone.
+#[tokio::test]
+async fn a_job_actions_read_of_the_run_is_its_attempt_and_whether_it_completed() {
+    let (url, _) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs/10" => {
+            json(r#"{"id":10,"run_attempt":3,"status":"completed","event":"push","head_sha":"a"}"#)
+        }
+        "/repos/o/r/actions/runs/11" => {
+            json(r#"{"id":11,"status":"in_progress","event":"push","head_sha":"a"}"#)
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            r#"{"message":"Not Found ghp_FAKE_SENTINEL"}"#,
+        )
+            .into_response(),
+    })
+    .await;
+    let github = client(&url);
+    assert_eq!(
+        github.action_run("o/r", 10).await,
+        Ok(RunNow {
+            attempt: 3,
+            completed: true
+        })
+    );
+    assert_eq!(
+        github.action_run("o/r", 11).await,
+        Ok(RunNow {
+            attempt: 1,
+            completed: false
+        })
+    );
+    assert_eq!(
+        github.action_run("o/r", 12).await,
+        Err(ActionFailure::Status { status: 404 })
+    );
+}
+
+/// A job action GitHub refuses for its rate limit keeps the status it answered; one runnerd holds back itself has
+/// none, as it sent nothing.
+#[tokio::test]
+async fn a_rate_limit_answer_keeps_its_status_and_one_held_back_has_none() {
+    let reset = (SystemTime::now() + Duration::from_secs(3600))
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (url, seen) = fake_github(move |_| {
+        (
+            StatusCode::FORBIDDEN,
+            [
+                ("x-ratelimit-remaining", "0".to_owned()),
+                ("x-ratelimit-reset", reset.to_string()),
+            ],
+        )
+            .into_response()
+    })
+    .await;
+    let github = client(&url);
+    let until = SystemTime::UNIX_EPOCH + Duration::from_secs(reset);
+    let cancel = JobActionRequest::CancelRun { run: 10 };
+    assert_eq!(
+        github.job_action("o/r", cancel, &go).await,
+        Err(ActionFailure::RateLimited {
+            status: Some(403),
+            until
+        })
+    );
+    assert_eq!(
+        github.job_action("o/r", cancel, &go).await,
+        Err(ActionFailure::RateLimited {
+            status: None,
+            until
+        }),
+        "held back: nothing sent"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let (url, _) =
+        fake_github(|_| (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "60")]).into_response())
+            .await;
+    let refused = client(&url).job_action("o/r", cancel, &go).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ActionFailure::RateLimited {
+                status: Some(429),
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+}
+
+/// A token source that counts its reads, and holds each from the `gated`th on until the test lets it go: `old` first,
+/// `new` after.
+fn gated_source(
+    reads: &Arc<AtomicUsize>,
+    gated: usize,
+) -> (super::TokenSource, std::sync::mpsc::Sender<()>) {
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let reads = reads.clone();
+    let source: super::TokenSource = Box::new(move || {
+        let read = reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if read >= gated {
+            let _ = gate.lock().unwrap().recv();
+        }
+        Ok(Token(if read == 1 { "old" } else { "new" }.to_owned()))
+    });
+    (source, release)
+}
+
+async fn reads_reach(reads: &AtomicUsize, count: usize) {
+    while reads.load(Ordering::SeqCst) < count {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The permit is asked once the token is in hand and before each send, the one after a 401 included: a reload while
+/// the token is read withdraws the action, and nothing is sent.
+#[tokio::test]
+async fn a_permit_that_says_no_once_the_token_is_read_sends_nothing() {
+    let (url, seen) = fake_github(|_| StatusCode::ACCEPTED.into_response()).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let (source, release) = gated_source(&reads, 1);
+    let github = Arc::new(Github::new(&url, source).unwrap());
+    let allowed = Arc::new(AtomicBool::new(true));
+    let sending = {
+        let (github, allowed) = (github.clone(), allowed.clone());
+        tokio::spawn(async move {
+            let permit = || -> BoxFuture<'_, bool> {
+                let go = allowed.load(Ordering::SeqCst);
+                Box::pin(async move { go })
+            };
+            github
+                .job_action("o/r", JobActionRequest::CancelRun { run: 10 }, &permit)
+                .await
+        })
+    };
+    reads_reach(&reads, 1).await;
+    allowed.store(false, Ordering::SeqCst);
+    release.send(()).unwrap();
+    assert_eq!(sending.await.unwrap(), Err(ActionFailure::Withdrawn));
+    assert_eq!(seen.lock().unwrap().len(), 0, "nothing was sent");
+
+    // A 401, and a reload while the new token is read: the second send does not go.
+    let (url, seen) = fake_github(|request| {
+        if request
+            .headers
+            .get("authorization")
+            .map(HeaderValue::as_bytes)
+            == Some(b"Bearer new")
+        {
+            StatusCode::ACCEPTED.into_response()
+        } else {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+    })
+    .await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let (source, release) = gated_source(&reads, 2);
+    let github = Arc::new(Github::new(&url, source).unwrap());
+    let allowed = Arc::new(AtomicBool::new(true));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let sending = {
+        let (github, allowed, asked) = (github.clone(), allowed.clone(), asked.clone());
+        tokio::spawn(async move {
+            let permit = || -> BoxFuture<'_, bool> {
+                asked.fetch_add(1, Ordering::SeqCst);
+                let go = allowed.load(Ordering::SeqCst);
+                Box::pin(async move { go })
+            };
+            github
+                .job_action("o/r", JobActionRequest::CancelRun { run: 10 }, &permit)
+                .await
+        })
+    };
+    reads_reach(&reads, 2).await;
+    allowed.store(false, Ordering::SeqCst);
+    release.send(()).unwrap();
+    assert_eq!(sending.await.unwrap(), Err(ActionFailure::Withdrawn));
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "asked before each send");
+    assert_eq!(seen.lock().unwrap().len(), 1, "only the refused one went");
+}
+
+/// A token source that panics fails that read only: the next request reads again.
+#[tokio::test]
+async fn a_token_read_that_panics_fails_once_and_the_next_request_reads_again() {
+    let (url, seen) = fake_github(|_| StatusCode::ACCEPTED.into_response()).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = reads.clone();
+    let source: super::TokenSource = Box::new(move || {
+        assert!(
+            counted.fetch_add(1, Ordering::SeqCst) > 0,
+            "the first read panics"
+        );
+        Ok(Token("new".to_owned()))
+    });
+    let github = Github::new(&url, source).unwrap();
+    let first = github
+        .job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &go)
+        .await;
+    assert!(first.is_err(), "no token came of the read that panicked");
+    github
+        .job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &go)
+        .await
+        .unwrap();
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "the second request read again"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1, "and only it reached GitHub");
+}
+
+/// A token read that hangs is read once, whoever stops waiting for it, and holds neither later requests' reads nor
+/// the runtime's shutdown.
+#[test]
+fn a_token_read_that_hangs_is_read_once_and_holds_no_shutdown() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let (source, release) = gated_source(&reads, 1);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        // Never reached: no token comes.
+        let github = Github::new("http://127.0.0.1:9", source).unwrap();
+        for _ in 0..3 {
+            let waited = tokio::time::timeout(
+                Duration::from_millis(100),
+                github.job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &go),
+            )
+            .await;
+            assert!(waited.is_err(), "still reading");
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "later requests join the read"
+        );
+    });
+    let (stopped, shut) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(runtime);
+        let _ = stopped.send(());
+    });
+    assert!(
+        shut.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the runtime stops with the read still hanging"
+    );
+    drop(release);
 }
 
 #[tokio::test]

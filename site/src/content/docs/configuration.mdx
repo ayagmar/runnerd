@@ -180,6 +180,10 @@ A key without a default must be set. Sizes take `K`, `M`, `G` or `T`, durations 
 - `interval`, `raise_interval` (default `"1h"`): the least time between a change to a profile and one that lowers its `memory` or `cpus`, or that only raises; `raise_interval` is at most `interval`
 - `max_step` (default `50`): the most percent one change lowers `memory` or moves `cpus`
 
+### `[github]`
+
+- `job_actions` (default `true`): clients may [cancel a job's run and re-run jobs](../clients/#cancel-and-re-run) on GitHub with runnerd's token, each confirmed before it is sent; `false` turns both off. A classic token needs the `repo` scope, a fine-grained one Actions: write; `runnerd doctor` says what it can tell without trying
+
 ### `[web]`
 
 - `origins` (default `[]`): proxy addresses whose dashboard pages may write ([From another device](../clients/#from-another-device)): `https://host:port`, or `http` for loopback only

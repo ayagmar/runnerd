@@ -93,6 +93,8 @@ Chromium browsers install the dashboard as an app: the install button in the add
 | `job <id>`, `logs <id> [-f] [--from N]` | one job's timeline, steps and usage; its log, `-f` following it to the end |
 | `tui`, `watch` | the [terminal dashboard](#terminal-dashboard); slots, running, queued and finished jobs redrawn as events arrive, or one line per event off a terminal |
 | `pause <repo> [--force]`, `resume <repo>`, `pause --all`, `resume --all` | no new runners, also after a restart. Refused while a job runs; `--force` cancels its run and removes the runner |
+| `cancel <job> [--confirm <token>] [--force]` | shows what cancelling the job's workflow run on GitHub stops (the whole run, at its current attempt, on every runner) and the command that sends it; `--confirm` sends what it showed; `--force` sends without showing it, for scripts |
+| `rerun <job> [--failed] [--confirm <token>] [--force]` | shows what GitHub re-runs: this job and the jobs that depend on it, or with `--failed` the run's failed jobs; `--confirm` and `--force` as for `cancel` |
 | `reseed <profile> [--no-wait]` | makes slot 1's layers the profile's snapshot once its slots are free |
 | `shell <job> [--step N]` | a shell in a failed job's [record](../running/#records-of-failed-jobs); exiting removes the container |
 | `records`, `records rm <job>` | the records with sizes and limits; remove one, `--all`, or `--older-than 2d` |
@@ -127,6 +129,10 @@ Usage
 ```
 
 `CPU held back` gives a share of the job's busy time, which reads higher than the share of the whole run that [auto sizing](../admission/#auto-sizing) counts.
+
+### Cancel and re-run
+
+GitHub cancels runs, not jobs, and a re-run takes the jobs that depend on the one re-run with it. So `runnerctl cancel` and `runnerctl rerun` first read the run from GitHub, print what GitHub would do to its current attempt and the other jobs of the run runnerd knows (GitHub may have more, on other runners), and send nothing. They end with a command such as `runnerctl cancel 9001 --confirm 3f9a…`, which sends what they showed, once, within 5 minutes. If the run has moved to another attempt by then, or runnerd's config changed, nothing is sent: you get a new preview. If GitHub would not show the run, there is nothing to confirm until it does. `--force` skips the preview and sends at once, for scripts. The answer is one of four: GitHub took it, the run had already finished, GitHub refused (with its HTTP status and what to check), or the outcome is unknown, as after a timeout; then check the run on GitHub before asking again. runnerd's own record of the job stays as it was; the cancelled job and the new attempt arrive as GitHub lists them. [`[github] job_actions = false`](../configuration/#github) turns both off.
 
 ### Sizing
 

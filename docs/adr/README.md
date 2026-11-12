@@ -140,4 +140,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |
 | [0132](0132-one-attention-list-core-words.md) | One attention list that core words, with a cached doctor and five views | Accepted |
 | [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Accepted |
+| [0134](0134-a-job-action-is-previewed-then-sent-to-github-once.md) | A job action is previewed, then sent to GitHub once | Accepted |
 | [0135](0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md) | The job history is searched, sorted and laid out by core | Accepted |

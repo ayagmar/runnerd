@@ -26,6 +26,7 @@ fn status() -> Status {
         Some(runner(false, true)),
     ];
     Status {
+        job_actions: crate::api::JobActions::On,
         version: "0.0.0".to_owned(),
         shutting_down: false,
         stopping: None,

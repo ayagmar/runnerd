@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["admission, buildcache, docker, github, cache, insights, isolation,<br/>record, scheduler, observe, sizing, store"]
+        host["actions, admission, buildcache, command, docker, github, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -59,9 +59,18 @@ flowchart TB
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `admission`, `buildcache`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`,
-  `sizing`, `store`: `host` only
-  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU,
+- `actions`, `admission`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`,
+  `scheduler`, `observe`, `sizing`, `store`: `host` only
+  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
+  through the engine's own `Github`, off the engine's loop: a preview that reads the run and issues a confirmation,
+  then, for a request that carries one, one POST within a deadline, once a permit `Github` asks with the token in hand
+  has read the run's attempt again and found the config unchanged. `actions::flights` holds the confirmations issued
+  and what is in flight per run, and `actions::policy` the config's job actions and repositories as one snapshot with
+  a revision; each is a leaf only its own methods write
+  ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)); `api::actions` words its
+  previews and answers. `command` runs an external command in a process group of its own and kills it past its
+  deadline or at a stop, for the doctor and for `github`'s `gh auth token`; `github::token` holds the client's token
+  and the one read of it in flight, on a thread of its own. `admission` predicts a job's memory peak and average CPU,
   replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
@@ -94,8 +103,8 @@ flowchart TB
 
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
 notifications, each kind of target a `Sender` in a module of its own, `api/doctor_cache` keeps the doctor's last run
-for the config running, and `api/attention` the attention snapshot, each in one worker), `init`, `doctor` (with
-`doctor/command`, which runs each command in a process group of its own and kills it past its deadline or at a stop),
+for the config running, and `api/attention` the attention snapshot, each in one worker), `init`, `doctor` (its
+commands run through core's `command`, which kills each one's process group past its deadline or at a stop),
 `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
 check), `views` (one per page: overview, history, records, sizing, insights, caches, config, and a job; the navigation
@@ -118,7 +127,10 @@ client → transport → principal → handler → core
 2. The transport ([`crates/daemon/src/api.rs`](crates/daemon/src/api.rs)) reads the peer's credentials and turns
    them into an `api::Principal` in one extractor, `Authenticated`. Only the user the daemon runs as gets through.
 3. Handlers take that principal, read `Handle::status` or the job store (`Handle::store`), or call `Control`
-   (pause, resume, reseed, cache clean, remove records, open a shell, reload, shutdown). `GET /v1/events` streams
+   (pause, resume, reseed, cache clean, remove records, open a shell, reload, shutdown). `POST /v1/jobs/{id}/cancel`
+   and `/rerun` ([`crates/daemon/src/api/actions.rs`](crates/daemon/src/api/actions.rs)) go to `Handle::actions`,
+   which reads `Control` for the config of the moment and sends to GitHub without the engine
+   ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)). `GET /v1/events` streams
    the store's events as server-sent events. The config routes
    ([`crates/daemon/src/api/control.rs`](crates/daemon/src/api/control.rs)) validate a new config and hand the
    engine the parsed config with a `Commit` that writes the file; the engine runs the commit between ticks and runs
@@ -305,6 +317,8 @@ always returns, so the daemon closes and flushes the history.
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>` with the scope's ref and the key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
+| Job actions | in memory: the confirmations issued and one entry per run while its POST is out in `actions::flights`, each confirmation for 5 minutes; the config's job actions and repositories in `actions::policy`, replaced whole at each reload; a restart forgets them all ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)) |
+| GitHub token | in memory, in `github::token`, read again after GitHub refuses it; never written anywhere |
 | Doctor's checks and attention | in memory: the doctor's last run in `api/doctor_cache`, the attention snapshot in `api/attention`; a restart starts with the doctor not run and a new `instance` whose revisions count from 1, and forgets why listings failed ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)) |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
@@ -335,6 +349,11 @@ always returns, so the daemon closes and flushes the history.
   time, one deadline for the whole run, each command's process group killed past its own and at a stop, and a request
   waits for a run less than a client's timeout ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)).
 - Clients never talk to Docker or GitHub; they talk to the daemon.
+- A job action reaches GitHub only with a confirmation this daemon issued, once, with no retry, and only while the
+  run is at the attempt its preview showed and the config at the revision it was shown under, both checked with the
+  token in hand right before the POST. It never changes the job's stored lifecycle; its answer's body is never read,
+  and an answer that may or may not have been acted on, any 5xx included, is `unknown`
+  ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)).
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,
   and `GET /v1/config` answers them as `<secret>` (`config::mask_secrets`), which `PUT /v1/config` and the check

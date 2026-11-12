@@ -1,8 +1,9 @@
-//! The commands the doctor runs (`systemctl`, `gh`), each in a process group of its own, so none outlives its
-//! deadline or the daemon: past its deadline, its whole group is killed, whatever its processes did with the pipes,
-//! and once the daemon stops, every group still running is killed and no command starts (ADR 0132).
+//! The commands runnerd runs (the doctor's `systemctl` and `gh`, and `gh auth token` for the GitHub client), each in
+//! a process group of its own, so none outlives its deadline or the daemon: past its deadline, its whole group is
+//! killed, whatever its processes did with the pipes, and once the daemon stops, every group still running is killed
+//! and no command starts (ADRs 0132 and 0134).
 //!
-//! It must not run anything the doctor did not ask for, or signal a process it did not start.
+//! It must not run anything its caller did not ask for, or signal a process it did not start.
 
 use std::io::{self, Read as _};
 use std::os::unix::process::CommandExt as _;
@@ -10,12 +11,14 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
-use runnerd_core::api;
+use crate::api;
 use rustix::process::{Pid, Signal, kill_process_group};
 
 /// The commands of this process: those running, and whether it stopped. Only its methods here write it.
-pub(crate) struct Running(Mutex<Groups>);
+#[derive(Debug)]
+pub struct Running(Mutex<Groups>);
 
+#[derive(Debug)]
 struct Groups {
     /// The process groups of the commands running: each command's own, led by it.
     running: Vec<Pid>,
@@ -23,11 +26,18 @@ struct Groups {
     stopped: bool,
 }
 
-/// The daemon's commands.
-pub(crate) static RUNNING: Running = Running::new();
+/// The daemon's commands: the doctor's and the GitHub client's.
+pub static RUNNING: Running = Running::new();
+
+impl Default for Running {
+    fn default() -> Running {
+        Running::new()
+    }
+}
 
 impl Running {
-    pub(crate) const fn new() -> Running {
+    /// None running, not stopped.
+    pub const fn new() -> Running {
         Running(Mutex::new(Groups {
             running: Vec::new(),
             stopped: false,
@@ -39,7 +49,7 @@ impl Running {
     }
 
     /// Kills every command running and what it started, and starts none after: their reads end at once.
-    pub(crate) fn stop(&self) {
+    pub fn stop(&self) {
         let mut groups = self.lock();
         groups.stopped = true;
         for group in &groups.running {
@@ -66,7 +76,7 @@ impl Running {
 
 /// `command`'s output, as `Command::output` gives it, with no input; with its group killed past `deadline`, which
 /// covers reading what it wrote too: a process it left behind holding its pipes does not hold the read.
-pub(crate) fn output_within(
+pub fn output_within(
     command: &mut Command,
     deadline: Duration,
     running: &Running,
@@ -149,3 +159,6 @@ fn collect(child: &mut Child, until: Instant) -> Option<io::Result<Output>> {
     }
     Some(Ok(output))
 }
+
+#[cfg(test)]
+mod tests;

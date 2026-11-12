@@ -46,6 +46,7 @@
 
 use serde::{Deserialize, Serialize};
 
+mod actions;
 mod admission;
 mod attention;
 mod budget;
@@ -64,6 +65,12 @@ mod storage;
 mod tone;
 mod units;
 
+pub use actions::{
+    ActionAnswer, ActionOutcome, ActionPreview, ActionQuery, ActionRefusal, ActionResult,
+    ActionTarget, CONFIRM_SECS, JOB_ACTIONS_CHECK, JobAction, JobActions, PreviewFacts, RunSeen,
+    SIBLINGS_MAX, Superseded, UnknownCause, actions_in_flight, actions_no_run,
+    actions_not_configured, actions_off,
+};
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
 pub use attention::{
     ATTENTION_MAX, Attention, AttentionItem, AttentionKind, Fix, Subject, attention_items,
@@ -172,6 +179,10 @@ pub struct Status {
     /// A repository whose last listing failed, as while GitHub rate-limits runnerd, or that is no longer polled
     /// because runnerd is shutting down, shows no jobs here, while the history keeps its jobs queued.
     pub queued: Vec<QueuedJob>,
+    /// Whether the daemon cancels and re-runs jobs (ADR 0134); a daemon before 0.2 sends none, read as
+    /// [`JobActions::Unsupported`].
+    #[serde(default)]
+    pub job_actions: JobActions,
 }
 
 /// The memory budget runners and the mirror share, in bytes.

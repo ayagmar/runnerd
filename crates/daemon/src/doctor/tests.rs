@@ -9,8 +9,8 @@ use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
 use super::{
-    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, Kernel, READS_AT_ONCE,
-    SYSBOX_DAEMONS, Slice, Status, SysboxDaemon, checks, command, process_runs, read_each,
+    Check, ConfigFile, DaemonState, DockerFacts, GhAuth, Host, ImageFound, Kernel, READS_AT_ONCE,
+    SYSBOX_DAEMONS, Slice, Status, SysboxDaemon, TokenKind, checks, process_runs, read_each,
 };
 use crate::testdir::Dir;
 
@@ -74,11 +74,10 @@ fn ready_host(os_release: &str) -> Host {
             memory_max: Some(ByteSize(33 << 30)),
             cpu_quota: "infinity".to_owned(),
         })),
-        gh_scopes: Ok(vec![
-            "gist".to_owned(),
-            "repo".to_owned(),
-            "workflow".to_owned(),
-        ]),
+        gh: Ok(GhAuth {
+            scopes: vec!["gist".to_owned(), "repo".to_owned(), "workflow".to_owned()],
+            kind: TokenKind::OAuth,
+        }),
         visibility: [
             ("halyard/ledger", "private"),
             ("halyard/storefront", "internal"),
@@ -147,6 +146,7 @@ fn a_ready_host_passes_every_check() {
             "image",
             "records",
             "gh",
+            "job actions",
             "repository",
             "repository",
             "GitHub Actions' cache",
@@ -207,23 +207,87 @@ fn gh_without_an_account_is_not_logged_in_rather_than_a_token_without_scopes() {
         stderr: stderr.as_bytes().to_vec(),
     };
     // What gh 2.102 prints with no account: it succeeds.
-    let none = super::gh_scopes(&output(
+    let none = super::gh_auth(&output(
         "",
         "You are not logged into any GitHub hosts. To log in, run: gh auth login\n",
     ))
-    .unwrap_err();
+    .err()
+    .unwrap();
     assert!(
         none.starts_with("gh is not logged in to github.com"),
         "{none}"
     );
-    assert_eq!(
-        super::gh_scopes(&output("active:gist, repo\n", "")).unwrap(),
-        ["gist", "repo"]
-    );
-    assert_eq!(
-        super::gh_scopes(&output("active:\n", "")).unwrap(),
-        Vec::<String>::new(),
+    let oauth = super::gh_auth(&output("active:gist, repo\ntoken:oauth\n", "")).unwrap();
+    assert_eq!(oauth.scopes, ["gist", "repo"]);
+    assert_eq!(oauth.kind, TokenKind::OAuth);
+    let fine = super::gh_auth(&output("active:\ntoken:fine-grained\n", "")).unwrap();
+    assert!(
+        fine.scopes.is_empty(),
         "an account whose token has no scopes is logged in"
+    );
+    assert_eq!(fine.kind, TokenKind::FineGrained);
+    // A gh that printed no kind.
+    let older = super::gh_auth(&output("active:repo\n", "")).unwrap();
+    assert_eq!(older.kind, TokenKind::Other);
+}
+
+/// A fine-grained token is not failed for lacking `repo`, which it cannot have; whether a token can cancel and re-run
+/// jobs is evidence only, never a failure or a warning the attention list shows (ADR 0134).
+#[test]
+fn the_job_actions_check_says_what_the_token_shows_and_a_fine_grained_token_is_no_missing_repo() {
+    let config = config("sysbox");
+    let found = |scopes: &[&str], kind| {
+        let mut host = ready_host(ARCH);
+        host.gh = Ok(GhAuth {
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            kind,
+        });
+        let checks = checks(&host, Some(&config));
+        let named = |name: &str| {
+            let check = checks.iter().find(|check| check.name == name).unwrap();
+            (check.status, check.detail.clone())
+        };
+        (named("gh"), named(api::JOB_ACTIONS_CHECK))
+    };
+    let ((gh, _), (actions, detail)) = found(&[], TokenKind::FineGrained);
+    assert_eq!(
+        gh,
+        Status::Info,
+        "a fine-grained token is not failed for lacking repo"
+    );
+    assert_eq!(actions, Status::Info);
+    assert!(
+        detail.starts_with("not verifiable without a write"),
+        "{detail}"
+    );
+    let (_, (actions, _)) = found(&["repo"], TokenKind::Classic);
+    assert_eq!(actions, Status::Pass);
+    let ((gh, _), (actions, _)) = found(&["gist"], TokenKind::OAuth);
+    assert_eq!((gh, actions), (Status::Fail, Status::Warn));
+    let (_, (actions, _)) = found(&[], TokenKind::Other);
+    assert_eq!(actions, Status::Info);
+    let mut host = ready_host(ARCH);
+    host.gh = Err("gh is not logged in to github.com".to_owned());
+    let skipped = checks(&host, Some(&config));
+    let check = skipped
+        .iter()
+        .find(|check| check.name == api::JOB_ACTIONS_CHECK)
+        .unwrap();
+    assert_eq!(check.status, Status::Skip);
+    let example = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/runnerd.toml"
+    ))
+    .unwrap();
+    let off = Config::parse(&format!("{example}\n[github]\njob_actions = false\n")).unwrap();
+    let checks = checks(&ready_host(ARCH), Some(&off));
+    let check = checks
+        .iter()
+        .find(|check| check.name == api::JOB_ACTIONS_CHECK)
+        .unwrap();
+    assert_eq!(
+        (check.status, check.detail.as_str()),
+        (Status::Info, "off: [github] job_actions = false")
     );
 }
 
@@ -735,7 +799,10 @@ fn a_slice_without_limits_and_a_token_without_repo_fail() {
         memory_max: None,
         cpu_quota: "infinity".to_owned(),
     }));
-    host.gh_scopes = Ok(vec!["gist".to_owned()]);
+    host.gh = Ok(GhAuth {
+        scopes: vec!["gist".to_owned()],
+        kind: TokenKind::Classic,
+    });
     let checks = checks(&host, Some(&config));
     assert_eq!(failed(&checks), ["slice", "gh"]);
     let slice = checks.iter().find(|check| check.name == "slice").unwrap();
@@ -1017,125 +1084,5 @@ fn many_repositories_are_read_a_few_at_a_time_and_answered_in_their_order() {
     assert!(
         read_each(&Vec::<String>::new(), |name: &String| name.clone()).is_empty(),
         "no repositories, no reads"
-    );
-}
-
-/// Whether the process `pid` runs: not gone, and not a zombie its new parent has yet to reap.
-fn runs(pid: &str) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit(") ")
-            .next()
-            .is_some_and(|rest| !rest.starts_with('Z'))
-    })
-}
-
-/// Waits up to 2 s for `pid` to end.
-fn ends(pid: &str) -> bool {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while runs(pid) {
-        if std::time::Instant::now() >= until {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    true
-}
-
-fn sh(script: &str) -> Command {
-    let mut command = Command::new("sh");
-    command.args(["-c", script]);
-    command
-}
-
-#[test]
-fn a_commands_output_is_read_as_it_wrote_it() {
-    let running = command::Running::new();
-    let output = command::output_within(
-        &mut sh("echo out; echo err >&2; exit 3"),
-        std::time::Duration::from_secs(10),
-        &running,
-    )
-    .unwrap();
-    assert_eq!(output.status.code(), Some(3));
-    assert_eq!(output.stdout, b"out\n");
-    assert_eq!(output.stderr, b"err\n");
-}
-
-#[test]
-fn a_command_past_its_deadline_is_killed_with_what_it_started() {
-    let dir = Dir::new();
-    let pid_file = dir.0.join("pid");
-    let running = command::Running::new();
-    let started = std::time::Instant::now();
-    let read = command::output_within(
-        &mut sh(&format!(
-            "sleep 30 & echo $! > {}; sleep 30",
-            pid_file.display()
-        )),
-        std::time::Duration::from_millis(300),
-        &running,
-    );
-    assert_eq!(
-        read.unwrap_err().kind(),
-        std::io::ErrorKind::TimedOut,
-        "past its deadline"
-    );
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    let pid = std::fs::read_to_string(&pid_file).unwrap();
-    assert!(ends(pid.trim()), "what it started is killed too");
-}
-
-#[test]
-fn a_command_that_ends_leaving_its_pipes_open_is_bounded_too() {
-    let dir = Dir::new();
-    let pid_file = dir.0.join("pid");
-    let running = command::Running::new();
-    let started = std::time::Instant::now();
-    // The shell ends at once; the sleep it leaves holds its stdout.
-    let read = command::output_within(
-        &mut sh(&format!(
-            "sleep 30 & echo $! > {}; exit 0",
-            pid_file.display()
-        )),
-        std::time::Duration::from_millis(300),
-        &running,
-    );
-    assert_eq!(read.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "not until the pipe closes: {:?}",
-        started.elapsed()
-    );
-    let pid = std::fs::read_to_string(&pid_file).unwrap();
-    assert!(ends(pid.trim()), "the process holding the pipe is killed");
-}
-
-#[test]
-fn a_stop_kills_the_commands_running_and_starts_none() {
-    let running = std::sync::Arc::new(command::Running::new());
-    let started = std::time::Instant::now();
-    let reading = {
-        let running = running.clone();
-        std::thread::spawn(move || {
-            command::output_within(
-                &mut sh("sleep 30"),
-                std::time::Duration::from_secs(60),
-                &running,
-            )
-        })
-    };
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    running.stop();
-    let stopped = reading.join().unwrap().unwrap();
-    assert!(!stopped.status.success(), "killed: {stopped:?}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    assert!(
-        command::output_within(
-            &mut sh("true"),
-            std::time::Duration::from_secs(10),
-            &running
-        )
-        .is_err(),
-        "no command starts once stopped"
     );
 }

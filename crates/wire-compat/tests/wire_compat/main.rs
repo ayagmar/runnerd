@@ -305,6 +305,13 @@ documents! {
     "figure-kind": FigureKind => variants(samples::figure_kind()),
     "step-match": StepMatch => variants(samples::step_match()),
     "compare-query": CompareQuery => full(samples::compare_query(), None),
+    "action-preview": ActionPreview => full(samples::action_preview(), None),
+    "action-result": ActionResult => full(samples::action_result(), Some(json(samples::action_result_empty()))),
+    "action-query": ActionQuery => full(samples::action_query(), Some(json(api::ActionQuery::default()))),
+    "job-action": JobAction => variants(samples::job_action()),
+    "action-outcome": ActionOutcome => variants(samples::action_outcome()),
+    "action-refusal": ActionRefusal => variants(samples::action_refusal()),
+    "job-actions": JobActions => variants(samples::job_actions()),
 }
 
 /// The previous release's samples, one file per document.

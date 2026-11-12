@@ -7,6 +7,8 @@
 #![warn(missing_docs)]
 
 #[cfg(feature = "host")]
+pub mod actions;
+#[cfg(feature = "host")]
 pub mod admission;
 pub mod api;
 #[cfg(feature = "host")]
@@ -15,6 +17,8 @@ pub mod buildcache;
 pub mod cache;
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "host")]
+pub mod command;
 pub mod config;
 #[cfg(feature = "host")]
 pub mod docker;

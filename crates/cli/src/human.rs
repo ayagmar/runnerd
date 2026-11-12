@@ -6,9 +6,10 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    self, AutoPlan, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
-    JobSizing, JobSummary, NotifyTest, ProfilePlan, ProfileSizing, QueuedJob, RecordNote,
-    RecordState, Records, Savings, Sizing, SlotState, Status, Step, WaitSpread,
+    self, ActionPreview, ActionResult, AutoPlan, BuildCacheCounts, Caches, Digest, Event,
+    EventEnvelope, Insights, Job, JobPage, JobSizing, JobSummary, NotifyTest, ProfilePlan,
+    ProfileSizing, QueuedJob, RecordNote, RecordState, Records, Savings, Sizing, SlotState, Status,
+    Step, WaitSpread,
 };
 use runnerd_core::api::{Column, job_title};
 pub(crate) use runnerd_core::api::{ago, cores_used, duration};
@@ -330,6 +331,37 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
         );
     }
     out
+}
+
+/// What cancelling or re-running a job would do, before anything is sent (ADR 0134): core's title, scope and notes,
+/// the run's other jobs runnerd knows, and core's note on what that list leaves out.
+pub(crate) fn action_preview(preview: &ActionPreview, paint: Paint) -> String {
+    let mut out = format!(
+        "{}\n{}\n",
+        paint.paint(Tone::Bold, &preview.title),
+        preview.scope
+    );
+    for note in &preview.notes {
+        let _ = writeln!(out, "{note}");
+    }
+    if !preview.siblings.is_empty() {
+        let mut table = Table::columns(&[Column::Id, Column::Job, Column::Outcome]);
+        for job in &preview.siblings {
+            table.row(vec![
+                cell(job.id.to_string(), Tone::Dim),
+                plain(job.title().to_string()),
+                outcome(job),
+            ]);
+        }
+        out.push_str(&table.render(paint, ""));
+    }
+    let _ = writeln!(out, "{}", paint.paint(Tone::Dim, &preview.siblings_note));
+    out
+}
+
+/// How GitHub took a job action, in core's words and tone.
+pub(crate) fn action_result(result: &ActionResult, paint: Paint) -> String {
+    paint.paint(result.tone().into(), &result.message)
 }
 
 /// A step's mark for its outcome: `✓` succeeded, `✗` failed, `●` running, `○` waiting, `-` neither.

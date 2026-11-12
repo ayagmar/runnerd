@@ -11,6 +11,7 @@ const NOW: u64 = 1_800_000_000;
 
 fn status() -> Status {
     Status {
+        job_actions: crate::api::JobActions::On,
         version: "0.0.0".to_owned(),
         shutting_down: false,
         stopping: None,
@@ -311,6 +312,19 @@ fn doctor_checks_count_only_from_a_current_run_and_otherwise_say_they_are_not_cu
         ready(vec![check("Docker", CheckStatus::Pass)]).passed(),
         "a current run with no failure passes"
     );
+}
+
+/// Whether the token can cancel and re-run jobs is advice only, whatever its status: only GitHub's answer to a real
+/// action is evidence (ADR 0134).
+#[test]
+fn the_job_actions_check_never_needs_attention() {
+    let checks = vec![
+        check(crate::api::JOB_ACTIONS_CHECK, CheckStatus::Warn),
+        check(crate::api::JOB_ACTIONS_CHECK, CheckStatus::Fail),
+        check("slice", CheckStatus::Warn),
+    ];
+    let items = attention_items(&status(), &ready(checks), None, NOW);
+    assert_eq!(keys(&items), ["doctor:slice"]);
 }
 
 #[test]

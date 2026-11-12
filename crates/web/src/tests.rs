@@ -3452,3 +3452,53 @@ async fn a_running_job_without_a_name_is_named_by_its_id_on_the_overview() {
         "its budget readout names it too"
     );
 }
+
+#[tokio::test]
+async fn the_demo_daemon_previews_a_job_action_and_its_jobs_reach_every_answer() {
+    use runnerd_core::api::{ActionQuery, JobAction};
+    use runnerd_core::client::{Client, JobActionAnswer};
+
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fixtures = fake::Fixtures::new(NOW);
+    let jobs: Vec<u64> = fixtures
+        .jobs
+        .iter()
+        .filter(|job| job.summary.run_id != 0)
+        .map(|job| job.summary.id)
+        .collect();
+    let fake = fake::Fake::new(fixtures);
+    fake::serve(&socket, fake.clone());
+    let client = Client::new(socket);
+    let mut reached = Vec::new();
+    for job in jobs {
+        let JobActionAnswer::Confirm(preview) = client
+            .job_action(job, JobAction::Cancel, &ActionQuery::default())
+            .await
+            .unwrap()
+        else {
+            panic!("job {job} was sent without a confirmation");
+        };
+        let confirmed = ActionQuery {
+            force: true,
+            confirm: preview.confirm.clone(),
+            failed: false,
+        };
+        let JobActionAnswer::Done(result) = client
+            .job_action(job, JobAction::Cancel, &confirmed)
+            .await
+            .unwrap()
+        else {
+            panic!("job {job}'s confirmation was not taken");
+        };
+        let answer = (result.outcome, result.refusal, result.status);
+        if !reached.contains(&answer) {
+            reached.push(answer);
+        }
+    }
+    assert_eq!(
+        reached.len(),
+        fake::action_answers(NOW).len(),
+        "the demo's jobs reach every answer: {reached:?}"
+    );
+}

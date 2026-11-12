@@ -523,6 +523,7 @@ mod tests {
     fn state() -> State {
         State {
             status: Status {
+                job_actions: runnerd_core::api::JobActions::On,
                 version: "0.0.1".to_owned(),
                 shutting_down: false,
                 stopping: None,

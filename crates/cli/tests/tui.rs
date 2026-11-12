@@ -56,6 +56,7 @@ impl Drop for TempDir {
 /// A daemon with nothing configured and nothing happening; its event stream stays open and quiet.
 fn serve(socket: &Path) {
     let status = Status {
+        job_actions: runnerd_core::api::JobActions::On,
         version: "0.0.1".to_owned(),
         shutting_down: false,
         stopping: None,
