@@ -85,6 +85,12 @@ pub use jobs::{
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
     Swap, Timeline, Total, host_margin, job_title,
 };
+pub use jobs::{
+    Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,
+    LogEvidence, LogGroup, LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch,
+    LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
+    SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
+};
 pub use labels::{Column, View};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
@@ -108,7 +114,6 @@ pub use storage::{
     RecordState, actions_cache_place, records_near_full,
 };
 pub use tone::{Tone, Toned};
-#[cfg(feature = "host")]
 pub(crate) use units::days_from_civil;
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 

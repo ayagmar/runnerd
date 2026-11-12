@@ -56,6 +56,13 @@ pub const HOST_SHORT: u64 = 9302;
 /// A queued job that fits, behind [`HOST_SHORT`], which waited long enough that no younger job starts before it.
 pub const BEHIND_MEMORY: u64 = 9303;
 
+mod logs;
+
+pub use logs::{
+    LOG_EXPIRED, LOG_FAILED, LOG_MISSING, LOG_NOT_OUTLINED, LOG_RUNNING, LOG_TRUNCATED, LogFacts,
+    LoggedJob, log_facts, logged_jobs,
+};
+
 const LEDGER: &str = "halyard/ledger";
 const STOREFRONT: &str = "halyard/storefront";
 

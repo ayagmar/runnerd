@@ -28,6 +28,8 @@ use crate::testdir::Dir;
 use super::notify::{Setup, Timing};
 use super::{ConfigSource, MemoryMax, SyncDir, bind, serve, serve_for, sync_dir};
 
+mod log;
+
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
 
 /// The notifier at a test's pace, in UTC.
@@ -1368,6 +1370,9 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/jobs/1"),
         client.get("http://runnerd/v1/jobs/1/samples"),
         client.get("http://runnerd/v1/jobs/1/logs"),
+        client.get("http://runnerd/v1/jobs/1/log/lines"),
+        client.get("http://runnerd/v1/jobs/1/log/outline"),
+        client.get("http://runnerd/v1/jobs/1/log/search?q=x"),
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
         client.get("http://runnerd/v1/activity"),

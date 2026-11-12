@@ -1,4 +1,4 @@
--- The job history at schema version 21, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 22, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -150,6 +150,38 @@ CREATE TABLE log_lines (
     job INTEGER NOT NULL,
     line INTEGER NOT NULL,
     text TEXT NOT NULL,
+    PRIMARY KEY (job, line)
+) WITHOUT ROWID;
+
+-- A job's log as structure (ADR 0133), kept by the writer as its lines are stored, in the same transaction, and
+-- pruned with them. None for a log stored before schema 22. `log_outlines` is where the outline got to
+-- (`api::SavedOutline`): the first line it describes, what it counted, and the groups it did not keep and those of
+-- them still open. `log_groups`: each group kept, by its `##[group]` line; `end_line` is its `##[endgroup]` line,
+-- NULL while open. `log_marks`: 'error' and 'warning' lines, and 'section' lines that start a step without a group.
+CREATE TABLE log_outlines (
+    job INTEGER PRIMARY KEY NOT NULL,
+    from_line INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    warnings INTEGER NOT NULL,
+    groups_kept INTEGER NOT NULL,
+    marks_kept INTEGER NOT NULL,
+    sections_kept INTEGER NOT NULL,
+    dropped INTEGER NOT NULL,
+    hidden INTEGER NOT NULL
+);
+CREATE TABLE log_groups (
+    job INTEGER NOT NULL,
+    start INTEGER NOT NULL,
+    end_line INTEGER,
+    depth INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    PRIMARY KEY (job, start)
+) WITHOUT ROWID;
+CREATE INDEX log_groups_open ON log_groups (job, start) WHERE end_line IS NULL;
+CREATE TABLE log_marks (
+    job INTEGER NOT NULL,
+    line INTEGER NOT NULL,
+    kind TEXT NOT NULL,
     PRIMARY KEY (job, line)
 ) WITHOUT ROWID;
 

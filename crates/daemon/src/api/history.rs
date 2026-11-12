@@ -1,7 +1,8 @@
 //! The job history routes: jobs, their samples and logs, the slice's samples, stats, sizing advice, insights, what the
 //! jobs' minutes would have cost on GitHub's runners and cache sizes,
-//! read from the store. Every handler takes the authenticated principal. Reads only; a log with `follow` streams
-//! until its job's record is final or the server stops.
+//! read from the store, and a job's log as structure (ADR 0133): its outline, its styled lines and a search. Every
+//! handler takes the authenticated principal. Reads only; a log with `follow`, plain or styled, streams until its job's
+//! record is final or the server stops.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +15,8 @@ use futures_util::stream;
 use runnerd_core::api::{
     ActivityQuery, BuildCacheStats, CacheHistory, CacheHistoryQuery, CacheKind, Caches, Event,
     HostSampleQuery, HostSamples, INSIGHT_DAYS, INSIGHT_DAYS_MAX, InsightsQuery, JobQuery,
-    LogQuery, Savings, Sizing, SizingQuery, StatsQuery, reads_since,
+    LogLinesQuery, LogQuery, LogSearchQuery, Savings, Search, Sizing, SizingQuery, StatsQuery,
+    StyledLine, reads_since,
 };
 use runnerd_core::config::Config;
 use runnerd_core::insights::{self, History};
@@ -365,11 +367,23 @@ enum Phase {
     Done,
 }
 
+/// How a log stream writes its lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// As stored, one per line: `GET /v1/jobs/{id}/logs`.
+    Plain,
+    /// One `StyledLine` of JSON per line: `GET /v1/jobs/{id}/log/lines`.
+    Styled,
+}
+
 struct LogStream {
     store: Store,
     job: u64,
     next: u64,
     follow: bool,
+    format: Format,
+    /// Lines still to send; `None` for no limit.
+    left: Option<u64>,
     phase: Phase,
     events: broadcast::Receiver<std::sync::Arc<runnerd_core::api::EventEnvelope>>,
     stopping: watch::Receiver<bool>,
@@ -384,24 +398,67 @@ fn lines(lines: &[String]) -> Bytes {
     Bytes::from(text)
 }
 
+fn styled(lines: &[StyledLine]) -> Bytes {
+    let mut text = Vec::new();
+    for line in lines {
+        // A `StyledLine` always serializes.
+        if serde_json::to_writer(&mut text, line).is_ok() {
+            text.push(b'\n');
+        }
+    }
+    Bytes::from(text)
+}
+
 impl LogStream {
+    /// The next batch of stored lines from `next` and the number after its last, or `None` when none is stored.
+    async fn stored(&mut self) -> Result<Option<(Bytes, u64)>, StoreError> {
+        let batch = self.left.map_or(LOG_BATCH, |left| left.min(LOG_BATCH));
+        Ok(match self.format {
+            Format::Plain => {
+                let batch = self.store.log_lines(self.job, self.next, batch).await?;
+                batch.last().map(|(line, _)| *line + 1).map(|next| {
+                    let text: Vec<String> = batch.into_iter().map(|(_, text)| text).collect();
+                    (lines(&text), next)
+                })
+            }
+            Format::Styled => {
+                let batch = self.store.styled_lines(self.job, self.next, batch).await?;
+                batch.last().map(|line| (styled(&batch), line.line + 1))
+            }
+        })
+    }
+
+    /// Counts `sent` lines against the limit; whether the stream is done.
+    fn spent(&mut self, sent: u64) -> bool {
+        match &mut self.left {
+            Some(left) => {
+                *left = left.saturating_sub(sent);
+                *left == 0
+            }
+            None => false,
+        }
+    }
+
     /// The next part of the body; `None` at the end.
     async fn next(&mut self) -> Option<Result<Bytes, StoreError>> {
         loop {
             match self.phase {
                 Phase::Done => return None,
                 Phase::Stored { last } => {
-                    let batch = match self.store.log_lines(self.job, self.next, LOG_BATCH).await {
-                        Ok(batch) => batch,
+                    let read = match self.stored().await {
+                        Ok(read) => read,
                         Err(store_error) => {
                             self.phase = Phase::Done;
                             return Some(Err(store_error));
                         }
                     };
-                    if let Some((line, _)) = batch.last() {
-                        self.next = line + 1;
-                        let text: Vec<String> = batch.into_iter().map(|(_, text)| text).collect();
-                        return Some(Ok(lines(&text)));
+                    if let Some((bytes, next)) = read {
+                        let sent = next - self.next;
+                        self.next = next;
+                        if self.spent(sent) {
+                            self.phase = Phase::Done;
+                        }
+                        return Some(Ok(bytes));
                     }
                     self.phase = if last || !self.follow {
                         Phase::Done
@@ -429,7 +486,10 @@ impl LogStream {
                             Event::LogLine { job, line, text } if *job == self.job => {
                                 if *line == self.next {
                                     self.next += 1;
-                                    return Some(Ok(lines(std::slice::from_ref(text))));
+                                    return Some(Ok(match self.format {
+                                        Format::Plain => lines(std::slice::from_ref(text)),
+                                        Format::Styled => styled(&[StyledLine::parse(*line, text)]),
+                                    }));
                                 }
                                 if *line > self.next {
                                     self.phase = Phase::Stored { last: false };
@@ -450,11 +510,15 @@ impl LogStream {
     }
 }
 
-pub(super) async fn logs(
-    _: Authenticated,
-    State(state): State<AppState>,
-    Path(id): Path<u64>,
-    Query(query): Query<LogQuery>,
+/// A job's log from line `from`, written in `format`: what is stored, at most `left` lines when given; with `follow`,
+/// then each line as it is stored until the job is final.
+async fn log_stream(
+    state: &AppState,
+    id: u64,
+    from: u64,
+    follow: bool,
+    format: Format,
+    left: Option<u64>,
 ) -> Response {
     let store = state.handle.store.clone();
     // Subscribed before the first read, so no line stored meanwhile is missed.
@@ -467,8 +531,10 @@ pub(super) async fn logs(
     let log = LogStream {
         store,
         job: id,
-        next: query.from.unwrap_or(0),
-        follow: query.follow,
+        next: from,
+        follow,
+        format,
+        left,
         phase: Phase::Stored { last: false },
         events,
         stopping: state.stopping.clone(),
@@ -476,5 +542,81 @@ pub(super) async fn logs(
     let body = Body::from_stream(stream::unfold(log, |mut log| async move {
         log.next().await.map(|part| (part, log))
     }));
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+    let content_type = match format {
+        Format::Plain => "text/plain; charset=utf-8",
+        Format::Styled => "application/x-ndjson",
+    };
+    ([(header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+pub(super) async fn logs(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(query): Query<LogQuery>,
+) -> Response {
+    log_stream(
+        &state,
+        id,
+        query.from.unwrap_or(0),
+        query.follow,
+        Format::Plain,
+        None,
+    )
+    .await
+}
+
+/// `GET /v1/jobs/{id}/log/lines`: styled lines, a page of them, or followed as `/logs` follows.
+pub(super) async fn styled_lines(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(query): Query<LogLinesQuery>,
+) -> Response {
+    let left = (!query.follow).then(|| query.page());
+    log_stream(
+        &state,
+        id,
+        query.from.unwrap_or(0),
+        query.follow,
+        Format::Styled,
+        left,
+    )
+    .await
+}
+
+/// `GET /v1/jobs/{id}/log/outline`.
+pub(super) async fn log_outline(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Response {
+    match state.handle.store.log_outline(id).await {
+        Ok(Some(outline)) => Json(outline).into_response(),
+        Ok(None) => no_job(id),
+        Err(store_error) => failed(&store_error),
+    }
+}
+
+/// `GET /v1/jobs/{id}/log/search`.
+pub(super) async fn search_log(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(query): Query<LogSearchQuery>,
+) -> Response {
+    let search = match Search::new(&query) {
+        Ok(search) => search,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    let store = &state.handle.store;
+    match store.job(id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return no_job(id),
+        Err(store_error) => return failed(&store_error),
+    }
+    match store.search_log(id, search).await {
+        Ok(found) => Json(found).into_response(),
+        Err(store_error) => failed(&store_error),
+    }
 }

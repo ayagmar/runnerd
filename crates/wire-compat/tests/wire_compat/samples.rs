@@ -12,21 +12,23 @@
 use runnerd_core::api::{
     Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, AutoNote, AutoPlan, Basis, Bucket,
     Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind,
-    CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, CountBrake,
+    CacheSize, CacheVolume, Caches, Check, CheckStatus, Color, ConfigCheck, ConfigFile, CountBrake,
     Counted, CpuAdmission, CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event,
-    EventEnvelope, EventQuery, HoldCause, Holder, HostBudget, HostCredit, HostHazard, HostMemory,
-    HostSample, HostSampleQuery, HostSamples, HostSpan, Insight, InsightKind, Insights,
-    InsightsQuery, Job, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState,
-    JobSummary, LogQuery, LogSummary, LongWait, MemoryBound, MemoryHold, Notification, NotifyEvent,
-    NotifyTest, NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks,
-    Period, PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus,
-    QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
-    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink,
-    RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings,
-    SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing,
-    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread,
-    Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Stopping, Swap, Timeline, Usd,
-    WaitSpread, Waiting, WeekWaits,
+    EventEnvelope, EventQuery, FailureSummary, HoldCause, Holder, HostBudget, HostCredit,
+    HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples, HostSpan, Insight,
+    InsightKind, Insights, InsightsQuery, Job, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner,
+    JobSizing, JobState, JobSummary, LineKind, LineRange, LogEvidence, LogGroup, LogLinesQuery,
+    LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary, LongWait, MarkKind,
+    MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing,
+    PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled, Pressure,
+    PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits,
+    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery,
+    RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run, RunLink, RunnerFailure,
+    RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity,
+    ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold,
+    SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats,
+    StatsQuery, StatsRow, Status, Step, StepLines, StepLog, Stopping, StyledLine, Swap, Timeline,
+    Usd, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -1482,5 +1484,208 @@ pub(crate) fn shell_query() -> ShellQuery {
         step: Some(3),
         cols: Some(120),
         rows: Some(40),
+    }
+}
+
+pub(crate) fn styled_line() -> StyledLine {
+    StyledLine {
+        line: 42,
+        at: Some(1_792_717_245),
+        kind: LineKind::Error,
+        runs: vec![Run {
+            text: "error: missing target".to_owned(),
+            color: Some(Color::Red),
+            bold: true,
+            mark: true,
+        }],
+        omitted: 1024,
+    }
+}
+
+/// What serializing a styled line may leave out.
+pub(crate) fn styled_line_empty() -> StyledLine {
+    StyledLine {
+        line: 0,
+        at: None,
+        kind: LineKind::Output,
+        runs: vec![Run {
+            text: "plain".to_owned(),
+            color: None,
+            bold: false,
+            mark: false,
+        }],
+        omitted: 0,
+    }
+}
+
+pub(crate) fn line_kind() -> Vec<LineKind> {
+    let every = vec![
+        LineKind::Output,
+        LineKind::Group,
+        LineKind::EndGroup,
+        LineKind::Error,
+        LineKind::Warning,
+        LineKind::Notice,
+        LineKind::Debug,
+        LineKind::Command,
+    ];
+    for kind in &every {
+        match kind {
+            LineKind::Output
+            | LineKind::Group
+            | LineKind::EndGroup
+            | LineKind::Error
+            | LineKind::Warning
+            | LineKind::Notice
+            | LineKind::Debug
+            | LineKind::Command
+            | LineKind::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn color() -> Vec<Color> {
+    let every = vec![
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::Grey,
+    ];
+    for color in &every {
+        match color {
+            Color::Red
+            | Color::Green
+            | Color::Yellow
+            | Color::Blue
+            | Color::Magenta
+            | Color::Cyan
+            | Color::Grey
+            | Color::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn step_log() -> Vec<StepLog> {
+    let every = vec![
+        StepLog::Lines(LineRange { from: 4, to: 15 }),
+        StepLog::Empty,
+        StepLog::Unattributed,
+    ];
+    for log in &every {
+        match log {
+            StepLog::Lines(_) | StepLog::Empty | StepLog::Unattributed | StepLog::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn mark_kind() -> Vec<MarkKind> {
+    let every = vec![MarkKind::Error, MarkKind::Warning];
+    for kind in &every {
+        match kind {
+            MarkKind::Error | MarkKind::Warning | MarkKind::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn log_evidence() -> Vec<LogEvidence> {
+    let every = vec![
+        LogEvidence::Complete,
+        LogEvidence::Running,
+        LogEvidence::Partial,
+        LogEvidence::Truncated,
+        LogEvidence::Expired,
+        LogEvidence::Missing,
+        LogEvidence::NotOutlined,
+    ];
+    for evidence in &every {
+        match evidence {
+            LogEvidence::Complete
+            | LogEvidence::Running
+            | LogEvidence::Partial
+            | LogEvidence::Truncated
+            | LogEvidence::Expired
+            | LogEvidence::Missing
+            | LogEvidence::NotOutlined
+            | LogEvidence::Unknown => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn log_outline() -> LogOutline {
+    LogOutline {
+        job: 42,
+        evidence: LogEvidence::Truncated,
+        lines: 40,
+        from: 0,
+        groups: vec![LogGroup {
+            start: 4,
+            end: Some(6),
+            depth: 0,
+            title: "Run make".to_owned(),
+        }],
+        steps: vec![StepLines {
+            number: 2,
+            lines: StepLog::Lines(LineRange { from: 4, to: 15 }),
+        }],
+        unattributed: vec![LineRange { from: 15, to: 40 }],
+        errors: 1,
+        warnings: 2,
+        marks: vec![LogMark {
+            line: 14,
+            kind: MarkKind::Error,
+        }],
+        capped: true,
+        failure: Some(FailureSummary {
+            step: Some(2),
+            exit_code: Some(2),
+            excerpt: Some(vec![styled_line()]),
+            shell: Some("runnerctl shell 42".to_owned()),
+        }),
+    }
+}
+
+/// What serializing an outline may leave out.
+pub(crate) fn log_outline_empty() -> LogOutline {
+    LogOutline {
+        groups: vec![LogGroup {
+            end: None,
+            ..log_outline().groups[0].clone()
+        }],
+        failure: None,
+        ..log_outline()
+    }
+}
+
+pub(crate) fn log_search() -> LogSearch {
+    LogSearch {
+        matches: vec![42],
+        lines: vec![styled_line()],
+        next: Some(43),
+    }
+}
+
+pub(crate) fn log_lines_query() -> LogLinesQuery {
+    LogLinesQuery {
+        from: Some(10),
+        limit: Some(500),
+        follow: true,
+    }
+}
+
+pub(crate) fn log_search_query() -> LogSearchQuery {
+    LogSearchQuery {
+        q: "error".to_owned(),
+        from: Some(10),
+        limit: Some(20),
+        context: Some(2),
+        follow: true,
     }
 }

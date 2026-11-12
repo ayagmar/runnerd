@@ -138,3 +138,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0128](0128-each-repository-is-listed-on-its-own-pace.md) | Each repository is listed on its own pace | Accepted |
 | [0130](0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md) | The budgets count what runs uses and keep room for its largest growths | Accepted |
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |
+| [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Accepted |

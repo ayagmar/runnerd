@@ -273,6 +273,16 @@ documents! {
     "count-brake": CountBrake => variants(samples::count_brake()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
+    "log-outline": LogOutline => full(samples::log_outline(), Some(json(samples::log_outline_empty()))),
+    "styled-line": StyledLine => full(samples::styled_line(), Some(json(samples::styled_line_empty()))),
+    "line-kind": LineKind => variants(samples::line_kind()),
+    "color": Color => variants(samples::color()),
+    "step-log": StepLog => variants(samples::step_log()),
+    "mark-kind": MarkKind => variants(samples::mark_kind()),
+    "log-evidence": LogEvidence => variants(samples::log_evidence()),
+    "log-search": LogSearch => full(samples::log_search(), Some(json(api::LogSearch::default()))),
+    "log-lines-query": LogLinesQuery => full(samples::log_lines_query(), None),
+    "log-search-query": LogSearchQuery => full(samples::log_search_query(), None),
 }
 
 /// The previous release's samples, one file per document.

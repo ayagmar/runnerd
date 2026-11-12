@@ -117,12 +117,13 @@ fn delete_samples(db: &Db<'_>, runners: &[String], before: u64) -> rusqlite::Res
     Ok(())
 }
 
-/// The log lines of jobs that finished before `before`.
+/// The log lines of jobs that finished before `before`, then their outlines.
 fn logs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
     let jobs: Vec<u64> = db
         .prepare(
             "SELECT id FROM jobs WHERE finished_at < ?1 AND state IN ('completed', 'lost', 'elsewhere') \
-             AND EXISTS (SELECT 1 FROM log_lines WHERE job = id)",
+             AND (EXISTS (SELECT 1 FROM log_lines WHERE job = id) \
+             OR EXISTS (SELECT 1 FROM log_outlines WHERE job = id))",
         )?
         .query_map([before], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -136,6 +137,11 @@ fn delete_logs(db: &Db<'_>, jobs: &[u64]) -> rusqlite::Result<()> {
     )?;
     for job in jobs {
         batched(db, || delete.execute(params![job, BATCH]))?;
+        // After the lines, so an outline never describes lines that are all gone yet reads as kept; at most a few
+        // thousand rows.
+        if !db.stopped() {
+            super::outline::delete(db, *job)?;
+        }
     }
     Ok(())
 }
