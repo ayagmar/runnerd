@@ -43,6 +43,7 @@ fn job(state: JobState, conclusion: &str, steps: Vec<Step>) -> Job {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            record_mark: None,
         },
         steps,
         record: None,
@@ -350,6 +351,7 @@ fn a_failure_summary_says_each_part_only_on_its_evidence() {
         skipped: None,
         removed_at: None,
         removed_by: None,
+        gone_at: None,
     });
     let kept = LogOutline::of(&failed, &log()).failure.unwrap();
     assert_eq!(kept.shell.as_deref(), Some("runnerctl shell 7"));

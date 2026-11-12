@@ -651,6 +651,10 @@ fn record(view: &JobView) -> Markup {
                     h2 #record-title { "Record" }
                     p.muted { "Kept, then " (state.line()) " " (time_ago(at, view.now)) "." }
                 }
+                state @ RecordState::Gone { .. } => {
+                    h2 #record-title { "Record" }
+                    p.muted { "Kept, then " (state.line()) "." }
+                }
                 state @ RecordState::Kept { .. } => {
                 div.section-head {
                     h2 #record-title { "Open a shell" }

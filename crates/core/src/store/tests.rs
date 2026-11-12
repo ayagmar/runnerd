@@ -17,6 +17,7 @@ use crate::observe::metrics::{CpuHeld, Events};
 use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
+mod lens;
 mod log_outline;
 mod waits;
 
@@ -147,10 +148,10 @@ async fn jobs_list_newest_first_by_repository_in_pages() {
             ..JobQuery::default()
         })
     };
-    let first = page(None).await.unwrap();
+    let first = page(None).await.unwrap().page;
     let ids: Vec<u64> = first.jobs.iter().map(|job| job.id).collect();
     assert_eq!((ids, first.next), (vec![5, 3], Some(3)));
-    let second = page(first.next).await.unwrap();
+    let second = page(first.next).await.unwrap().page;
     let ids: Vec<u64> = second.jobs.iter().map(|job| job.id).collect();
     assert_eq!((ids, second.next), (vec![1], None));
 }
@@ -183,7 +184,8 @@ async fn jobs_list_by_workflow_and_name_to_compare_runs_of_one_job() {
             ..JobQuery::default()
         })
         .await
-        .unwrap();
+        .unwrap()
+        .page;
     let ids: Vec<u64> = page.jobs.iter().map(|job| job.id).collect();
     assert_eq!(ids, [4, 1]);
 }

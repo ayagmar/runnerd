@@ -11,25 +11,28 @@
 
 use runnerd_core::api::{
     Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, Attention, AttentionItem,
-    AttentionKind, AutoNote, AutoPlan, Basis, Bucket, Budget, BuildCacheCounts, BuildCacheStats,
-    Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check,
-    CheckStatus, Color, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission, CpuBudget,
-    Dashboard, Delivery, Digest, Doctor, DoctorState, ErrorResponse, Event, EventEnvelope,
-    EventQuery, FailureSummary, Fix, HoldCause, Holder, HostBudget, HostCredit, HostHazard,
-    HostMemory, HostSample, HostSampleQuery, HostSamples, HostSpan, Insight, InsightKind, Insights,
-    InsightsQuery, Job, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState,
-    JobSummary, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence, LogGroup,
+    AttentionKind, AutoNote, AutoPlan, BarEnd, Baseline, Basis, Bucket, Budget, BuildCacheCounts,
+    BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume,
+    Caches, Check, CheckStatus, Color, CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted,
+    CpuAdmission, CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorState, ErrorResponse,
+    Event, EventEnvelope, EventQuery, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause,
+    Holder, HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery,
+    HostSamples, HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobComparison,
+    JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort, JobState,
+    JobSummary, Lane, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence, LogGroup,
     LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary, LongWait,
     MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery,
     Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled,
     Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record,
-    RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
-    ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run, RunLink,
-    RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SavedWindow, Savings,
-    SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing,
-    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread,
-    Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, StepLines, StepLog, Stopping,
-    StyledLine, Subject, Swap, Timeline, Tone, Usd, View, WaitSpread, Waiting, WeekWaits,
+    RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
+    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run,
+    RunLink, RunnerFailure, RunnerSpan, RunnerStatus, RunningJob, Sample, SampleSeries,
+    SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownAnswer,
+    ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert,
+    Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started, Starts, Stats, StatsQuery,
+    StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch, Stopping, StyledLine,
+    Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View, WaitSpread,
+    Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -771,6 +774,7 @@ pub(crate) fn job_summary() -> JobSummary {
             truncated: false,
         },
         runner_fault: true,
+        record_mark: Some(RecordMark::Kept),
     }
 }
 
@@ -826,6 +830,7 @@ pub(crate) fn job() -> Job {
             skipped: Some("the job succeeded".to_owned()),
             removed_at: Some(1_761_500_000),
             removed_by: Some(RecordRemoval::User),
+            gone_at: Some(1_761_600_000),
         }),
         admission: Some(admission()),
     }
@@ -1559,6 +1564,8 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             job: 42,
             removed_by: RecordRemoval::Age,
         },
+        Event::RecordSkipped { job: 43 },
+        Event::RecordGone { job: 44 },
         Event::SizingChanged {
             change: sizing_change(),
         },
@@ -1597,6 +1604,8 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             | Event::CacheReseeded { .. }
             | Event::RecordCreated { .. }
             | Event::RecordDeleted { .. }
+            | Event::RecordSkipped { .. }
+            | Event::RecordGone { .. }
             | Event::SizingChanged { .. }
             | Event::RunnerFailed { .. }
             | Event::JobSample { .. }
@@ -1642,6 +1651,12 @@ pub(crate) fn job_query() -> JobQuery {
         until: Some(1_761_400_000),
         before: Some(42),
         limit: Some(50),
+        q: Some("b_uild%".to_owned()),
+        branch: Some("main".to_owned()),
+        record: Some(RecordFilter::Kept),
+        sort: Some(JobSort::Wait),
+        order: Some(SortOrder::Asc),
+        cursor: Some("j1.wait.asc.30.41".to_owned()),
     }
 }
 
@@ -1918,4 +1933,175 @@ pub(crate) fn log_search_query() -> LogSearchQuery {
         context: Some(2),
         follow: true,
     }
+}
+
+pub(crate) fn job_list() -> JobList {
+    JobList {
+        page: JobPage {
+            jobs: vec![job_summary()],
+            next: None,
+        },
+        total: Some(120),
+        shortened: vec![42],
+        applied: Some(job_query()),
+    }
+}
+
+pub(crate) fn record_mark() -> Vec<RecordMark> {
+    vec![RecordMark::Kept, RecordMark::Removed, RecordMark::Skipped]
+}
+
+pub(crate) fn record_filter() -> Vec<RecordFilter> {
+    vec![
+        RecordFilter::Any,
+        RecordFilter::Kept,
+        RecordFilter::Removed,
+        RecordFilter::Skipped,
+    ]
+}
+
+pub(crate) fn job_sort() -> Vec<JobSort> {
+    vec![
+        JobSort::Queued,
+        JobSort::Wait,
+        JobSort::Run,
+        JobSort::Memory,
+    ]
+}
+
+pub(crate) fn sort_order() -> Vec<SortOrder> {
+    vec![SortOrder::Desc, SortOrder::Asc]
+}
+
+pub(crate) fn bar_end() -> Vec<BarEnd> {
+    vec![
+        BarEnd::At { at: 1_761_400_600 },
+        BarEnd::Open,
+        BarEnd::Unknown,
+    ]
+}
+
+fn timeline_bar(job: u64, started_at: Option<u64>, end: BarEnd) -> TimelineBar {
+    TimelineBar {
+        job,
+        repository: "tidewater/halyard".to_owned(),
+        workflow: Some("ci".to_owned()),
+        name: "build".to_owned(),
+        state: JobState::Completed,
+        conclusion: Some("success".to_owned()),
+        runner_fault: true,
+        queued_at: 1_761_400_000,
+        started_at,
+        end,
+        runner: started_at.map(|_| "jvm-1-1761400000".to_owned()),
+    }
+}
+
+pub(crate) fn slot_timeline() -> SlotTimeline {
+    SlotTimeline {
+        since: 1_761_399_000,
+        until: 1_761_402_600,
+        lanes: vec![Lane {
+            profile: "jvm".to_owned(),
+            slot: 2,
+            bars: vec![timeline_bar(
+                42,
+                Some(1_761_400_010),
+                BarEnd::At { at: 1_761_400_600 },
+            )],
+            runners: vec![RunnerSpan {
+                name: "jvm-1-1761400000".to_owned(),
+                started_at: 1_761_400_000,
+                end: BarEnd::Open,
+            }],
+        }],
+        unassigned: vec![timeline_bar(43, None, BarEnd::Unknown)],
+        observed: vec![Span {
+            from: 1_761_399_000,
+            to: 1_761_402_000,
+        }],
+        history_from: 1_760_000_000,
+        cut_before: Some(1_761_399_500),
+    }
+}
+
+pub(crate) fn timeline_query() -> TimelineQuery {
+    TimelineQuery {
+        since: Some(1_761_399_000),
+        until: Some(1_761_402_600),
+    }
+}
+
+pub(crate) fn job_comparison() -> JobComparison {
+    let delta = |figure, sampled| FigureDelta {
+        figure,
+        this: Some(120),
+        baseline: Some(100),
+        sampled,
+    };
+    JobComparison {
+        job: 42,
+        baseline: Baseline::Chosen {
+            job: 41,
+            branch: Some("main".to_owned()),
+            queued_at: 1_761_300_000,
+            asked: true,
+        },
+        figures: vec![delta(FigureKind::Run, false)],
+        steps: vec![StepDelta {
+            name: "Run tests".to_owned(),
+            matched: StepMatch::Matched,
+            this: Some(3),
+            baseline: Some(4),
+            time: delta(FigureKind::StepTime, false),
+            memory: Some(delta(FigureKind::StepMemory, true)),
+            cpu: Some(delta(FigureKind::StepCpu, true)),
+        }],
+        steps_cut: true,
+    }
+}
+
+pub(crate) fn baseline() -> Vec<Baseline> {
+    vec![
+        job_comparison().baseline,
+        Baseline::Unavailable {
+            reason: Unavailable::UnknownBranch,
+        },
+        Baseline::Incompatible { job: 7 },
+    ]
+}
+
+pub(crate) fn unavailable() -> Vec<Unavailable> {
+    vec![
+        Unavailable::NoEarlierSuccess,
+        Unavailable::UnknownWorkflow,
+        Unavailable::UnknownBranch,
+    ]
+}
+
+pub(crate) fn figure_kind() -> Vec<FigureKind> {
+    vec![
+        FigureKind::Wait,
+        FigureKind::Run,
+        FigureKind::MemoryPeak,
+        FigureKind::CpuTime,
+        FigureKind::CpuAverage,
+        FigureKind::Received,
+        FigureKind::StepTime,
+        FigureKind::StepMemory,
+        FigureKind::StepCpu,
+    ]
+}
+
+pub(crate) fn step_match() -> Vec<StepMatch> {
+    vec![
+        StepMatch::Matched,
+        StepMatch::OnlyThis,
+        StepMatch::OnlyBaseline,
+        StepMatch::Ambiguous,
+    ]
+}
+
+pub(crate) fn compare_query() -> CompareQuery {
+    CompareQuery { with: Some(41) }
 }

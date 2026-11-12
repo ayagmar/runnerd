@@ -27,7 +27,7 @@ use runnerd_core::api::{
     Activity, ActivityQuery, Bucket, Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory,
     CacheKind, CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor,
     ErrorResponse, Event, EventEnvelope, EventQuery, HostSample, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, PauseQuery, Paused,
+    JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, PauseQuery, Paused,
     ProfileStatus, QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records,
     RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RunnerStatus, RunningJob,
     Sample, SampleSeries, SlotStatus, Started, Stats, StatsRow, Status, Step, Timeline,
@@ -39,6 +39,9 @@ use runnerd_core::api::{Attention, DoctorState, attention_items};
 use runnerd_core::api::{
     AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
     WaitSpread, WeekWaits,
+};
+use runnerd_core::api::{
+    CompareQuery, JobComparison, JobList, RecordMark, SlotTimeline, StepUsage, TimelineQuery,
 };
 use runnerd_core::api::{LogLinesQuery, LogOutline, LogSearchQuery, Search, StyledLine};
 use tokio::net::UnixListener;
@@ -310,6 +313,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             truncated: false,
         },
         runner_fault: false,
+        record_mark: None,
     };
     (
         Job {
@@ -681,12 +685,12 @@ impl Fixtures {
                 let summary = &job.summary;
                 let created_at = summary.timeline.finished_at.unwrap_or(now);
                 let bytes = 280 * MIB + noise.next(400) * MIB;
-                job.record = Some(RecordNote {
+                let note = RecordNote {
                     created_at: Some(created_at),
                     bytes: Some(bytes),
                     ..RecordNote::default()
-                });
-                Record {
+                };
+                let record = Record {
                     job: summary.id,
                     repository: summary.repository.clone(),
                     profile: summary
@@ -699,10 +703,23 @@ impl Fixtures {
                     created_at,
                     bytes,
                     image: format!("runnerd-record:{}", summary.id),
-                }
+                };
+                job.summary.record_mark = Some(RecordMark::of(&note));
+                job.record = Some(note);
+                record
             })
             .collect();
         records.reverse();
+        // The lenses' awkward cases, listed after the demo's own: their IDs are older.
+        let lens = runnerd_fixtures::lens_history_at(now);
+        jobs.extend(lens.jobs);
+        samples.extend(
+            lens.samples
+                .into_iter()
+                .map(|lens| (lens.job, lens.samples)),
+        );
+        records.extend(runnerd_fixtures::lens_records_at(now).records);
+        records.sort_by_key(|record| record.created_at);
         let records = Records {
             records,
             limits: RecordLimits {
@@ -786,47 +803,36 @@ impl Fixtures {
         }
     }
 
-    fn page(&self, query: &JobQuery) -> JobPage {
-        let limit = query.limit.unwrap_or(50) as usize;
-        let mut jobs: Vec<JobSummary> = self
-            .jobs
-            .iter()
-            .map(|job| job.summary.clone())
-            .filter(|job| {
-                query
-                    .repository
-                    .as_ref()
-                    .is_none_or(|r| *r == job.repository)
-            })
-            .filter(|job| query.state.is_none_or(|state| state == job.state))
-            .filter(|job| {
-                query
-                    .conclusion
-                    .as_ref()
-                    .is_none_or(|c| job.conclusion.as_ref() == Some(c))
-            })
-            .filter(|job| {
-                query
-                    .workflow
-                    .as_ref()
-                    .is_none_or(|workflow| job.workflow.as_ref() == Some(workflow))
-            })
-            .filter(|job| query.name.as_ref().is_none_or(|name| job.name == *name))
-            .filter(|job| query.before.is_none_or(|before| job.id < before))
-            .filter(|job| {
-                query
-                    .since
-                    .is_none_or(|since| job.timeline.queued_at >= since)
-            })
-            .filter(|job| {
-                query
-                    .until
-                    .is_none_or(|until| job.timeline.queued_at < until)
-            })
+    fn page(&self, query: &JobQuery) -> Result<JobList, String> {
+        let jobs: Vec<JobSummary> = self.jobs.iter().map(|job| job.summary.clone()).collect();
+        query.page(&jobs)
+    }
+
+    /// What `GET /v1/timeline` answers: the history over the window, runnerd not watching for the half hour the
+    /// lens's fixtures say.
+    fn timeline(&self, query: &TimelineQuery) -> Result<SlotTimeline, String> {
+        let window = query.window(self.now)?;
+        let jobs: Vec<JobSummary> = self.jobs.iter().map(|job| job.summary.clone()).collect();
+        let observed = runnerd_fixtures::lens_observed(window.from, self.now)
+            .into_iter()
+            .filter(|span| span.to > span.from)
             .collect();
-        let next = (jobs.len() > limit).then(|| jobs[limit - 1].id);
-        jobs.truncate(limit);
-        JobPage { jobs, next }
+        Ok(SlotTimeline::of(
+            &jobs,
+            window,
+            observed,
+            self.now - 30 * 86_400,
+        ))
+    }
+
+    /// What `GET /v1/jobs/{id}/compare` answers.
+    fn compare(&self, id: u64, query: &CompareQuery) -> Option<JobComparison> {
+        JobComparison::in_history(id, query.with, &self.jobs, |job| {
+            StepUsage::of(
+                self.samples.get(&job.summary.id).map_or(&[], Vec::as_slice),
+                &job.steps,
+            )
+        })
     }
 }
 
@@ -1513,8 +1519,37 @@ fn router(fake: Fake) -> Router {
         .route(
             "/v1/jobs",
             get(|State(fake): State<Fake>, Query(query): Query<JobQuery>| async move {
-                Json(fake.fixtures.lock().unwrap().page(&query))
+                match fake.fixtures.lock().unwrap().page(&query) {
+                    Ok(list) => Json(list).into_response(),
+                    Err(message) => (StatusCode::BAD_REQUEST, Json(ErrorResponse { message })).into_response(),
+                }
             }),
+        )
+        .route(
+            "/v1/timeline",
+            get(|State(fake): State<Fake>, Query(query): Query<TimelineQuery>| async move {
+                match fake.fixtures.lock().unwrap().timeline(&query) {
+                    Ok(timeline) => Json(timeline).into_response(),
+                    Err(message) => (StatusCode::BAD_REQUEST, Json(ErrorResponse { message })).into_response(),
+                }
+            }),
+        )
+        .route(
+            "/v1/jobs/{id}/compare",
+            get(
+                |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<CompareQuery>| async move {
+                    let compared = fake.fixtures.lock().unwrap().compare(id, &query);
+                    compared.map_or_else(
+                        || {
+                            not_found(&match query.with {
+                                Some(with) => format!("no job {id} or no job {with} in the history"),
+                                None => format!("no job {id} in the history"),
+                            })
+                        },
+                        |compared| Json(compared).into_response(),
+                    )
+                },
+            ),
         )
         .route(
             "/v1/jobs/{id}",

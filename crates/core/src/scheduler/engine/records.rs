@@ -614,6 +614,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.store.record_made(record.clone());
                     }
                 }
+                // Only an inventory Docker answered says a noted record is gone.
+                self.store.records_listed(
+                    records.iter().map(|record| record.job).collect(),
+                    time::now_ms(),
+                );
                 self.records.set_listed(records);
             }
             Err(error) => warn!("cannot list the records: {error}"),

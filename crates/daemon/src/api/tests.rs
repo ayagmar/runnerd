@@ -30,6 +30,7 @@ use super::{ConfigSource, MemoryMax, SyncDir, bind, doctor_cache, serve, serve_f
 
 mod attention;
 
+mod lens;
 mod log;
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
@@ -1442,6 +1443,8 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/jobs/1/log/lines"),
         client.get("http://runnerd/v1/jobs/1/log/outline"),
         client.get("http://runnerd/v1/jobs/1/log/search?q=x"),
+        client.get("http://runnerd/v1/jobs/1/compare"),
+        client.get("http://runnerd/v1/timeline"),
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
         client.get("http://runnerd/v1/activity"),

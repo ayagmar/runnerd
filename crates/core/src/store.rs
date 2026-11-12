@@ -24,6 +24,7 @@ use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
 
+mod lens;
 mod outline;
 mod prune;
 mod read;
@@ -77,6 +78,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE INDEX log_groups_open ON log_groups (job, start) WHERE end_line IS NULL;\n\
          CREATE TABLE log_marks (job INTEGER NOT NULL, line INTEGER NOT NULL, kind TEXT NOT NULL, \
          PRIMARY KEY (job, line)) WITHOUT ROWID;",
+    ),
+    (
+        23,
+        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, sampled_at INTEGER);\n\
+         ALTER TABLE records ADD COLUMN gone_at INTEGER;",
     ),
 ];
 
@@ -367,6 +373,10 @@ enum Write {
         at: u64,
         by: api::RecordRemoval,
     },
+    RecordsListed {
+        jobs: Vec<u64>,
+        at: u64,
+    },
     Paused {
         repositories: Vec<String>,
         /// Whether it committed.
@@ -496,6 +506,8 @@ impl Store {
         configure(&db)?;
         prepare(&mut db)?;
         let downtime = Downtime::before(&mut db, now)?;
+        db.execute("INSERT INTO sessions (started_at) VALUES (?1)", [now])?;
+        let session = db.last_insert_rowid();
         let reader = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -510,7 +522,18 @@ impl Store {
         let thread_held = held.clone();
         std::thread::Builder::new()
             .name("runnerd-store".to_owned())
-            .spawn(move || write::run(db, downtime, receiver, &thread_events, &thread_held))?;
+            .spawn(move || {
+                write::run(
+                    write::Started {
+                        db,
+                        downtime,
+                        session,
+                    },
+                    receiver,
+                    &thread_events,
+                    &thread_held,
+                );
+            })?;
         Ok(Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
@@ -790,6 +813,13 @@ impl Store {
         self.send(Write::RecordRemoved { job, at, by });
     }
 
+    /// Records that Docker listed the records of `jobs`, and no others, at `at` (ms): a record the history notes as
+    /// kept whose job is not among them was removed outside runnerd, and is noted gone and announced as
+    /// `record.gone`. Only an inventory Docker answered is sent; one it did not changes nothing.
+    pub fn records_listed(&self, jobs: Vec<u64>, at: u64) {
+        self.send(Write::RecordsListed { jobs, at });
+    }
+
     /// Records the paused repositories, all of them, in place of the ones recorded before. The write is sent at
     /// once, in order with every other; the future says whether it committed.
     pub fn paused(&self, repositories: Vec<String>) -> impl Future<Output = bool> + use<> {
@@ -928,9 +958,25 @@ impl Store {
         Ok(tokio::task::spawn_blocking(move || query(&lock(&reader))).await??)
     }
 
-    /// One page of jobs, newest first.
-    pub async fn jobs(&self, query: api::JobQuery) -> Result<api::JobPage, StoreError> {
+    /// One page of jobs as `query` asks, which [`api::JobQuery::check`] passed (ADR 0135).
+    pub async fn jobs(&self, query: api::JobQuery) -> Result<api::JobList, StoreError> {
         self.read(move |db| read::jobs(db, &query)).await
+    }
+
+    /// What each slot ran over `window` (ADR 0135), with the host samples not yet stored counted as watched time.
+    pub async fn timeline(&self, window: api::Span) -> Result<api::SlotTimeline, StoreError> {
+        let held: Vec<u64> = lock(&self.held).iter().map(|sample| sample.at).collect();
+        self.read(move |db| lens::timeline(db, window, &held, api::SAMPLE_INTERVAL))
+            .await
+    }
+
+    /// Job `id` beside the job `with` names, or its baseline (ADR 0135); `None` without either job.
+    pub async fn compare(
+        &self,
+        id: u64,
+        with: Option<u64>,
+    ) -> Result<Option<api::JobComparison>, StoreError> {
+        self.read(move |db| lens::compare(db, id, with)).await
     }
 
     /// A job with its steps.

@@ -1,8 +1,8 @@
 //! What every client says of caches, the build cache and records.
 
 use crate::api::{
-    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Record, RecordLimits, RecordNote,
-    RecordRemoval, RecordState, Records, Tone, records_near_full,
+    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Record, RecordLimits, RecordMark,
+    RecordNote, RecordRemoval, RecordState, Records, Tone, records_near_full,
 };
 
 const G: u64 = 1 << 30;
@@ -146,6 +146,27 @@ fn a_skipped_record_is_never_kept_and_a_removed_one_never_offers_a_shell() {
         kept.state(),
         RecordState::Kept { bytes: None },
         "kept though its size is unknown"
+    );
+    let gone = RecordNote {
+        gone_at: Some(5),
+        ..kept.clone()
+    };
+    assert_eq!(gone.state(), RecordState::Gone { noticed_at: 5 });
+    assert_eq!(
+        (gone.state().line(), RecordMark::of(&gone)),
+        (
+            "removed outside runnerd, when and why unknown".to_owned(),
+            RecordMark::Removed
+        )
+    );
+    let removed_then = RecordNote {
+        gone_at: Some(10),
+        ..removed.clone()
+    };
+    assert_eq!(
+        removed_then.state().line(),
+        "removed past max_age",
+        "runnerd's own removal says more than a later look at Docker"
     );
 }
 

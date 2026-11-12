@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 mod outline;
 mod search;
 
+pub(crate) use outline::TITLE_SOURCE_MAX;
+pub(crate) use outline::title;
 pub use outline::{
     FailureSummary, LineRange, LogEvidence, LogGroup, LogMark, LogOutline, MarkKind, OutlineChange,
     OutlineParts, Outliner, SavedOutline, StepLines, StepLog, StoredLog,

@@ -95,6 +95,10 @@ pub struct RecordNote {
     pub removed_at: Option<u64>,
     /// Why it was removed.
     pub removed_by: Option<RecordRemoval>,
+    /// When runnerd found its image gone from Docker, removed outside runnerd before then, at a time and for a
+    /// reason it does not know (ADR 0135).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gone_at: Option<u64>,
 }
 
 /// `DELETE /v1/records` query parameters: exactly one of them.

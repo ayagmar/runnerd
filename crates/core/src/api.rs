@@ -81,6 +81,10 @@ pub use insights::{
     InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest,
     NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitSpread, WeekWaits,
 };
+#[cfg(feature = "host")]
+pub(crate) use jobs::SAMPLE_GAP_INTERVALS;
+#[cfg(feature = "host")]
+pub(crate) use jobs::TITLE_SOURCE_MAX;
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
@@ -89,6 +93,15 @@ pub use jobs::{
     LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
     Swap, Timeline, Total, host_margin, job_title,
+};
+pub use jobs::{
+    BarEnd, Baseline, BaselineRead, COMPARE_STEP_BYTES, COMPARE_STEPS_MAX, ChangeKind,
+    CompareQuery, ComparedSteps, FigureDelta, FigureKind, Gap, GapKind, JOB_LABELS_MAX,
+    JOB_SEARCH_MAX, JOB_TEXT_MAX, JOBS_PAGE_BYTES, JOBS_PAGE_DEFAULT, JOBS_PAGE_MAX, JobComparison,
+    JobList, JobSort, Lane, RecordFilter, RecordMark, RunnerSpan, SlotKey, SlotTimeline,
+    SlottedBar, SlottedRunner, SortOrder, Span, StepDelta, StepMatch, StepUsage, TIMELINE_BARS_MAX,
+    TIMELINE_DEFAULT, TIMELINE_WINDOW_MAX, TimelineBar, TimelineQuery, TimelineRows, Unavailable,
+    row_bytes,
 };
 pub use jobs::{
     Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,

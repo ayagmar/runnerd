@@ -2732,7 +2732,14 @@ async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_records_
     let (failed, others) = {
         let fixtures = dashboard.fake.fixtures.lock().unwrap();
         let jobs: Vec<u64> = fixtures.records.records.iter().map(|r| r.job).collect();
-        (jobs[0], jobs.len() - 1)
+        // The oldest record whose job the history still has: a job page needs one.
+        let listed = |job: &&u64| {
+            fixtures
+                .jobs
+                .iter()
+                .any(|listed| listed.summary.id == **job)
+        };
+        (*jobs.iter().find(listed).unwrap(), jobs.len() - 1)
     };
     let job = dashboard
         .page(&cookie, &format!("/jobs/{failed}"))

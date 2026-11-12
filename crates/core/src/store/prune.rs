@@ -47,6 +47,15 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
             before(history.samples),
         ),
     );
+    // A session goes with its samples; the latest, this daemon's, stays.
+    logged(
+        "prune sessions",
+        db.execute(
+            "DELETE FROM sessions WHERE coalesce(sampled_at, started_at) < ?1 \
+             AND id < (SELECT max(id) FROM sessions)",
+            [before(history.samples)],
+        ),
+    );
     logged("prune logs", logs(db, before(history.logs)));
     logged(
         "prune events",

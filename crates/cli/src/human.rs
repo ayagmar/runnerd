@@ -406,7 +406,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
 fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
     let state = note.state();
     match state {
-        RecordState::Skipped { .. } => format!("record {}", paint.paint(Tone::Dim, &state.line())),
+        RecordState::Skipped { .. } | RecordState::Gone { .. } => {
+            format!("record {}", paint.paint(Tone::Dim, &state.line()))
+        }
         RecordState::Removed { at, .. } => format!(
             "record {}",
             paint.paint(Tone::Dim, &format!("{}, {}", state.line(), ago(at, now)))
@@ -1014,6 +1016,8 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             bytes(record.bytes)
         ),
         Event::RecordDeleted { job, removed_by } => format!("{job} record {removed_by}"),
+        Event::RecordGone { job } => format!("{job} record {}", RecordState::gone_words()),
+        Event::RecordSkipped { job } => format!("{job} record not kept"),
         Event::SizingChanged { change } => format!("{} {}", change.profile, change.line()),
         Event::RunnerFailed { failure } => format!(
             "{} {}: {}; no runner for {}s",

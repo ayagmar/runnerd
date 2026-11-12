@@ -281,6 +281,11 @@ pub enum RecordState<'note> {
         /// Why, when known.
         by: Option<RecordRemoval>,
     },
+    /// Its image went from Docker without runnerd removing it: when and why are not known.
+    Gone {
+        /// When runnerd found it gone.
+        noticed_at: u64,
+    },
     /// It is kept: a shell can open in it.
     Kept {
         /// Its size when made, when known.
@@ -289,15 +294,17 @@ pub enum RecordState<'note> {
 }
 
 impl RecordNote {
-    /// What became of the record: not made, made and removed, or kept, in that order of precedence.
+    /// What became of the record: not made, made and removed, gone outside runnerd, or kept, in that order of
+    /// precedence.
     pub fn state(&self) -> RecordState<'_> {
-        match (&self.skipped, self.removed_at) {
-            (Some(why), _) => RecordState::Skipped { why },
-            (None, Some(at)) => RecordState::Removed {
+        match (&self.skipped, self.removed_at, self.gone_at) {
+            (Some(why), _, _) => RecordState::Skipped { why },
+            (None, Some(at), _) => RecordState::Removed {
                 at,
                 by: self.removed_by,
             },
-            (None, None) => RecordState::Kept { bytes: self.bytes },
+            (None, None, Some(noticed_at)) => RecordState::Gone { noticed_at },
+            (None, None, None) => RecordState::Kept { bytes: self.bytes },
         }
     }
 
@@ -308,6 +315,11 @@ impl RecordNote {
 }
 
 impl RecordState<'_> {
+    /// What a record found gone from Docker says, on its job's page and for `record.gone`.
+    pub fn gone_words() -> &'static str {
+        "removed outside runnerd, when and why unknown"
+    }
+
     /// Its words, before when it was removed for a removed one: `not kept: too little free disk`, `removed past
     /// max_age`, or `record kept, 2G`.
     pub fn line(&self) -> String {
@@ -316,6 +328,7 @@ impl RecordState<'_> {
             RecordState::Removed { by, .. } => {
                 by.map_or_else(|| "removed".to_owned(), |by| by.to_string())
             }
+            RecordState::Gone { .. } => RecordState::gone_words().to_owned(),
             RecordState::Kept { bytes: Some(bytes) } => {
                 format!("record kept, {}", ByteSize(*bytes))
             }

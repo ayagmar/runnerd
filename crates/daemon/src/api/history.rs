@@ -13,10 +13,10 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use runnerd_core::api::{
-    ActivityQuery, BuildCacheStats, CacheHistory, CacheHistoryQuery, CacheKind, Caches, Event,
-    HostSampleQuery, HostSamples, INSIGHT_DAYS, INSIGHT_DAYS_MAX, InsightsQuery, JobQuery,
-    LogLinesQuery, LogQuery, LogSearchQuery, Savings, Search, Sizing, SizingQuery, StatsQuery,
-    StyledLine, reads_since,
+    ActivityQuery, BuildCacheStats, CacheHistory, CacheHistoryQuery, CacheKind, Caches,
+    CompareQuery, Event, HostSampleQuery, HostSamples, INSIGHT_DAYS, INSIGHT_DAYS_MAX,
+    InsightsQuery, JobQuery, LogLinesQuery, LogQuery, LogSearchQuery, Savings, Search, Sizing,
+    SizingQuery, StatsQuery, StyledLine, TimelineQuery, reads_since,
 };
 use runnerd_core::config::Config;
 use runnerd_core::insights::{self, History};
@@ -53,11 +53,16 @@ fn no_job(id: u64) -> Response {
     )
 }
 
+/// `GET /v1/jobs`: a page of jobs, searched, filtered and sorted as the query asks (ADR 0135); 400 with core's
+/// words for a query `JobQuery::check` refuses.
 pub(super) async fn jobs(
     _: Authenticated,
     State(state): State<AppState>,
     Query(query): Query<JobQuery>,
 ) -> Response {
+    if let Err(refused) = query.check() {
+        return error(StatusCode::BAD_REQUEST, &refused);
+    }
     match state.handle.store.jobs(query).await {
         Ok(page) => Json(page).into_response(),
         Err(store_error) => failed(&store_error),
@@ -603,6 +608,43 @@ pub(super) async fn log_outline(
     match state.handle.store.log_outline(id).await {
         Ok(Some(outline)) => Json(outline).into_response(),
         Ok(None) => no_job(id),
+        Err(store_error) => failed(&store_error),
+    }
+}
+
+/// `GET /v1/timeline`: what each slot ran over a window (ADR 0135); 400 for a window `TimelineQuery::window`
+/// refuses.
+pub(super) async fn timeline(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<TimelineQuery>,
+) -> Response {
+    let window = match query.window(now()) {
+        Ok(window) => window,
+        Err(refused) => return error(StatusCode::BAD_REQUEST, &refused),
+    };
+    match state.handle.store.timeline(window).await {
+        Ok(timeline) => Json(timeline).into_response(),
+        Err(store_error) => failed(&store_error),
+    }
+}
+
+/// `GET /v1/jobs/{id}/compare`: a job beside its baseline (ADR 0135); 404 without the job or the one `with` names.
+pub(super) async fn compare(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Query(query): Query<CompareQuery>,
+) -> Response {
+    match state.handle.store.compare(id, query.with).await {
+        Ok(Some(comparison)) => Json(comparison).into_response(),
+        Ok(None) => match query.with {
+            Some(with) => error(
+                StatusCode::NOT_FOUND,
+                &format!("no job {id} or no job {with} in the history"),
+            ),
+            None => no_job(id),
+        },
         Err(store_error) => failed(&store_error),
     }
 }
