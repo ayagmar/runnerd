@@ -51,7 +51,7 @@ flowchart TB
   structure: it styles each stored line, builds the outline a line at a time (`Outliner`), tells each step's lines by
   their times and the steps' and words a failure from what is stored, and searches a page at a time
   ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)). `api::jobs::query`,
-  `api::jobs::timeline` and `api::jobs::compare` define the job list's search, sorts and cursor, the slots' timeline and
+  `api::jobs::timeline` and `api::jobs::compare` define the job list's search, sorts and pages, the slots' timeline and
   a job beside its baseline as pure functions over a history in memory, which the store answers in SQL and the demo
   calls ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)). `api::savings` prices this machine's job minutes
   at GitHub's per-minute rates and words the figure ([ADR 0072](docs/adr/0072-job-minutes-priced-at-github-hosted-rates.md));
@@ -428,11 +428,14 @@ always returns, so the daemon closes and flushes the history.
   It is read in one read transaction. The plain log and `log.line` carry the stored text; `/log/outline`, `/log/lines`
   and `/log/search` carry no escape sequence, and every read of their lines is bounded in bytes, each line to its
   first 64 KiB ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)).
-- A job list, a timeline and a comparison are each read in one read transaction and bounded at the read: rows and
-  bytes for a page, a 7-day window and 2,000 bars and runner spans for a timeline. Core's pure versions of them
-  (`JobQuery::page`, `SlotTimeline::of`, `JobComparison::in_history`) are the meaning; tests hold the store's SQL to
-  them over generated histories. A timeline calls time `unknown` where no host sample shows runnerd watching, never
-  idle ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)).
+- A job list, a timeline and a comparison are each read in one read transaction and bounded at the read: rows,
+  bytes and each text column for a page, a 7-day window and 2,000 bars and runner spans for a timeline, 500 steps
+  and 128 KiB of their names for each side of a comparison. Core's pure versions of them (`JobQuery::page`,
+  `SlotTimeline::of`, `JobComparison::in_history`) are the meaning; tests hold the store's SQL to them over
+  generated histories. A timeline calls time `unknown` outside a daemon session (`sessions`, one row per open) where
+  no host sample shows runnerd watching, never idle. A record noted kept whose image Docker's listing lacks is
+  noted gone by the store's writer, in order after every earlier write
+  ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)).
 - Host samples reach subscribers when taken and the database a minute's worth at a time; reads include the ones not
   yet stored.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as

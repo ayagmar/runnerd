@@ -406,7 +406,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
 fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
     let state = note.state();
     match state {
-        RecordState::Skipped { .. } => format!("record {}", paint.paint(Tone::Dim, &state.line())),
+        RecordState::Skipped { .. } | RecordState::Gone { .. } => {
+            format!("record {}", paint.paint(Tone::Dim, &state.line()))
+        }
         RecordState::Removed { at, .. } => format!(
             "record {}",
             paint.paint(Tone::Dim, &format!("{}, {}", state.line(), ago(at, now)))

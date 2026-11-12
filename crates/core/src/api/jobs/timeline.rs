@@ -174,14 +174,18 @@ impl TimelineBar {
     }
 
     /// Whether it belongs on a timeline of `window`: queued before its end, and ended after its start, or still
-    /// going on. One whose end is unknown is shown only when it began in the window, since the history cannot say
-    /// whether it lasted until the window. The store reads the same.
-    pub fn overlaps(&self, window: Span) -> bool {
+    /// going on. A job whose end is unknown may have run until its runner, which ended as `runner` says, was
+    /// removed: it is shown while that runner may have been up in the window. Without a runner here, only when it
+    /// began in the window. The store reads the same.
+    pub fn overlaps(&self, window: Span, runner: Option<BarEnd>) -> bool {
         self.queued_at < window.to
-            && match self.end {
-                BarEnd::At { at } => at > window.from,
-                BarEnd::Open => true,
-                BarEnd::Unknown | BarEnd::Other => self.begins() >= window.from,
+            && match (self.end, runner) {
+                (BarEnd::At { at }, _) => at > window.from,
+                (BarEnd::Open, _) => true,
+                (BarEnd::Unknown | BarEnd::Other, Some(runner)) => {
+                    runner.at().is_none_or(|at| at > window.from)
+                }
+                (BarEnd::Unknown | BarEnd::Other, None) => self.begins() >= window.from,
             }
     }
 }
@@ -370,20 +374,23 @@ impl SlotTimeline {
         };
         for job in jobs {
             let bar = TimelineBar::of(job);
-            if !bar.overlaps(window) {
+            // Its runner's removal ends its container's span.
+            let runner_end = job.runner.as_ref().map(|_| {
+                match (job.timeline.cleaned_at, job.state.is_final()) {
+                    (Some(at), _) => BarEnd::At { at },
+                    (None, false) => BarEnd::Open,
+                    (None, true) => BarEnd::Unknown,
+                }
+            });
+            if !bar.overlaps(window, runner_end) {
                 continue;
             }
             let slot = job.runner.as_ref().map(|runner| SlotKey {
                 profile: runner.profile.clone(),
                 slot: runner.slot,
             });
-            if let (Some(runner), Some(slot)) = (&job.runner, &slot) {
+            if let (Some(runner), Some(slot), Some(end)) = (&job.runner, &slot, runner_end) {
                 let started_at = job.timeline.container_started_at.unwrap_or(bar.queued_at);
-                let end = match (job.timeline.cleaned_at, job.state.is_final()) {
-                    (Some(at), _) => BarEnd::At { at },
-                    (None, false) => BarEnd::Open,
-                    (None, true) => BarEnd::Unknown,
-                };
                 let up = started_at < window.to && end.at().is_none_or(|at| at > window.from);
                 if up {
                     rows.runners.push(SlottedRunner {
@@ -403,27 +410,39 @@ impl SlotTimeline {
 }
 
 impl Lane {
-    /// Its stretches without a job in `timeline`'s window, each worded by core: `no job` where runnerd was watching,
-    /// `unknown` where it was not, or where a bar's start or end is unknown. A bar's wait before its start is not a
-    /// job in the slot.
+    /// Its stretches without a job in `timeline`'s window, each worded by core: `no job` only where runnerd was
+    /// watching and the history is whole; `unknown` where it was not watching, where a bar's start or end is
+    /// unknown (until its runner was removed), and everywhere once the timeline left bars out (`cut_before`), since
+    /// one left out may have run in any lane. A bar's wait before its start is not a job in the slot.
     pub fn gaps(&self, timeline: &SlotTimeline) -> Vec<Gap> {
         let window = Span {
             from: timeline.since,
             to: timeline.until,
         };
-        // What the bars hold of the slot, and what the history cannot say about it.
-        let mut busy = Vec::new();
+        if timeline.cut_before.is_some() {
+            return subtract(window, &self.busy(window))
+                .into_iter()
+                .map(|span| Gap {
+                    span,
+                    kind: GapKind::Unknown,
+                })
+                .collect();
+        }
+        // What the history cannot say about the slot: a bar without a start, or whose end is unknown until its
+        // runner was removed.
+        let removed = |bar: &TimelineBar| {
+            self.runners
+                .iter()
+                .find(|runner| Some(&runner.name) == bar.runner.as_ref())
+                .and_then(|runner| runner.end.at())
+        };
         let mut unsure = Vec::new();
         for bar in &self.bars {
             match (bar.started_at, bar.end) {
-                (Some(from), BarEnd::At { at }) => busy.push(Span { from, to: at }),
-                (Some(from), BarEnd::Open) => busy.push(Span {
-                    from,
-                    to: window.to,
-                }),
+                (Some(_), BarEnd::At { .. } | BarEnd::Open) => {}
                 (Some(from), BarEnd::Unknown | BarEnd::Other) => unsure.push(Span {
                     from,
-                    to: window.to,
+                    to: removed(bar).unwrap_or(window.to),
                 }),
                 (None, end) => unsure.push(Span {
                     from: bar.queued_at,
@@ -432,7 +451,7 @@ impl Lane {
             }
         }
         let mut gaps = Vec::new();
-        for free in subtract(window, &busy) {
+        for free in subtract(window, &self.busy(window)) {
             let mut known = Vec::new();
             let watched = timeline
                 .observed
@@ -454,6 +473,21 @@ impl Lane {
         }
         gaps.sort_by_key(|gap| gap.span.from);
         gaps
+    }
+
+    /// What its bars hold of the slot for sure: each run with both ends, and those still going on.
+    fn busy(&self, window: Span) -> Vec<Span> {
+        self.bars
+            .iter()
+            .filter_map(|bar| match (bar.started_at, bar.end) {
+                (Some(from), BarEnd::At { at }) => Some(Span { from, to: at }),
+                (Some(from), BarEnd::Open) => Some(Span {
+                    from,
+                    to: window.to,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 }
 

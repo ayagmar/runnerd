@@ -13,9 +13,12 @@ mod log;
 mod query;
 mod timeline;
 
+#[cfg(feature = "host")]
+pub(crate) use compare::SAMPLE_GAP_INTERVALS;
 pub use compare::{
-    Baseline, BaselineRead, ChangeKind, CompareQuery, FigureDelta, FigureKind, JobComparison,
-    StepDelta, StepMatch, StepUsage, Unavailable,
+    Baseline, BaselineRead, COMPARE_STEP_BYTES, COMPARE_STEPS_MAX, ChangeKind, CompareQuery,
+    ComparedSteps, FigureDelta, FigureKind, JobComparison, StepDelta, StepMatch, StepUsage,
+    Unavailable,
 };
 pub use facts::{
     JobTitle, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, RunComparison, SampleUsage,
@@ -30,8 +33,8 @@ pub use log::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use query::{
-    JOB_SEARCH_MAX, JOBS_PAGE_BYTES, JOBS_PAGE_DEFAULT, JOBS_PAGE_MAX, JobCursor, JobSort,
-    RecordFilter, RecordMark, SortOrder, row_bytes,
+    JOB_LABELS_MAX, JOB_SEARCH_MAX, JOB_TEXT_MAX, JOBS_PAGE_BYTES, JOBS_PAGE_DEFAULT,
+    JOBS_PAGE_MAX, JobSort, RecordFilter, RecordMark, SortOrder, row_bytes,
 };
 pub use timeline::{
     BarEnd, Gap, GapKind, Lane, RunnerSpan, SlotKey, SlotTimeline, SlottedBar, SlottedRunner, Span,
@@ -535,7 +538,7 @@ pub struct JobQuery {
     pub since: Option<u64>,
     /// Only jobs queued before this time.
     pub until: Option<u64>,
-    /// Only jobs with a smaller ID: the `next` of the previous page. Not with `sort`.
+    /// Only jobs with a smaller ID: the `next` of the previous page. Only in the default order, newest first.
     pub before: Option<u64>,
     /// At most this many jobs; default 50, at most 500. A page also ends once it holds
     /// [`JOBS_PAGE_BYTES`] of text.
@@ -550,14 +553,14 @@ pub struct JobQuery {
     /// Only jobs whose record this says became of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<RecordFilter>,
-    /// Sort by this instead of by ID; a job whose key is unknown comes last either way, ties by ID.
+    /// Sort by this; a job whose figure is unknown comes last either way, ties by ID. `queued`, newest first, is
+    /// the default order, which pages with `before`; any other order is one page, the first `limit` jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<JobSort>,
-    /// With `sort`: which way; default largest or latest first.
+    /// Which way; default largest or latest first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<SortOrder>,
-    /// With `sort`: the `cursor` of the previous page, which pages only the sort, direction and filters it was
-    /// made for.
+    /// Refused: a sorted list is one page, which a search or the filters narrow. Read only to say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
@@ -567,21 +570,26 @@ pub struct JobQuery {
 pub struct JobPage {
     /// Newest first, or in the query's sort.
     pub jobs: Vec<JobSummary>,
-    /// Without `sort`: pass as `before` for the next page; `None` on the last page.
+    /// In the default order: pass as `before` for the next page; `None` on the last page, and in any other order.
     pub next: Option<u64>,
 }
 
-/// `GET /v1/jobs`: one page of jobs, and how to read the next (ADR 0135). A [`JobPage`] with two fields more, so a
-/// client that reads a `JobPage` reads it too, and one that reads a `JobList` from an older daemon finds them
-/// absent.
+/// `GET /v1/jobs`: one page of jobs (ADR 0135). A [`JobPage`] with fields more, so a client that reads a `JobPage`
+/// reads it too, and one that reads a `JobList` from an older daemon finds them absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobList {
-    /// The jobs and, without `sort`, `next`.
+    /// The jobs and, in the default order, `next`.
     #[serde(flatten)]
     pub page: JobPage,
-    /// With `sort`: pass as `cursor` for the next page; `None` on the last page.
+    /// In any order but the default: how many jobs the filters admit, of which the page shows the first
+    /// ([`JobList::shown_words`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
+    pub total: Option<u64>,
+    /// The jobs whose name, workflow, branch, repository, URL or labels were longer than a list shows
+    /// ([`JOB_TEXT_MAX`] bytes each, [`JOB_LABELS_MAX`] bytes of labels) and are cut here; their own page has them
+    /// whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shortened: Vec<u64>,
     /// The query as the daemon read it, its limit and direction filled in; `None` from a daemon that predates
     /// search and sorting, which ignored them ([`JobList::understood`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]

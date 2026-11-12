@@ -49,7 +49,15 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[];
+const ACCEPTED: &[Accepted] = &[
+    // Only `record.deleted` carries it, for a record found gone from Docker; the previous release's client drops
+    // that event, as it drops every event it cannot read. The job's note says it in `gone_at`, which it ignores.
+    Accepted {
+        reader: Reader::Previous,
+        item: "record-removal/outside",
+        adr: "0135",
+    },
+];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -291,7 +299,7 @@ documents! {
     "tone": Tone => variants(samples::tone()),
     "doctor-state": DoctorState => variants(samples::doctor_state()),
     "listing-problem": ListingProblem => variants(samples::listing_problem()),
-    "job-list": JobList => full(samples::job_list(), Some(json(api::JobQuery::default().answer(Vec::new(), false)))),
+    "job-list": JobList => full(samples::job_list(), Some(json(api::JobQuery::default().answer(Vec::new(), false, 0, Vec::new())))),
     "record-mark": RecordMark => variants(samples::record_mark()),
     "record-filter": RecordFilter => variants(samples::record_filter()),
     "job-sort": JobSort => variants(samples::job_sort()),

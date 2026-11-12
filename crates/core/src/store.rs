@@ -79,6 +79,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE TABLE log_marks (job INTEGER NOT NULL, line INTEGER NOT NULL, kind TEXT NOT NULL, \
          PRIMARY KEY (job, line)) WITHOUT ROWID;",
     ),
+    (
+        23,
+        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, sampled_at INTEGER);\n\
+         ALTER TABLE records ADD COLUMN gone_at INTEGER;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -368,6 +373,10 @@ enum Write {
         at: u64,
         by: api::RecordRemoval,
     },
+    RecordsListed {
+        jobs: Vec<u64>,
+        at: u64,
+    },
     Paused {
         repositories: Vec<String>,
         /// Whether it committed.
@@ -497,6 +506,8 @@ impl Store {
         configure(&db)?;
         prepare(&mut db)?;
         let downtime = Downtime::before(&mut db, now)?;
+        db.execute("INSERT INTO sessions (started_at) VALUES (?1)", [now])?;
+        let session = db.last_insert_rowid();
         let reader = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -511,7 +522,18 @@ impl Store {
         let thread_held = held.clone();
         std::thread::Builder::new()
             .name("runnerd-store".to_owned())
-            .spawn(move || write::run(db, downtime, receiver, &thread_events, &thread_held))?;
+            .spawn(move || {
+                write::run(
+                    write::Started {
+                        db,
+                        downtime,
+                        session,
+                    },
+                    receiver,
+                    &thread_events,
+                    &thread_held,
+                );
+            })?;
         Ok(Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
@@ -789,6 +811,13 @@ impl Store {
     /// Records that a job's record was removed at `at` (ms), and why, and announces it.
     pub fn record_removed(&self, job: u64, at: u64, by: api::RecordRemoval) {
         self.send(Write::RecordRemoved { job, at, by });
+    }
+
+    /// Records that Docker listed the records of `jobs`, and no others, at `at` (ms): a record the history notes as
+    /// kept whose job is not among them was removed outside runnerd, and is noted gone and announced as
+    /// `record.deleted`. Only an inventory Docker answered is sent; one it did not changes nothing.
+    pub fn records_listed(&self, jobs: Vec<u64>, at: u64) {
+        self.send(Write::RecordsListed { jobs, at });
     }
 
     /// Records the paused repositories, all of them, in place of the ones recorded before. The write is sent at

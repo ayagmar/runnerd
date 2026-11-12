@@ -1601,3 +1601,101 @@ async fn recording_a_failed_job_between_polls_lists_github_no_sooner() {
     handle.shutdown(Shutdown::Force);
     run.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_kept_record_docker_no_longer_lists_is_noted_gone_once_docker_answers() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60), record_image(11, 60)];
+    let dir = TestDir::new("records-gone");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    for id in [10, 11] {
+        handle.store.queued(
+            "o/r",
+            &QueuedJob {
+                id,
+                run_id: id,
+                name: "build".to_owned(),
+                ..QueuedJob::default()
+            },
+            crate::time::now_ms(),
+        );
+    }
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    assert!(
+        note(&handle, 10).await.unwrap().gone_at.is_none(),
+        "job 10's record is noted kept"
+    );
+    drop((engine, handle));
+
+    // Removed with `docker rmi` while no daemon ran; the next one's first listing fails.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.images = vec![record_image(11, 60)];
+        state.fail_images = 1;
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    let unlisted = note(&handle, 10).await.unwrap();
+    assert_eq!(
+        unlisted.state(),
+        api::RecordState::Kept {
+            bytes: Some(1 << 30)
+        },
+        "an inventory Docker did not give changes nothing"
+    );
+
+    engine.tick(Shutdown::No).await;
+    let gone = note(&handle, 10).await.unwrap();
+    assert!(
+        matches!(gone.state(), api::RecordState::Gone { .. }),
+        "{gone:?}"
+    );
+    assert_eq!(
+        gone.state().line(),
+        "removed outside runnerd, when and why unknown"
+    );
+    assert!(
+        matches!(
+            note(&handle, 11).await.unwrap().state(),
+            api::RecordState::Kept { .. }
+        ),
+        "job 11's image is still there"
+    );
+    let marks: Vec<(u64, Option<api::RecordMark>)> = handle
+        .store
+        .jobs(api::JobQuery::default())
+        .await
+        .unwrap()
+        .page
+        .jobs
+        .into_iter()
+        .map(|job| (job.id, job.record_mark))
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            (11, Some(api::RecordMark::Kept)),
+            (10, Some(api::RecordMark::Removed))
+        ]
+    );
+    let announced = || async {
+        handle
+            .store
+            .events_after(0, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| match event.event {
+                api::Event::RecordDeleted { job, removed_by } => Some((job, removed_by)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(announced().await, [(10, api::RecordRemoval::Outside)]);
+
+    // A later listing finds it gone again, and says nothing new.
+    engine.recover().await.unwrap();
+    handle.store.flush().await;
+    assert_eq!(announced().await, [(10, api::RecordRemoval::Outside)]);
+}

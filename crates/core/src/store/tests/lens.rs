@@ -17,6 +17,9 @@ use crate::testdir::TestDir;
 /// The schema at version 21, as runnerd 0.0.23 to 0.1.0 created it.
 const SCHEMA_21: &str = include_str!("schema-21.sql");
 
+/// The schema at version 22, before observation sessions.
+const SCHEMA_22: &str = include_str!("schema-22.sql");
+
 /// 2026-10-23T01:00:00Z, in seconds.
 const T0: u64 = 1_792_717_200;
 
@@ -86,6 +89,12 @@ fn insert(db: &Connection, row: &Row) {
     }
 }
 
+/// A name longer than a list shows, of characters of 1 to 4 bytes.
+fn long_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| "a\u{e9}\u{20ac}\u{1d11e}".repeat(api::JOB_TEXT_MAX))
+}
+
 /// `count` jobs with many equal and unknown keys, odd names and every record note, times with milliseconds.
 fn generated(seed: u64, count: u64) -> Vec<Row> {
     let mut rng = Rng(seed);
@@ -115,7 +124,14 @@ fn generated(seed: u64, count: u64) -> Vec<Row> {
                 id,
                 repository: rng.pick(&["o/a", "o/b"]),
                 workflow: *rng.pick(&[Some("CI"), None, Some("Re%lease")]),
-                name: rng.pick(&["build", "b_uild", "baulk", "engel"]),
+                name: rng.pick(&[
+                    "build",
+                    "b_uild",
+                    "baulk",
+                    "engel",
+                    "be\0fore NEEDLE",
+                    long_name(),
+                ]),
                 branch: *rng.pick(&[Some("main"), None, Some("feat/A")]),
                 state,
                 conclusion: (state == "completed").then(|| *rng.pick(&["success", "failure"])),
@@ -139,59 +155,70 @@ fn generated(seed: u64, count: u64) -> Vec<Row> {
 /// A note for each kind of record, on some of the jobs.
 fn notes(db: &Connection, count: u64) {
     for id in (1..=count).step_by(3) {
-        let sql = match id % 4 {
+        let sql = match id % 5 {
             0 => "INSERT INTO records (job, created_at, bytes) VALUES (?1, 1000, 10)",
             1 => {
                 "INSERT INTO records (job, created_at, bytes, removed_at, removed_by) VALUES (?1, 1, 1, 2, 'age')"
             }
             2 => "INSERT INTO records (job, skipped) VALUES (?1, 'too little free disk')",
-            _ => "INSERT INTO records (job, removed_at, removed_by) VALUES (?1, 2, 'user')",
+            3 => {
+                "INSERT INTO records (job, removed_at, removed_by, gone_at) VALUES (?1, 2, 'user', 3)"
+            }
+            // Found gone from Docker: removed outside runnerd.
+            _ => {
+                "INSERT INTO records (job, created_at, bytes, gone_at) VALUES (?1, 1000, 10, 3000)"
+            }
         };
         db.execute(sql, [id]).unwrap();
     }
 }
 
-/// Every page of `query`, following each cursor or `next`, reopening the store after every other page.
-async fn store_pages(path: &Path, query: &JobQuery) -> Vec<Vec<u64>> {
+/// Every page of `query`, following each `next`, reopening the store after every other page.
+async fn store_pages(path: &Path, query: &JobQuery) -> Vec<JobList> {
     let mut store = Store::open(path).unwrap();
     let mut query = query.clone();
     let mut pages = Vec::new();
     loop {
         let list = store.jobs(query.clone()).await.unwrap();
-        pages.push(list.page.jobs.iter().map(|job| job.id).collect());
+        let next = list.page.next;
+        pages.push(list);
         if pages.len() % 2 == 0 {
             drop(store);
             store = Store::open(path).unwrap();
         }
-        match (list.cursor, list.page.next) {
-            (Some(cursor), _) => query.cursor = Some(cursor),
-            (None, Some(next)) => query.before = Some(next),
-            (None, None) => return pages,
+        match next {
+            Some(next) => query.before = Some(next),
+            None => return pages,
         }
     }
 }
 
 /// The same pages as `api` defines them over the jobs the store reads.
-fn core_pages(query: &JobQuery, jobs: &[JobSummary]) -> Vec<Vec<u64>> {
+fn core_pages(query: &JobQuery, jobs: &[JobSummary]) -> Vec<JobList> {
     let mut query = query.clone();
     let mut pages = Vec::new();
     loop {
         let list: JobList = query.page(jobs).unwrap();
-        pages.push(list.page.jobs.iter().map(|job| job.id).collect());
-        match (list.cursor, list.page.next) {
-            (Some(cursor), _) => query.cursor = Some(cursor),
-            (None, Some(next)) => query.before = Some(next),
-            (None, None) => return pages,
+        let next = list.page.next;
+        pages.push(list);
+        match next {
+            Some(next) => query.before = Some(next),
+            None => return pages,
         }
     }
 }
 
+/// Every job of the history, as its own page reads it: its text whole.
 async fn every_job(store: &Store) -> Vec<JobSummary> {
     let query = JobQuery {
         limit: Some(api::JOBS_PAGE_MAX),
         ..JobQuery::default()
     };
-    store.jobs(query).await.unwrap().page.jobs
+    let mut jobs = Vec::new();
+    for listed in store.jobs(query).await.unwrap().page.jobs {
+        jobs.push(store.job(listed.id).await.unwrap().unwrap().summary);
+    }
+    jobs
 }
 
 #[tokio::test]
@@ -234,6 +261,10 @@ async fn the_historys_pages_are_the_ones_core_defines_for_every_search_sort_and_
                 ..JobQuery::default()
             },
             JobQuery {
+                q: Some("needle".to_owned()),
+                ..JobQuery::default()
+            },
+            JobQuery {
                 q: Some("feat/a".to_owned()),
                 repository: Some("o/a".to_owned()),
                 ..JobQuery::default()
@@ -272,7 +303,12 @@ async fn the_historys_pages_are_the_ones_core_defines_for_every_search_sort_and_
                             ..filter.clone()
                         };
                         let expected = core_pages(&query, &jobs);
-                        assert_eq!(store_pages(&path, &query).await, expected, "{query:?}");
+                        let mut read = store_pages(&path, &query).await;
+                        // A restart counts the time no runnerd ran into an open job's wait.
+                        for job in read.iter_mut().flat_map(|page| &mut page.page.jobs) {
+                            job.timeline.unseen = 0;
+                        }
+                        assert_eq!(read, expected, "{query:?}");
                     }
                 }
             }
@@ -324,6 +360,15 @@ async fn a_page_is_read_in_one_snapshot_while_jobs_are_pruned() {
     assert!(reads > 0, "the jobs were read while they were pruned");
 }
 
+/// A daemon's session from `from` to its last stored host sample at `to`, in seconds.
+fn session(db: &Connection, from: u64, to: u64) {
+    db.execute(
+        "INSERT INTO sessions (started_at, sampled_at) VALUES (?1, ?2)",
+        [from * 1000, to * 1000],
+    )
+    .unwrap();
+}
+
 /// A host sample every 2 s from `from` to `to`, in seconds.
 fn watched(db: &Connection, from: u64, to: u64) {
     for at in (from..=to).step_by(2) {
@@ -347,8 +392,10 @@ async fn a_timeline_is_the_one_core_lays_out_from_the_jobs_overlapping_its_windo
     }
     keep_since(&path, 0);
     watched(&db, T0, T0 + 12);
+    session(&db, T0, T0 + 12);
     // A restart: no sample from T0 + 12 to T0 + 20.
     watched(&db, T0 + 20, T0 + 40);
+    session(&db, T0 + 20, T0 + 40);
     drop(db);
     let store = Store::open(&path).unwrap();
     let jobs = every_job(&store).await;
@@ -478,7 +525,10 @@ fn slots_history(store: &Store, path: &Path) {
     )
     .unwrap();
     watched(&db, T0 + 100, T0 + 140);
+    session(&db, T0 + 95, T0 + 140);
     watched(&db, T0 + 160, T0 + 180);
+    // The latest session, as this daemon's is: it goes on past its last stored sample.
+    session(&db, T0 + 158, T0 + 180);
     drop(db);
     keep_since(path, (T0 + 110) * 1000);
     // Samples not stored yet are watched time too.
@@ -567,6 +617,177 @@ async fn a_timeline_keeps_old_slots_real_ends_restarts_and_unknown_time_apart() 
 }
 
 #[tokio::test]
+async fn a_restart_between_two_samples_is_unwatched_and_so_is_time_before_the_first_session() {
+    let dir = TestDir::new("lens-sessions");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    keep_since(&path, 0);
+    let db = Connection::open(&path).unwrap();
+    // Samples from before any session the history recorded.
+    watched(&db, T0 - 20, T0 - 2);
+    // A daemon stopped at T0 + 11 and the next started at T0 + 13: its samples are 2 s apart.
+    watched(&db, T0, T0 + 10);
+    session(&db, T0, T0 + 10);
+    watched(&db, T0 + 12, T0 + 20);
+    session(&db, T0 + 11, T0 + 20);
+    drop(db);
+    let timeline = store
+        .timeline(Span {
+            from: T0 - 20,
+            to: T0 + 20,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        timeline.observed,
+        [
+            Span {
+                from: T0,
+                to: T0 + 10
+            },
+            Span {
+                from: T0 + 12,
+                to: T0 + 20
+            }
+        ],
+        "a restart shorter than three intervals is still a gap"
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_notes_its_session_and_each_host_sample_it_stores_in_it() {
+    let dir = TestDir::new("lens-session-write");
+    let path = dir.0.join("runnerd.db");
+    let sessions = || -> Vec<(u64, Option<u64>)> {
+        Connection::open(&path)
+            .unwrap()
+            .prepare("SELECT started_at, sampled_at FROM sessions ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let store = Store::open(&path).unwrap();
+    let at = crate::time::now_ms() / 1000;
+    for second in [at, at + 2, at + 4] {
+        store.host_sample(api::HostSample {
+            at: second,
+            cpu: 0,
+            memory: 0,
+        });
+    }
+    store.flush().await;
+    let first = sessions();
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].1,
+        Some((at + 4) * 1000),
+        "its latest stored sample"
+    );
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    reopened.flush().await;
+    let both = sessions();
+    assert_eq!(
+        (both.len(), both[1].1),
+        (2, None),
+        "a new session, no sample yet"
+    );
+}
+
+#[tokio::test]
+async fn a_v22_history_reads_its_old_samples_as_unwatched_once_opened() {
+    let dir = TestDir::new("lens-22");
+    let path = dir.0.join("runnerd.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(SCHEMA_22).unwrap();
+    insert(&db, &slot_job(1, "jvm", 1, T0 + 10, Some(T0 + 20)));
+    watched(&db, T0, T0 + 40);
+    db.pragma_update(None, "user_version", 22).unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(user_version(&path), VERSION);
+    keep_since(&path, 0);
+    let timeline = store
+        .timeline(Span {
+            from: T0,
+            to: T0 + 40,
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeline.lanes[0].bars[0].job, 1);
+    assert_eq!(
+        timeline.observed,
+        [],
+        "no session vouches for samples a runnerd before sessions stored"
+    );
+}
+
+/// A lane's gaps, in seconds from `T0`.
+fn lane_gaps(timeline: &SlotTimeline, profile: &str, slot: usize) -> Vec<(u64, u64, GapKind)> {
+    timeline
+        .lanes
+        .iter()
+        .find(|lane| (lane.profile.as_str(), lane.slot) == (profile, slot))
+        .unwrap()
+        .gaps(timeline)
+        .into_iter()
+        .map(|gap| (gap.span.from - T0, gap.span.to - T0, gap.kind))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_lane_with_a_bar_left_out_or_an_unknown_end_is_never_free() {
+    let window = Span {
+        from: T0,
+        to: T0 + 100,
+    };
+    // A job running in jvm 1 since before the window, which the cap leaves out for the jobs queued after it.
+    let dir = TestDir::new("lens-whole-cap");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    keep_since(&path, 0);
+    let db = Connection::open(&path).unwrap();
+    insert(&db, &slot_job(1, "jvm", 1, T0 - 100, None));
+    for id in 2..=api::TIMELINE_BARS_MAX as u64 + 1 {
+        let mut waiting = slot_job(id, "jvm", 1, T0 + 1 + id % 90, None);
+        (waiting.state, waiting.started_at, waiting.runner) = ("queued", None, None);
+        insert(&db, &waiting);
+    }
+    watched(&db, T0, T0 + 100);
+    session(&db, T0, T0 + 100);
+    drop(db);
+    let timeline = store.timeline(window).await.unwrap();
+    assert!(timeline.cut_before.is_some(), "the cap left a bar out");
+    assert_eq!(
+        lane_gaps(&timeline, "jvm", 1),
+        [(0, 100, GapKind::Unknown)],
+        "its runner's lane, without its bar, is not free"
+    );
+
+    // Lost before the window with no end; its runner was removed at T0 + 50.
+    let dir = TestDir::new("lens-whole-lost");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    keep_since(&path, 0);
+    let db = Connection::open(&path).unwrap();
+    let mut lost = slot_job(1, "jvm", 1, T0 - 100, None);
+    lost.state = "lost";
+    lost.runner = Some(("jvm", 1, (T0 - 101) * 1000, Some((T0 + 50) * 1000)));
+    insert(&db, &lost);
+    watched(&db, T0, T0 + 100);
+    session(&db, T0, T0 + 100);
+    drop(db);
+    let timeline = store.timeline(window).await.unwrap();
+    assert_eq!(
+        lane_gaps(&timeline, "jvm", 1),
+        [(0, 50, GapKind::Unknown), (50, 100, GapKind::NoJob)],
+        "it may have run until its runner went"
+    );
+}
+
+#[tokio::test]
 async fn a_timeline_past_its_cap_keeps_the_latest_and_says_from_when() {
     let dir = TestDir::new("lens-cap");
     let path = dir.0.join("runnerd.db");
@@ -648,6 +869,62 @@ fn compare_history(path: &Path) {
             .unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn compare_reads_steps_bounded_and_cut_as_core_does() {
+    let dir = TestDir::new("lens-compare-bounded");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    compare_history(&path);
+    let db = Connection::open(&path).unwrap();
+    // Jobs 5 and 2 each gain 600 more steps, names of 2,000 bytes, one with a NUL in its first 800.
+    for id in [5u64, 2] {
+        for number in 5..605u32 {
+            let lead = if number == 7 { "be\0fore" } else { "step" };
+            let name = format!("{lead} {number:04} {}", "é".repeat(995));
+            db.execute(
+                "INSERT INTO steps (job, number, name, status, conclusion, started_at, completed_at) \
+                 VALUES (?1, ?2, ?3, 'completed', 'success', NULL, NULL)",
+                params![id, number, name],
+            )
+            .unwrap();
+        }
+    }
+    let compared = store.compare(5, None).await.unwrap().unwrap();
+    let history = [
+        store.job(5).await.unwrap().unwrap(),
+        store.job(2).await.unwrap().unwrap(),
+    ];
+    assert_eq!(history[0].steps.len(), 604, "the job keeps every step");
+    let mut usages = Vec::new();
+    for job in &history {
+        let series = store
+            .job_samples(job.summary.id, std::time::Duration::from_secs(2))
+            .await
+            .unwrap()
+            .unwrap();
+        usages.push(api::StepUsage::of(&series.samples, &job.steps));
+    }
+    let in_memory = JobComparison::in_history(5, None, &history, |job| {
+        usages[usize::from(job.summary.id == 2)].clone()
+    });
+    assert_eq!(
+        in_memory.as_ref(),
+        Some(&compared),
+        "the store cuts the steps as core does"
+    );
+    assert!(compared.steps_cut, "a comparison says it left steps out");
+    assert!(
+        compared.steps.len() < 200,
+        "the names' bytes bound the steps read: {}",
+        compared.steps.len()
+    );
+    assert!(
+        compared.steps[6].name.starts_with("before 0007 "),
+        "a NUL inside the bytes read is kept, then made plain: {:?}",
+        compared.steps[6].name.get(..16)
+    );
 }
 
 #[tokio::test]

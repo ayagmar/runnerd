@@ -830,6 +830,7 @@ pub(crate) fn job() -> Job {
             skipped: Some("the job succeeded".to_owned()),
             removed_at: Some(1_761_500_000),
             removed_by: Some(RecordRemoval::User),
+            gone_at: Some(1_761_600_000),
         }),
         admission: Some(admission()),
     }
@@ -1023,13 +1024,15 @@ pub(crate) fn record_removal() -> Vec<RecordRemoval> {
         RecordRemoval::Size,
         RecordRemoval::Age,
         RecordRemoval::User,
+        RecordRemoval::Outside,
     ];
     for removal in &every {
         match removal {
             RecordRemoval::Count
             | RecordRemoval::Size
             | RecordRemoval::Age
-            | RecordRemoval::User => {}
+            | RecordRemoval::User
+            | RecordRemoval::Outside => {}
         }
     }
     every
@@ -1653,7 +1656,7 @@ pub(crate) fn job_query() -> JobQuery {
         record: Some(RecordFilter::Kept),
         sort: Some(JobSort::Wait),
         order: Some(SortOrder::Asc),
-        cursor: Some("j1.wait.asc.00000000deadbeef.30.41".to_owned()),
+        cursor: Some("j1.wait.asc.30.41".to_owned()),
     }
 }
 
@@ -1938,7 +1941,8 @@ pub(crate) fn job_list() -> JobList {
             jobs: vec![job_summary()],
             next: None,
         },
-        cursor: Some("j1.wait.asc.00000000deadbeef.30.41".to_owned()),
+        total: Some(120),
+        shortened: vec![42],
         applied: Some(job_query()),
     }
 }
@@ -2053,6 +2057,7 @@ pub(crate) fn job_comparison() -> JobComparison {
             memory: Some(delta(FigureKind::StepMemory, true)),
             cpu: Some(delta(FigureKind::StepCpu, true)),
         }],
+        steps_cut: true,
     }
 }
 

@@ -91,6 +91,7 @@ fn made(now: u64, ago: u64) -> RecordNote {
         skipped: None,
         removed_at: None,
         removed_by: None,
+        gone_at: None,
     }
 }
 

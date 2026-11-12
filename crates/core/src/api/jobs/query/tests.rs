@@ -37,23 +37,22 @@ fn ids(list: &JobList) -> Vec<u64> {
     list.page.jobs.iter().map(|job| job.id).collect()
 }
 
-/// Every page of `query` over `jobs`, following each page's cursor or `next`.
+/// Every page of `query` over `jobs` in the default order, following each page's `next`.
 fn pages(query: &JobQuery, jobs: &[JobSummary]) -> Vec<Vec<u64>> {
     let mut query = query.clone();
     let mut pages = Vec::new();
     loop {
         let list = query.page(jobs).unwrap();
         pages.push(ids(&list));
-        match (list.cursor, list.page.next) {
-            (Some(cursor), _) => query.cursor = Some(cursor),
-            (None, Some(next)) => query.before = Some(next),
-            (None, None) => return pages,
+        match list.page.next {
+            Some(next) => query.before = Some(next),
+            None => return pages,
         }
     }
 }
 
 #[test]
-fn a_sort_puts_unknown_keys_last_either_way_and_breaks_ties_by_id_across_pages() {
+fn a_sort_puts_unknown_keys_last_either_way_and_breaks_ties_by_id() {
     // Waits: 1 and 2 waited 10s, 3 waited 5s, 4 and 5 never started.
     let jobs = vec![
         ran(1, 100, Some(110), Some(200)),
@@ -65,30 +64,18 @@ fn a_sort_puts_unknown_keys_last_either_way_and_breaks_ties_by_id_across_pages()
     let wait = |order| JobQuery {
         sort: Some(JobSort::Wait),
         order,
-        limit: Some(1),
         ..JobQuery::default()
     };
     assert_eq!(
-        pages(&wait(None), &jobs).concat(),
+        ids(&wait(None).page(&jobs).unwrap()),
         [2, 1, 3, 5, 4],
         "desc: largest first, ties by the larger ID, unknown last"
     );
     assert_eq!(
-        pages(&wait(Some(SortOrder::Asc)), &jobs).concat(),
+        ids(&wait(Some(SortOrder::Asc)).page(&jobs).unwrap()),
         [3, 1, 2, 4, 5],
         "asc: smallest first, ties by the smaller ID, unknown still last"
     );
-    for limit in 1..=6 {
-        let query = JobQuery {
-            limit: Some(limit),
-            ..wait(None)
-        };
-        assert_eq!(
-            pages(&query, &jobs).concat(),
-            [2, 1, 3, 5, 4],
-            "pages of {limit}"
-        );
-    }
 }
 
 #[test]
@@ -111,127 +98,107 @@ fn run_time_and_memory_are_unknown_until_a_jobs_record_is_final() {
 }
 
 #[test]
-fn a_key_that_becomes_known_never_shows_a_job_twice_in_one_pass() {
-    let mut jobs: Vec<JobSummary> = (1..=6)
-        .map(|id| ran(id, 100, Some(100 + id), None))
+fn a_sorted_list_is_one_page_that_says_how_many_the_filters_admit() {
+    // Job N queued at 100 + N and waited N seconds.
+    let jobs: Vec<JobSummary> = (1..=6)
+        .map(|id| ran(id, 100 + id, Some(100 + 2 * id), Some(300)))
         .collect();
-    for job in &mut jobs {
-        job.state = JobState::Running;
-    }
-    jobs[0].state = JobState::Completed;
-    jobs[0].timeline.finished_at = Some(500);
-    let query = JobQuery {
-        sort: Some(JobSort::Run),
+    let longest = JobQuery {
+        sort: Some(JobSort::Wait),
         limit: Some(2),
         ..JobQuery::default()
     };
-    let first = query.page(&jobs).unwrap();
-    // Between pages, every running job ends: their keys go from unknown to known.
-    for job in &mut jobs {
-        job.state = JobState::Completed;
-        job.timeline.finished_at.get_or_insert(1000);
-    }
-    let mut seen = ids(&first);
-    let mut query = query.clone();
-    query.cursor = first.cursor;
-    while query.cursor.is_some() {
-        let list = query.page(&jobs).unwrap();
-        seen.extend(ids(&list));
-        query.cursor = list.cursor;
-    }
-    let mut unique = seen.clone();
-    unique.sort_unstable();
-    unique.dedup();
-    assert_eq!(unique.len(), seen.len(), "no job twice: {seen:?}");
-}
-
-#[test]
-fn a_cursor_pages_only_the_sort_order_and_filters_it_was_made_for() {
-    let jobs: Vec<JobSummary> = (1..=4).map(|id| job(id, 100 + id)).collect();
-    let query = JobQuery {
+    let list = longest.page(&jobs).unwrap();
+    assert_eq!(ids(&list), [6, 5]);
+    assert_eq!(
+        (list.page.next, list.total),
+        (None, Some(6)),
+        "no continuation"
+    );
+    assert_eq!(
+        list.shown_words().as_deref(),
+        Some("2 of 6 jobs, longest wait first")
+    );
+    let narrowed = JobQuery {
+        until: Some(103),
+        ..longest.clone()
+    };
+    assert_eq!(
+        narrowed.page(&jobs).unwrap().shown_words(),
+        None,
+        "the filters narrow it to what one page holds"
+    );
+    let oldest = JobQuery {
         sort: Some(JobSort::Queued),
-        limit: Some(1),
+        order: Some(SortOrder::Asc),
+        limit: Some(4),
         ..JobQuery::default()
     };
-    let cursor = query.page(&jobs).unwrap().cursor;
-    assert!(cursor.is_some(), "a first page of one has a next");
-    let changed = [
-        JobQuery {
-            q: Some("build".to_owned()),
-            ..query.clone()
-        },
-        JobQuery {
-            branch: Some("main".to_owned()),
-            ..query.clone()
-        },
-        JobQuery {
-            order: Some(SortOrder::Asc),
-            ..query.clone()
-        },
-        JobQuery {
-            sort: Some(JobSort::Wait),
-            ..query.clone()
-        },
-    ];
-    for changed in changed {
-        let changed = JobQuery {
-            cursor: cursor.clone(),
-            ..changed
-        };
-        assert_eq!(
-            changed.check().unwrap_err(),
-            "the cursor is of another sort or search; start from the first page"
-        );
-    }
-    let same = JobQuery {
-        cursor: cursor.clone(),
-        limit: Some(3),
-        ..query.clone()
-    };
-    assert!(same.check().is_ok(), "a page size is not a filter");
-    for refused in [
-        JobQuery {
-            cursor: Some("j1.wait.desc.0.-.4".to_owned()),
+    let list = oldest.page(&jobs).unwrap();
+    assert_eq!((ids(&list), list.page.next), (vec![1, 2, 3, 4], None));
+    assert_eq!(
+        list.shown_words().as_deref(),
+        Some("4 of 6 jobs, oldest first")
+    );
+
+    // Newest first is the default order, sorted or not, and pages by ID.
+    for sort in [None, Some(JobSort::Queued)] {
+        let query = JobQuery {
+            sort,
+            limit: Some(4),
             ..JobQuery::default()
-        },
-        JobQuery {
-            before: Some(3),
-            ..query.clone()
-        },
-        JobQuery {
-            cursor: Some("j2.queued.desc.0.1.4".to_owned()),
-            ..query.clone()
-        },
-        JobQuery {
-            cursor: Some("j1.queued.desc.zz.1.4".to_owned()),
-            ..query.clone()
-        },
-    ] {
-        assert!(refused.check().is_err(), "{refused:?}");
+        };
+        assert_eq!(pages(&query, &jobs), [vec![6, 5, 4, 3], vec![2, 1]]);
+        let list = query.page(&jobs).unwrap();
+        assert_eq!((list.total, list.shown_words()), (None, None));
     }
 }
 
 #[test]
-fn a_cursor_reads_back_what_it_wrote() {
-    for key in [None, Some(0), Some(u64::MAX)] {
-        let cursor = JobCursor {
-            sort: JobSort::Memory,
-            order: SortOrder::Asc,
-            filter: 0xdead_beef,
-            key,
-            id: 42,
-        };
-        assert_eq!(JobCursor::parse(&cursor.encode()), Some(cursor));
-    }
-    for text in [
-        "",
-        "j1",
-        "j1.memory.asc.1.2.3.4",
-        "j1.disk.asc.1.2.3",
-        "j1.memory.up.1.2.3",
-    ] {
-        assert_eq!(JobCursor::parse(text), None, "{text}");
-    }
+fn a_cursor_and_before_outside_the_default_order_are_refused_in_cores_words() {
+    let wait = JobQuery {
+        sort: Some(JobSort::Wait),
+        ..JobQuery::default()
+    };
+    assert_eq!(
+        JobQuery {
+            cursor: Some("j1.wait.desc.6ac9806bd2bf4ce5.0.0".to_owned()),
+            ..wait.clone()
+        }
+        .check()
+        .unwrap_err(),
+        "a sorted list is one page, its first jobs; narrow it with a search or the filters"
+    );
+    assert!(
+        JobQuery {
+            before: Some(3),
+            ..wait.clone()
+        }
+        .check()
+        .unwrap_err()
+        .starts_with("before pages the list newest first"),
+        "before with a sort"
+    );
+    assert!(
+        JobQuery {
+            before: Some(3),
+            order: Some(SortOrder::Asc),
+            ..JobQuery::default()
+        }
+        .check()
+        .is_err(),
+        "before oldest first"
+    );
+    assert_eq!(
+        JobQuery {
+            before: Some(3),
+            sort: Some(JobSort::Queued),
+            ..JobQuery::default()
+        }
+        .check(),
+        Ok(()),
+        "before newest first"
+    );
 }
 
 #[test]
@@ -271,6 +238,7 @@ fn a_record_filter_and_mark_follow_the_records_note() {
         skipped: skipped.then(|| "too little free disk".to_owned()),
         removed_at: removed.then_some(2),
         removed_by: None,
+        gone_at: None,
     };
     assert_eq!(RecordMark::of(&note(false, false)), RecordMark::Kept);
     assert_eq!(RecordMark::of(&note(false, true)), RecordMark::Removed);
@@ -307,6 +275,7 @@ fn a_jobs_record_note_and_its_summarys_mark_both_survive_its_json() {
         skipped: None,
         removed_at: None,
         removed_by: None,
+        gone_at: None,
     };
     let mut summary = job(1, 10);
     summary.record_mark = Some(RecordMark::of(&note));
@@ -336,18 +305,50 @@ fn a_newer_daemons_record_mark_reads_as_unknown_and_an_older_daemons_list_as_not
 }
 
 #[test]
-fn a_page_ends_at_its_byte_budget_and_says_there_is_more() {
+fn a_jobs_long_text_is_cut_as_a_list_shows_it_and_a_page_ends_before_its_byte_budget() {
     let mut big = job(1, 1);
-    big.name = "x".repeat(usize::try_from(JOBS_PAGE_BYTES).unwrap());
-    let jobs = vec![big, job(2, 2), job(3, 3)];
+    big.name = "x".repeat(usize::try_from(JOBS_PAGE_BYTES).unwrap() * 8);
+    big.labels = vec!["l".repeat(JOB_LABELS_MAX)];
+    let jobs = vec![big, job(2, 2)];
     let list = JobQuery::default().page(&jobs).unwrap();
     assert_eq!(
         ids(&list),
-        [3, 2, 1],
-        "the job that reaches the budget is the last"
+        [2, 1],
+        "a job past the budget alone is shown, cut"
     );
-    let mut first_big = jobs.clone();
-    first_big[2].name = "y".repeat(usize::try_from(JOBS_PAGE_BYTES).unwrap());
-    let list = JobQuery::default().page(&first_big).unwrap();
-    assert_eq!((ids(&list), list.page.next), (vec![3], Some(3)));
+    let shown = &list.page.jobs[1];
+    assert_eq!(shown.name.len(), JOB_TEXT_MAX);
+    assert!(
+        shown.labels.is_empty(),
+        "labels past their bound are left out"
+    );
+    assert_eq!(list.shortened, [1]);
+
+    // Each job's text cut to a quarter of a megabyte's worth across 4-byte characters: a page ends before the job
+    // that would pass the budget, and the next starts at it.
+    let wide: Vec<JobSummary> = (1..=500)
+        .map(|id| {
+            let mut wide = job(id, id);
+            wide.name = "\u{1d11e}".repeat(JOB_TEXT_MAX * 2);
+            wide.workflow = Some(wide.name.clone());
+            wide.branch = Some(wide.name.clone());
+            wide
+        })
+        .collect();
+    let query = JobQuery {
+        limit: Some(JOBS_PAGE_MAX),
+        ..JobQuery::default()
+    };
+    let first = query.page(&wide).unwrap();
+    let bytes: u64 = first.page.jobs.iter().map(row_bytes).sum();
+    assert!(bytes <= JOBS_PAGE_BYTES, "{bytes} bytes");
+    let row = row_bytes(&first.page.jobs[0]);
+    assert!(
+        bytes + row > JOBS_PAGE_BYTES,
+        "one more would have passed it"
+    );
+    let count = u64::try_from(first.page.jobs.len()).unwrap();
+    assert_eq!(first.page.next, Some(501 - count));
+    let all = pages(&query, &wide).concat();
+    assert_eq!(all, (1..=500).rev().collect::<Vec<_>>(), "every job once");
 }

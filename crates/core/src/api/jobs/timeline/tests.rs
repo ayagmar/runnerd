@@ -70,8 +70,13 @@ fn lane<'timeline>(
 fn bars_keep_their_real_ends_in_the_slot_their_runner_had_and_jobs_without_one_wait_apart() {
     let mut lost = ran(4, "jvm", 2, 1500, None);
     lost.state = JobState::Lost;
+    // Lost before the window, its end unknown: it may have run until its runner was removed, which it was not.
     let mut lost_before = ran(5, "jvm", 2, 500, None);
     lost_before.state = JobState::Lost;
+    // Lost before the window, its runner removed before it too.
+    let mut lost_gone = ran(10, "jvm", 2, 500, None);
+    lost_gone.state = JobState::Lost;
+    lost_gone.timeline.cleaned_at = Some(800);
     let mut elsewhere = job(7, 1200);
     elsewhere.state = JobState::Elsewhere;
     elsewhere.timeline.finished_at = Some(1300);
@@ -83,6 +88,7 @@ fn bars_keep_their_real_ends_in_the_slot_their_runner_had_and_jobs_without_one_w
         ran(3, "retired", 3, 1200, None),
         lost,
         lost_before,
+        lost_gone,
         // Before the window, and after it.
         ran(8, "jvm", 1, 100, Some(200)),
         job(9, 2100),
@@ -106,10 +112,10 @@ fn bars_keep_their_real_ends_in_the_slot_their_runner_had_and_jobs_without_one_w
     let second = lane(&timeline, "jvm", 2);
     assert_eq!(
         bars(second),
-        [4],
-        "an unknown end shows only from a start in the window"
+        [5, 4],
+        "an unknown end shows while its runner may have been up in the window"
     );
-    assert_eq!(second.bars[0].end_words(), Some("end unknown"));
+    assert_eq!(second.bars[1].end_words(), Some("end unknown"));
     assert_eq!(
         timeline
             .unassigned
@@ -162,6 +168,45 @@ fn a_lanes_empty_stretch_is_no_job_only_where_runnerd_was_watching() {
             .iter()
             .all(|gap| gap.kind == GapKind::Unknown),
         "without samples nothing reads as free"
+    );
+}
+
+/// The lane's gaps as `(from, to, words)`.
+fn gaps(timeline: &SlotTimeline, profile: &str, slot: usize) -> Vec<(u64, u64, &'static str)> {
+    lane(timeline, profile, slot)
+        .gaps(timeline)
+        .into_iter()
+        .map(|gap| (gap.span.from, gap.span.to, gap.kind.words()))
+        .collect()
+}
+
+#[test]
+fn a_lane_says_no_job_only_where_the_history_is_whole() {
+    // A job running in jvm 1 since before the window, left out by the cap for the jobs queued after it.
+    let mut jobs = vec![ran(1, "jvm", 1, 900, None)];
+    let count = u64::try_from(TIMELINE_BARS_MAX).unwrap();
+    jobs.extend((0..count).map(|id| job(id + 2, 1000 + id / 4)));
+    let timeline = SlotTimeline::of(&jobs, WINDOW, vec![WINDOW], 0);
+    assert!(timeline.cut_before.is_some(), "the cap left a bar out");
+    assert!(
+        lane(&timeline, "jvm", 1).bars.is_empty(),
+        "its runner's lane is there, its bar is not"
+    );
+    assert_eq!(
+        gaps(&timeline, "jvm", 1),
+        [(1000, 2000, "unknown")],
+        "a lane with bars left out is never free"
+    );
+
+    // Lost before the window with no end; its runner was removed at 1500.
+    let mut lost = ran(1, "jvm", 1, 500, None);
+    lost.state = JobState::Lost;
+    lost.timeline.cleaned_at = Some(1500);
+    let timeline = SlotTimeline::of(&[lost], WINDOW, vec![WINDOW], 0);
+    assert_eq!(
+        gaps(&timeline, "jvm", 1),
+        [(1000, 1500, "unknown"), (1500, 2000, "no job")],
+        "it may have run until its runner went"
     );
 }
 

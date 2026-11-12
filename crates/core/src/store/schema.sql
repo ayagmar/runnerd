@@ -1,4 +1,4 @@
--- The job history at schema version 22, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 23, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -230,14 +230,16 @@ CREATE TABLE announced_profiles (
 ) WITHOUT ROWID;
 
 -- What the history keeps about a failed job's record (`api::RecordNote`): when it was made and its size, or why
--- none was made; when it was removed and why. Pruned with its job.
+-- none was made; when it was removed and why, or when runnerd found its image gone from Docker (`gone_at`), removed
+-- outside runnerd. Pruned with its job.
 CREATE TABLE records (
     job INTEGER PRIMARY KEY NOT NULL,
     created_at INTEGER,
     bytes INTEGER,
     skipped TEXT,
     removed_at INTEGER,
-    removed_by TEXT
+    removed_by TEXT,
+    gone_at INTEGER
 );
 
 -- Each change auto sizing made or meant to make to a profile's `memory`, `slots` and `cpus` (`api::SizingChange`),
@@ -282,3 +284,12 @@ CREATE TABLE history_kept (
     jobs_since INTEGER NOT NULL
 );
 INSERT INTO history_kept (jobs_since) VALUES (CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+
+-- Each daemon's run, from its open to the latest host sample it stored: runnerd watched only inside one, so a
+-- timeline reads time outside every session, and before the first, as unknown (ADR 0135). Pruned with the samples;
+-- the latest stays.
+CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY,
+    started_at INTEGER NOT NULL,
+    sampled_at INTEGER
+);

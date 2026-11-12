@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::facts::{samples_between, usage_of};
-use super::log::title;
+use super::log::{TITLE_SOURCE_MAX, title};
 use super::{Job, JobState, JobSummary, Sample, Step};
 use crate::api::{SAMPLE_INTERVAL, Tone, cpu_time, duration, in_cores};
 use crate::config::ByteSize;
@@ -324,13 +324,21 @@ pub struct StepDelta {
     pub cpu: Option<FigureDelta>,
 }
 
+/// Samples further apart than this many sample intervals, or as far from a step's start or end, leave part of the
+/// step unsampled: its peak may be in it.
+pub(crate) const SAMPLE_GAP_INTERVALS: u64 = 3;
+
 /// What a step's samples say, as the store reads them over its window: the samples after its start up to its end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepUsage {
     /// The step's number.
     pub number: u32,
-    /// How many samples were taken in it.
-    pub samples: u64,
+    /// When its first sample was taken.
+    pub first: u64,
+    /// When its last was.
+    pub last: u64,
+    /// The longest time between two of its samples, in seconds; 0 for one sample.
+    pub widest_gap: u64,
     /// Their highest memory, in bytes.
     pub memory_peak: u64,
     /// Their CPU use averaged, in millicores.
@@ -347,9 +355,16 @@ impl StepUsage {
                 let (from, to) = (step.started_at?, step.completed_at?);
                 let inside = samples_between(samples, from, to);
                 let usage = usage_of(&inside)?;
+                let widest_gap = inside
+                    .windows(2)
+                    .map(|pair| pair[1].at.saturating_sub(pair[0].at))
+                    .max()
+                    .unwrap_or(0);
                 Some(StepUsage {
                     number: step.number,
-                    samples: u64::try_from(inside.len()).ok()?,
+                    first: inside.first()?.at,
+                    last: inside.last()?.at,
+                    widest_gap,
                     memory_peak: usage.memory_peak,
                     cpu_average: usage.cpu_average,
                 })
@@ -363,8 +378,10 @@ impl StepUsage {
 pub enum BaselineRead {
     /// A run of the same job, and its steps' samples.
     Found {
-        /// The job.
-        job: Box<Job>,
+        /// The job's summary.
+        job: Box<JobSummary>,
+        /// Its steps, as far as a comparison reads them.
+        steps: ComparedSteps,
         /// Its steps' samples.
         usage: Vec<StepUsage>,
         /// Whether the query named it.
@@ -387,6 +404,65 @@ pub struct JobComparison {
     pub figures: Vec<FigureDelta>,
     /// This job's steps in order, then the baseline's steps it does not have; none without a baseline.
     pub steps: Vec<StepDelta>,
+    /// Whether a job had more steps, or more of their names, than a comparison reads, so `steps` leaves its last
+    /// ones out ([`COMPARE_STEPS_MAX`], [`COMPARE_STEP_BYTES`]).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub steps_cut: bool,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// The most steps of each job a comparison reads, in order of their numbers.
+pub const COMPARE_STEPS_MAX: usize = 500;
+
+/// The most bytes of step names of each job a comparison reads, each name read from its first 800 bytes, the most a
+/// title is read from; a first step is read whatever its name's length.
+pub const COMPARE_STEP_BYTES: usize = 128 * 1024;
+
+/// A job's steps as far as a comparison reads them: the first [`COMPARE_STEPS_MAX`] in order, while their names,
+/// each cut to its first 800 bytes, add up to at most [`COMPARE_STEP_BYTES`]. Steps pair by these names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComparedSteps {
+    /// The steps read, in order.
+    pub steps: Vec<Step>,
+    /// Whether the job has steps past them.
+    pub cut: bool,
+}
+
+impl ComparedSteps {
+    /// `steps`, in order of their numbers, as the store reads them.
+    pub fn of(steps: &[Step]) -> ComparedSteps {
+        let mut ordered: Vec<&Step> = steps.iter().collect();
+        ordered.sort_by_key(|step| step.number);
+        let mut read = ComparedSteps::default();
+        for step in ordered {
+            let mut step = step.clone();
+            let cut = step.name.floor_char_boundary(TITLE_SOURCE_MAX);
+            step.name.truncate(cut);
+            if !read.push(step) {
+                read.cut = true;
+                break;
+            }
+        }
+        read
+    }
+
+    /// Adds `step`, its name already cut, unless the steps read are at a bound; whether it was added.
+    pub fn push(&mut self, step: Step) -> bool {
+        let bytes: usize = self.steps.iter().map(|step| step.name.len()).sum();
+        let full = self.steps.len() >= COMPARE_STEPS_MAX
+            || (!self.steps.is_empty() && bytes + step.name.len() > COMPARE_STEP_BYTES);
+        if !full {
+            self.steps.push(step);
+        }
+        !full
+    }
 }
 
 /// A step's time in seconds, where both ends are known.
@@ -394,12 +470,17 @@ fn step_time(step: &Step) -> Option<u64> {
     Some(step.completed_at?.saturating_sub(step.started_at?))
 }
 
-/// Whether `usage` covers its step: a sample at least every other interval of the step's time.
+/// Whether `usage` covers its step from start to end: its first sample near the step's start, its last near its
+/// end, and none further apart than the samples' normal tolerance. A step whose samples were partly pruned, or
+/// that ran while sampling stopped, is not covered: its peak may be in the part not sampled.
 fn covers(usage: &StepUsage, step: &Step) -> bool {
-    step_time(step).is_some_and(|time| {
-        let expected = time / SAMPLE_INTERVAL;
-        expected > 0 && usage.samples > 0 && usage.samples * 2 >= expected
-    })
+    let tolerance = SAMPLE_INTERVAL * SAMPLE_GAP_INTERVALS;
+    let (Some(from), Some(to)) = (step.started_at, step.completed_at) else {
+        return false;
+    };
+    usage.first.saturating_sub(from) <= tolerance
+        && to.saturating_sub(usage.last) <= tolerance
+        && usage.widest_gap <= tolerance
 }
 
 impl JobComparison {
@@ -447,7 +528,7 @@ impl JobComparison {
 
     /// Job `id` beside the job `with` names, or its baseline, in `history` held in memory, `usage` reading a job's
     /// steps' samples: as the store answers it, for the demo's fake daemon and the fixtures. `None` without either
-    /// job.
+    /// job. Steps and samples are read only once a baseline is found.
     pub fn in_history(
         id: u64,
         with: Option<u64>,
@@ -457,7 +538,8 @@ impl JobComparison {
         let find = |id: u64| history.iter().find(|job| job.summary.id == id);
         let this = find(id)?;
         let found = |other: &Job, asked: bool| BaselineRead::Found {
-            job: Box::new(other.clone()),
+            job: Box::new(other.summary.clone()),
+            steps: ComparedSteps::of(&other.steps),
             usage: usage(other),
             asked,
         };
@@ -479,13 +561,28 @@ impl JobComparison {
                 Err(reason) => BaselineRead::Unavailable(reason),
             }
         };
-        Some(JobComparison::of(this, &usage(this), baseline))
+        let (steps, usage) = match baseline {
+            BaselineRead::Found { .. } => (ComparedSteps::of(&this.steps), usage(this)),
+            _ => (ComparedSteps::default(), Vec::new()),
+        };
+        Some(JobComparison::of(&this.summary, &steps, &usage, baseline))
     }
 
-    /// `job`, whose steps' samples are `usage`, beside the baseline the store read.
-    pub fn of(job: &Job, usage: &[StepUsage], baseline: BaselineRead) -> JobComparison {
-        let (other, other_usage, asked) = match baseline {
-            BaselineRead::Found { job, usage, asked } => (job, usage, asked),
+    /// `job`, whose steps a comparison reads are `steps` and their samples `usage`, beside the baseline the store
+    /// read. Without a baseline, `steps` and `usage` are not looked at, so the store need not read them.
+    pub fn of(
+        job: &JobSummary,
+        steps: &ComparedSteps,
+        usage: &[StepUsage],
+        baseline: BaselineRead,
+    ) -> JobComparison {
+        let (other, other_steps, other_usage, asked) = match baseline {
+            BaselineRead::Found {
+                job,
+                steps,
+                usage,
+                asked,
+            } => (job, steps, usage, asked),
             BaselineRead::Unavailable(reason) => {
                 return JobComparison::alone(job, Baseline::Unavailable { reason });
             }
@@ -494,26 +591,35 @@ impl JobComparison {
             }
         };
         JobComparison {
-            job: job.summary.id,
+            job: job.id,
             baseline: Baseline::Chosen {
-                job: other.summary.id,
-                branch: other.summary.branch.clone(),
-                queued_at: other.summary.timeline.queued_at,
+                job: other.id,
+                branch: other.branch.clone(),
+                queued_at: other.timeline.queued_at,
                 asked,
             },
-            figures: figures(&job.summary, Some(&other.summary)),
-            steps: steps(job, usage, &other, &other_usage),
+            figures: figures(job, Some(&other)),
+            steps: deltas(&steps.steps, usage, &other_steps.steps, &other_usage),
+            steps_cut: steps.cut || other_steps.cut,
         }
     }
 
     /// `job` with no baseline: its own figures, each baseline side unknown, and no steps to pair.
-    fn alone(job: &Job, baseline: Baseline) -> JobComparison {
+    fn alone(job: &JobSummary, baseline: Baseline) -> JobComparison {
         JobComparison {
-            job: job.summary.id,
+            job: job.id,
             baseline,
-            figures: figures(&job.summary, None),
+            figures: figures(job, None),
             steps: Vec::new(),
+            steps_cut: false,
         }
+    }
+
+    /// What `steps` leaves out, worded; `None` when nothing.
+    pub fn steps_cut_words(&self) -> Option<&'static str> {
+        self.steps_cut.then_some(
+            "some steps are not compared: a run has more steps, or longer step names, than a comparison reads",
+        )
     }
 }
 
@@ -564,9 +670,14 @@ fn names(steps: &[Step]) -> BTreeMap<&str, usize> {
 }
 
 /// The steps side by side, paired by a name each job has once.
-fn steps(job: &Job, usage: &[StepUsage], other: &Job, other_usage: &[StepUsage]) -> Vec<StepDelta> {
-    let ours = names(&job.steps);
-    let theirs = names(&other.steps);
+fn deltas(
+    ours_steps: &[Step],
+    usage: &[StepUsage],
+    theirs_steps: &[Step],
+    other_usage: &[StepUsage],
+) -> Vec<StepDelta> {
+    let ours = names(ours_steps);
+    let theirs = names(theirs_steps);
     let unique = |name: &str| {
         ours.get(name).copied().unwrap_or(0) <= 1 && theirs.get(name).copied().unwrap_or(0) <= 1
     };
@@ -584,9 +695,9 @@ fn steps(job: &Job, usage: &[StepUsage], other: &Job, other_usage: &[StepUsage])
         sampled: true,
     };
     let mut deltas = Vec::new();
-    for step in &job.steps {
+    for step in ours_steps {
         let paired = unique(&step.name)
-            .then(|| other.steps.iter().find(|theirs| theirs.name == step.name))
+            .then(|| theirs_steps.iter().find(|theirs| theirs.name == step.name))
             .flatten();
         let matched = match (paired, unique(&step.name)) {
             (Some(_), _) => StepMatch::Matched,
@@ -614,7 +725,7 @@ fn steps(job: &Job, usage: &[StepUsage], other: &Job, other_usage: &[StepUsage])
             }),
         });
     }
-    for theirs in &other.steps {
+    for theirs in theirs_steps {
         let unpaired = !unique(&theirs.name) || !ours.contains_key(theirs.name.as_str());
         if !unpaired {
             continue;

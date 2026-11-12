@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 mod outline;
 mod search;
 
-#[cfg(feature = "host")]
 pub(crate) use outline::TITLE_SOURCE_MAX;
 pub(crate) use outline::title;
 pub use outline::{

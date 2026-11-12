@@ -1,5 +1,5 @@
-//! The job history's search, sorts, timeline and compare over the socket (ADR 0135): real query URLs, the cursor
-//! carried from one page to the next, and what the daemon refuses, worded by core.
+//! The job history's search, sorts, timeline and compare over the socket (ADR 0135): real query URLs, the default
+//! order's pages, a sorted list's one page, and what the daemon refuses, worded by core.
 
 use reqwest::StatusCode;
 use runnerd_core::api::{Baseline, JobComparison, JobList, SlotTimeline, Unavailable};
@@ -46,59 +46,59 @@ async fn message(response: reqwest::Response) -> String {
 }
 
 #[tokio::test]
-async fn a_search_pages_with_its_cursor_and_a_query_the_daemon_refuses_answers_400_in_cores_words()
-{
+async fn a_search_pages_newest_first_a_sort_is_one_page_and_a_refused_query_answers_400_in_cores_words()
+ {
     let dir = Dir::new();
     let daemon = start(&dir.0, None).await;
     queued(&daemon.store);
     daemon.store.flush().await;
+    let list = async |path: &str| -> JobList {
+        let response = get(&daemon, path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        serde_json::from_str(&response.text().await.unwrap()).unwrap()
+    };
 
     // `_` is text: `b_u` finds the two named `b_uild`, not `build`.
-    let mut path = "/v1/jobs?q=b_u&sort=queued&order=asc&limit=1".to_owned();
+    let mut path = "/v1/jobs?q=b_u&limit=1".to_owned();
     let mut seen = Vec::new();
     loop {
-        let response = get(&daemon, &path).await;
-        assert_eq!(response.status(), StatusCode::OK, "{path}");
-        let list: JobList = serde_json::from_str(&response.text().await.unwrap()).unwrap();
-        assert!(list.understood(), "this daemon says what it read");
-        seen.extend(list.page.jobs.iter().map(|job| job.id));
-        let Some(cursor) = list.cursor else { break };
-        path = format!(
-            "/v1/jobs?q=b_u&sort=queued&order=asc&limit=1&cursor={}",
-            urlencode(&cursor)
-        );
+        let page = list(&path).await;
+        assert!(page.understood(), "this daemon says what it read");
+        seen.extend(page.page.jobs.iter().map(|job| job.id));
+        let Some(next) = page.page.next else { break };
+        path = format!("/v1/jobs?q=b_u&limit=1&before={next}");
     }
-    assert_eq!(seen, [2, 4]);
+    assert_eq!(seen, [4, 2]);
 
-    let first: JobList = get(&daemon, "/v1/jobs?sort=wait&limit=1")
-        .await
-        .text()
-        .await
-        .map(|text| serde_json::from_str(&text).unwrap())
-        .unwrap();
-    let cursor = urlencode(&first.cursor.unwrap());
+    let oldest = list("/v1/jobs?sort=queued&order=asc&limit=2").await;
+    assert_eq!(
+        oldest
+            .page
+            .jobs
+            .iter()
+            .map(|job| job.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        (oldest.page.next, oldest.shown_words().as_deref()),
+        (None, Some("2 of 5 jobs, oldest first"))
+    );
+
     let refused = [
-        ("/v1/jobs?q=".to_owned(), "a search is 1 to 100 bytes"),
+        ("/v1/jobs?q=", "a search is 1 to 100 bytes"),
         (
-            "/v1/jobs?sort=wait&before=3".to_owned(),
-            "before pages the list by ID",
+            "/v1/jobs?sort=wait&before=3",
+            "before pages the list newest first",
         ),
         (
-            format!("/v1/jobs?sort=wait&branch=main&cursor={cursor}"),
-            "the cursor is of another sort or search",
+            "/v1/jobs?sort=wait&cursor=j1.wait.desc.6ac9806bd2bf4ce5.0.0",
+            "a sorted list is one page",
         ),
-        (
-            format!("/v1/jobs?cursor={cursor}"),
-            "a cursor pages a sorted list",
-        ),
-        (
-            "/v1/jobs?sort=wait&cursor=j9.x".to_owned(),
-            "the cursor is not one this daemon made",
-        ),
-        ("/v1/jobs?sort=disk".to_owned(), ""),
+        ("/v1/jobs?sort=disk", ""),
     ];
     for (path, words) in refused {
-        let response = get(&daemon, &path).await;
+        let response = get(&daemon, path).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         if !words.is_empty() {
             let said = message(response).await;
@@ -172,15 +172,4 @@ async fn the_timeline_and_compare_answer_json_and_say_what_they_cannot() {
         );
     }
     daemon.stop().await;
-}
-
-/// `text` for a query string: a cursor holds only letters, digits, `.` and `-`, which need no escape, so this
-/// escapes nothing a cursor holds; it is here so a cursor that did would fail loudly.
-fn urlencode(text: &str) -> String {
-    assert!(
-        text.chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-')),
-        "{text}"
-    );
-    text.to_owned()
 }

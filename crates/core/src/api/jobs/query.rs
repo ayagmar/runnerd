@@ -1,12 +1,10 @@
-//! What `GET /v1/jobs` searches, filters and sorts by, and the cursor that pages a sorted list (ADR 0135). The
-//! semantics are here, without the history: the store implements them in SQL, the demo's fake daemon and the
-//! fixtures in memory with [`JobQuery::page`], and a store test holds the two to the same pages.
+//! What `GET /v1/jobs` searches, filters and sorts by (ADR 0135). The semantics are here, without the history: the
+//! store implements them in SQL, the demo's fake daemon and the fixtures in memory with [`JobQuery::page`], and a
+//! store test holds the two to the same pages.
 //!
-//! A sort's key only ever goes from unknown to known (a job starts, ends, or its record becomes final), and unknown
-//! keys sort last in both directions; so a pass through the pages never shows a job twice, and a job whose key
-//! becomes known behind the cursor is not shown by that pass.
-
-use std::fmt::Write as _;
+//! Only the default order, newest first by ID, pages, with `before`: a job's ID never changes. Any other order is one
+//! page of the first `limit` jobs, read in one snapshot, with how many the filters admit: a sort key such as a wait
+//! changes while a job runs, so no continuation of a sorted list could promise to show each job once.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,14 +21,24 @@ pub const JOBS_PAGE_DEFAULT: u32 = 50;
 pub const JOBS_PAGE_MAX: u32 = 500;
 
 /// The text a page holds at most, in bytes, counted over each job's repository, workflow, name, branch, URL and
-/// labels as stored: the job that reaches it is the page's last, and the page has a next one.
+/// labels as the list shows them ([`row_bytes`]): a page ends before the job that would pass it. A job's text is cut
+/// to [`JOB_TEXT_MAX`] and [`JOB_LABELS_MAX`], so even a page's first job is far below it.
 pub const JOBS_PAGE_BYTES: u64 = 1 << 20;
+
+/// The most bytes of a job's repository, workflow, name, branch and URL a list shows, each, to the last whole
+/// character; past them, the text is cut and the job is in `JobList::shortened`.
+pub const JOB_TEXT_MAX: usize = 1024;
+
+/// The most bytes of a job's labels, as stored (a JSON array of strings), a list shows; past them it shows none,
+/// and the job is in `JobList::shortened`.
+pub const JOB_LABELS_MAX: usize = 4096;
 
 /// What a sorted list of jobs is sorted by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JobSort {
-    /// When GitHub queued it.
+    /// When GitHub queued it, in the order of the jobs' IDs, which GitHub gives as it queues them: the default
+    /// order.
     Queued,
     /// How long it waited for a runner, as its page says it ([`JobSummary::waited`]): from queued to started, in
     /// whole seconds. Unknown until it starts, so a job still queued sorts with the unknown ones.
@@ -42,27 +50,6 @@ pub enum JobSort {
 }
 
 impl JobSort {
-    /// Its name in a query and a cursor.
-    fn name(self) -> &'static str {
-        match self {
-            JobSort::Queued => "queued",
-            JobSort::Wait => "wait",
-            JobSort::Run => "run",
-            JobSort::Memory => "memory",
-        }
-    }
-
-    fn named(name: &str) -> Option<JobSort> {
-        [
-            JobSort::Queued,
-            JobSort::Wait,
-            JobSort::Run,
-            JobSort::Memory,
-        ]
-        .into_iter()
-        .find(|sort| sort.name() == name)
-    }
-
     /// `job`'s key: seconds, or bytes for memory; `None` while unknown.
     pub fn key(self, job: &JobSummary) -> Option<u64> {
         let timeline = &job.timeline;
@@ -92,15 +79,6 @@ pub enum SortOrder {
     Asc,
 }
 
-impl SortOrder {
-    fn name(self) -> &'static str {
-        match self {
-            SortOrder::Desc => "desc",
-            SortOrder::Asc => "asc",
-        }
-    }
-}
-
 /// `JobQuery::record`: jobs by what became of their record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -128,9 +106,9 @@ impl RecordFilter {
     }
 }
 
-/// What became of a failed job's record, as a list marks it (`JobSummary::record`): what the history notes, which
-/// `RecordNote::state` reads in full on the job's page. Docker's images are the inventory (`GET /v1/records`); a
-/// record removed outside runnerd still reads kept here.
+/// What became of a failed job's record, as a list marks it (`JobSummary::record_mark`): what the history notes,
+/// which `RecordNote::state` reads in full on the job's page. Docker's images are the inventory (`GET /v1/records`);
+/// a record removed outside runnerd reads removed once runnerd lists the images and finds it gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordMark {
@@ -150,7 +128,7 @@ impl RecordMark {
     pub fn of(note: &RecordNote) -> RecordMark {
         match note.state() {
             RecordState::Skipped { .. } => RecordMark::Skipped,
-            RecordState::Removed { .. } => RecordMark::Removed,
+            RecordState::Removed { .. } | RecordState::Gone { .. } => RecordMark::Removed,
             RecordState::Kept { .. } => RecordMark::Kept,
         }
     }
@@ -174,100 +152,10 @@ impl RecordMark {
     }
 }
 
-/// Where a sorted list's next page starts: after the job with `key` and `id`, in the list `filter` names. A client
-/// passes it on as `JobQuery::cursor` and reads nothing in it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JobCursor {
-    /// The sort it pages.
-    pub sort: JobSort,
-    /// Its direction.
-    pub order: SortOrder,
-    /// [`JobQuery::filter_hash`] of the query it pages.
-    pub filter: u64,
-    /// The last job's key; `None` while unknown.
-    pub key: Option<u64>,
-    /// The last job's ID.
-    pub id: u64,
-}
-
-/// A cursor's version, its first part: a later version that pages another way changes it, and this version refuses
-/// a cursor it cannot read.
-const CURSOR_VERSION: &str = "j1";
-
-impl JobCursor {
-    /// The cursor `JobPage::cursor` carries: `j1.wait.desc.<hash>.<key or ->.<id>`.
-    pub fn encode(&self) -> String {
-        let key = self
-            .key
-            .map_or_else(|| "-".to_owned(), |key| key.to_string());
-        format!(
-            "{CURSOR_VERSION}.{}.{}.{:016x}.{key}.{}",
-            self.sort.name(),
-            self.order.name(),
-            self.filter,
-            self.id
-        )
-    }
-
-    /// Reads a cursor [`encode`](JobCursor::encode) wrote; `None` for any other text.
-    pub fn parse(text: &str) -> Option<JobCursor> {
-        let mut parts = text.split('.');
-        let mut next = || parts.next();
-        if next()? != CURSOR_VERSION {
-            return None;
-        }
-        let sort = JobSort::named(next()?)?;
-        let order = match next()? {
-            "desc" => SortOrder::Desc,
-            "asc" => SortOrder::Asc,
-            _ => return None,
-        };
-        let filter = u64::from_str_radix(next()?, 16).ok()?;
-        let key = match next()? {
-            "-" => None,
-            key => Some(key.parse().ok()?),
-        };
-        let id = next()?.parse().ok()?;
-        next().is_none().then_some(JobCursor {
-            sort,
-            order,
-            filter,
-            key,
-            id,
-        })
-    }
-
-    /// Whether `job` comes after it in its list.
-    fn precedes(&self, job: &JobSummary) -> bool {
-        let key = self.sort.key(job);
-        let after_id = match self.order {
-            SortOrder::Desc => job.id < self.id,
-            SortOrder::Asc => job.id > self.id,
-        };
-        match (self.key, key) {
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => after_id,
-            (Some(last), Some(key)) => match self.order {
-                SortOrder::Desc => key < last || (key == last && after_id),
-                SortOrder::Asc => key > last || (key == last && after_id),
-            },
-        }
-    }
-}
-
-/// FNV-1a, 64 bits: a hash that stays the same across builds and platforms, unlike `std`'s.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-    })
-}
-
 impl JobQuery {
-    /// Checks a query before it is read: a search of 1 to [`JOB_SEARCH_MAX`] bytes without control characters, a
-    /// cursor only with the sort, direction and filters it was made for, and `before` only without a sort. Returns
-    /// the cursor, or the reason to refuse the query, worded for its user.
-    pub fn check(&self) -> Result<Option<JobCursor>, String> {
+    /// Checks a query before it is read: a search of 1 to [`JOB_SEARCH_MAX`] bytes without control characters,
+    /// `before` only in the default order, and no `cursor`. Returns the reason to refuse it, worded for its user.
+    pub fn check(&self) -> Result<(), String> {
         if let Some(q) = &self.q {
             if q.is_empty() || q.len() > JOB_SEARCH_MAX {
                 return Err(format!(
@@ -278,53 +166,27 @@ impl JobQuery {
                 return Err("a search has no control characters".to_owned());
             }
         }
-        match (self.sort, self.before, &self.cursor) {
-            (Some(_), Some(_), _) => Err(
-                "before pages the list by ID; a sorted list pages with the cursor its page gives"
+        if self.cursor.is_some() {
+            return Err(
+                "a sorted list is one page, its first jobs; narrow it with a search or the filters"
                     .to_owned(),
-            ),
-            (None, _, Some(_)) => {
-                Err("a cursor pages a sorted list; give the sort it was made for".to_owned())
-            }
-            (Some(sort), None, Some(cursor)) => {
-                let read = JobCursor::parse(cursor)
-                    .ok_or_else(|| "the cursor is not one this daemon made".to_owned())?;
-                if read.sort != sort
-                    || read.order != self.order.unwrap_or_default()
-                    || read.filter != self.filter_hash()
-                {
-                    return Err(
-                        "the cursor is of another sort or search; start from the first page"
-                            .to_owned(),
-                    );
-                }
-                Ok(Some(read))
-            }
-            (_, _, None) => Ok(None),
+            );
         }
+        if self.before.is_some() && !self.pages() {
+            return Err(
+                "before pages the list newest first; a sorted list is one page, which a search or the filters \
+                 narrow"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
-    /// A hash of what the query filters by, which a cursor carries so that it pages only the list it was made for.
-    pub fn filter_hash(&self) -> u64 {
-        // Each field absent, or its length and text, so no two filters write the same bytes.
-        let mut canonical = String::new();
-        let mut field = |value: Option<String>| match value {
-            Some(value) => {
-                let _ = write!(canonical, "{}:{value};", value.len());
-            }
-            None => canonical.push_str("-;"),
-        };
-        field(self.repository.clone());
-        field(self.state.map(|state| format!("{state:?}")));
-        field(self.conclusion.clone());
-        field(self.workflow.clone());
-        field(self.name.clone());
-        field(self.since.map(|since| since.to_string()));
-        field(self.until.map(|until| until.to_string()));
-        field(self.q.clone());
-        field(self.branch.clone());
-        field(self.record.map(|record| format!("{record:?}")));
-        fnv1a(canonical.as_bytes())
+    /// Whether it lists in the default order, newest first by ID, the one order that pages, with `before` and
+    /// `next`.
+    pub fn pages(&self) -> bool {
+        self.sort.is_none_or(|sort| sort == JobSort::Queued)
+            && self.order.unwrap_or_default() == SortOrder::Desc
     }
 
     /// How many jobs a page holds: `limit`, within 1 and [`JOBS_PAGE_MAX`].
@@ -364,100 +226,128 @@ impl JobQuery {
             })
     }
 
+    /// Puts `jobs` in its order: by ID for `queued`, else by its key, unknown last, ties by ID.
+    fn order(&self, jobs: &mut [&JobSummary]) {
+        let order = self.order.unwrap_or_default();
+        let by_id = |a: &JobSummary, b: &JobSummary| match order {
+            SortOrder::Desc => b.id.cmp(&a.id),
+            SortOrder::Asc => a.id.cmp(&b.id),
+        };
+        match self.sort.unwrap_or(JobSort::Queued) {
+            JobSort::Queued => jobs.sort_by(|a, b| by_id(a, b)),
+            sort => jobs.sort_by(|a, b| {
+                let keyed = match (sort.key(a), sort.key(b)) {
+                    (Some(a_key), Some(b_key)) => match order {
+                        SortOrder::Desc => b_key.cmp(&a_key),
+                        SortOrder::Asc => a_key.cmp(&b_key),
+                    },
+                    (a_key, b_key) => a_key.is_none().cmp(&b_key.is_none()),
+                };
+                keyed.then_with(|| by_id(a, b))
+            }),
+        }
+    }
+
     /// The page this query reads of `jobs`, a whole history held in memory, as the store reads it from the
     /// database: for the demo's fake daemon and tests. Refuses what [`check`](JobQuery::check) refuses.
     pub fn page(&self, jobs: &[JobSummary]) -> Result<JobList, String> {
-        let cursor = self.check()?;
-        let mut listed: Vec<&JobSummary> = jobs.iter().filter(|job| self.admits(job)).collect();
-        match self.sort {
-            None => {
-                listed.sort_by_key(|job| std::cmp::Reverse(job.id));
-                listed.retain(|job| self.before.is_none_or(|before| job.id < before));
-            }
-            Some(sort) => {
-                let order = self.order.unwrap_or_default();
-                listed.sort_by(|a, b| {
-                    let (a_key, b_key) = (sort.key(a), sort.key(b));
-                    let keyed = match (a_key, b_key) {
-                        (Some(a_key), Some(b_key)) => match order {
-                            SortOrder::Desc => b_key.cmp(&a_key),
-                            SortOrder::Asc => a_key.cmp(&b_key),
-                        },
-                        (a_key, b_key) => a_key.is_none().cmp(&b_key.is_none()),
-                    };
-                    keyed.then_with(|| match order {
-                        SortOrder::Desc => b.id.cmp(&a.id),
-                        SortOrder::Asc => a.id.cmp(&b.id),
-                    })
-                });
-                if let Some(cursor) = cursor {
-                    listed.retain(|job| cursor.precedes(job));
-                }
-            }
-        }
+        self.check()?;
+        let mut listed: Vec<&JobSummary> = jobs
+            .iter()
+            .filter(|job| self.admits(job))
+            .filter(|job| self.before.is_none_or(|before| job.id < before))
+            .collect();
+        self.order(&mut listed);
         let size = usize::try_from(self.page_size()).unwrap_or(usize::MAX);
         let mut page = Vec::new();
+        let mut shortened = Vec::new();
         let mut bytes = 0;
-        for job in &listed {
-            if page.len() == size || (bytes >= JOBS_PAGE_BYTES && !page.is_empty()) {
+        for job in listed.iter().take(size) {
+            let (shown, cut) = listed_text(job);
+            let row = row_bytes(&shown);
+            if !page.is_empty() && bytes + row > JOBS_PAGE_BYTES {
                 break;
             }
-            bytes += row_bytes(job);
-            page.push((*job).clone());
+            bytes += row;
+            if cut {
+                shortened.push(shown.id);
+            }
+            page.push(shown);
         }
+        let total = u64::try_from(listed.len()).unwrap_or(u64::MAX);
         let more = listed.len() > page.len();
-        Ok(self.answer(page, more))
+        Ok(self.answer(page, more, total, shortened))
     }
 
-    /// A page of `jobs`, in order, with the next page's `next` or `cursor` when `more` follow.
-    pub fn answer(&self, jobs: Vec<JobSummary>, more: bool) -> JobList {
-        let last = jobs.last().filter(|_| more);
-        let (next, cursor) = match (self.sort, last) {
-            (None, Some(last)) => (Some(last.id), None),
-            (Some(sort), Some(last)) => (
-                None,
-                Some(
-                    JobCursor {
-                        sort,
-                        order: self.order.unwrap_or_default(),
-                        filter: self.filter_hash(),
-                        key: sort.key(last),
-                        id: last.id,
-                    }
-                    .encode(),
-                ),
-            ),
-            (_, None) => (None, None),
-        };
+    /// A page of `jobs`, in order, of the `total` the filters admit, `shortened` those whose text was cut: with the
+    /// next page's `next` when `more` follow in the default order, and `total` in any other.
+    pub fn answer(
+        &self,
+        jobs: Vec<JobSummary>,
+        more: bool,
+        total: u64,
+        shortened: Vec<u64>,
+    ) -> JobList {
+        let pages = self.pages();
+        let next = jobs.last().filter(|_| more && pages).map(|last| last.id);
         let mut applied = self.clone();
         applied.limit = Some(self.page_size());
-        applied.order = self.sort.map(|_| self.order.unwrap_or_default());
+        applied.order = Some(self.order.unwrap_or_default());
         JobList {
             page: JobPage { jobs, next },
-            cursor,
+            total: (!pages).then_some(total),
+            shortened,
             applied: Some(applied),
         }
     }
 }
 
+/// `text` cut to [`JOB_TEXT_MAX`] bytes, to its last whole character.
+fn cut(text: &str) -> &str {
+    &text[..text.floor_char_boundary(JOB_TEXT_MAX)]
+}
+
+/// `job` as a list shows it, as the store reads it: each text cut to [`JOB_TEXT_MAX`] bytes, labels past
+/// [`JOB_LABELS_MAX`] left out. And whether any was.
+fn listed_text(job: &JobSummary) -> (JobSummary, bool) {
+    let cut_option = |text: &Option<String>| text.as_deref().map(|text| cut(text).to_owned());
+    let labels_fit = labels_bytes(&job.labels) <= JOB_LABELS_MAX;
+    let listed = JobSummary {
+        repository: cut(&job.repository).to_owned(),
+        name: cut(&job.name).to_owned(),
+        workflow: cut_option(&job.workflow),
+        branch: cut_option(&job.branch),
+        url: cut_option(&job.url),
+        labels: if labels_fit {
+            job.labels.clone()
+        } else {
+            Vec::new()
+        },
+        ..job.clone()
+    };
+    let shortened = !labels_fit || row_bytes(&listed) != row_bytes(job);
+    (listed, shortened)
+}
+
+/// The bytes of `labels` as the store keeps them: a JSON array of strings, as `serde_json` writes it.
+fn labels_bytes(labels: &[String]) -> usize {
+    2 + labels.len().saturating_sub(1)
+        + labels
+            .iter()
+            .map(|label| json_string_len(label))
+            .sum::<usize>()
+}
+
 /// The bytes of a job's text the page budget counts, as the store counts them in its columns.
 pub fn row_bytes(job: &JobSummary) -> u64 {
     let text = |text: Option<&str>| text.map_or(0, str::len);
-    // The labels as the store keeps them: a JSON array of strings, as `serde_json` writes it.
-    let labels = 2
-        + job.labels.len().saturating_sub(1)
-        + job
-            .labels
-            .iter()
-            .map(|label| json_string_len(label))
-            .sum::<usize>();
     u64::try_from(
         job.repository.len()
             + text(job.workflow.as_deref())
             + job.name.len()
             + text(job.branch.as_deref())
             + text(job.url.as_deref())
-            + labels,
+            + labels_bytes(&job.labels),
     )
     .unwrap_or(u64::MAX)
 }
@@ -479,6 +369,31 @@ impl JobList {
     /// `applied`, ignores them and lists every job, which a client says is not supported rather than a result.
     pub fn understood(&self) -> bool {
         self.applied.is_some()
+    }
+
+    /// What a sorted page shows of its list when it is not all of it: `50 of 1234 jobs, longest wait first`.
+    /// `None` in the default order, which pages, and when the page holds every job.
+    pub fn shown_words(&self) -> Option<String> {
+        let total = self.total?;
+        let shown = u64::try_from(self.page.jobs.len()).unwrap_or(u64::MAX);
+        if shown >= total {
+            return None;
+        }
+        let query = self.applied.as_ref()?;
+        let first = match (
+            query.sort.unwrap_or(JobSort::Queued),
+            query.order.unwrap_or_default(),
+        ) {
+            (JobSort::Queued, SortOrder::Desc) => "newest",
+            (JobSort::Queued, SortOrder::Asc) => "oldest",
+            (JobSort::Wait, SortOrder::Desc) => "longest wait",
+            (JobSort::Wait, SortOrder::Asc) => "shortest wait",
+            (JobSort::Run, SortOrder::Desc) => "longest run",
+            (JobSort::Run, SortOrder::Asc) => "shortest run",
+            (JobSort::Memory, SortOrder::Desc) => "largest memory peak",
+            (JobSort::Memory, SortOrder::Asc) => "smallest memory peak",
+        };
+        Some(format!("{shown} of {total} jobs, {first} first"))
     }
 }
 

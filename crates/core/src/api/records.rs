@@ -69,6 +69,10 @@ pub enum RecordRemoval {
     Age,
     /// Someone removed it.
     User,
+    /// Its image went from Docker without runnerd removing it, such as by `docker rmi`: when and why are not known.
+    /// Only `record.deleted` says it; the job's note keeps [`RecordNote::gone_at`] instead, which a client of 0.1.0
+    /// reads.
+    Outside,
 }
 
 impl std::fmt::Display for RecordRemoval {
@@ -78,6 +82,7 @@ impl std::fmt::Display for RecordRemoval {
             RecordRemoval::Size => "removed to keep within max_total",
             RecordRemoval::Age => "removed past max_age",
             RecordRemoval::User => "removed by hand",
+            RecordRemoval::Outside => "removed outside runnerd, when and why unknown",
         })
     }
 }
@@ -95,6 +100,10 @@ pub struct RecordNote {
     pub removed_at: Option<u64>,
     /// Why it was removed.
     pub removed_by: Option<RecordRemoval>,
+    /// When runnerd found its image gone from Docker, removed outside runnerd before then, at a time and for a
+    /// reason it does not know (ADR 0135).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gone_at: Option<u64>,
 }
 
 /// `DELETE /v1/records` query parameters: exactly one of them.

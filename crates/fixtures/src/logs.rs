@@ -114,6 +114,7 @@ fn kept() -> RecordNote {
         skipped: None,
         removed_at: None,
         removed_by: None,
+        gone_at: None,
     }
 }
 

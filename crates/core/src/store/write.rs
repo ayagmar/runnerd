@@ -28,16 +28,26 @@ const ANNOUNCE_REPOSITORY: &str =
 const ANNOUNCE_PROFILE: &str =
     "INSERT OR REPLACE INTO announced_profiles (profile, event) VALUES (?1, ?2)";
 
+/// What `Store::open` hands its writer.
+pub(super) struct Started {
+    /// The writer's connection.
+    pub(super) db: Connection,
+    /// The time before this daemon when no runnerd ran.
+    pub(super) downtime: Option<Downtime>,
+    /// This daemon's row in `sessions`, which it notes each host sample it stores in.
+    pub(super) session: i64,
+}
+
 pub(super) fn run(
-    db: Connection,
-    downtime: Option<Downtime>,
+    started: Started,
     mut queue: mpsc::UnboundedReceiver<Write>,
     events: &broadcast::Sender<Arc<EventEnvelope>>,
     held: &Mutex<Vec<api::HostSample>>,
 ) {
     let writer = Writer {
-        db,
-        downtime,
+        db: started.db,
+        downtime: started.downtime,
+        session: started.session,
         events,
         held,
     };
@@ -51,6 +61,8 @@ struct Writer<'store> {
     db: Connection,
     /// The time before this daemon when no runnerd ran, which a job queued before it first records waited through.
     downtime: Option<Downtime>,
+    /// This daemon's row in `sessions`.
+    session: i64,
     events: &'store broadcast::Sender<Arc<EventEnvelope>>,
     /// `Store::held`.
     held: &'store Mutex<Vec<api::HostSample>>,
@@ -175,6 +187,7 @@ impl Writer<'_> {
             Write::RecordMade(record) => self.record_made(record),
             Write::RecordSkipped { job, why } => self.record_skipped(job, &why),
             Write::RecordRemoved { job, at, by } => self.record_removed(job, at, by),
+            Write::RecordsListed { jobs, at } => self.records_listed(&jobs, at),
             Write::Visibility {
                 repository,
                 visibility,
@@ -248,8 +261,35 @@ impl Writer<'_> {
         });
     }
 
-    /// Stores the held host samples in one transaction, then lets go of them. If that fails they are held for the
-    /// next try, ten batches at most: older ones are dropped.
+    /// Notes as gone each record noted kept whose job is not in `listed`, the records Docker has, and announces it.
+    /// After every write sent before, so a record runnerd made or removed is noted as such first.
+    fn records_listed(&self, listed: &[u64], at: u64) {
+        self.change("note the records gone from Docker", |announced| {
+            let kept: Vec<u64> = self
+                .db
+                .prepare(
+                    "SELECT job FROM records WHERE created_at IS NOT NULL AND skipped IS NULL \
+                     AND removed_at IS NULL AND gone_at IS NULL ORDER BY job",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for job in kept.into_iter().filter(|job| !listed.contains(job)) {
+                self.db.execute(
+                    "UPDATE records SET gone_at = ?2 WHERE job = ?1",
+                    params![job, at],
+                )?;
+                announced.push(Event::RecordDeleted {
+                    job,
+                    removed_by: api::RecordRemoval::Outside,
+                });
+            }
+            Ok(())
+        });
+    }
+
+    /// Stores the held host samples in one transaction, and notes the latest in this daemon's session: runnerd was
+    /// watching in it up to then. Then lets go of them. If that fails they are held for the next try, ten batches at
+    /// most: older ones are dropped.
     fn store_host_samples(&self) {
         let samples = lock(self.held).clone();
         if samples.is_empty() {
@@ -260,6 +300,12 @@ impl Writer<'_> {
                 self.db.execute(
                     "INSERT OR REPLACE INTO host_samples (at, cpu, memory) VALUES (?1, ?2, ?3)",
                     params![sample.at * 1000, sample.cpu, sample.memory],
+                )?;
+            }
+            if let Some(latest) = samples.iter().map(|sample| sample.at).max() {
+                self.db.execute(
+                    "UPDATE sessions SET sampled_at = max(coalesce(sampled_at, 0), ?2) WHERE id = ?1",
+                    params![self.session, latest * 1000],
                 )?;
             }
             Ok(())
@@ -1114,6 +1160,7 @@ mod tests {
         let writer = Writer {
             db,
             downtime: None,
+            session: 0,
             events: &events,
             held: &held,
         };

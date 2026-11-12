@@ -57,6 +57,26 @@ fn job(summary: JobSummary, steps: Vec<Step>) -> Job {
     }
 }
 
+/// `this`, with its steps as a comparison reads them, beside `baseline`.
+fn of(this: &Job, usage: &[StepUsage], baseline: BaselineRead) -> JobComparison {
+    JobComparison::of(
+        &this.summary,
+        &ComparedSteps::of(&this.steps),
+        usage,
+        baseline,
+    )
+}
+
+/// `job`, found as a baseline.
+fn found(job: Job, usage: Vec<StepUsage>, asked: bool) -> BaselineRead {
+    BaselineRead::Found {
+        steps: ComparedSteps::of(&job.steps),
+        job: Box::new(job.summary),
+        usage,
+        asked,
+    }
+}
+
 #[test]
 fn the_baseline_is_the_latest_earlier_success_of_the_same_job_on_its_branch_run_here() {
     let this = summary(10, 1000);
@@ -122,15 +142,7 @@ fn steps_pair_by_a_name_each_job_has_once_never_by_position() {
             step(4, "Upload", 560, Some(565)),
         ],
     );
-    let compared = JobComparison::of(
-        &this,
-        &[],
-        BaselineRead::Found {
-            job: Box::new(baseline),
-            usage: Vec::new(),
-            asked: false,
-        },
-    );
+    let compared = of(&this, &[], found(baseline, Vec::new(), false));
     let rows: Vec<String> = compared
         .steps
         .iter()
@@ -166,50 +178,72 @@ fn steps_pair_by_a_name_each_job_has_once_never_by_position() {
     );
 }
 
+/// A sample every 2 s after `from` up to `to`, at `memory` bytes.
+fn samples(from: u64, to: u64, memory: u64) -> Vec<Sample> {
+    (from + 2..=to)
+        .step_by(2)
+        .map(|at| Sample {
+            at,
+            cpu: 1500,
+            memory,
+            network_received: 0,
+            network_sent: 0,
+        })
+        .collect()
+}
+
 #[test]
-fn a_steps_resources_are_compared_only_where_both_steps_samples_cover_them() {
-    let steps = || {
+fn a_steps_resources_are_compared_only_where_both_steps_samples_cover_it_from_start_to_end() {
+    let steps = |start: u64| {
         vec![
-            step(1, "Run tests", 0, Some(60)),
-            step(2, "Run lint", 60, Some(64)),
+            step(1, "Run tests", start, Some(start + 60)),
+            step(2, "Run lint", start + 60, Some(start + 64)),
         ]
     };
-    let this = job(summary(10, 1000), steps());
-    let baseline = job(summary(5, 500), steps());
-    let usage = |number, samples| StepUsage {
-        number,
-        samples,
-        memory_peak: 1 << 30,
-        cpu_average: 1500,
+    let this = job(summary(10, 1000), steps(1100));
+    let this_usage = StepUsage::of(&samples(1100, 1164, 3 << 30), &this.steps);
+    let baseline = job(summary(5, 500), steps(600));
+    let memory = |baseline_samples: &[Sample]| {
+        let compared = of(
+            &this,
+            &this_usage,
+            found(
+                baseline.clone(),
+                StepUsage::of(baseline_samples, &baseline.steps),
+                true,
+            ),
+        );
+        compared
+            .steps
+            .iter()
+            .map(|step| step.memory)
+            .collect::<Vec<_>>()
     };
-    let compared = JobComparison::of(
-        &this,
-        &[usage(1, 30), usage(2, 2)],
-        BaselineRead::Found {
-            job: Box::new(baseline),
-            // 10 samples over 60s is less than half the 30 expected: the baseline's tests step is not covered.
-            usage: vec![usage(1, 10), usage(2, 1)],
-            asked: true,
-        },
-    );
+    let whole = memory(&samples(600, 664, 2 << 30));
     assert_eq!(
-        compared.steps[0].memory, None,
-        "a sparse side leaves it out"
+        whole[0].map(|memory| (memory.sampled, memory.change_words())),
+        Some((true, "+1G (+50%)".to_owned()))
     );
-    let lint = &compared.steps[1];
+    assert!(whole[1].is_some(), "a short step's two samples cover it");
+
+    // Its first half pruned: 15 of the 30 samples, its peak perhaps in the half gone.
+    let pruned = memory(&samples(630, 664, 2 << 30));
     assert_eq!(
-        lint.memory
-            .map(|memory| (memory.sampled, memory.change_words())),
-        Some((true, "same".to_owned()))
+        pruned[0], None,
+        "a step whose samples start late is not compared"
     );
-    assert!(matches!(
-        compared.baseline,
-        Baseline::Chosen {
-            job: 5,
-            asked: true,
-            ..
-        }
-    ));
+    // Sampling stopped for 20 s in the middle: 20 samples of 30.
+    let mut outage = samples(600, 620, 2 << 30);
+    outage.extend(samples(640, 664, 2 << 30));
+    assert_eq!(
+        memory(&outage)[0],
+        None,
+        "a step with a hole in its samples is not compared"
+    );
+    assert!(
+        memory(&outage)[1].is_some(),
+        "the lint step after it is whole"
+    );
 }
 
 #[test]
@@ -218,14 +252,10 @@ fn whole_job_figures_are_given_only_for_final_jobs_and_never_zero_for_unknown() 
     running.state = JobState::Running;
     running.timeline.finished_at = None;
     running.metrics.memory_peak = Some(9 << 30);
-    let compared = JobComparison::of(
+    let compared = of(
         &job(running, vec![]),
         &[],
-        BaselineRead::Found {
-            job: Box::new(job(summary(5, 500), vec![])),
-            usage: Vec::new(),
-            asked: false,
-        },
+        found(job(summary(5, 500), vec![]), Vec::new(), false),
     );
     let figure = |kind: FigureKind| {
         *compared
@@ -283,7 +313,7 @@ fn without_a_baseline_the_reason_is_the_answer() {
         summary(10, 1000),
         vec![step(1, "Run tests", 1010, Some(1020))],
     );
-    let unavailable = JobComparison::of(
+    let unavailable = of(
         &this,
         &[],
         BaselineRead::Unavailable(Unavailable::NoEarlierSuccess),
@@ -299,7 +329,7 @@ fn without_a_baseline_the_reason_is_the_answer() {
             .iter()
             .all(|figure| figure.baseline.is_none())
     );
-    let incompatible = JobComparison::of(&this, &[], BaselineRead::Incompatible(3));
+    let incompatible = of(&this, &[], BaselineRead::Incompatible(3));
     assert_eq!(
         incompatible.baseline.words().as_deref(),
         Some("job 3 is not a run of this job: another repository, workflow or name")
@@ -309,14 +339,10 @@ fn without_a_baseline_the_reason_is_the_answer() {
 #[test]
 fn a_hostile_step_name_reaches_the_comparison_plain() {
     let named = || vec![step(1, "Run \u{1b}]52;c;aGk=\u{7}evil\r", 0, Some(5))];
-    let compared = JobComparison::of(
+    let compared = of(
         &job(summary(10, 1000), named()),
         &[],
-        BaselineRead::Found {
-            job: Box::new(job(summary(5, 500), named())),
-            usage: Vec::new(),
-            asked: false,
-        },
+        found(job(summary(5, 500), named()), Vec::new(), false),
     );
     assert_eq!(compared.steps.len(), 1);
     assert!(
@@ -337,4 +363,87 @@ fn a_newer_daemons_answers_read_as_other() {
     assert_eq!(matched, StepMatch::Other);
     let figure: FigureKind = serde_json::from_str("\"disk\"").unwrap();
     assert_eq!(figure.label(), "Figure");
+}
+
+#[test]
+fn a_comparison_reads_a_bounded_count_and_size_of_steps_and_says_it_left_some_out() {
+    let many = |count: u32, name: &dyn Fn(u32) -> String| {
+        (1..=count)
+            .map(|number| step(number, &name(number), 0, Some(1)))
+            .collect::<Vec<_>>()
+    };
+    let compare = |steps: Vec<Step>| {
+        of(
+            &job(summary(10, 1000), steps.clone()),
+            &[],
+            found(job(summary(5, 500), steps), Vec::new(), false),
+        )
+    };
+    let counted = compare(many(600, &|number| format!("step {number}")));
+    assert_eq!(counted.steps.len(), COMPARE_STEPS_MAX);
+    assert_eq!(
+        counted.steps_cut_words(),
+        Some(
+            "some steps are not compared: a run has more steps, or longer step names, than a comparison reads"
+        )
+    );
+
+    // Names of 2,000 bytes are read from their first 800, and 163 of them fill the bytes a comparison reads.
+    let long = compare(many(200, &|number| {
+        format!("{number:04}{}", "é".repeat(998))
+    }));
+    assert_eq!(long.steps.len(), COMPARE_STEP_BYTES / 800);
+    assert!(
+        long.steps_cut,
+        "the steps past the bytes read are said to be left out"
+    );
+    assert!(
+        long.steps
+            .iter()
+            .all(|step| step.matched == StepMatch::Matched)
+    );
+
+    // One name past every bound is still read, cut, and nothing is said left out.
+    let huge = compare(many(1, &|_| "x".repeat(2 * COMPARE_STEP_BYTES)));
+    assert_eq!(huge.steps.len(), 1);
+    assert!(
+        huge.steps[0].name.len() <= 200,
+        "{}",
+        huge.steps[0].name.len()
+    );
+    assert!(
+        !huge.steps_cut,
+        "a job's one step is read whole as far as names go"
+    );
+    assert_eq!(compare(many(3, &|n| n.to_string())).steps_cut_words(), None);
+}
+
+#[test]
+fn samples_are_read_only_for_a_comparison_with_a_baseline() {
+    let history = [
+        job(
+            summary(10, 1000),
+            vec![step(1, "Run tests", 1010, Some(1020))],
+        ),
+        job(summary(5, 500), vec![step(1, "Run tests", 510, Some(520))]),
+    ];
+    let mut other = summary(7, 700);
+    other.name = "lint".to_owned();
+    let history = [history[0].clone(), history[1].clone(), job(other, vec![])];
+    let reads = std::cell::Cell::new(0);
+    let usage = |_: &Job| {
+        reads.set(reads.get() + 1);
+        Vec::new()
+    };
+    let incompatible = JobComparison::in_history(10, Some(7), &history, usage).unwrap();
+    assert_eq!(incompatible.baseline, Baseline::Incompatible { job: 7 });
+    let first = JobComparison::in_history(5, None, &history, usage).unwrap();
+    assert!(
+        matches!(first.baseline, Baseline::Unavailable { .. }),
+        "{:?}",
+        first.baseline
+    );
+    assert_eq!(reads.get(), 0, "no baseline, no samples read");
+    JobComparison::in_history(10, None, &history, usage).unwrap();
+    assert_eq!(reads.get(), 2, "both jobs' samples, once each");
 }
