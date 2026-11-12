@@ -152,6 +152,152 @@ impl RecordMark {
     }
 }
 
+impl RecordFilter {
+    /// Every filter, in the order a client offers them.
+    pub const ALL: [RecordFilter; 4] = [
+        RecordFilter::Any,
+        RecordFilter::Kept,
+        RecordFilter::Removed,
+        RecordFilter::Skipped,
+    ];
+
+    /// What a client offers it as: `any record`, then the marks' own words.
+    pub fn words(self) -> &'static str {
+        match self {
+            RecordFilter::Any => "any record",
+            RecordFilter::Kept => "record kept",
+            RecordFilter::Removed => "record removed",
+            RecordFilter::Skipped => "no record",
+        }
+    }
+}
+
+/// An order a list of jobs can be read in: what it is sorted by, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobOrder {
+    /// What it is sorted by.
+    pub sort: JobSort,
+    /// Which way.
+    pub order: SortOrder,
+}
+
+impl JobOrder {
+    /// The default order, newest first: the one that pages.
+    pub const NEWEST: JobOrder = JobOrder {
+        sort: JobSort::Queued,
+        order: SortOrder::Desc,
+    };
+
+    /// Every order, in the order a client offers them: newest first, then each figure largest first, then the
+    /// reverse of each.
+    pub const ALL: [JobOrder; 8] = [
+        JobOrder::NEWEST,
+        JobOrder::of_sort(JobSort::Wait, SortOrder::Desc),
+        JobOrder::of_sort(JobSort::Run, SortOrder::Desc),
+        JobOrder::of_sort(JobSort::Memory, SortOrder::Desc),
+        JobOrder::of_sort(JobSort::Queued, SortOrder::Asc),
+        JobOrder::of_sort(JobSort::Wait, SortOrder::Asc),
+        JobOrder::of_sort(JobSort::Run, SortOrder::Asc),
+        JobOrder::of_sort(JobSort::Memory, SortOrder::Asc),
+    ];
+
+    const fn of_sort(sort: JobSort, order: SortOrder) -> JobOrder {
+        JobOrder { sort, order }
+    }
+
+    /// The order `query` asks for.
+    pub fn of(query: &JobQuery) -> JobOrder {
+        JobOrder {
+            sort: query.sort.unwrap_or(JobSort::Queued),
+            order: query.order.unwrap_or_default(),
+        }
+    }
+
+    /// Whether it is the default order, which pages.
+    pub fn pages(self) -> bool {
+        self == JobOrder::NEWEST
+    }
+
+    /// Its words: `newest first`, `longest wait first`.
+    pub fn words(self) -> &'static str {
+        match (self.sort, self.order) {
+            (JobSort::Queued, SortOrder::Desc) => "newest first",
+            (JobSort::Queued, SortOrder::Asc) => "oldest first",
+            (JobSort::Wait, SortOrder::Desc) => "longest wait first",
+            (JobSort::Wait, SortOrder::Asc) => "shortest wait first",
+            (JobSort::Run, SortOrder::Desc) => "longest run first",
+            (JobSort::Run, SortOrder::Asc) => "shortest run first",
+            (JobSort::Memory, SortOrder::Desc) => "largest memory peak first",
+            (JobSort::Memory, SortOrder::Asc) => "smallest memory peak first",
+        }
+    }
+
+    /// `query` read in this order: its sort and order set, `None` for the default's, and `before` dropped where it
+    /// does not page.
+    pub fn apply(self, query: &mut JobQuery) {
+        let default = self.pages();
+        query.sort = (!default).then_some(self.sort);
+        query.order = (!default).then_some(self.order);
+        if !default {
+            query.before = None;
+        }
+    }
+}
+
+/// How far back a list of jobs reaches, by when GitHub queued them, as every client offers it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobRange {
+    /// The last 24 hours.
+    Day,
+    /// The last 7 days.
+    Week,
+    /// The last 30 days.
+    Month,
+    /// Every job the history keeps.
+    #[default]
+    All,
+}
+
+impl JobRange {
+    /// Every range, shortest first.
+    pub const ALL: [JobRange; 4] = [
+        JobRange::Day,
+        JobRange::Week,
+        JobRange::Month,
+        JobRange::All,
+    ];
+
+    /// Its words: `last 24 hours`, `all kept`.
+    pub fn words(self) -> &'static str {
+        match self {
+            JobRange::Day => "last 24 hours",
+            JobRange::Week => "last 7 days",
+            JobRange::Month => "last 30 days",
+            JobRange::All => "all kept",
+        }
+    }
+
+    /// `JobQuery::since` for it at `now`: none for every job.
+    pub fn since(self, now: u64) -> Option<u64> {
+        let days = match self {
+            JobRange::Day => 1,
+            JobRange::Week => 7,
+            JobRange::Month => 30,
+            JobRange::All => return None,
+        };
+        Some(now.saturating_sub(days * 24 * 3600))
+    }
+
+    /// The timeline of it at `now`: its window, at most the [`super::TIMELINE_WINDOW_MAX`] a timeline shows.
+    pub fn timeline(self, now: u64) -> super::TimelineQuery {
+        let longest = now.saturating_sub(super::TIMELINE_WINDOW_MAX);
+        super::TimelineQuery {
+            since: Some(self.since(now).map_or(longest, |since| since.max(longest))),
+            until: None,
+        }
+    }
+}
+
 impl JobQuery {
     /// Checks a query before it is read: a search of 1 to [`JOB_SEARCH_MAX`] bytes without control characters,
     /// `before` only in the default order, and no `cursor`. Returns the reason to refuse it, worded for its user.
@@ -380,20 +526,10 @@ impl JobList {
             return None;
         }
         let query = self.applied.as_ref()?;
-        let first = match (
-            query.sort.unwrap_or(JobSort::Queued),
-            query.order.unwrap_or_default(),
-        ) {
-            (JobSort::Queued, SortOrder::Desc) => "newest",
-            (JobSort::Queued, SortOrder::Asc) => "oldest",
-            (JobSort::Wait, SortOrder::Desc) => "longest wait",
-            (JobSort::Wait, SortOrder::Asc) => "shortest wait",
-            (JobSort::Run, SortOrder::Desc) => "longest run",
-            (JobSort::Run, SortOrder::Asc) => "shortest run",
-            (JobSort::Memory, SortOrder::Desc) => "largest memory peak",
-            (JobSort::Memory, SortOrder::Asc) => "smallest memory peak",
-        };
-        Some(format!("{shown} of {total} jobs, {first} first"))
+        Some(format!(
+            "{shown} of {total} jobs, {}",
+            JobOrder::of(query).words()
+        ))
     }
 }
 

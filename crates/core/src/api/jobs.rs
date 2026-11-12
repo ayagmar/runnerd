@@ -36,7 +36,7 @@ pub use log::{
 };
 pub use query::{
     JOB_LABELS_MAX, JOB_SEARCH_MAX, JOB_TEXT_MAX, JOBS_PAGE_BYTES, JOBS_PAGE_DEFAULT,
-    JOBS_PAGE_MAX, JobSort, RecordFilter, RecordMark, SortOrder, row_bytes,
+    JOBS_PAGE_MAX, JobOrder, JobRange, JobSort, RecordFilter, RecordMark, SortOrder, row_bytes,
 };
 pub use timeline::{
     BarEnd, Gap, GapKind, Lane, RunnerSpan, SlotKey, SlotTimeline, SlottedBar, SlottedRunner, Span,

@@ -118,11 +118,41 @@ pub(crate) fn fail(error: &dyn Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Takes over the terminal for `runnerctl tui`: raw mode and the alternate screen. [`restore`] gives it back; a
-/// panic gives it back too.
+/// Takes over the terminal for `runnerctl tui`: raw mode, the alternate screen and, when taken, the mouse. [`restore`]
+/// gives it back; a panic gives it back too, but for the mouse.
 #[cfg(feature = "tui")]
-pub(crate) fn full_screen() -> std::io::Result<ratatui::DefaultTerminal> {
-    ratatui::try_init()
+pub(crate) fn full_screen(mouse: Mouse) -> std::io::Result<ratatui::DefaultTerminal> {
+    let terminal = ratatui::try_init()?;
+    mouse.take()?;
+    Ok(terminal)
+}
+
+/// Whether the TUI takes the mouse's clicks and wheel from the terminal.
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mouse {
+    Taken,
+    Left,
+}
+
+#[cfg(feature = "tui")]
+impl From<bool> for Mouse {
+    fn from(taken: bool) -> Mouse {
+        if taken { Mouse::Taken } else { Mouse::Left }
+    }
+}
+
+#[cfg(feature = "tui")]
+impl Mouse {
+    fn take(self) -> std::io::Result<()> {
+        if self == Mouse::Taken {
+            ratatui::crossterm::execute!(
+                std::io::stdout(),
+                ratatui::crossterm::event::EnableMouseCapture
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Leaves raw mode and the alternate screen and shows the cursor, each tried whatever the others answered: keys and
@@ -133,9 +163,14 @@ pub(crate) fn restore() -> std::io::Result<()> {
     use ratatui::crossterm::cursor::Show;
     use ratatui::crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
     let raw = disable_raw_mode();
+    // Given back whether it was taken or not: asking a terminal to stop reporting it is harmless.
+    let mouse = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableMouseCapture
+    );
     let screen = ratatui::crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
     let cursor = ratatui::crossterm::execute!(std::io::stdout(), Show);
-    [raw, screen, cursor]
+    [raw, mouse, screen, cursor]
         .into_iter()
         .filter_map(Result::err)
         .min_by_key(gone)
@@ -156,9 +191,10 @@ pub(crate) fn gone(error: &std::io::Error) -> bool {
 /// yet, so its first frame draws every cell; unlike `Terminal::clear`, it does not ask the terminal where its
 /// cursor is, an answer some terminals are slow to give.
 #[cfg(feature = "tui")]
-pub(crate) fn resume() -> std::io::Result<ratatui::DefaultTerminal> {
+pub(crate) fn resume(mouse: Mouse) -> std::io::Result<ratatui::DefaultTerminal> {
     use ratatui::crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
     enable_raw_mode()?;
     ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
+    mouse.take()?;
     ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))
 }

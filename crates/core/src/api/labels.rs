@@ -114,6 +114,10 @@ pub enum Column {
     Made,
     /// How much disk a record takes.
     Size,
+    /// The workflow it ran in.
+    Workflow,
+    /// What became of a failed job's record.
+    Record,
 }
 
 impl Column {
@@ -132,6 +136,8 @@ impl Column {
             Column::Cpu => "CPU",
             Column::Made => "Made",
             Column::Size => "Size",
+            Column::Workflow => "Workflow",
+            Column::Record => "Record",
         }
     }
 }
@@ -139,3 +145,6 @@ impl Column {
 /// What a count of jobs, or a list of them on a page, is headed: the history's figures, a profile's facts, the waits
 /// table. Not the name of [`View::Jobs`], though it reads the same.
 pub const JOBS_HEADING: &str = "Jobs";
+
+/// What a client says where an older daemon lacks a route or a field it reads: never an empty answer in its place.
+pub const NOT_SUPPORTED: &str = "not supported by this runnerd";

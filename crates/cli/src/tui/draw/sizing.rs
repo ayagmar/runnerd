@@ -13,11 +13,19 @@ use super::job::fit_details;
 use super::{bold, fit, heading, length, selected, widths, wrap};
 use crate::human::{self, Tone, bytes, cores_used, duration};
 use crate::tui::app::App;
+use crate::tui::mouse::{Hits, List};
 
 /// What each profile's jobs use and what to set its memory and slots to; the selected profile's jobs below. Under
 /// 100 columns the medians, the jobs at their cap, the largest peaks and the waits of warm and cold starts are left
 /// out.
-pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+pub(super) fn sizing(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    now: u64,
+    theme: Theme,
+    hits: &mut Hits,
+) {
     let Some(sizing) = &app.sizing else {
         let [title, rest] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -34,11 +42,12 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
     let wide = area.width >= 100;
     let profiles = length(sizing.profiles.len());
     let plan = auto_plan(sizing, usize::from(area.width), now, app, theme);
-    let [title, profiles_area, plan_area, advice_area, jobs_area] = Layout::vertical([
+    // The profiles and the selected one's advice first; what auto sizing does next under them, then the jobs.
+    let [title, profiles_area, advice_area, plan_area, jobs_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(profiles.saturating_add(1)),
-        Constraint::Length(length(plan.len())),
         Constraint::Length(3),
+        Constraint::Length(length(plan.len())),
         Constraint::Min(0),
     ])
     .areas(area);
@@ -61,15 +70,17 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
         theme,
     );
     sizing_profiles(frame, profiles_area, app, sizing, theme);
+    super::table_hits(hits, profiles_area, List::Sizing, 0, sizing.profiles.len());
     let Some(profile) = sizing.profiles.get(app.sized) else {
         return;
     };
     let width = usize::from(advice_area.width);
     // The advice wraps onto a second line rather than lose its end; the hint below it is cut.
-    let mut lines = vec![Line::styled(
-        format!("{}: {}", profile.name, sizing.advice_line(profile)),
-        theme.tone(profile.advice.tone().into()),
-    )];
+    // The action plain: the table's advice word carries the tone.
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{}: ", profile.name), bold()),
+        Span::raw(sizing.advice_line(profile)),
+    ])];
     let last = sizing
         .changes
         .iter()
@@ -117,7 +128,7 @@ pub(super) fn auto_plan(
     let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) else {
         return Vec::new();
     };
-    let mut lines = vec![Line::from("")];
+    let mut lines = Vec::new();
     // The rules and what blocks every look are sentences, wrapped rather than cut.
     for (position, line) in wrap(&format!("Auto sizing {}", plan.rules()), width)
         .into_iter()
@@ -137,7 +148,7 @@ pub(super) fn auto_plan(
         lines.extend(
             wrap(&blocked, width)
                 .into_iter()
-                .map(|line| Line::styled(line, theme.tone(Tone::Bad))),
+                .map(|line| Line::styled(line, theme.wait())),
         );
     }
     let name_width = sizing
@@ -170,9 +181,7 @@ pub(super) fn auto_plan(
             lines.extend(
                 wrap(&refusal, width.saturating_sub(indent))
                     .into_iter()
-                    .map(|line| {
-                        Line::styled(format!("{:indent$}{line}", ""), theme.tone(Tone::Busy))
-                    }),
+                    .map(|line| Line::styled(format!("{:indent$}{line}", ""), theme.dim())),
             );
         }
     }

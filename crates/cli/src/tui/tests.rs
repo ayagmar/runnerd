@@ -31,7 +31,7 @@ use runnerd_core::api::{
     Admission, AdmissionPolicy, Basis, Budget, CpuAdmission, Event, EventEnvelope, EventQuery,
     HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary,
     ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus, RunnerStatus,
-    Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline, Waiting,
+    Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, StyledLine, Timeline, Waiting,
 };
 use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread, Starts};
 
@@ -40,6 +40,7 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{App, Connection, Effect, Msg, Pane, Refused, Removal, Resizing, View};
 use super::draw::{Theme, draw};
 use super::feed;
+use super::overlay::Overlay;
 use crate::testing::Fake;
 use crate::watch;
 
@@ -204,7 +205,9 @@ fn opened(effects: &[Effect]) -> Vec<u64> {
 fn screen(app: &App, width: u16, height: u16, colour: bool) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
-        .draw(|frame| draw(frame, app, NOW, Theme { colour }))
+        .draw(|frame| {
+            draw(frame, app, NOW, Theme { colour });
+        })
         .unwrap();
     let buffer = terminal.backend().buffer();
     let mut text = String::new();
@@ -299,19 +302,17 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
     running_job(&mut app);
 
     let overview = screen(&app, 120, 40, false);
-    assert!(overview.contains("jvm · slot 1"), "{overview}");
-    assert!(overview.contains("CI / build"), "{overview}");
-    assert!(overview.contains("2/3 Unit tests"), "{overview}");
-    assert!(overview.contains("mem 4G"), "{overview}");
+    let lane = rows_with(&overview, "■ jvm 1 ");
+    assert_eq!(lane.len(), 1, "one row for the slot: {overview}");
+    for expected in ["CI / build", "2/3 Unit tests", " 4G "] {
+        assert!(lane[0].contains(expected), "{expected}: {overview}");
+    }
     assert!(overview.contains("1m 31s"), "ran since 1009: {overview}");
 
     // Enter on the selected slot opens its job.
     assert_eq!(opened(&app.update(key(KeyCode::Enter))), [42]);
     assert_eq!(app.view, View::Job);
-    app.update(Msg::LogLine {
-        job: 42,
-        text: "##[group]Unit tests".to_owned(),
-    });
+    log(&mut app, 42, ["##[group]Unit tests"]);
     let job = screen(&app, 120, 40, false);
     let head: Vec<&str> = job.lines().skip(1).take(2).map(str::trim_end).collect();
     assert_eq!(
@@ -329,7 +330,8 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
         "Waiting for a runner 4s",
         "Runner starting 5s",
         "capped at 9G and 8 CPUs",
-        "##[group]Unit tests",
+        // The group's line as core styles it: numbered, its command gone.
+        "1 Unit tests",
     ] {
         assert!(job.contains(expected), "{expected}: {job}");
     }
@@ -353,11 +355,17 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
 fn every_pane_fits_a_terminal_of_80_by_24() {
     let mut app = app();
     running_job(&mut app);
+    for at in 0..4 {
+        app.host.push_back(runnerd_core::api::HostSample {
+            at: NOW - 30 + at * 10,
+            cpu: 2000,
+            memory: 4 << 30,
+        });
+    }
     let overview = screen(&app, 80, 24, true);
     for expected in [
         "Budget",
         "33G reserved in ci.slice",
-        "Slots",
         "jvm 1",
         "jvm 2",
         "node 1",
@@ -373,12 +381,7 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
     }
 
     app.update(key(KeyCode::Enter));
-    for line in 0..100 {
-        app.update(Msg::LogLine {
-            job: 42,
-            text: format!("line {line}"),
-        });
-    }
+    log(&mut app, 42, (0..100).map(|line| format!("line {line}")));
     let job = screen(&app, 80, 24, true);
     for expected in [
         "Set up job",
@@ -420,7 +423,9 @@ fn the_failed_figure_is_red_only_for_failures_of_the_runner() {
         });
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &app, NOW, Theme { colour: true }))
+            .draw(|frame| {
+                draw(frame, &app, NOW, Theme { colour: true });
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row: Vec<&str> = (0..160).map(|x| buffer[(x, 1)].symbol()).collect();
@@ -448,7 +453,9 @@ fn without_colour_nothing_is_coloured() {
     running_job(&mut app);
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     terminal
-        .draw(|frame| draw(frame, &app, NOW, Theme { colour: false }))
+        .draw(|frame| {
+            draw(frame, &app, NOW, Theme { colour: false });
+        })
         .unwrap();
     let buffer = terminal.backend().buffer();
     assert!(
@@ -684,7 +691,10 @@ fn sizing() -> Sizing {
 #[test]
 fn sizing_advice_is_written_into_the_config_only_after_y() {
     let mut app = app();
-    assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Sizing]);
+    assert_eq!(
+        app.update(tab(runnerd_core::api::View::Capacity)),
+        vec![Effect::Sizing]
+    );
     app.update(Msg::Sizing(sizing()));
     assert_eq!(
         app.update(key(KeyCode::Char('a'))),
@@ -745,7 +755,7 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
 #[test]
 fn a_refused_pause_asks_over_a_resize_which_comes_back_once_answered() {
     let mut app = app();
-    app.update(key(KeyCode::Char('3')));
+    app.update(tab(runnerd_core::api::View::Capacity));
     app.update(Msg::Sizing(sizing()));
     app.update(key(KeyCode::Char('j')));
     app.update(key(KeyCode::Char('a')));
@@ -1050,7 +1060,7 @@ fn a_profile_a_reload_adds_or_removes_comes_and_goes_and_the_selection_stays_on_
         },
     ));
     assert!(
-        screen(&app, 120, 40, false).contains("rust · slot 1"),
+        screen(&app, 120, 40, false).contains("■ rust 1 "),
         "the new profile's slot shows"
     );
     for _ in 0..3 {
@@ -1242,7 +1252,9 @@ fn history_request(effects: &[Effect]) -> (u64, runnerd_core::api::JobQuery) {
     effects
         .iter()
         .find_map(|effect| match effect {
-            Effect::History { generation, query } => Some((*generation, query.clone())),
+            Effect::History {
+                generation, query, ..
+            } => Some((*generation, query.clone())),
             _ => None,
         })
         .unwrap_or_else(|| panic!("expected a history request, not {effects:?}"))
@@ -1252,11 +1264,47 @@ fn history_query(effects: &[Effect]) -> runnerd_core::api::JobQuery {
     history_request(effects).1
 }
 
+/// `texts` as the next lines of job `job`'s log, styled as core styles them.
+fn log<T: AsRef<str>>(app: &mut App, job: u64, texts: impl IntoIterator<Item = T>) {
+    let from = app
+        .job
+        .as_ref()
+        .filter(|open| open.job.summary.id == job)
+        .map_or(0, |open| open.log.read() as u64);
+    let lines = texts
+        .into_iter()
+        .zip(from..)
+        .map(|(text, line)| StyledLine::parse(line, text.as_ref()))
+        .collect();
+    app.update(Msg::Lines { job, lines });
+}
+
+/// The key of core's `view`'s tab.
+pub(super) fn tab(view: runnerd_core::api::View) -> Msg {
+    let at = View::tabs()
+        .iter()
+        .position(|(shown, _)| *shown == view)
+        .unwrap();
+    key(KeyCode::Char(
+        char::from_digit(u32::try_from(at + 1).unwrap(), 10).unwrap(),
+    ))
+}
+
+/// A page as a daemon that reads search and sort lists it.
+pub(super) fn listed(page: runnerd_core::api::JobPage) -> runnerd_core::api::JobList {
+    runnerd_core::api::JobList {
+        page,
+        total: None,
+        shortened: Vec::new(),
+        applied: Some(runnerd_core::api::JobQuery::default()),
+    }
+}
+
 /// The daemon's answer to a history request.
 fn history_page(generation: u64, jobs: Vec<JobSummary>, next: Option<u64>) -> Msg {
     Msg::History {
         generation,
-        page: Ok(runnerd_core::api::JobPage { jobs, next }),
+        list: Ok(listed(runnerd_core::api::JobPage { jobs, next })),
     }
 }
 
@@ -1272,12 +1320,62 @@ fn the_history_filters_ask_for_the_first_page_again() {
     ));
     let next = history_query(&app.update(key(KeyCode::Char(']'))));
     assert_eq!(next.before, Some(42));
-    let failed = history_query(&app.update(key(KeyCode::Char('c'))));
+    let failed = history_query(&filter(&mut app, "Outcome", "failure"));
     assert_eq!(failed.conclusion.as_deref(), Some("failure"));
     assert_eq!(failed.before, None, "a new filter starts at the first page");
-    let ledger = history_query(&app.update(key(KeyCode::Char('s'))));
+    let ledger = history_query(&filter(&mut app, "Repository", "halyard/ledger"));
     assert_eq!(ledger.repository.as_deref(), Some("halyard/ledger"));
     assert_eq!(ledger.conclusion.as_deref(), Some("failure"));
+    let cleared = history_query(&app.update(key(KeyCode::Char('x'))));
+    assert_eq!(
+        (cleared.repository, cleared.conclusion),
+        (None, None),
+        "x clears every filter"
+    );
+}
+
+/// The labels of the list open over the view.
+fn choices(app: &App) -> Vec<String> {
+    match &app.overlay {
+        Overlay::Pick(picker) => picker
+            .choices()
+            .iter()
+            .map(|choice| choice.label.clone())
+            .collect(),
+        other => panic!("expected a list, not {other:?}"),
+    }
+}
+
+/// Picks `label` from the list open over the view, with the keys.
+fn choose(app: &mut App, label: &str) -> Vec<Effect> {
+    let Overlay::Pick(picker) = &app.overlay else {
+        panic!(
+            "expected a list to pick {label} from, not {:?}",
+            app.overlay
+        );
+    };
+    let at = picker
+        .choices()
+        .iter()
+        .position(|choice| choice.label == label)
+        .unwrap_or_else(|| panic!("{label} is offered: {:?}", choices(app)));
+    let from = picker.at();
+    let way = if at > from {
+        KeyCode::Down
+    } else {
+        KeyCode::Up
+    };
+    for _ in 0..at.abs_diff(from) {
+        app.update(key(way));
+    }
+    app.update(key(KeyCode::Enter))
+}
+
+/// Sets the jobs view's filter `column` to `value` through `f` and its lists.
+fn filter(app: &mut App, column: &str, value: &str) -> Vec<Effect> {
+    app.update(key(KeyCode::Char('f')));
+    assert!(choose(app, column).is_empty(), "{column} opens its list");
+    choose(app, value)
 }
 
 #[test]
@@ -1291,14 +1389,12 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
     app.update(key(KeyCode::Tab));
     app.update(key(KeyCode::Tab));
     assert_eq!(opened(&app.update(key(KeyCode::Enter))), [41]);
-    app.update(Msg::LogLine {
-        job: 99,
-        text: "another job's line".to_owned(),
-    });
-    app.update(Msg::LogLine {
-        job: 41,
-        text: "##[error]Process completed with exit code 1.".to_owned(),
-    });
+    log(&mut app, 99, ["another job's line"]);
+    log(
+        &mut app,
+        41,
+        ["##[error]Process completed with exit code 1."],
+    );
     app.update(Msg::Job(Job {
         admission: None,
         summary: app.job.as_ref().unwrap().job.summary.clone(),
@@ -1415,10 +1511,10 @@ fn a_late_answer_to_an_earlier_history_filter_is_ignored() {
         vec![summary(40, JobState::Completed)],
         Some(40),
     ));
-    let (failures, _) = history_request(&app.update(key(KeyCode::Char('c'))));
+    let (failures, _) = history_request(&filter(&mut app, "Outcome", "failure"));
     // The rows and their continuation belong to the old filter: no next page while the new one loads.
     assert_eq!(app.update(key(KeyCode::Char(']'))), Vec::new());
-    let (successes, query) = history_request(&app.update(key(KeyCode::Char('c'))));
+    let (successes, query) = history_request(&filter(&mut app, "Outcome", "success"));
     assert_eq!(query.conclusion.as_deref(), Some("success"));
 
     // The answers come back in the other order.
@@ -1429,7 +1525,7 @@ fn a_late_answer_to_an_earlier_history_filter_is_ignored() {
     app.update(history_page(successes, vec![succeeded], None));
     app.update(history_page(failures, vec![failed], Some(44)));
 
-    let page = app.history.page.as_ref().unwrap();
+    let page = &app.history.list.as_ref().unwrap().page;
     assert_eq!(page.jobs.iter().map(|job| job.id).collect::<Vec<_>>(), [43]);
     let history = screen(&app, 120, 40, false);
     assert!(history.contains("outcome success"), "{history}");
@@ -1628,30 +1724,21 @@ fn how_long_ago_a_job_was_queued_reads_in_full_at_every_width() {
 }
 
 #[test]
-fn every_slot_card_title_keeps_its_slot_number_and_a_rule() {
+fn every_slot_is_one_row_named_by_its_profile_and_number_at_every_size() {
     let mut app = app();
     app.live.status.profiles[1] = profile("node", 2, 7 << 30);
-    for width in [96, 104, 120, 136] {
-        let overview = screen(&app, width, 40, false);
-        for card in [
-            "jvm · slot 1",
-            "jvm · slot 2",
-            "node · slot 1",
-            "node · slot 2",
-        ] {
-            assert!(
-                overview.contains(&format!("{card} ─")) || overview.contains(&format!("{card} ━")),
-                "{card} then its rule at {width}: {overview}"
+    for (width, height) in [(60, 20), (80, 24), (120, 32), (160, 45)] {
+        let overview = screen(&app, width, height, false);
+        for lane in ["■ jvm 1 ", "■ jvm 2 ", "■ node 1 ", "■ node 2 "] {
+            assert_eq!(
+                rows_with(&overview, lane).len(),
+                1,
+                "{lane} is one row at {width}x{height}: {overview}"
             );
         }
-        // The size reads the same on every card.
-        let sizes = rows_with(&overview, " · slot ")
-            .iter()
-            .map(|row| row.matches("CPUs").count())
-            .sum::<usize>();
         assert!(
-            sizes == 0 || sizes == 4,
-            "every card or none shows its CPUs at {width}: {overview}"
+            !overview.contains("jvm · slot"),
+            "no card titles: {overview}"
         );
     }
 }
@@ -1711,10 +1798,10 @@ fn text_that_does_not_fit_ends_in_an_ellipsis_and_leaves_its_neighbour_a_space()
     );
 
     let wide = screen(&app, 136, 40, false);
-    let step = rows_with(&wide, "2/3 Integration tests")[0];
+    let step = rows_with(&wide, "2/3 Integration tes")[0];
     assert!(
-        step.contains("(Testcont…"),
-        "the step's name ends in an ellipsis: {wide}"
+        step.contains("2/3 Integration tes… "),
+        "the step's name ends in an ellipsis and a space: {wide}"
     );
 
     let mut feature = finished(7, 60);
@@ -1736,12 +1823,14 @@ fn wide_characters_are_fitted_by_the_cells_they_take() {
     running_job(&mut app);
     app.live.running.get_mut(&42).unwrap().summary.branch = Some(wide.clone());
 
-    for width in [96, 120, 136] {
+    for width in [60, 96, 120, 136] {
         let overview = screen(&app, width, 40, false);
-        for card in ["ビルド · slot 1", "ビルド · slot 2"] {
+        for lane in ["■ ビルド 1 ", "■ ビルド 2 "] {
+            let row = rows_with(&overview, lane);
+            assert_eq!(row.len(), 1, "{lane} at {width}: {overview}");
             assert!(
-                overview.contains(&format!("{card} ─")),
-                "{card} then its rule at {width}: {overview}"
+                row[0].width() <= usize::from(width),
+                "{lane} fits {width}: {overview}"
             );
         }
     }
@@ -1990,7 +2079,7 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
 }
 
 #[test]
-fn the_health_line_counts_the_warning_insights_and_says_where_to_read_them() {
+fn the_insights_view_lists_each_insight_in_its_tone_and_the_health_line_leaves_them_out() {
     use runnerd_core::api::{Insight, InsightKind, Insights, Severity};
     let insight = |key: &str, severity| Insight {
         key: key.to_owned(),
@@ -2005,7 +2094,7 @@ fn the_health_line_counts_the_warning_insights_and_says_where_to_read_them() {
     };
     let mut app = app();
     app.activity = Some(day());
-    app.update(Msg::Insights(Box::new(Insights {
+    let insights = Insights {
         since: 0,
         until: NOW,
         insights: vec![
@@ -2015,19 +2104,23 @@ fn the_health_line_counts_the_warning_insights_and_says_where_to_read_them() {
         ],
         waits: Vec::new(),
         host: Vec::new(),
-    })));
+    };
+    let warning = insights.warning_line().unwrap();
+    app.update(Msg::Insights(Box::new(insights)));
 
     let wide = screen(&app, 160, 40, false);
     let health = wide.lines().nth(1).unwrap();
     assert!(
-        health.contains("2 insights: runnerctl insights"),
-        "notices are not counted: {health}"
+        !health.contains("insights"),
+        "the attention list and the insights view carry them: {health}"
     );
-    let small = screen(&app, 80, 24, false);
-    let health = small.lines().nth(1).unwrap();
-    assert!(
-        !health.contains("runnerctl insights") && health.contains("Failed, 24 h: 2"),
-        "the pointer goes first at 80 columns: {health}"
+    app.update(tab(runnerd_core::api::View::Insights));
+    let shown = screen(&app, 120, 32, false);
+    assert!(shown.contains(&warning), "{warning}: {shown}");
+    assert_eq!(
+        rows_with(&shown, "failed and then passed").len(),
+        4,
+        "a row each, and the selected one's sentence under them: {shown}"
     );
 }
 
@@ -2084,37 +2177,34 @@ fn the_history_filters_by_the_workflows_its_repository_has_run() {
         vec![summary(42, JobState::Completed), e2e],
         None,
     ));
-    let ci = history_query(&app.update(key(KeyCode::Char('w'))));
+    let ci = history_query(&filter(&mut app, "Workflow", "CI"));
     assert_eq!(
         ci.workflow.as_deref(),
         Some("CI"),
         "by name, across repositories"
     );
-    let e2e = history_query(&app.update(key(KeyCode::Char('w'))));
+    let e2e = history_query(&filter(&mut app, "Workflow", "E2E"));
     assert_eq!(e2e.workflow.as_deref(), Some("E2E"));
     assert!(screen(&app, 120, 24, false).contains("workflow E2E"));
-    let any = history_query(&app.update(key(KeyCode::Char('w'))));
+    let any = history_query(&filter(&mut app, "Workflow", "any"));
     assert_eq!(any.workflow, None, "then any again");
 
-    app.update(key(KeyCode::Char('w')));
-    let ledger = history_query(&app.update(key(KeyCode::Char('s'))));
+    filter(&mut app, "Workflow", "CI");
+    let ledger = history_query(&filter(&mut app, "Repository", "halyard/ledger"));
     assert_eq!(
         (ledger.repository.as_deref(), ledger.workflow.as_deref()),
         (Some("halyard/ledger"), Some("CI")),
         "a workflow the repository runs stays"
     );
-    let storefront = history_query(&app.update(key(KeyCode::Char('s'))));
+    let storefront = history_query(&filter(&mut app, "Repository", "halyard/storefront"));
     assert_eq!(
         (storefront.repository.as_deref(), storefront.workflow),
         (Some("halyard/storefront"), None),
         "one it never ran would show nothing, so it goes"
     );
-    let only = history_query(&app.update(key(KeyCode::Char('w'))));
-    assert_eq!(
-        only.workflow.as_deref(),
-        Some("E2E"),
-        "only its own workflows"
-    );
+    app.update(key(KeyCode::Char('f')));
+    choose(&mut app, "Workflow");
+    assert_eq!(choices(&app), ["any", "E2E"], "only its own workflows");
 }
 
 #[test]
@@ -2157,10 +2247,10 @@ fn a_job_s_page_compares_it_with_the_same_job_s_latest_runs() {
     ];
     app.update(Msg::Runs {
         job,
-        page: Ok(runnerd_core::api::JobPage {
+        list: Ok(listed(runnerd_core::api::JobPage {
             jobs: std::mem::take(&mut newest_first),
             next: None,
-        }),
+        })),
     });
     let shown = screen(&app, 120, 40, false);
     let heading = rows_with(&shown, "Latest 4 runs");
@@ -2192,7 +2282,7 @@ fn a_job_s_page_compares_it_with_the_same_job_s_latest_runs() {
 fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
     let mut app = app();
-    app.update(key(KeyCode::Char('3')));
+    app.update(tab(runnerd_core::api::View::Capacity));
     let mut sizing = sizing();
     sizing.auto = true;
     sizing.auto_plan = Some(AutoPlan {
@@ -2494,10 +2584,10 @@ fn the_open_job_s_own_bar_among_its_runs_follows_it_through_start_and_a_missed_f
     };
     app.update(Msg::Runs {
         job,
-        page: Ok(runnerd_core::api::JobPage {
+        list: Ok(listed(runnerd_core::api::JobPage {
             jobs: vec![summary(42, JobState::Queued), earlier(32), earlier(31)],
             next: None,
-        }),
+        })),
     });
     // The newest run's bar is the last before the waits.
     let ran_bar = |app: &App| {
@@ -2569,10 +2659,10 @@ fn the_open_job_s_peak_among_its_runs_rises_with_its_samples_until_its_record_is
     earlier.metrics.memory_peak = Some(6 << 30);
     app.update(Msg::Runs {
         job,
-        page: Ok(runnerd_core::api::JobPage {
+        list: Ok(listed(runnerd_core::api::JobPage {
             jobs: vec![current, earlier],
             next: None,
-        }),
+        })),
     });
     let sample = |memory| {
         event(
@@ -2666,8 +2756,8 @@ fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
     );
     assert!(!health.contains("starting"), "{health}");
     assert!(
-        shown.contains("A warm runner for halyard/ledger, waiting for a job"),
-        "its slot card says so: {shown}"
+        shown.contains("a warm runner for halyard/ledger, waiting for a job"),
+        "its lane says so: {shown}"
     );
     assert!(!shown.contains("waiting for its job"), "{shown}");
     let narrow = screen(&app, 80, 20, false);
@@ -2714,7 +2804,7 @@ fn a_step_shows_the_duration_it_has_and_none_it_lacks() {
 #[test]
 fn a_sizing_row_of_a_job_without_a_name_says_a_job() {
     let mut app = app();
-    app.update(key(KeyCode::Char('3')));
+    app.update(tab(runnerd_core::api::View::Capacity));
     let mut unnamed = sizing();
     for profile in &mut unnamed.profiles {
         profile.jobs[0].workflow = None;
@@ -2728,4 +2818,80 @@ fn a_sizing_row_of_a_job_without_a_name_says_a_job() {
             .all(|row| row.contains("a job")),
         "as runnerctl sizing names it: {shown}"
     );
+}
+
+#[test]
+fn a_log_search_asks_the_daemon_and_n_and_shift_n_walk_its_matches() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(key(KeyCode::Enter));
+    log(&mut app, 42, (0..60).map(|line| format!("line {line}")));
+    app.update(key(KeyCode::Char('/')));
+    for character in "line 1".chars() {
+        app.update(key(KeyCode::Char(character)));
+    }
+    let asked = app.update(key(KeyCode::Enter));
+    let query = asked
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Search { job: 42, query } => Some(query.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("Enter searches: {asked:?}"));
+    assert_eq!(query.q, "line 1");
+    let matches = vec![1, 10, 11];
+    app.update(Msg::Found {
+        job: 42,
+        query: "line 1".to_owned(),
+        found: Ok(runnerd_core::api::LogSearch {
+            lines: matches
+                .iter()
+                .map(|line| StyledLine::parse(*line, &format!("line {line}")))
+                .collect(),
+            matches,
+            next: None,
+        }),
+    });
+    let shown = screen(&app, 120, 40, false);
+    assert!(shown.contains("/line 1 1/3"), "on the first match: {shown}");
+    app.update(key(KeyCode::Char('n')));
+    assert!(screen(&app, 120, 40, false).contains("/line 1 2/3"));
+    app.update(key(KeyCode::Char('N')));
+    app.update(key(KeyCode::Char('N')));
+    assert!(
+        screen(&app, 120, 40, false).contains("/line 1 3/3"),
+        "N past the first wraps to the last, as in vi"
+    );
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.view, View::Job, "Esc leaves the search first");
+    assert!(!screen(&app, 120, 40, false).contains("/line 1"));
+}
+
+#[test]
+fn every_view_keeps_its_header_and_footer_at_every_size() {
+    let mut app = app();
+    running_job(&mut app);
+    let views: Vec<Msg> = View::tabs()
+        .into_iter()
+        .map(|(view, _)| tab(view))
+        .collect();
+    for msg in views {
+        app.update(msg);
+        for (width, height) in [(60, 20), (80, 24), (120, 32), (160, 45)] {
+            let shown = screen(&app, width, height, false);
+            let rows: Vec<&str> = shown.lines().collect();
+            assert!(
+                rows[0].contains("runnerd"),
+                "the header at {width}x{height}: {shown}"
+            );
+            assert!(
+                rows[0].contains("■ live"),
+                "the connection stays in the header at {width}x{height}: {shown}"
+            );
+            assert!(
+                !rows[usize::from(height) - 1].trim().is_empty(),
+                "the footer at {width}x{height}: {shown}"
+            );
+        }
+    }
 }

@@ -9,12 +9,20 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
 use super::job::fit_details;
-use super::{column_title, fit, heading, selected, styled_heading};
+use super::{column_title, fit, heading, selected, styled_heading, table_hits};
 use crate::human::{self, bytes};
 use crate::tui::app::App;
+use crate::tui::mouse::{Hits, List};
 
 /// The records of failed jobs, each a stopped runner `runnerctl shell` opens a shell in.
-pub(super) fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+pub(super) fn records(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    now: u64,
+    theme: Theme,
+    hits: &mut Hits,
+) {
     let name = api::Section::Records.title();
     let [title, table_area, hint] = Layout::vertical([
         Constraint::Length(1),
@@ -97,6 +105,13 @@ pub(super) fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, th
     .row_highlight_style(selected());
     let mut state = TableState::default().with_selected(Some(app.record));
     frame.render_stateful_widget(table, table_area, &mut state);
+    table_hits(
+        hits,
+        table_area,
+        List::Records,
+        state.offset(),
+        records.records.len(),
+    );
     if let Some(record) = records.records.get(app.record) {
         frame.render_widget(
             Line::styled(

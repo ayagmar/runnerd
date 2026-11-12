@@ -1,52 +1,63 @@
-//! The overview: the health line, the queue with why each job waits, the repositories and the latest jobs.
+//! The overview: what needs attention, the health line, the budget, a lane per slot, the queue with why each job
+//! waits, the repositories and the latest jobs, and the slice's charts when there is room.
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
-use runnerd_core::api::{
-    self, Activity, Insights, JobSummary, QueuedJob, RepositoryStatus, WaitKind,
-};
+use runnerd_core::api::{self, Activity, JobSummary, QueuedJob, RepositoryStatus, WaitKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
+use super::attention::{self, attention};
 use super::budget::budget;
 use super::job::drop_least;
 use super::slice::slice;
-use super::slots::{slot_cards, slot_lines};
-use super::{bold, fit, heading, length, list_block, selected, spark, wrap};
+use super::slots::lanes;
+use super::{bold, fit, heading, length, list_block, selected, spark};
 use crate::human::{self, ago, duration};
 use crate::tui::app::{App, Pane};
+use crate::tui::mouse::{Hits, List};
 
 /// The fewest rows the repositories and latest jobs keep: a title and four jobs.
 pub(super) const LISTS_MIN: u16 = 5;
 
-/// Top to bottom as the dashboard's overview: health, budget, slots, the queue, then the repositories and latest
-/// jobs; the slice's charts, last on the dashboard, take what the lists leave and are the first to go.
-pub(super) fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
-    let slots = app.slots().count();
-    let columns = usize::from(area.width / 30).clamp(1, slots.max(1));
-    let cards = length(slots.div_ceil(columns) * 7 + 1);
-    let lines = length(slots + 1);
+/// The most items the attention list shows on the overview; the rest are counted.
+const ATTENTION_SHOWN: usize = 5;
+
+/// The rows the slice's charts take at most: they show half an hour, which more rows would not add to.
+const CHARTS_MAX: u16 = 8;
+
+/// The fewest rows a chart is drawn in: its border and three rows of bars.
+const CHARTS_MIN: u16 = 5;
+
+/// Top to bottom: health, what needs attention, budget, a lane per slot, the queue, then the repositories and
+/// latest jobs, which take the rows left; the slice's charts take what the lists do not need, up to their size, and
+/// are the first to go.
+pub(super) fn overview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    now: u64,
+    theme: Theme,
+    hits: &mut Hits,
+) {
+    let slots = length(app.slots().count());
     let queued = app.live.status.queued.len();
-    // What the month's job minutes would have cost, under the health line, whole: wrapped, never cut, as its basis
-    // and what it leaves out are part of the figure. Left out when the slots and lists would lose their room.
-    let savings: Vec<String> = app
-        .savings
-        .as_ref()
-        .map(|savings| wrap(&savings.month.headline(), usize::from(area.width)))
-        .filter(|wrapped| area.height > 4 + length(wrapped.len()) + lines + LISTS_MIN)
-        .unwrap_or_default();
-    let savings_height = length(savings.len());
-    let rest = area.height.saturating_sub(4 + savings_height);
+    let rest = area.height.saturating_sub(1 + 3);
     let queue_least = if queued == 0 {
         0
     } else {
         length(queued.min(3) + 1)
     };
-    let as_cards = rest >= cards + queue_least + LISTS_MIN;
-    let slots_height = if as_cards { cards } else { lines };
-    let left = rest.saturating_sub(slots_height);
+    // The attention list gives way to the lanes and lists on a short terminal, down to one item.
+    let attention_room = rest.saturating_sub(slots + queue_least + LISTS_MIN);
+    let attention_height = attention::wanted(app, ATTENTION_SHOWN).min(
+        attention_room.max(attention::wanted(app, 1).min(rest.saturating_sub(slots + LISTS_MIN))),
+    );
+    let rest = rest.saturating_sub(attention_height);
+    let lanes_height = slots.min(rest.saturating_sub(LISTS_MIN.min(rest / 2)));
+    let left = rest.saturating_sub(lanes_height);
     let queue_height = if queued == 0 {
         0
     } else {
@@ -56,51 +67,43 @@ pub(super) fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, t
     };
     let left = left.saturating_sub(queue_height);
     let side_by_side = area.width >= 100;
-    let lists_wanted = lists_height(app, side_by_side);
-    // The charts take what the lists leave, from a chart of four rows.
-    let charts_height = if left >= 6 + LISTS_MIN {
-        left.saturating_sub(lists_wanted).max(6)
+    let lists_wanted = lists_height(app, side_by_side).max(LISTS_MIN);
+    let charts_height = left.saturating_sub(lists_wanted).min(CHARTS_MAX);
+    let charts_height = if charts_height >= CHARTS_MIN && !app.host.is_empty() {
+        charts_height
     } else {
         0
     };
+    // Rows nothing else wants show more of what needs attention.
+    let spare = left.saturating_sub(lists_wanted + charts_height);
+    let attention_height = attention_height
+        + spare.min(attention::wanted(app, usize::MAX).saturating_sub(attention_height));
     let [
         health_area,
-        savings_area,
+        attention_area,
         budget_area,
-        slots_area,
+        lanes_area,
         queue_area,
         lists_area,
         charts_area,
     ] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(savings_height),
+        Constraint::Length(attention_height),
         Constraint::Length(3),
-        Constraint::Length(slots_height),
+        Constraint::Length(lanes_height),
         Constraint::Length(queue_height),
         Constraint::Min(0),
         Constraint::Length(charts_height),
     ])
     .areas(area);
     health(frame, health_area, app, now, theme);
-    if !savings.is_empty() {
-        frame.render_widget(
-            Paragraph::new(
-                savings
-                    .into_iter()
-                    .map(|line| Line::from(Span::styled(line, theme.dim())))
-                    .collect::<Vec<_>>(),
-            ),
-            savings_area,
-        );
+    if attention_height > 0 {
+        attention(frame, attention_area, app, now, theme, hits);
     }
     budget(frame, budget_area, app, theme);
-    if as_cards {
-        slot_cards(frame, slots_area, app, columns, now, theme);
-    } else {
-        slot_lines(frame, slots_area, app, now, theme);
-    }
+    lanes(frame, lanes_area, app, now, theme, hits);
     if queue_height > 0 {
-        queue(frame, queue_area, app, now, theme);
+        queue(frame, queue_area, app, now, theme, hits);
     }
     if charts_height > 0 {
         slice(frame, charts_area, app, theme);
@@ -116,8 +119,8 @@ pub(super) fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, t
             .max(lists_area.height.min(2));
         Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(lists_area)
     };
-    repositories(frame, repositories_area, app, theme);
-    latest(frame, latest_area, app, now, theme);
+    repositories(frame, repositories_area, app, theme, hits);
+    latest(frame, latest_area, app, now, theme, hits);
 }
 
 /// The rows the repositories and latest jobs would fill, side by side or one above the other.
@@ -132,9 +135,9 @@ pub(super) fn lists_height(app: &App, side_by_side: bool) -> u16 {
 }
 
 /// The figures that say whether CI keeps up, as the dashboard opens with them: slots running, jobs waiting and the
-/// oldest's wait, then over the last 24 hours the p95 wait with the longest wait of each hour, and the failures, then
-/// how many warning insights hold. What does not fit goes whole, least telling first: where to read the insights, the
-/// starting and warm runners, the finished count, the hours, the oldest wait and the insights.
+/// oldest's wait, then over the last 24 hours the p95 wait with the longest wait of each hour, and the failures. What
+/// does not fit goes whole, least telling first: the starting and warm runners, the finished count, the hours and the
+/// oldest wait. What the history says is in the attention list and the insights view, not here.
 pub(super) fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     const SPARK_LEAST: usize = 8;
     let mut items = health_items(app, now, theme);
@@ -150,6 +153,8 @@ pub(super) fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
             .sum()
     };
     drop_least(&mut items, 1, |items| used(items) <= width);
+    // On the narrowest line the last figures go whole too, rather than be cut.
+    drop_least(&mut items, 0, |items| used(items) <= width);
     // What the hours' bars may take: the line's room less the other items and a space.
     let room = width
         .saturating_sub(used(&items).saturating_sub(1 + SPARK_LEAST))
@@ -231,26 +236,6 @@ pub(super) fn health_items(
             ));
         }
     }
-    items.extend(insight_items(app, theme));
-    items
-}
-
-/// How many warning insights hold, and where to read them; nothing without one.
-pub(super) fn insight_items(app: &App, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
-    let mut items = Vec::new();
-    if let Some(line) = app.insights.as_ref().and_then(Insights::warning_line) {
-        items.push((
-            1,
-            Some(vec![
-                Span::styled(" · ", theme.dim()),
-                Span::styled(line, theme.wait().add_modifier(Modifier::BOLD)),
-            ]),
-        ));
-        items.push((
-            5,
-            Some(vec![Span::styled(": runnerctl insights", theme.dim())]),
-        ));
-    }
     items
 }
 
@@ -302,7 +287,14 @@ pub(super) fn reason(
 
 /// Every queued job, oldest first: how long it has waited, its name, its repository (and pool) where there is room,
 /// and why it waits, which takes the rest of the line.
-pub(super) fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+pub(super) fn queue(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    now: u64,
+    theme: Theme,
+    hits: &mut Hits,
+) {
     let focused = app.pane == Pane::Queue;
     let queued = &app.live.status.queued;
     let [title, table_area] =
@@ -373,10 +365,7 @@ pub(super) fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, them
                     Cell::from(fit(&name, name_width)),
                 ];
                 if repository_width > 0 {
-                    cells.push(Cell::from(Span::styled(
-                        fit(&place, repository_width),
-                        theme.dim(),
-                    )));
+                    cells.push(Cell::from(fit(&place, repository_width)));
                 }
                 cells.push(Cell::from(reason(app, job, now, reason_width, theme)));
                 Row::new(cells)
@@ -392,6 +381,12 @@ pub(super) fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, them
     let table = Table::new(rows, widths).row_highlight_style(selected());
     let mut state = TableState::default().with_selected(focused.then_some(app.queued));
     frame.render_stateful_widget(table, table_area, &mut state);
+    hits.rows(
+        table_area,
+        List::Queue,
+        state.offset(),
+        queued.len() - state.offset().min(queued.len()),
+    );
 }
 
 /// What the repositories pane needs to show each repository whole with its profile, and a cell before the next pane.
@@ -414,7 +409,13 @@ pub(super) fn repositories_width(app: &App) -> u16 {
     length(widest + 1).max(24)
 }
 
-pub(super) fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+pub(super) fn repositories(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    hits: &mut Hits,
+) {
     let focused = app.pane == Pane::Repositories;
     let repositories = &app.live.status.repositories;
     // A cell stays free before the latest jobs: the profiles, which the square's colour also shows for the first
@@ -463,10 +464,9 @@ pub(super) fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: 
             }
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(lines).block(list_block("Repositories", focused, theme)),
-        area,
-    );
+    let block = list_block("Repositories", focused, theme);
+    hits.rows(block.inner(area), List::Repositories, 0, repositories.len());
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// An outcome as an upper-case badge.
@@ -494,106 +494,133 @@ fn queued_ago(job: &JobSummary, now: u64) -> String {
 
 /// The latest finished jobs, newest first: the outcome, the job, its repository where there is room, from 110 columns
 /// how long it waited and from 140 its branch, how long it ran and when it was queued.
-pub(super) fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+pub(super) fn latest(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    now: u64,
+    theme: Theme,
+    hits: &mut Hits,
+) {
     let focused = app.pane == Pane::Latest;
     let block = list_block("Latest jobs", focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let jobs = &app.live.recent;
-    let run_times: Vec<String> = jobs
-        .iter()
-        .map(|job| job.ran(now).map_or_else(String::new, duration))
-        .collect();
-    let queued: Vec<String> = jobs.iter().map(|job| queued_ago(job, now)).collect();
-    // The times are as wide as the widest of them; the job and its repository take what is left, the job first.
-    let ran_width = run_times.iter().map(|ran| ran.width()).max().unwrap_or(0);
-    let ago_width = queued.iter().map(|ago| ago.width()).max().unwrap_or(0);
-    let waits: Vec<String> = jobs
-        .iter()
-        .map(|job| job.waited(now).map_or_else(String::new, duration))
-        .collect();
-    let wait_width = if inner.width >= 110 {
-        waits.iter().map(|wait| wait.width()).max().unwrap_or(0)
-    } else {
-        0
-    };
-    let branch_width = if inner.width >= 140 {
-        jobs.iter()
-            .map(|job| job.branch.as_deref().unwrap_or_default().width())
-            .max()
-            .unwrap_or(0)
-            .min(20)
-    } else {
-        0
-    };
-    let optional = [wait_width, branch_width]
-        .iter()
-        .filter(|width| **width > 0)
-        .map(|width| width + 1)
-        .sum::<usize>();
-    let outcome_width = badge_width(jobs);
-    let rest = usize::from(inner.width)
-        .saturating_sub(outcome_width + 1 + ran_width + 1 + ago_width + 1 + optional);
-    let titles: Vec<String> = jobs.iter().map(|job| job.title().to_string()).collect();
-    let title_width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
-    let repository_width = jobs
-        .iter()
-        .map(|job| job.repository.width())
-        .max()
-        .unwrap_or(0);
-    // The repository shows from a dozen cells, cut if it must be.
-    let (title_width, repository_width) = if rest >= title_width + 1 + repository_width.min(12) {
-        (title_width, rest - title_width - 1)
-    } else {
-        (rest, 0)
-    };
-    let rows = jobs
-        .iter()
-        .zip(titles)
-        .zip(run_times.into_iter().zip(queued))
-        .zip(waits)
-        .map(|(((job, title), (ran, ago)), wait)| {
-            let mut cells = vec![
-                Cell::from(badge(job, theme)),
-                Cell::from(fit(&title, title_width)),
-            ];
-            if repository_width > 0 {
-                cells.push(Cell::from(Span::styled(
-                    fit(&job.repository, repository_width),
-                    theme.dim(),
-                )));
-            }
-            if branch_width > 0 {
-                cells.push(Cell::from(Span::styled(
-                    fit(job.branch.as_deref().unwrap_or_default(), branch_width),
-                    theme.dim(),
-                )));
-            }
-            if wait_width > 0 {
-                cells.push(Cell::from(
-                    Line::from(Span::styled(wait, theme.wait())).right_aligned(),
-                ));
-            }
-            cells.extend([
-                Cell::from(Line::from(ran).right_aligned()),
-                Cell::from(Line::from(Span::styled(ago, theme.dim())).right_aligned()),
-            ]);
-            Row::new(cells)
-        });
-    let mut widths = vec![
-        Constraint::Length(length(outcome_width)),
-        Constraint::Length(length(title_width)),
-    ];
-    for width in [repository_width, branch_width, wait_width] {
-        if width > 0 {
-            widths.push(Constraint::Length(length(width)));
+    let widths = LatestWidths::of(jobs, inner.width, now);
+    let rows = jobs.iter().map(|job| {
+        let mut cells = vec![
+            Cell::from(badge(job, theme)),
+            Cell::from(fit(&job.title().to_string(), widths.title)),
+        ];
+        if widths.repository > 0 {
+            cells.push(Cell::from(fit(&job.repository, widths.repository)));
         }
-    }
-    widths.extend([
-        Constraint::Length(length(ran_width)),
-        Constraint::Length(length(ago_width)),
-    ]);
-    let table = Table::new(rows, widths).row_highlight_style(selected());
+        if widths.branch > 0 {
+            cells.push(Cell::from(Span::styled(
+                fit(job.branch.as_deref().unwrap_or_default(), widths.branch),
+                theme.dim(),
+            )));
+        }
+        if widths.wait > 0 {
+            let wait = job.waited(now).map_or_else(String::new, duration);
+            cells.push(Cell::from(
+                Line::from(Span::styled(wait, theme.wait())).right_aligned(),
+            ));
+        }
+        let ran = job.ran(now).map_or_else(String::new, duration);
+        cells.extend([
+            Cell::from(Line::from(ran).right_aligned()),
+            Cell::from(Line::from(Span::styled(queued_ago(job, now), theme.dim())).right_aligned()),
+        ]);
+        Row::new(cells)
+    });
+    let table = Table::new(rows, widths.constraints()).row_highlight_style(selected());
     let mut state = TableState::default().with_selected(focused.then_some(app.latest));
     frame.render_stateful_widget(table, inner, &mut state);
+    hits.rows(
+        inner,
+        List::Latest,
+        state.offset(),
+        jobs.len() - state.offset().min(jobs.len()),
+    );
+}
+
+/// The latest jobs' columns, in cells; 0 for a column left out.
+struct LatestWidths {
+    outcome: usize,
+    title: usize,
+    repository: usize,
+    branch: usize,
+    wait: usize,
+    ran: usize,
+    ago: usize,
+}
+
+impl LatestWidths {
+    /// The times as wide as the widest of them; the job and its repository take what is left, the job first. The
+    /// waits from 110 columns, the branches from 140.
+    fn of(jobs: &[JobSummary], width: u16, now: u64) -> LatestWidths {
+        let widest = |widths: &mut dyn Iterator<Item = usize>| widths.max().unwrap_or(0);
+        let ran = widest(
+            &mut jobs
+                .iter()
+                .map(|job| job.ran(now).map_or_else(String::new, duration).width()),
+        );
+        let ago = widest(&mut jobs.iter().map(|job| queued_ago(job, now).width()));
+        let wait = if width >= 110 {
+            widest(
+                &mut jobs
+                    .iter()
+                    .map(|job| job.waited(now).map_or_else(String::new, duration).width()),
+            )
+        } else {
+            0
+        };
+        let branch = if width >= 140 {
+            widest(
+                &mut jobs
+                    .iter()
+                    .map(|job| job.branch.as_deref().unwrap_or_default().width()),
+            )
+            .min(20)
+        } else {
+            0
+        };
+        let optional: usize = [wait, branch]
+            .iter()
+            .filter(|width| **width > 0)
+            .map(|width| width + 1)
+            .sum();
+        let outcome = badge_width(jobs);
+        let rest = usize::from(width).saturating_sub(outcome + 1 + ran + 1 + ago + 1 + optional);
+        let title = widest(&mut jobs.iter().map(|job| job.title().to_string().width()));
+        let repository = widest(&mut jobs.iter().map(|job| job.repository.width()));
+        // The repository shows from a dozen cells, cut if it must be.
+        let (title, repository) = if rest >= title + 1 + repository.min(12) {
+            (title, rest - title - 1)
+        } else {
+            (rest, 0)
+        };
+        LatestWidths {
+            outcome,
+            title,
+            repository,
+            branch,
+            wait,
+            ran,
+            ago,
+        }
+    }
+
+    /// The table's widths, without the columns left out.
+    fn constraints(&self) -> Vec<Constraint> {
+        let optional = [self.repository, self.branch, self.wait];
+        [self.outcome, self.title]
+            .into_iter()
+            .chain(optional.into_iter().filter(|width| *width > 0))
+            .chain([self.ran, self.ago])
+            .map(|width| Constraint::Length(length(width)))
+            .collect()
+    }
 }

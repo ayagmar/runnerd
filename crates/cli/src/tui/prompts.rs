@@ -1,6 +1,8 @@
 //! The questions the footer asks, which any key answers: one is shown at a time, and only `Prompts`' methods change
 //! which. It decides nothing about what an answer does (`app`) or how a question reads (`draw`).
 
+use runnerd_core::api::ActionPreview;
+
 use super::app::{Refused, Removal, Resizing};
 
 /// A question waiting for its answer.
@@ -12,6 +14,10 @@ pub(crate) enum Prompt {
     Remove(Removal),
     /// Whether to write the sizing advice into the daemon's config.
     Resize(Resizing),
+    /// Whether to empty a cache volume.
+    Empty(String),
+    /// Whether to cancel or re-run a job, as core's preview says what that does.
+    Action(Box<ActionPreview>),
 }
 
 impl Prompt {
@@ -21,6 +27,8 @@ impl Prompt {
             Prompt::Force(_) => 0,
             Prompt::Remove(_) => 1,
             Prompt::Resize(_) => 2,
+            Prompt::Empty(_) => 3,
+            Prompt::Action(_) => 4,
         }
     }
 }

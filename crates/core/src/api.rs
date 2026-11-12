@@ -105,10 +105,10 @@ pub use jobs::{
     BarEnd, Baseline, BaselineRead, COMPARE_STEP_BYTES, COMPARE_STEPS_MAX, ChangeKind,
     CompareQuery, ComparedSteps, FigureDelta, FigureKind, Gap, GapKind, JOB_LABELS_MAX,
     JOB_SEARCH_MAX, JOB_TEXT_MAX, JOBS_PAGE_BYTES, JOBS_PAGE_DEFAULT, JOBS_PAGE_MAX, JobComparison,
-    JobList, JobSort, Lane, RecordFilter, RecordMark, RunnerSpan, SlotKey, SlotTimeline,
-    SlottedBar, SlottedRunner, SortOrder, Span, StepDelta, StepMatch, StepUsage, TIMELINE_BARS_MAX,
-    TIMELINE_DEFAULT, TIMELINE_WINDOW_MAX, TimelineBar, TimelineQuery, TimelineRows, Unavailable,
-    row_bytes,
+    JobList, JobOrder, JobRange, JobSort, Lane, RecordFilter, RecordMark, RunnerSpan, SlotKey,
+    SlotTimeline, SlottedBar, SlottedRunner, SortOrder, Span, StepDelta, StepMatch, StepUsage,
+    TIMELINE_BARS_MAX, TIMELINE_DEFAULT, TIMELINE_WINDOW_MAX, TimelineBar, TimelineQuery,
+    TimelineRows, Unavailable, row_bytes,
 };
 pub use jobs::{
     Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,
@@ -116,7 +116,7 @@ pub use jobs::{
     LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
-pub use labels::{Column, JOBS_HEADING, Section, View};
+pub use labels::{Column, JOBS_HEADING, NOT_SUPPORTED, Section, View};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,

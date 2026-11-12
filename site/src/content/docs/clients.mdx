@@ -155,7 +155,7 @@ Peaks cover each job's recent runs, CPU peaks only runs at the profile's current
 
 ## Terminal dashboard
 
-`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views, `1` to `3`, are Overview, Jobs and Capacity; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records. `enter` opens a job: its timeline, latest runs, steps, memory and CPU against the caps, and the log, followed while the job runs.
+`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records and `4` `4` from Sizing to Caches. The overview lists what needs attention, then a row per slot. `enter` opens a job: on a failed one the failure first, then its timeline, steps, memory and CPU against the caps, latest runs, and the log, folded by step and followed while the job runs.
 
 <Tui
   name="overview-96"
@@ -169,17 +169,26 @@ Peaks cover each job's recent runs, CPU peaks only runs at the profile's current
 
 | Key | |
 |---|---|
-| `1` `2` `3` | overview, jobs, capacity; again for the view's next section; `o` and `h` open the overview and history too |
-| `tab`, `j` `k` or arrows, `PgDn` `PgUp` | the overview's pane; move in it, or scroll a log; by ten |
-| `enter`, `esc` | open the selected job; back |
+| `1` to `5` | overview, jobs, insights, capacity, settings; again for the view's next section; `o` and `h` open the overview and history too |
+| `tab`, `j` `k` or arrows, `PgDn` `PgUp` | the overview's pane; move in it, or in a log; by ten |
+| `enter`, `esc` | open the selected job, or where an attention item points; back |
+| `!` | what needs attention; the header's count opens it too |
+| `/`, `n` `N` | jobs: search names, workflows and branches; job: search the log, the next and previous match |
+| `f` `s` `t`, `l`, `x` | jobs: pick a filter, the order, the time range; the slots' timeline; clear the filters |
+| `]` `[` | jobs: next and previous page |
+| `enter`, `G` `g` | job: fold or open a step or group; follow the log, or go to its start |
+| `c` | job: compare with an earlier run of the same job |
+| `x`, `a` `A` | job: cancel its run, re-run it, re-run the run's failed jobs; each shows what GitHub would do and sends only on `y` |
 | `p` `r`, `P` `U` | pause or resume the selected repository, or every one; a pause refused while a job runs asks before forcing it |
 | `R` | reseed the selected slot's profile |
-| `c` `s` `w`, `]` `[` | history: cycle the outcome, repository and workflow filters; next and previous page |
-| `d` `D` | records: remove the selected record, or all, after `y` |
+| `d` `D` | records: remove the selected record, or all, after `y`; caches: empty the selected volume, after `y` |
 | `a` | sizing: write the selected profile's advice into the config, after `y` |
-| `G` `g` | follow the log, or go to its start |
+| `u` | settings: read the config and the doctor's checks again |
+| click, wheel | select, click again to open; scroll. `--no-mouse` or `RUNNERCTL_NO_MOUSE=1` leaves the mouse to the terminal |
 | `?`, `q` or `ctrl-c` | all keys; quit |
 | `ctrl-z` | suspend; `fg` brings it back |
+
+A daemon too old for a view's read says so in the view, `not supported by this runnerd`, rather than showing it empty.
 
 When the daemon goes away the header says `reconnecting` and the event stream resumes where it stopped. `cargo build -p runnerd-cli --no-default-features` builds `runnerctl` without the TUI.
 
