@@ -1,14 +1,16 @@
 //! `GET /v1/attention`: what needs attention now, kept by one worker that owns the snapshot (ADR 0132). The worker
 //! words nothing itself: `api::attention_items` decides every item from the engine's status, the doctor's last run
 //! (`doctor_cache`) and the insights. It looks again whenever the status, the doctor's run or the config changes, on
-//! each durable event, and every `Timing::every`, so a condition that comes or goes with time alone shows; it reads
-//! the insights at most once a `Timing::insights`, and again at once after the config is replaced. The revision moves
+//! each durable event, and every `Timing::every`, so a condition that comes or goes with time alone shows. It reads
+//! the insights at most once a `Timing::insights`, and again at once when the config they were read with is no longer
+//! the one running, or the jobs waiting for the host's memory are not those they were read with. The revision moves
 //! only when the content does, also when one item replaces another, and each move is sent as `attention.changed`.
 //!
 //! It must not change the engine, the store or the config: it reads them and publishes.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::State;
@@ -34,9 +36,9 @@ pub(crate) const TIMING: Timing = Timing {
     insights: Duration::from_mins(1),
 };
 
-/// The snapshot and its revision. Only `update` writes it. Nothing of it survives a restart: the revision starts again
-/// at the daemon's start time in milliseconds, past any the daemon before reached unless that changed more than once a
-/// millisecond on average, so a client never mistakes a new snapshot for the one it holds.
+/// The snapshot and its revision. Only `update` writes it. Nothing of it survives a restart: the next process has an
+/// instance of its own and counts its revisions from 1 again, so a client never mistakes a new snapshot for the one it
+/// holds, whatever the clock did between.
 struct Snapshot {
     shown: Attention,
 }
@@ -44,7 +46,7 @@ struct Snapshot {
 impl Snapshot {
     /// Takes `items` in place of what it shows: the new revision when they differ, `None` when they say the same.
     fn update(&mut self, items: Vec<api::AttentionItem>) -> Option<u64> {
-        let next = Attention::new(self.shown.revision + 1, items);
+        let next = Attention::new(self.shown.instance.clone(), self.shown.revision + 1, items);
         if next.same_content(&self.shown) {
             return None;
         }
@@ -53,21 +55,61 @@ impl Snapshot {
     }
 }
 
-/// The insights the worker read last.
+/// The insights the worker read last, and what they were read with. Replaced whole by each read.
 struct Read {
     at: Instant,
+    /// The revision of the config they were read with.
+    config: String,
+    /// The jobs waiting for the host's memory when they were read, which the host-held insight counts.
+    held: Vec<u64>,
     /// `None` when the read failed: no insight is listed then.
     insights: Option<Insights>,
 }
 
-/// What needs attention before the worker's first look: the status as it is and no doctor run, so never an all clear.
-pub(super) fn first(status: &api::Status, start: u64) -> Attention {
+impl Read {
+    /// Whether they still stand for `config` and `status`: read within `Timing::insights`, with the config running,
+    /// while the same jobs wait for the host's memory.
+    fn stands(&self, config: &str, status: &api::Status, timing: Timing) -> bool {
+        self.at.elapsed() < timing.insights && self.config == config && self.held == held(status)
+    }
+}
+
+/// The jobs waiting for the host's memory in `status`, in order.
+fn held(status: &api::Status) -> Vec<u64> {
+    let mut held: Vec<u64> = status
+        .queued
+        .iter()
+        .filter(|job| matches!(job.waiting, Some(api::Waiting::HostMemory { .. })))
+        .map(|job| job.id)
+        .collect();
+    held.sort_unstable();
+    held
+}
+
+/// A new server's instance: the process's ID, its start in nanoseconds and a count of the servers it started, so no
+/// two are the same, whatever the clock does.
+fn instance() -> String {
+    static STARTED: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!(
+        "{:x}-{nanos:x}-{}",
+        std::process::id(),
+        STARTED.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// What needs attention before the worker's first look, at revision 1 of a new instance: the status as it is and no
+/// doctor run, so never an all clear.
+pub(super) fn first(status: &api::Status) -> Attention {
     let doctor = Doctor {
         checks: Vec::new(),
         state: Some(DoctorState::NotRun),
     };
     Attention::new(
-        start,
+        instance(),
+        1,
         api::attention_items(status, &doctor, None, super::history::now()),
     )
 }
@@ -89,15 +131,16 @@ pub(super) async fn run(state: AppState, published: watch::Sender<Attention>, ti
     let mut stopping = state.stopping.clone();
     let mut read: Option<Read> = None;
     loop {
-        let config_replaced = replaced.has_changed().unwrap_or(false);
         let revision = replaced.borrow_and_update().clone();
-        if config_replaced
-            || read
-                .as_ref()
-                .is_none_or(|read| read.at.elapsed() >= timing.insights)
+        let current = status.borrow_and_update().clone();
+        if !read
+            .as_ref()
+            .is_some_and(|read| read.stands(&revision, &current, timing))
         {
             read = Some(Read {
                 at: Instant::now(),
+                config: revision.clone(),
+                held: held(&current),
                 insights: read_insights(&state).await,
             });
         }
@@ -106,17 +149,17 @@ pub(super) async fn run(state: AppState, published: watch::Sender<Attention>, ti
             .borrow_and_update()
             .report(&revision, now, state.doctors.timing());
         let items = api::attention_items(
-            &status.borrow_and_update(),
+            &current,
             &report,
             read.as_ref().and_then(|read| read.insights.as_ref()),
             now,
         );
         if let Some(revision) = snapshot.update(items) {
             published.send_replace(snapshot.shown.clone());
-            state
-                .handle
-                .store
-                .event(Event::AttentionChanged { revision });
+            state.handle.store.event(Event::AttentionChanged {
+                instance: snapshot.shown.instance.clone(),
+                revision,
+            });
         }
         tokio::select! {
             changed = status.changed() => if changed.is_err() { return },
@@ -153,3 +196,6 @@ async fn read_insights(state: &AppState) -> Option<Insights> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -114,7 +114,7 @@ impl Listing {
 
 /// What a failed listing tells clients of `error`: its class and GitHub's status, never GitHub's text, which could
 /// echo what was sent.
-fn problem(error: &github::Error) -> api::ListingProblem {
+pub(super) fn problem(error: &github::Error) -> api::ListingProblem {
     match error {
         github::Error::Token(_) => api::ListingProblem::NoToken,
         github::Error::Status { status, .. } if status.as_u16() == 401 => {

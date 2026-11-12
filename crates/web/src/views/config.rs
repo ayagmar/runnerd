@@ -413,10 +413,13 @@ fn doctor_get(options: &str) -> String {
     format!("@get('/config/doctor', {{{options}filterSignals: {{include: /^$/}}}})")
 }
 
-/// The doctor's checks for the config the daemon runs with, or why there are none; in place of `doctor_pending`.
-pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>) -> Markup {
-    let label = |check: &Check| {
+/// The doctor's checks for the config the daemon runs with at `now`, or why there are none; in place of
+/// `doctor_pending`. Checks that are not current, such as a stale run's, follow core's line saying so, none of them
+/// painted as passing or needing a fix.
+pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>, now: u64) -> Markup {
+    let label = |check: &Check, current: bool| {
         let class = match check.status.tone() {
+            _ if !current => "neutral",
             Tone::Good => "success",
             Tone::Bad => "failure",
             Tone::Warn => "warn",
@@ -424,16 +427,28 @@ pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>) -> Markup {
         };
         (check.status.label(), class)
     };
+    let run_again = html! {
+        button.button-quiet type="button" data-indicator:_doctoring=""
+            data-attr:aria-busy="$_doctoring && 'true'"
+            data-on:click=(doctor_get("")) { "Run the doctor again" }
+    };
     html! {
         section #doctor .doctor aria-labelledby="doctor-title" {
             h2 #doctor-title { "Doctor" }
             @match doctor {
                 Ok(doctor) => {
-                    ul.check-list {
+                    @let not_current = doctor.state.as_ref().and_then(|state| state.line(now));
+                    @let current = not_current.is_none();
+                    @if let Some(line) = &not_current {
+                        p.check-message #doctor-state { (line) }
+                        (run_again)
+                    }
+                    ul.check-list aria-describedby=[(!current).then_some("doctor-state")] {
                         @for check in &doctor.checks {
-                            @let (text, class) = label(check);
+                            @let (text, class) = label(check, current);
                             // A check that needs nothing from the reader steps back; one that does keeps its fix.
-                            li class=[matches!(check.status.tone(), Tone::Bad | Tone::Warn).then_some("needs")] {
+                            li class=[(current && matches!(check.status.tone(), Tone::Bad | Tone::Warn))
+                                .then_some("needs")] {
                                 span class=(format!("badge {class}")) { (text) }
                                 div {
                                     p { strong { (check.name) } " " (check.detail) }
@@ -445,9 +460,7 @@ pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>) -> Markup {
                 }
                 Err(error) => {
                     p.check-message { (error) }
-                    button.button-quiet type="button" data-indicator:_doctoring=""
-                        data-attr:aria-busy="$_doctoring && 'true'"
-                        data-on:click=(doctor_get("")) { "Run the doctor again" }
+                    (run_again)
                 }
             }
         }

@@ -1414,11 +1414,12 @@ pub fn paused() -> Daemon {
     daemon
 }
 
-/// `GET /v1/attention` at revision 1 for `daemon`, `doctor` and the insights at [`NOW`]: core's items
-/// (`api::attention_items`). For the fixtures: the doctor's failure, the token or the listings, labels no pool serves,
-/// the long wait for the host's memory, the warning insights and the rate limit.
+/// `GET /v1/attention` at revision 1 of the instance `fixtures` for `daemon`, `doctor` and the insights at [`NOW`]:
+/// core's items (`api::attention_items`). For the fixtures: the doctor's failure, the token or the listings, labels no
+/// pool serves, the long wait for the host's memory, the warning insights and the rate limit.
 pub fn attention(daemon: &Daemon, doctor: &api::Doctor) -> api::Attention {
     api::Attention::new(
+        "fixtures".to_owned(),
         1,
         api::attention_items(&daemon.status, doctor, Some(&insights(NOW)), NOW),
     )
@@ -1441,7 +1442,8 @@ pub fn crowded_attention() -> api::Attention {
 /// `GET /v1/attention` from a newer daemon: a kind, a tone, a subject and a fix this version does not know, beside an
 /// item it does. A client shows the first by its title, neutral, without a link or a fix.
 pub const FUTURE_ATTENTION: &str = r#"{
-  "revision": 1792677787001,
+  "instance": "7f3a9c-1",
+  "revision": 12,
   "items": [
     {"key": "disk-full", "kind": "disk-full", "tone": "alarm", "title": "Docker's disk is 98% full",
      "subject": {"kind": "volume", "name": "runnerd-pnpm"}, "since": 1792677000,
@@ -1467,13 +1469,18 @@ pub struct AttentionFact {
     pub since: Option<String>,
 }
 
-/// The facts of `attention`, as core words them at [`NOW`], in its order; and what a client that shows `shown` items
-/// says of the rest.
-pub fn attention_facts(
-    attention: &api::Attention,
-    shown: usize,
-) -> (Vec<AttentionFact>, Option<String>) {
-    let facts = attention
+/// What every client states of an attention list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionFacts {
+    /// Its items, in its order.
+    pub items: Vec<AttentionFact>,
+    /// What a client that shows some of them says of the rest: `and 3 more`; `None` when it shows all.
+    pub more: Option<String>,
+}
+
+/// The facts of `attention`, as core words them at [`NOW`], for a client that shows `shown` items.
+pub fn attention_facts(attention: &api::Attention, shown: usize) -> AttentionFacts {
+    let items = attention
         .items
         .iter()
         .map(|item| AttentionFact {
@@ -1484,7 +1491,10 @@ pub fn attention_facts(
             since: item.since.map(|at| api::ago(at, NOW)),
         })
         .collect();
-    (facts, attention.more(shown))
+    AttentionFacts {
+        items,
+        more: attention.more(shown),
+    }
 }
 
 #[cfg(test)]
@@ -1623,8 +1633,7 @@ mod tests {
         let crowded = crowded_attention();
         assert_eq!(crowded.items.len(), api::ATTENTION_MAX);
         assert!(crowded.omitted > 0, "some are left out");
-        let (_, more) = attention_facts(&crowded, 3);
-        assert!(more.is_some(), "and N more");
+        assert!(attention_facts(&crowded, 3).more.is_some(), "and N more");
         let future: api::Attention = serde_json::from_str(FUTURE_ATTENTION).unwrap();
         assert_eq!(future.items[0].kind, api::AttentionKind::Unknown);
         assert_eq!(future.items[1].fix, None, "a view this version lacks");

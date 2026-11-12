@@ -135,3 +135,7 @@ impl Column {
         }
     }
 }
+
+/// What a count of jobs, or a list of them on a page, is headed: the history's figures, a profile's facts, the waits
+/// table. Not the name of [`View::Jobs`], though it reads the same.
+pub const JOBS_HEADING: &str = "Jobs";

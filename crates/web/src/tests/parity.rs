@@ -407,3 +407,40 @@ async fn the_pages_and_their_tables_are_named_as_core_names_them() {
         &[Column::Job, Column::Made, Column::Size].map(Column::title),
     );
 }
+
+#[tokio::test]
+async fn doctor_checks_that_are_not_current_follow_core_s_line_and_none_reads_as_passing() {
+    for doctor in runnerd_fixtures::doctor_not_current() {
+        let state = doctor.state.clone().unwrap();
+        let mut fixtures = fake::Fixtures::new(runnerd_fixtures::NOW);
+        fixtures.doctor = Some(doctor.clone());
+        let dashboard = Dashboard::serving(&[], fixtures).await;
+        let cookie = dashboard.sign_in().await;
+        let before = crate::now();
+        let page = dashboard.page(&cookie, "/config/doctor").await;
+        let after = crate::now();
+        let shown = text(&page.body);
+        // The dashboard reads the wall clock, as the stale state's age does.
+        let line = [before, after]
+            .into_iter()
+            .filter_map(|now| state.line(now))
+            .find(|line| shown.contains(line.as_str()));
+        assert!(line.is_some(), "core's line for {state:?}: {shown}");
+        assert!(
+            !page.body.contains("badge success") && !page.body.contains(r#"class="needs""#),
+            "no check of {state:?} reads as current: {}",
+            page.body
+        );
+        for check in &doctor.checks {
+            assert_eq!(
+                shown.contains(&check.detail),
+                matches!(
+                    state,
+                    runnerd_core::api::DoctorState::Stale { .. }
+                        | runnerd_core::api::DoctorState::Unknown
+                ),
+                "a stale run's checks show beside its line; a run not done or failed has none: {state:?}"
+            );
+        }
+    }
+}

@@ -83,6 +83,9 @@ pub struct Fixtures {
     pub doctor_delay: std::time::Duration,
     /// Why `GET /v1/doctor` fails, as the daemon's 500; `None`, it answers.
     pub doctor_error: Option<String>,
+    /// What `GET /v1/doctor` answers; `None`, the demo's own. One not run or failed is a 503 with its state's line,
+    /// as the daemon answers it.
+    pub doctor: Option<Doctor>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -735,6 +738,7 @@ impl Fixtures {
             sizing: None,
             doctor_delay: std::time::Duration::ZERO,
             doctor_error: None,
+            doctor: None,
         }
     }
 
@@ -1456,8 +1460,8 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
     }
 }
 
-/// What needs attention, as core words it from the fake's status, doctor and insights; the revision follows the
-/// content, as the daemon's does.
+/// What needs attention, as core words it from the fake's status, doctor and insights; the revision is a hash of the
+/// content, so it changes when the content does, as the daemon's does.
 fn attention(fixtures: &Fixtures) -> Attention {
     let items = attention_items(
         &fixtures.status,
@@ -1471,7 +1475,7 @@ fn attention(fixtures: &Fixtures) -> Attention {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
         });
-    Attention::new(revision, items)
+    Attention::new("demo".to_owned(), revision, items)
 }
 
 fn router(fake: Fake) -> Router {
@@ -1707,7 +1711,15 @@ fn router(fake: Fake) -> Router {
                 if let Some(message) = error {
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { message })).into_response();
                 }
-                Json(doctor(&fake.fixtures.lock().unwrap())).into_response()
+                let fixtures = fake.fixtures.lock().unwrap();
+                let answer = fixtures.doctor.clone().unwrap_or_else(|| doctor(&fixtures));
+                match &answer.state {
+                    Some(state @ (DoctorState::NotRun | DoctorState::Failed { .. })) => {
+                        let message = state.line(fixtures.now).unwrap_or_default();
+                        (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { message })).into_response()
+                    }
+                    _ => Json(answer).into_response(),
+                }
             }),
         )
         .route(

@@ -17,8 +17,12 @@ pub const ATTENTION_MAX: usize = 50;
 /// `GET /v1/attention`: what needs attention now, most urgent first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attention {
-    /// Changes whenever the content does, also when one item replaces another; never repeats across the daemon's
-    /// restarts. `attention.changed` on `/v1/events` carries the new one.
+    /// The daemon process that keeps the snapshot: new at each start, never the same as an earlier one's. Revisions
+    /// count within one instance; a client compares them only when the instances are the same.
+    pub instance: String,
+    /// From 1 at the daemon's start, one up whenever the content changes, also when one item replaces another.
+    /// `attention.changed` on `/v1/events` carries the new one. Two snapshots of one `instance` and `revision` say the
+    /// same.
     pub revision: u64,
     /// By tone, then known evidence times before unknown, newest first, then `key`; at most [`ATTENTION_MAX`].
     pub items: Vec<AttentionItem>,
@@ -165,19 +169,20 @@ impl Fix {
 }
 
 impl Attention {
-    /// The snapshot of `items`, as [`attention_items`] orders them, at `revision`: the first [`ATTENTION_MAX`], and
-    /// how many more.
-    pub fn new(revision: u64, mut items: Vec<AttentionItem>) -> Attention {
+    /// The snapshot of `items`, as [`attention_items`] orders them, at `revision` of `instance`: the first
+    /// [`ATTENTION_MAX`], and how many more.
+    pub fn new(instance: String, revision: u64, mut items: Vec<AttentionItem>) -> Attention {
         let omitted = items.len().saturating_sub(ATTENTION_MAX);
         items.truncate(ATTENTION_MAX);
         Attention {
+            instance,
             revision,
             items,
             omitted: omitted as u64,
         }
     }
 
-    /// Whether `other` says the same, whatever its revision.
+    /// Whether `other` says the same, whatever its instance and revision.
     pub fn same_content(&self, other: &Attention) -> bool {
         self.items == other.items && self.omitted == other.omitted
     }
@@ -199,7 +204,7 @@ pub fn attention_items(
     now: u64,
 ) -> Vec<AttentionItem> {
     let mut items = cannot_start(status);
-    items.extend(host_memory(status, insights, now));
+    items.extend(host_memory(status, insights));
     items.extend(doctor_items(doctor, now));
     items.extend(
         insights
@@ -207,7 +212,7 @@ pub fn attention_items(
             .flat_map(|insights| &insights.insights)
             .filter_map(insight_item),
     );
-    items.extend(github(status));
+    items.extend(github(status, now));
     items.sort_by(|a, b| {
         rank(a.tone)
             .cmp(&rank(b.tone))
@@ -316,35 +321,29 @@ fn cannot_start(status: &Status) -> Vec<AttentionItem> {
 }
 
 /// The host-held insight, while a queued job waits for the host's memory in `status` too: one item, which the
-/// insights leave out.
-fn host_memory(status: &Status, insights: Option<&Insights>, now: u64) -> Option<AttentionItem> {
-    let (held, waited) = insights?
+/// insights leave out. It is about the host, which programs outside CI hold, not about one job: the insight names
+/// none, and the jobs waiting may have changed since it was read. Its evidence time is unknown for the same reason;
+/// the daemon reads the insights again when the jobs waiting for the host change.
+fn host_memory(status: &Status, insights: Option<&Insights>) -> Option<AttentionItem> {
+    let held = insights?
         .insights
         .iter()
-        .find_map(|insight| match insight.kind {
-            InsightKind::HostHeld { waited, .. } => Some((insight, waited)),
-            _ => None,
-        })?;
-    let job = status
+        .find(|insight| matches!(insight.kind, InsightKind::HostHeld { .. }))?;
+    status
         .queued
         .iter()
-        .filter(|job| matches!(job.waiting, Some(Waiting::HostMemory { .. })))
-        .min_by_key(|job| (job.queued_at, job.id))?;
-    Some(AttentionItem {
-        key: "host-memory".to_owned(),
-        kind: AttentionKind::HostMemory,
-        tone: Tone::Warn,
-        title: held.sentence.clone(),
-        subject: Subject::Job {
-            id: job.id,
-            repository: job.repository.clone(),
-            name: job.name.clone(),
-        },
-        since: Some(now.saturating_sub(waited)),
-        fix: Some(Fix::Open {
-            view: View::Overview,
-        }),
-    })
+        .any(|job| matches!(job.waiting, Some(Waiting::HostMemory { .. })))
+        .then(|| AttentionItem {
+            key: "host-memory".to_owned(),
+            kind: AttentionKind::HostMemory,
+            tone: Tone::Warn,
+            title: held.sentence.clone(),
+            subject: Subject::Host,
+            since: None,
+            fix: Some(Fix::Open {
+                view: View::Overview,
+            }),
+        })
 }
 
 /// The doctor's failures and warnings from a current run, or one item saying its checks are not current.
@@ -450,7 +449,7 @@ fn insight_item(insight: &Insight) -> Option<AttentionItem> {
 }
 
 /// The listings GitHub fails or refuses, and its rate limit.
-fn github(status: &Status) -> Vec<AttentionItem> {
+fn github(status: &Status, now: u64) -> Vec<AttentionItem> {
     let failing: Vec<_> = status
         .repositories
         .iter()
@@ -503,15 +502,22 @@ fn github(status: &Status) -> Vec<AttentionItem> {
                 ),
             }),
     );
-    items.extend(status.github_line().map(|line| AttentionItem {
-        key: "rate-limited".to_owned(),
-        kind: AttentionKind::RateLimited,
-        tone: Tone::Warn,
-        title: line.to_owned(),
-        subject: Subject::Github,
-        since: None,
-        fix: None,
-    }));
+    // Gone once its reset time passed, whether or not the engine published since.
+    let limited = status.github_limited_until.is_some_and(|until| until > now);
+    items.extend(
+        status
+            .github_line()
+            .filter(|_| limited)
+            .map(|line| AttentionItem {
+                key: "rate-limited".to_owned(),
+                kind: AttentionKind::RateLimited,
+                tone: Tone::Warn,
+                title: line.to_owned(),
+                subject: Subject::Github,
+                since: None,
+                fix: None,
+            }),
+    );
     items
 }
 

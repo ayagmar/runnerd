@@ -842,7 +842,9 @@ mod tests {
         let new = Fake::serve(
             Router::new().route(
                 "/v1/attention",
-                get(|| async { axum::Json(crate::api::Attention::new(4, Vec::new())) }),
+                get(|| async {
+                    axum::Json(crate::api::Attention::new("a1".to_owned(), 4, Vec::new()))
+                }),
             ),
             Duration::from_secs(5),
             Duration::from_secs(5),

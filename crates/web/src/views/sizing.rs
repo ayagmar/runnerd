@@ -6,7 +6,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
+    Advice, AutoPlan, JOBS_HEADING, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone,
+    job_title,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -162,7 +163,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                 h2 #(id) { span.swatch aria-hidden="true" {} (profile.name) }
                 dl.facts {
                     div { dt { "Memory" } dd { (format::bytes(profile.memory)) " × " (profile.slots) } }
-                    div { dt { "Jobs" } dd { (profile.starts.total()) } } // not the view's name
+                    div { dt { (JOBS_HEADING) } dd { (profile.starts.total()) } }
                     div { dt { "Slots busy" } dd { (profile.busy) "%" } }
                     div { dt { "Waited p50 / p95" } dd { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) } }
                     @if profile.starts.warm > 0 {

@@ -1,10 +1,13 @@
 //! The doctor's checks for the config the daemon runs with, kept by one worker (ADR 0132). `GET /v1/doctor` and the
 //! attention worker read the last run here instead of each reading the host. The worker runs one check of the host
-//! at a time, off the async threads: at the start, after each config replaced (reloads that come while a run goes on
-//! make one run after it, and its result, for a config no longer current, is dropped), when a request finds no recent
-//! run, and every `Timing::refresh`. Each command and Docker request of a run ends within `doctor::READ_DEADLINE`;
-//! a run past `Timing::deadline` is reported failed and waited for before the next starts. Nothing of it survives a
-//! restart, and a stop leaves a run going to end by its own deadlines.
+//! at a time: at the start, after each config replaced (reloads that come while a run goes on make one run after it,
+//! and its result, for a config no longer current, is dropped), when a request finds no recent run, and every
+//! `Timing::refresh`. A run reads the job history from the store, then everything it asks the host, the slice's
+//! `MemoryMax` included, on one blocking thread: each command's process group is killed past
+//! `doctor::READ_DEADLINE`, each Docker request dropped. A run not done `Timing::deadline` after it began is reported
+//! failed, and the next starts only once its blocking work ended. A request waits for a run at most `Timing::answer`,
+//! under every client's timeout, and otherwise answers the last run as it stands. Nothing of it survives a restart; at
+//! a stop the worker ends, and the daemon kills the commands still running (`doctor::stop_commands`).
 //!
 //! It must not change the host, the config or the engine: it reads.
 
@@ -12,28 +15,50 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use runnerd_core::api::{self, Check, Sizing};
+use runnerd_core::api::{self, Check};
 use runnerd_core::config::{Config, revision};
-use runnerd_core::sizing::Window;
+use runnerd_core::sizing::{History, Window, advise};
 use tokio::sync::{Notify, watch};
 use tracing::warn;
 
 use super::AppState;
 
-/// Reads the host and runs the checks for `config` read from `path`, with the sizing advice: `read_host`, or a test's.
-/// Called on a blocking thread.
+/// Reads the host and runs the checks for `config` read from `path`, with what the sizing check reads of the job
+/// history: `read_host`, or a test's. Called on a blocking thread.
 pub(crate) type ReadHost =
-    Arc<dyn Fn(Option<&Config>, &Path, Option<Result<Sizing, String>>) -> Vec<Check> + Send + Sync>;
+    Arc<dyn Fn(Option<&Config>, &Path, Result<Recorded, String>) -> Vec<Check> + Send + Sync>;
+
+/// What the sizing check reads of the job history, as `GET /v1/sizing` reads it: the slice's `MemoryMax` is the
+/// host's, read with the rest of it.
+pub(crate) struct Recorded {
+    pub history: History,
+    pub window: Window,
+}
 
 /// The doctor of `runnerd doctor`, on this host.
 pub(crate) fn read_host(
     config: Option<&Config>,
     path: &Path,
-    sizing: Option<Result<Sizing, String>>,
+    recorded: Result<Recorded, String>,
 ) -> Vec<Check> {
     let mut host = crate::doctor::Host::read(config, Some(path));
-    host.sizing = sizing;
+    let memory_max = host
+        .slice
+        .as_ref()
+        .and_then(|slice| slice.as_ref().ok())
+        .and_then(|slice| slice.memory_max)
+        .map(|max| max.0);
+    host.sizing = config.map(|config| {
+        recorded.map(|recorded| advise(config, memory_max, &recorded.history, recorded.window))
+    });
     crate::doctor::checks(&host, config)
+}
+
+/// The history the sizing check reads, from the store.
+async fn recorded(state: &AppState) -> Result<Recorded, String> {
+    let window = Window::new(None, super::history::now());
+    let history = super::history::sizing_history(state, window).await?;
+    Ok(Recorded { history, window })
 }
 
 /// How the worker paces its runs, and how old a run may be.
@@ -45,16 +70,20 @@ pub(crate) struct Timing {
     pub refresh: Duration,
     /// A run older than this is stale.
     pub stale: Duration,
-    /// How long one run may take before it is reported failed.
+    /// How long one run may take, from reading the history to the last check, before it is reported failed.
     pub deadline: Duration,
+    /// How long a request waits for a run before it answers the last as it stands: under every client's timeout.
+    pub answer: Duration,
 }
 
-/// What the daemon runs with: a run every 10 minutes, stale after 15, one under a minute old answering a request.
+/// What the daemon runs with: a run every 10 minutes, stale after 15, one under a minute old answering a request,
+/// which waits 20 s at most for a new one (`client::TIMEOUT` is 30 s).
 pub(crate) const TIMING: Timing = Timing {
     fresh: Duration::from_mins(1),
     refresh: Duration::from_mins(10),
     stale: Duration::from_mins(15),
     deadline: Duration::from_mins(2),
+    answer: Duration::from_secs(20),
 };
 
 /// How the doctor runs: what reads the host, and its pace.
@@ -161,8 +190,8 @@ impl Doctors {
     }
 
     /// The checks for the config of `revision()` at most `Timing::fresh` old: the last run's when it is, else those of
-    /// a run asked for now, once it ends. Requests at once share that run. Past its deadline, the last run's,
-    /// whatever their state.
+    /// a run asked for now, once it ends. Requests at once share that run. A run not done within `Timing::answer`
+    /// goes on, and the last run's checks answer, in their state: not run, stale or failed.
     pub(super) async fn current(&self, revision: impl Fn() -> String) -> api::Doctor {
         let asked = super::history::now();
         let mut last = self.last.clone();
@@ -170,8 +199,7 @@ impl Doctors {
         if !last.borrow().answers(&revision(), recent) {
             self.wanted.notify_one();
             let done = last.wait_for(|last| last.answers(&revision(), asked));
-            // With its last command's deadline: a run that ran out of time is reported failed by then.
-            let _ = tokio::time::timeout(self.timing.deadline + Duration::from_secs(1), done).await;
+            let _ = tokio::time::timeout(self.timing.answer, done).await;
         }
         last.borrow()
             .report(&revision(), super::history::now(), self.timing)
@@ -185,23 +213,29 @@ pub(super) struct Worker {
     setup: Setup,
 }
 
-/// The readers' handle and the worker that serves it, which `run` runs.
-pub(super) fn doctors(setup: Setup) -> (Doctors, Worker) {
+/// The readers' handle and the worker that serves it.
+pub(super) struct Cache {
+    pub doctors: Doctors,
+    /// What `run` runs.
+    pub worker: Worker,
+}
+
+/// A cache with no run yet.
+pub(super) fn cache(setup: Setup) -> Cache {
     let (published, last) = watch::channel(Last::default());
     let wanted = Arc::new(Notify::new());
-    let doctors = Doctors {
-        last,
-        wanted: wanted.clone(),
-        timing: setup.timing,
-    };
-    (
-        doctors,
-        Worker {
+    Cache {
+        doctors: Doctors {
+            last,
+            wanted: wanted.clone(),
+            timing: setup.timing,
+        },
+        worker: Worker {
             published,
             wanted,
             setup,
         },
-    )
+    }
 }
 
 /// Runs the checks until the server stops: at once, then on each config replaced, each request and each refresh.
@@ -229,29 +263,28 @@ pub(super) async fn run(state: AppState, worker: Worker) {
         let ran_for = revision(&text);
         replaced.borrow_and_update();
         let deadline = setup.timing.deadline;
-        let sizing = match tokio::time::timeout(
-            deadline,
-            super::history::sizing_now(&state, Window::new(None, super::history::now())),
-        )
-        .await
-        {
-            Ok(sizing) => sizing,
-            Err(_) => Err("the job history did not answer in time".to_owned()),
-        };
+        // One deadline for the whole run, the history's read included.
+        let until = tokio::time::Instant::now() + deadline;
+        let recorded = tokio::time::timeout_at(until, recorded(&state))
+            .await
+            .unwrap_or_else(|_| Err("the job history did not answer in time".to_owned()));
         let read = setup.read.clone();
         let mut task = tokio::task::spawn_blocking(move || {
-            read(Config::parse(&text).ok().as_ref(), &path, Some(sizing))
+            read(Config::parse(&text).ok().as_ref(), &path, recorded)
         });
-        let outcome = match tokio::time::timeout(deadline, &mut task).await {
-            Ok(Ok(checks)) => Ok(checks),
-            Ok(Err(join_error)) => Err(format!("it stopped: {join_error}")),
-            Err(_) => {
-                overdue = Some(task);
-                Err(format!(
-                    "it took longer than {}",
-                    api::duration(deadline.as_secs())
-                ))
-            }
+        let outcome = tokio::select! {
+            done = tokio::time::timeout_at(until, &mut task) => match done {
+                Ok(Ok(checks)) => Ok(checks),
+                Ok(Err(join_error)) => Err(format!("it stopped: {join_error}")),
+                Err(_) => {
+                    overdue = Some(task);
+                    Err(format!(
+                        "it took longer than {}",
+                        api::duration(deadline.as_secs())
+                    ))
+                }
+            },
+            _ = stopping.wait_for(|stopping| *stopping) => return,
         };
         if let Err(error) = &outcome {
             warn!("doctor: the host's checks did not finish: {error}");
@@ -261,12 +294,27 @@ pub(super) async fn run(state: AppState, worker: Worker) {
             continue;
         }
         let at = super::history::now();
-        published.send_modify(|last| last.done(ran_for, at, outcome));
-        tokio::select! {
-            changed = replaced.changed() => if changed.is_err() { return },
-            () = wanted.notified() => {}
-            () = tokio::time::sleep(setup.timing.refresh) => {}
-            _ = stopping.wait_for(|stopping| *stopping) => return,
+        published.send_modify(|last| last.done(ran_for.clone(), at, outcome));
+        let refresh = tokio::time::sleep(setup.timing.refresh);
+        tokio::pin!(refresh);
+        loop {
+            tokio::select! {
+                changed = replaced.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    break;
+                }
+                () = wanted.notified() => {
+                    // A request made while the last run went on is answered by it: it asks for no second run.
+                    let recent = super::history::now().saturating_sub(setup.timing.fresh.as_secs());
+                    if !published.borrow().answers(&ran_for, recent) {
+                        break;
+                    }
+                }
+                () = &mut refresh => break,
+                _ = stopping.wait_for(|stopping| *stopping) => return,
+            }
         }
     }
 }

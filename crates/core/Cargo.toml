@@ -72,6 +72,8 @@ axum.workspace = true
 futures-util.workspace = true
 log.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
+# To read what the engine logs.
+tracing-subscriber.workspace = true
 
 # They start real containers through the host modules.
 [[test]]

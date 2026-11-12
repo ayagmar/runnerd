@@ -4,11 +4,11 @@
 //! check says so, so a read of the host is bounded however the host hangs (ADR 0132).
 
 use std::collections::BTreeMap;
-use std::io::{self, Read as _};
+use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
+use std::time::Duration;
 
 use runnerd_core::admission::host;
 use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
@@ -258,64 +258,14 @@ fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
 /// How long one command the doctor runs, or one read of Docker and the registries behind it, may take.
 pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(20);
 
-/// `command`'s output, as `Command::output` gives it, with no input; killed past [`READ_DEADLINE`].
+/// `command`'s output, as `Command::output` gives it, with no input; its group killed past [`READ_DEADLINE`].
 fn output(command: &mut Command) -> io::Result<Output> {
-    output_within(command, READ_DEADLINE)
+    command::output_within(command, READ_DEADLINE, &command::RUNNING)
 }
 
-/// `output` with its own deadline.
-fn output_within(command: &mut Command, deadline: Duration) -> io::Result<Output> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    // Read as it runs, so a full pipe never stops it.
-    let drain = |pipe: Option<Box<dyn io::Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut read = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut read);
-            }
-            read
-        })
-    };
-    let stdout = drain(
-        child
-            .stdout
-            .take()
-            .map(|pipe| Box::new(pipe) as Box<dyn io::Read + Send>),
-    );
-    let stderr = drain(
-        child
-            .stderr
-            .take()
-            .map(|pipe| Box::new(pipe) as Box<dyn io::Read + Send>),
-    );
-    let until = Instant::now() + deadline;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= until {
-            let _ = child.kill();
-            let _ = child.wait();
-            // The readers end when whatever else holds the pipes lets go; nothing waits for them.
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "it did not finish within {}",
-                    api::duration(deadline.as_secs())
-                ),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    Ok(Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
+/// Kills the commands the doctor runs and starts none after: the daemon stops.
+pub(crate) fn stop_commands() {
+    command::RUNNING.stop();
 }
 
 /// `read`, with its error as text, given up past [`READ_DEADLINE`]: dropping the future ends its requests.
@@ -1173,5 +1123,6 @@ fn skip(name: &str, detail: &str) -> Check {
     }
 }
 
+mod command;
 #[cfg(test)]
 mod tests;

@@ -149,6 +149,8 @@ pub enum Event {
     /// one item replaces another; a client that missed it reads the snapshot when it connects again.
     #[serde(rename = "attention.changed")]
     AttentionChanged {
+        /// The daemon process the snapshot is of: `Attention::instance`.
+        instance: String,
         /// The snapshot's new `revision`.
         revision: u64,
     },

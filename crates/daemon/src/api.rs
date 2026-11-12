@@ -351,14 +351,8 @@ async fn serve_for(
             .and_then(|parsed| parsed.web.open)
             .map(|open| open.to_string()),
     };
-    let start = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        });
-    let (doctors, doctor) = doctor_cache::doctors(config.doctor);
-    let (attention, attention_receiver) =
-        watch::channel(attention::first(&handle.status.borrow(), start));
+    let doctor_cache::Cache { doctors, worker } = doctor_cache::cache(config.doctor);
+    let (attention, attention_receiver) = watch::channel(attention::first(&handle.status.borrow()));
     let state = AppState {
         handle,
         owner,
@@ -378,7 +372,7 @@ async fn serve_for(
         doctors,
         attention: attention_receiver,
     };
-    tokio::spawn(doctor_cache::run(state.clone(), doctor));
+    tokio::spawn(doctor_cache::run(state.clone(), worker));
     tokio::spawn(attention::run(state.clone(), attention, config.attention));
     tokio::spawn(auto::run(state.clone(), config.auto_every));
     tokio::spawn(notify::run(notify::Notifier {

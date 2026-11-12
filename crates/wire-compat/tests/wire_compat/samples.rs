@@ -494,7 +494,8 @@ pub(crate) fn listing_problem() -> Vec<ListingProblem> {
 
 pub(crate) fn attention() -> Attention {
     Attention {
-        revision: 1_761_400_000_123,
+        instance: "4f1c-18a2b3c4d5e6f708-0".to_owned(),
+        revision: 12,
         items: vec![
             AttentionItem {
                 key: "cannot-start:paused:tidewater/halyard".to_owned(),
@@ -520,7 +521,8 @@ pub(crate) fn attention() -> Attention {
 /// A snapshot with nothing left out, and an item with no evidence time or fix.
 pub(crate) fn attention_empty() -> Attention {
     Attention {
-        revision: 1_761_400_000_123,
+        instance: "4f1c-18a2b3c4d5e6f708-0".to_owned(),
+        revision: 12,
         items: vec![attention_item_empty()],
         omitted: 0,
     }
@@ -1576,7 +1578,8 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             text: "Compiling runnerd".to_owned(),
         },
         Event::AttentionChanged {
-            revision: 1_761_400_000_124,
+            instance: "4f1c-18a2b3c4d5e6f708-0".to_owned(),
+            revision: 13,
         },
     ];
     for event in &every {

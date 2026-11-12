@@ -1307,7 +1307,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Vec::new()
                 }
                 Err(error) => {
-                    warn!("{repository}: cannot list queued jobs: {error}");
+                    // What clients are told: GitHub's text could echo what was sent, the token included.
+                    warn!(
+                        "{repository}: cannot list queued jobs: {}",
+                        super::listing::problem(&error).why()
+                    );
                     failed = Some(error);
                     Vec::new()
                 }

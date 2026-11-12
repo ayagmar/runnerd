@@ -473,7 +473,8 @@ impl GithubApi for FakeGithub {
                 method: reqwest::Method::GET,
                 path: format!("/repos/{repository}/actions/runs"),
                 status: reqwest::StatusCode::BAD_GATEWAY,
-                message: "bad gateway".to_owned(),
+                // What an upstream proxy might echo back.
+                message: "bad gateway for token ghp_echoedSecret".to_owned(),
             });
         }
         let queued = state
@@ -7550,7 +7551,14 @@ async fn a_slot_whose_volume_was_cleaned_no_longer_attracts_its_job() {
 /// A listing that fails is in the status as its class and status code, never GitHub's text; the rate limit is no
 /// failure of it, and an answer clears it (ADR 0132).
 #[tokio::test]
-async fn a_failing_listing_is_published_without_githubs_words_until_one_answers() {
+async fn a_failing_listing_is_published_and_logged_without_githubs_words_until_one_answers() {
+    let logged = Logged::default();
+    let _logging = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(logged.clone())
+            .finish(),
+    );
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     let (mut engine, handle, _dir) = engine(&github, &docker);
@@ -7573,10 +7581,18 @@ async fn a_failing_listing_is_published_without_githubs_words_until_one_answers(
         Some(api::ListingProblem::Failed { status: 502 })
     );
     let written = serde_json::to_string(&*handle.status.borrow()).unwrap();
+    let debug = format!("{:?}", handle.status.borrow().repositories);
+    let log = logged.text();
     assert!(
-        !written.contains("bad gateway"),
-        "GitHub's words stay out: {written}"
+        log.contains("o/r: cannot list queued jobs: GitHub answers 502"),
+        "{log}"
     );
+    for shown in [&written, &debug, &log] {
+        assert!(
+            !shown.contains("ghp_echoedSecret") && !shown.contains("bad gateway"),
+            "GitHub's words stay out: {shown}"
+        );
+    }
     {
         let mut state = github.0.lock().unwrap();
         state.failed_queued.clear();
@@ -7604,4 +7620,33 @@ async fn a_failing_listing_is_published_without_githubs_words_until_one_answers(
     engine.tick(Shutdown::No).await;
     engine.publish();
     assert_eq!(listing(&handle), None, "an answer clears it");
+}
+
+/// What the engine logs while a test holds it as the default subscriber's writer.
+#[derive(Clone, Default)]
+struct Logged(Arc<Mutex<Vec<u8>>>);
+
+impl Logged {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Logged {
+    type Writer = Logged;
+
+    fn make_writer(&'writer self) -> Logged {
+        self.clone()
+    }
 }

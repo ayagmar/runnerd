@@ -96,7 +96,7 @@ pub use jobs::{
     LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
-pub use labels::{Column, Section, View};
+pub use labels::{Column, JOBS_HEADING, Section, View};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
@@ -548,7 +548,17 @@ impl ListingFailure {
     /// What fails, as every client says it: `Cannot list halyard/ledger's queued jobs: GitHub answers 404; the token
     /// cannot see the repository, or it is gone`.
     pub fn line(&self, repository: &str) -> String {
-        let why = match &self.problem {
+        format!(
+            "Cannot list {repository}'s queued jobs: {}",
+            self.problem.why()
+        )
+    }
+}
+
+impl ListingProblem {
+    /// Why the listing fails, as the daemon's log and every client say it: `GitHub answers 502`. Never GitHub's text.
+    pub fn why(&self) -> String {
+        match self {
             ListingProblem::NoToken => "runnerd has no GitHub token".to_owned(),
             ListingProblem::Unauthorized => "GitHub refuses runnerd's token (401)".to_owned(),
             ListingProblem::Refused { status: 403 } => {
@@ -561,8 +571,7 @@ impl ListingFailure {
             ListingProblem::Unreachable => "GitHub does not answer".to_owned(),
             ListingProblem::Unexpected => "GitHub's answer is not what runnerd reads".to_owned(),
             ListingProblem::Unknown => "for a reason this client does not know".to_owned(),
-        };
-        format!("Cannot list {repository}'s queued jobs: {why}")
+        }
     }
 }
 

@@ -4,7 +4,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Bucket, Column, JobPage, JobQuery, JobState, Section, Stats, StatsQuery, StatsSummary, Status,
+    Bucket, Column, JOBS_HEADING, JobPage, JobQuery, JobState, Section, Stats, StatsQuery,
+    StatsSummary, Status,
 };
 use runnerd_core::client::{Client, ClientError};
 use serde::{Deserialize, Serialize};
@@ -400,7 +401,7 @@ fn headline(days: &[StatsSummary]) -> Markup {
     let each = |value: &dyn Fn(&StatsSummary) -> String| days.iter().map(value).collect::<Vec<_>>();
     let figures = [
         (
-            "Jobs", // not the view's name
+            JOBS_HEADING,
             total.jobs.to_string(),
             each(&|day| day.jobs.to_string()),
         ),
@@ -444,7 +445,7 @@ fn jobs(history: &History) -> Markup {
     });
     html! {
         section.jobs aria-labelledby="jobs-title" {
-            h2 #jobs-title .visually-hidden { "Jobs" } // not the view's name
+            h2 #jobs-title .visually-hidden { (JOBS_HEADING) }
             @if history.page.jobs.is_empty() {
                 p.muted { "No jobs match." }
             } @else {

@@ -231,10 +231,16 @@ fn a_long_wait_for_the_hosts_memory_is_one_item_while_a_job_waits_for_it_now() {
         "the insight is not listed again"
     );
     assert_eq!(items[0].title, "host-held:1 sentence");
-    assert_eq!(items[0].since, Some(NOW - 2400));
-    assert!(
-        matches!(items[0].subject, Subject::Job { id: 7, .. }),
-        "the job that waits"
+    // The insight was read earlier and names no job: the job waiting now may be another, which has waited seconds.
+    assert_eq!(items[0].subject, Subject::Host, "the host, not a job");
+    assert_eq!(
+        items[0].since, None,
+        "no evidence time the insight does not give"
+    );
+    assert_eq!(
+        attention_items(&status, &ready(Vec::new()), Some(&found), NOW + 10),
+        items,
+        "the same evidence read again later is the same item"
     );
 }
 
@@ -350,6 +356,16 @@ fn a_refused_token_is_one_item_for_every_repository_and_other_failures_one_each(
         kinds(&items),
         [AttentionKind::GithubAuth, AttentionKind::RateLimited]
     );
+    assert_eq!(
+        kinds(&attention_items(
+            &status,
+            &ready(Vec::new()),
+            None,
+            NOW + 600
+        )),
+        [AttentionKind::GithubAuth],
+        "the rate limit reset at its time, with no new status"
+    );
     assert_eq!(items[0].since, Some(NOW - 300), "the earliest failure");
     assert_eq!(
         items[0].title,
@@ -406,12 +422,20 @@ fn many_items_are_capped_and_the_rest_counted_in_core_s_words() {
     let checks: Vec<_> = (0..60)
         .map(|n| check(&format!("check {n:02}"), CheckStatus::Warn))
         .collect();
-    let attention = Attention::new(7, attention_items(&status(), &ready(checks), None, NOW));
+    let attention = Attention::new(
+        "a1".to_owned(),
+        7,
+        attention_items(&status(), &ready(checks), None, NOW),
+    );
     assert_eq!(attention.items.len(), crate::api::ATTENTION_MAX);
     assert_eq!(attention.omitted, 10);
     assert_eq!(attention.more(3).as_deref(), Some("and 57 more"));
     assert_eq!(attention.more(50).as_deref(), Some("and 10 more"));
-    let few = Attention::new(8, attention_items(&status(), &ready(Vec::new()), None, NOW));
+    let few = Attention::new(
+        "a1".to_owned(),
+        8,
+        attention_items(&status(), &ready(Vec::new()), None, NOW),
+    );
     assert_eq!(few.more(3), None, "nothing left out");
 }
 
@@ -419,12 +443,21 @@ fn many_items_are_capped_and_the_rest_counted_in_core_s_words() {
 fn the_same_items_are_the_same_content_at_any_revision_and_one_replaced_is_not() {
     let one = ready(vec![check("slice", CheckStatus::Warn)]);
     let other = ready(vec![check("sysbox", CheckStatus::Warn)]);
-    let first = Attention::new(1, attention_items(&status(), &one, None, NOW));
+    let first = Attention::new(
+        "a1".to_owned(),
+        1,
+        attention_items(&status(), &one, None, NOW),
+    );
     assert!(first.same_content(&Attention::new(
+        "a2".to_owned(),
         2,
         attention_items(&status(), &one, None, NOW)
     )));
-    let replaced = Attention::new(2, attention_items(&status(), &other, None, NOW));
+    let replaced = Attention::new(
+        "a1".to_owned(),
+        2,
+        attention_items(&status(), &other, None, NOW),
+    );
     assert_eq!(replaced.items.len(), first.items.len());
     assert!(
         !first.same_content(&replaced),
@@ -435,6 +468,7 @@ fn the_same_items_are_the_same_content_at_any_revision_and_one_replaced_is_not()
 #[test]
 fn a_client_reads_items_of_kinds_subjects_fixes_and_tones_a_newer_daemon_names() {
     let future = r#"{
+        "instance": "4f1c-2",
         "revision": 9,
         "items": [
             {"key": "k1", "kind": "disk-full", "tone": "alarm", "title": "Disk is full",

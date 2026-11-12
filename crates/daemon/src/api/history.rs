@@ -144,9 +144,11 @@ pub(super) async fn sizing(
     }
 }
 
-/// The advice for the config the daemon runs with, from the history in `window`, against the slice's `MemoryMax`
-/// read now, as a config check reads it: one raised since the daemon started counts without a restart.
-pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizing, String> {
+/// The job history the sizing advice reads for `window`, with auto sizing's changes recorded in it.
+pub(super) async fn sizing_history(
+    state: &AppState,
+    window: Window,
+) -> Result<runnerd_core::sizing::History, String> {
     // The windows always read the last 30 days; `since` narrows only the waits, the busy share and the starts.
     let mut history = state
         .handle
@@ -160,6 +162,13 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
     super::auto::recorded(state, &mut history, &auto, window)
         .await
         .map_err(|store_error| store_error.to_string())?;
+    Ok(history)
+}
+
+/// The advice for the config the daemon runs with, from the history in `window`, against the slice's `MemoryMax`
+/// read now, as a config check reads it: one raised since the daemon started counts without a restart.
+pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizing, String> {
+    let history = sizing_history(state, window).await?;
     let text = state.config.lock().await.text.clone();
     let config = Config::parse(&text).map_err(|parse_error| parse_error.to_string())?;
     let (read, slice) = (state.memory_max, config.host.slice.clone());
