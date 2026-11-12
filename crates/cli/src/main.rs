@@ -10,10 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use runnerd_core::api::{
-    Caches, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event, EventQuery, Insights,
-    InsightsQuery, Job, JobPage, JobQuery, JobState, LogQuery, NotifyTest, NotifyTestQuery,
-    PairingQuery, Pairings, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
-    Resize, Savings, ShellQuery, Sizing, SizingQuery, Status,
+    ActionQuery, ActionResult, Caches, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event,
+    EventQuery, Insights, InsightsQuery, Job, JobAction, JobPage, JobQuery, JobState, LogQuery,
+    NotifyTest, NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
+    RemoveRecordsQuery, RemovedRecords, Resize, Savings, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
@@ -27,7 +27,7 @@ mod tui;
 mod watch;
 
 use output::fail;
-use runnerd_core::client::{Body, Client, ClientError, Method, StatusCode};
+use runnerd_core::client::{Body, Client, ClientError, JobActionAnswer, Method, StatusCode};
 
 /// Command-line client for the runnerd daemon.
 #[derive(Parser)]
@@ -112,6 +112,25 @@ enum Command {
         /// Cancel the running jobs' workflow runs and remove their runners.
         #[arg(long)]
         force: bool,
+    },
+    /// Cancel a job's workflow run on GitHub: every job of the run still queued or running stops. Shows what it would
+    /// do and the command that sends it, with the confirmation the daemon issued for what it showed.
+    Cancel {
+        /// The job's ID, as `runnerctl jobs` lists it.
+        job: u64,
+        #[command(flatten)]
+        send: Sending,
+    },
+    /// Re-run a job on GitHub, with the jobs that depend on it, in a new attempt of its run. Shows what it would do and
+    /// the command that sends it, with the confirmation the daemon issued for what it showed.
+    Rerun {
+        /// The job's ID, as `runnerctl jobs` lists it.
+        job: u64,
+        /// Re-run the failed jobs of the job's run instead, with the jobs that depend on them.
+        #[arg(long)]
+        failed: bool,
+        #[command(flatten)]
+        send: Sending,
     },
     /// Let a paused repository, or every one, get runners again.
     Resume {
@@ -456,6 +475,17 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         } => {
             return pause(client, json, &Target::new(repository)?, force).await;
         }
+        Command::Cancel { job, send } => {
+            return job_action(client, json, paint, job, JobAction::Cancel, send.into()).await;
+        }
+        Command::Rerun { job, failed, send } => {
+            let action = if failed {
+                JobAction::RerunFailed
+            } else {
+                JobAction::Rerun
+            };
+            return job_action(client, json, paint, job, action, send.into()).await;
+        }
         Command::Resume { repository, .. } => {
             let target = Target::new(repository)?;
             client.post(&format!("{}/resume", target.path), &()).await?;
@@ -601,6 +631,126 @@ async fn pause(
     }
     output::line(paused.line(&target.name));
     Ok(ExitCode::SUCCESS)
+}
+
+/// What `runnerctl cancel` and `rerun` do with the daemon's preview.
+enum Send {
+    /// Show it, and the command that sends it.
+    Show,
+    /// Send what an earlier preview showed, with its confirmation.
+    Confirmed(String),
+    /// Read a preview and send it without showing it: for scripts.
+    Unseen,
+}
+
+/// How `runnerctl cancel` and `rerun` send.
+#[derive(clap::Args)]
+struct Sending {
+    /// Send what a preview showed: its confirmation, valid for 5 minutes and once.
+    #[arg(long, value_name = "TOKEN", conflicts_with = "force")]
+    confirm: Option<String>,
+    /// Send it without showing what it does first, for scripts.
+    #[arg(long)]
+    force: bool,
+}
+
+impl From<Sending> for Send {
+    fn from(sending: Sending) -> Send {
+        match sending {
+            Sending {
+                confirm: Some(token),
+                ..
+            } => Send::Confirmed(token),
+            Sending {
+                confirm: None,
+                force: true,
+            } => Send::Unseen,
+            Sending {
+                confirm: None,
+                force: false,
+            } => Send::Show,
+        }
+    }
+}
+
+/// Cancels or re-runs a job (ADR 0134). Without a flag it shows the daemon's preview and the command that sends it,
+/// with the confirmation issued for what it showed; `--confirm` sends that; `--force` sends a preview unseen.
+async fn job_action(
+    client: &Client,
+    json: bool,
+    paint: human::Paint,
+    job: u64,
+    action: JobAction,
+    send: Send,
+) -> Result<ExitCode, Error> {
+    let failed = action == JobAction::RerunFailed;
+    let token = match send {
+        Send::Confirmed(token) => token,
+        Send::Show | Send::Unseen => {
+            let preview = match client
+                .job_action(job, action, &ActionQuery::default())
+                .await
+            {
+                Ok(JobActionAnswer::Confirm(preview)) => preview,
+                Ok(JobActionAnswer::Done(result)) => return action_done(json, paint, &result),
+                Err(error) if error.is_unsupported() => {
+                    let why = runnerd_core::api::JobActions::Unsupported.why_not();
+                    return Err(Error::Local(why.unwrap_or_default().to_owned()));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match (send, preview.confirm.clone()) {
+                (Send::Unseen, Some(token)) => token,
+                _ => return Err(shown(&preview, paint, job, action)),
+            }
+        }
+    };
+    let confirmed = ActionQuery {
+        force: true,
+        confirm: Some(token),
+        failed,
+    };
+    match client.job_action(job, action, &confirmed).await? {
+        JobActionAnswer::Done(result) => action_done(json, paint, &result),
+        // The confirmation no longer holds: nothing was sent; show the new preview and its own command.
+        JobActionAnswer::Confirm(preview) => Err(shown(&preview, paint, job, action)),
+    }
+}
+
+/// A preview, and the command that sends what it shows, or why nothing can be.
+fn shown(
+    preview: &runnerd_core::api::ActionPreview,
+    paint: human::Paint,
+    job: u64,
+    action: JobAction,
+) -> Error {
+    let shown = human::action_preview(preview, paint);
+    let Some(token) = &preview.confirm else {
+        return Error::Local(format!(
+            "{shown}nothing can be sent until runnerd can read the run"
+        ));
+    };
+    let command = match action {
+        JobAction::RerunFailed => format!("runnerctl rerun {job} --failed --confirm {token}"),
+        JobAction::Rerun => format!("runnerctl rerun {job} --confirm {token}"),
+        JobAction::Cancel | JobAction::Unsupported => {
+            format!("runnerctl cancel {job} --confirm {token}")
+        }
+    };
+    let minutes = runnerd_core::api::CONFIRM_SECS / 60;
+    Error::Local(format!(
+        "{shown}`{command}` sends what this shows, once, within {minutes} minutes"
+    ))
+}
+
+/// Prints how GitHub took a job action; fails unless it took it or there was nothing to do.
+fn action_done(json: bool, paint: human::Paint, result: &ActionResult) -> Result<ExitCode, Error> {
+    if json {
+        print_json(result)?;
+    } else {
+        output::line(human::action_result(result, paint));
+    }
+    Ok(exit(result.succeeded()))
 }
 
 /// Asks for a reseed and, unless `no_wait`, waits for its `cache.reseeded`. The event stream is open before the

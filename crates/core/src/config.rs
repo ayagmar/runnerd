@@ -46,6 +46,9 @@ pub struct Config {
     /// Where the daemon sends notifications; none by default.
     #[serde(default)]
     pub notify: Notify,
+    /// What runnerd may ask of GitHub on the owner's behalf.
+    #[serde(default)]
+    pub github: Github,
 }
 
 /// `[host]`: where runner containers run and how they are isolated.
@@ -542,6 +545,22 @@ impl Web {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// `[github]`: what runnerd may ask of GitHub on the owner's behalf (ADR 0134). A config with it is one the daemons
+/// before 0.2 refuse.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Github {
+    /// Whether `POST /v1/jobs/{id}/cancel` and `POST /v1/jobs/{id}/rerun` may cancel a job's run or re-run it on
+    /// GitHub. Default on; off, both answer 403. A forced pause cancels runs either way.
+    pub job_actions: bool,
+}
+
+impl Default for Github {
+    fn default() -> Github {
+        Github { job_actions: true }
     }
 }
 

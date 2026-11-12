@@ -6,7 +6,7 @@
 //! 0026). It must not serve HTTP or write the config file: the daemon does, through `Commit`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use super::records::RecordSelection;
 use super::stop::Stop;
 use super::{Engine, Occupant, Slot};
+use crate::actions::policy::{Policies, Policy};
 use crate::api;
 use crate::cache;
 use crate::config::{ByteSize, Config};
@@ -254,6 +255,9 @@ pub struct Control {
     // remove or read.
     repositories: Mutex<BTreeSet<String>>,
     paused: Mutex<BTreeSet<String>>,
+    /// What the config lets the job actions do, which the engine sets at start and at each reload before it answers,
+    /// so the job actions check the config of the moment they are sent, as one snapshot (ADR 0134).
+    actions: Policies,
     /// Where `paused` is recorded.
     store: Store,
     shutdown: watch::Sender<Stop>,
@@ -279,6 +283,7 @@ impl Control {
         drop(store.paused(paused.iter().cloned().collect()));
         let (commands, receiver) = mpsc::unbounded_channel();
         let control = Control {
+            actions: Policies::new(api::JobActions::On, repositories.clone()),
             repositories: Mutex::new(repositories),
             paused: Mutex::new(paused),
             store,
@@ -365,7 +370,7 @@ impl Control {
     }
 
     /// Replaces the configured repositories; the removed ones are no longer paused, in the store too.
-    fn set_repositories(&self, repositories: BTreeSet<String>) {
+    pub(crate) fn set_repositories(&self, repositories: BTreeSet<String>) {
         let mut configured = lock(&self.repositories);
         let mut paused = lock(&self.paused);
         let before = paused.len();
@@ -388,6 +393,24 @@ impl Control {
     /// Whether the repository is paused.
     pub fn is_paused(&self, repository: &str) -> bool {
         lock(&self.paused).contains(repository)
+    }
+
+    /// What the config of this moment lets the owner do with jobs (ADR 0134): one snapshot.
+    pub fn action_policy(&self) -> Arc<Policy> {
+        self.actions.now()
+    }
+
+    /// Replaces that snapshot whole, from `[github] job_actions` and the configured repositories: the engine does at
+    /// start and at each reload.
+    pub fn set_action_policy(&self, setting: api::JobActions, repositories: BTreeSet<String>) {
+        self.actions.replace(setting, repositories);
+    }
+
+    /// Resolves once a stop of any mode is asked for: what is sent to GitHub on the owner's behalf ends then.
+    pub async fn stop_asked(&self) {
+        let mut mode = self.shutdown.subscribe();
+        // `self` holds the sender, so the wait ends only once a stop is asked for.
+        let _ = mode.wait_for(|stop| stop.mode() != Shutdown::No).await;
     }
 
     async fn send<T>(
@@ -933,6 +956,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (name, state) in self.repositories.iter_listed_mut() {
             state.forget_waits(|profile| config.pool_in(name, profile).is_some());
         }
+        self.control.set_action_policy(
+            api::JobActions::configured(self.config.github.job_actions),
+            names.clone(),
+        );
         self.control.set_repositories(names);
         let profiles = &self.config.profiles;
         self.upkeep

@@ -28,7 +28,10 @@ mod lens;
 mod outline;
 mod prune;
 mod read;
+mod run;
 mod write;
+
+pub use run::RunJobs;
 
 /// The schema a new database is created with, at [`VERSION`].
 const SCHEMA: &str = include_str!("store/schema.sql");
@@ -982,6 +985,19 @@ impl Store {
     /// A job with its steps.
     pub async fn job(&self, id: u64) -> Result<Option<api::Job>, StoreError> {
         self.read(move |db| read::job(db, id)).await
+    }
+
+    /// Up to `limit` other jobs of `repository`'s run `run` than `except`, newest attempt first (ADR 0134).
+    pub async fn run_jobs(
+        &self,
+        repository: &str,
+        run: u64,
+        except: u64,
+        limit: usize,
+    ) -> Result<RunJobs, StoreError> {
+        let repository = repository.to_owned();
+        self.read(move |db| run::run_jobs(db, &repository, run, except, limit))
+            .await
     }
 
     /// A job's samples, oldest first; `None` if there is no such job.

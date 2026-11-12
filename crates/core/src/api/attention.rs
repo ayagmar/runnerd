@@ -384,6 +384,8 @@ fn doctor_items(doctor: &Doctor, now: u64) -> Vec<AttentionItem> {
         .checks
         .iter()
         .filter(|check| matches!(check.status, CheckStatus::Fail | CheckStatus::Warn))
+        // Advisory whatever it says: only GitHub's answer to a real action is evidence (ADR 0134).
+        .filter(|check| check.name != super::JOB_ACTIONS_CHECK)
         .collect();
     let mut keys: Vec<String> = Vec::new();
     shown

@@ -20,9 +20,10 @@ use tokio::net::UnixStream;
 pub use hyper::{Method, StatusCode};
 
 use crate::api::{
-    Busy, CompareQuery, ErrorResponse, EventEnvelope, EventQuery, JobComparison, JobList, JobQuery,
-    LogLinesQuery, LogOutline, LogQuery, LogSearch, LogSearchQuery, RunningJob, SHELL_PROTOCOL,
-    ShellQuery, SlotTimeline, StyledLine, TimelineQuery,
+    ActionPreview, ActionQuery, ActionResult, Busy, CompareQuery, ErrorResponse, EventEnvelope,
+    EventQuery, JobAction, JobComparison, JobList, JobQuery, LogLinesQuery, LogOutline, LogQuery,
+    LogSearch, LogSearchQuery, RunningJob, SHELL_PROTOCOL, ShellQuery, SlotTimeline, StyledLine,
+    TimelineQuery,
 };
 
 /// A shell's terminal on the daemon's socket: raw bytes both ways until either side closes.
@@ -45,6 +46,15 @@ impl Default for Timeouts {
             idle: Duration::from_secs(45),
         }
     }
+}
+
+/// What `POST /v1/jobs/{id}/cancel` or `POST /v1/jobs/{id}/rerun` answered (ADR 0134).
+#[derive(Debug)]
+pub enum JobActionAnswer {
+    /// Not confirmed: nothing was sent. Show it and send its `confirm` with `force` to act.
+    Confirm(Box<ActionPreview>),
+    /// GitHub was asked, and this is how it took it.
+    Done(ActionResult),
 }
 
 /// What the daemon answers, with 404, a route it does not serve.
@@ -398,6 +408,44 @@ impl Client {
             }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// `POST /v1/jobs/{id}/cancel` for [`JobAction::Cancel`], `POST /v1/jobs/{id}/rerun` for a re-run, of the run's
+    /// failed jobs with [`JobAction::RerunFailed`] or `query.failed` (ADR 0134). A 409 with a preview is
+    /// [`JobActionAnswer::Confirm`]; any other refusal a [`ClientError::Api`]; a daemon without the routes, before
+    /// 0.2, fails with an error that [`ClientError::is_unsupported`] reads.
+    pub async fn job_action(
+        &self,
+        id: u64,
+        action: JobAction,
+        query: &ActionQuery,
+    ) -> Result<JobActionAnswer, ClientError> {
+        let route = match action {
+            JobAction::Cancel => "cancel",
+            JobAction::Rerun | JobAction::RerunFailed => "rerun",
+            JobAction::Unsupported => {
+                return Err(ClientError::Decode("no such job action".to_owned()));
+            }
+        };
+        let query = ActionQuery {
+            failed: query.failed || action == JobAction::RerunFailed,
+            ..query.clone()
+        };
+        let path = with_query(&format!("/v1/jobs/{id}/{route}"), &query)?;
+        let reply = self.request(Method::POST, &path, None).await?;
+        if reply.status == StatusCode::CONFLICT
+            && let Ok(preview) = serde_json::from_slice::<ActionPreview>(&reply.body)
+        {
+            return Ok(JobActionAnswer::Confirm(Box::new(preview)));
+        }
+        if reply.status.is_success() {
+            return decode(&reply.body).map(JobActionAnswer::Done);
+        }
+        Err(ClientError::Api {
+            status: reply.status,
+            message: reply.message(),
+            jobs: Vec::new(),
+        })
     }
 
     /// `GET /v1/jobs/{id}/logs`: the job's log, as lines. Unless followed, each part of the body must come within the

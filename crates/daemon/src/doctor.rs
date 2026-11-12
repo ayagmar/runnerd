@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use runnerd_core::admission::host;
 use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
+use runnerd_core::command;
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::isolation::modules_check;
@@ -34,8 +35,8 @@ pub(crate) struct Host {
     pub os_release: String,
     /// `None` without a config, which names the slice.
     pub slice: Option<Result<Slice, String>>,
-    /// The scopes of `gh`'s token for github.com.
-    pub gh_scopes: Result<Vec<String>, String>,
+    /// `gh`'s token for github.com: its scopes and kind.
+    pub gh: Result<GhAuth, String>,
     /// Each configured repository's visibility as GitHub names it (`public`, `private`, `internal`), by name; empty
     /// without a config.
     pub visibility: BTreeMap<String, Result<String, String>>,
@@ -50,6 +51,33 @@ pub(crate) struct Host {
     pub memory: Option<api::HostMemory>,
     /// The config's file; `None` without one, or when it cannot be read.
     pub config_file: Option<ConfigFile>,
+}
+
+/// What `gh auth status` says of the active account's token for github.com, never the token itself.
+pub(crate) struct GhAuth {
+    /// Its OAuth scopes; a fine-grained token has none.
+    pub scopes: Vec<String>,
+    pub kind: TokenKind,
+}
+
+/// What kind of token `gh` holds, by its prefix, which gh's own `--jq` reads so the token never leaves gh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenKind {
+    /// A classic personal access token, `ghp_`: its scopes say what it may do.
+    Classic,
+    /// `gh auth login`'s OAuth token, `gho_`: its scopes say what it may do.
+    OAuth,
+    /// A fine-grained personal access token, `github_pat_`: GitHub does not show its permissions.
+    FineGrained,
+    /// Another kind, or one gh did not show.
+    Other,
+}
+
+impl TokenKind {
+    /// Whether its scopes say what it may do.
+    fn scoped(self) -> bool {
+        matches!(self, TokenKind::Classic | TokenKind::OAuth)
+    }
 }
 
 /// The running kernel, whose modules Sysbox mounts into every runner.
@@ -130,7 +158,7 @@ impl Host {
             .map(|repository| repository.name.as_str())
             .collect();
         std::thread::scope(|scope| {
-            let gh_scopes = scope.spawn(read_gh_scopes);
+            let gh = scope.spawn(read_gh);
             let visibility = scope.spawn(|| read_each(&names, |name: &&str| read_visibility(name)));
             let docker = scope.spawn(|| {
                 let docker = read_docker();
@@ -175,13 +203,13 @@ impl Host {
                     ..memory
                 })
             };
-            let gh_scopes = joined(gh_scopes);
+            let gh = joined(gh);
             let visibility = names
                 .iter()
                 .zip(joined(visibility))
                 .map(|(name, read)| {
                     // Without gh logged in, what it said of a repository is only that.
-                    let visibility = match &gh_scopes {
+                    let visibility = match &gh {
                         Ok(_) => read,
                         Err(_) => Err("needs gh logged in to github.com".to_owned()),
                     };
@@ -200,7 +228,7 @@ impl Host {
                 sizing: None,
                 os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
                 slice,
-                gh_scopes,
+                gh,
                 visibility,
                 sysbox_daemons,
                 sysbox_unit,
@@ -475,7 +503,7 @@ fn read_slice(slice: &str) -> Result<Slice, String> {
     })
 }
 
-fn read_gh_scopes() -> Result<Vec<String>, String> {
+fn read_gh() -> Result<GhAuth, String> {
     let output = output(Command::new("gh").args([
         "auth",
         "status",
@@ -483,19 +511,25 @@ fn read_gh_scopes() -> Result<Vec<String>, String> {
         "github.com",
         "--json",
         "hosts",
+        // Only gh's own jq below reads the token: what is printed is its kind.
+        "--show-token",
         "--jq",
-        // Prefixed, so an account without scopes prints a line where none logged in prints nothing.
-        r#".hosts["github.com"][]? | select(.active) | "active:" + (.scopes // "")"#,
+        GH_AUTH_JQ,
     ]))
     .map_err(|error| format!("cannot run gh: {error}"))?;
-    gh_scopes(&output)
+    gh_auth(&output)
 }
 
-/// The scopes in what `read_gh_scopes`'s `gh auth status` printed: `Err` when no account is logged in, which `gh`
-/// says on stderr while it succeeds.
-fn gh_scopes(output: &Output) -> Result<Vec<String>, String> {
+/// The active account's scopes, prefixed, so an account without scopes prints a line where none logged in prints
+/// nothing; then its token's kind by its prefix, never the token.
+const GH_AUTH_JQ: &str = r#".hosts["github.com"][]? | select(.active) | "active:" + (.scopes // "") + "\ntoken:" + ((.token // "") | if startswith("github_pat_") then "fine-grained" elif startswith("ghp_") then "classic" elif startswith("gho_") then "oauth" else "other" end)"#;
+
+/// What `read_gh`'s `gh auth status` printed: `Err` when no account is logged in, which `gh` says on stderr while it
+/// succeeds.
+fn gh_auth(output: &Output) -> Result<GhAuth, String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let scopes = stdout.trim().strip_prefix("active:");
+    let mut lines = stdout.trim().lines();
+    let scopes = lines.next().and_then(|line| line.strip_prefix("active:"));
     let (true, Some(scopes)) = (output.status.success(), scopes) else {
         let why = first_line(&output.stderr);
         return Err(if why.is_empty() {
@@ -504,11 +538,20 @@ fn gh_scopes(output: &Output) -> Result<Vec<String>, String> {
             format!("gh is not logged in to github.com: {why}")
         });
     };
-    Ok(scopes
-        .split(',')
-        .map(|scope| scope.trim().to_owned())
-        .filter(|scope| !scope.is_empty())
-        .collect())
+    let kind = match lines.next().and_then(|line| line.strip_prefix("token:")) {
+        Some("classic") => TokenKind::Classic,
+        Some("oauth") => TokenKind::OAuth,
+        Some("fine-grained") => TokenKind::FineGrained,
+        _ => TokenKind::Other,
+    };
+    Ok(GhAuth {
+        scopes: scopes
+            .split(',')
+            .map(|scope| scope.trim().to_owned())
+            .filter(|scope| !scope.is_empty())
+            .collect(),
+        kind,
+    })
 }
 
 /// The first line of a command's error output, where `gh` says what failed; the rest is advice.
@@ -677,25 +720,8 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     if let Some(sizing) = &host.sizing {
         checks.push(sizing_check(sizing));
     }
-    checks.push(match &host.gh_scopes {
-        Ok(scopes) if scopes.iter().any(|s| s == "repo") => pass(
-            "gh",
-            "logged in to github.com with the repo scope".to_owned(),
-        ),
-        Ok(scopes) => fail(
-            "gh",
-            format!(
-                "the token has scopes {scopes:?} but not repo, which runner registration needs"
-            ),
-            "gh auth refresh --hostname github.com --scopes repo",
-        ),
-        Err(error) => fail(
-            "gh",
-            error.clone(),
-            "install the GitHub CLI (https://cli.github.com), then:\n\
-             gh auth login --hostname github.com --scopes repo",
-        ),
-    });
+    checks.push(gh_check(&host.gh));
+    checks.push(job_actions_check(&host.gh, config));
     checks.extend(
         host.visibility
             .iter()
@@ -715,6 +741,89 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         fix: None,
     });
     checks
+}
+
+/// Whether `gh`'s token can register runners: a classic or OAuth token by its `repo` scope. A fine-grained token
+/// shows no scopes, and GitHub does not show its permissions, so it is not failed for lacking `repo`.
+fn gh_check(gh: &Result<GhAuth, String>) -> Check {
+    match gh {
+        Ok(auth) if auth.scopes.iter().any(|s| s == "repo") => pass(
+            "gh",
+            "logged in to github.com with the repo scope".to_owned(),
+        ),
+        Ok(auth) if auth.kind.scoped() => fail(
+            "gh",
+            format!(
+                "the token has scopes {:?} but not repo, which runner registration needs",
+                auth.scopes
+            ),
+            "gh auth refresh --hostname github.com --scopes repo",
+        ),
+        Ok(auth) => Check {
+            name: "gh".to_owned(),
+            status: Status::Info,
+            detail: format!(
+                "logged in to github.com with {}, whose permissions GitHub does not show: runner registration \
+                 needs Administration: write on each repository",
+                token_words(auth.kind)
+            ),
+            fix: None,
+        },
+        Err(error) => fail(
+            "gh",
+            error.clone(),
+            "install the GitHub CLI (https://cli.github.com), then:\n\
+             gh auth login --hostname github.com --scopes repo",
+        ),
+    }
+}
+
+/// "a fine-grained token" or "a token": what a check calls a token whose permissions it cannot read.
+fn token_words(kind: TokenKind) -> &'static str {
+    match kind {
+        TokenKind::FineGrained => "a fine-grained token",
+        TokenKind::Classic | TokenKind::OAuth | TokenKind::Other => "a token",
+    }
+}
+
+/// Whether the token can cancel and re-run jobs (ADR 0134), as evidence: it can by a classic or OAuth token's `repo`
+/// scope, cannot without it, and is not verifiable without a write for any other token. Nothing is sent to find out:
+/// the first action's answer decides. The attention list leaves it out (`api::JOB_ACTIONS_CHECK`).
+fn job_actions_check(gh: &Result<GhAuth, String>, config: Option<&Config>) -> Check {
+    let name = api::JOB_ACTIONS_CHECK;
+    let info = |detail: String| Check {
+        name: name.to_owned(),
+        status: Status::Info,
+        detail,
+        fix: None,
+    };
+    if config.is_some_and(|config| !config.github.job_actions) {
+        return info("off: [github] job_actions = false".to_owned());
+    }
+    let Ok(auth) = gh else {
+        return skip(name, "needs gh logged in to github.com");
+    };
+    if auth.scopes.iter().any(|s| s == "repo") {
+        return pass(
+            name,
+            "the token's repo scope lets runnerd cancel and re-run jobs; GitHub's answer to each still decides"
+                .to_owned(),
+        );
+    }
+    if auth.kind.scoped() {
+        return Check {
+            name: name.to_owned(),
+            status: Status::Warn,
+            detail: "the token lacks the repo scope, which cancelling and re-running jobs need"
+                .to_owned(),
+            fix: Some("gh auth refresh --hostname github.com --scopes repo".to_owned()),
+        };
+    }
+    info(format!(
+        "not verifiable without a write: cancelling and re-running need Actions: write on each repository, which \
+         GitHub does not show for {}; the first action's answer says",
+        token_words(auth.kind)
+    ))
 }
 
 fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
@@ -1123,6 +1232,5 @@ fn skip(name: &str, detail: &str) -> Check {
     }
 }
 
-mod command;
 #[cfg(test)]
 mod tests;

@@ -24,6 +24,7 @@ fn runner(reserved: u64) -> RunnerStatus {
 /// `jvm` with two 8G slots, the first running, in a slice of `memory_max`.
 fn status(admission: AdmissionPolicy, memory_max: Option<u64>) -> Status {
     Status {
+        job_actions: crate::api::JobActions::On,
         version: "0.0.0".to_owned(),
         shutting_down: false,
         stopping: None,

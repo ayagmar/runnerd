@@ -52,6 +52,7 @@ impl Drop for TempDir {
 
 fn status() -> Status {
     Status {
+        job_actions: runnerd_core::api::JobActions::On,
         version: "0.0.1".to_owned(),
         shutting_down: false,
         stopping: None,
@@ -185,6 +186,8 @@ struct Fake {
     replaced: Vec<String>,
     /// The query of every config replacement.
     replaced_queries: Vec<Option<String>>,
+    /// The confirmations the job action previews issued, in order.
+    confirmations: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -512,6 +515,8 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/jobs/{id}/logs", get(get_logs))
         .route("/v1/repositories/{owner}/{name}/pause", post(pause))
         .route("/v1/repositories/pause", post(pause_all))
+        .route("/v1/jobs/{id}/cancel", post(cancel))
+        .route("/v1/jobs/{id}/rerun", post(rerun))
         .route(
             "/v1/repositories/resume",
             post(async || StatusCode::NO_CONTENT),
@@ -569,6 +574,96 @@ fn serve(socket: &Path) -> Shared {
         runtime.block_on(async { axum::serve(listener, app).await.unwrap() });
     });
     fake
+}
+
+/// Job 9001 of run 4182 of `halyard/ledger`, at attempt 2, with a sibling whose name carries escapes; GitHub takes
+/// its cancel and refuses re-runs with 403. Without a confirmation it issued for the same action, core's preview with
+/// 409 and a new confirmation, `token-1`, `token-2` and so on.
+fn job_action(
+    fake: &Shared,
+    id: u64,
+    action: runnerd_core::api::JobAction,
+    query: Option<String>,
+) -> Response {
+    use runnerd_core::api::{
+        ActionAnswer, ActionPreview, ActionResult, ActionTarget, PreviewFacts, RunSeen,
+    };
+
+    let query = query.unwrap_or_default();
+    let mut fake = fake.lock().unwrap();
+    fake.requests
+        .push(format!("POST /v1/jobs/{id}/{} {query}", action.slug()));
+    let target = ActionTarget {
+        action,
+        job: id,
+        name: "test".to_owned(),
+        repository: "halyard/ledger".to_owned(),
+        run: 4182,
+        attempt: Some(2),
+    };
+    let issued = |token: &String| token.ends_with(action.slug());
+    let confirmed =
+        serde_urlencoded::from_str::<runnerd_core::api::ActionQuery>(&query).is_ok_and(|query| {
+            query.force
+                && query
+                    .confirm
+                    .is_some_and(|token| fake.confirmations.contains(&token) && issued(&token))
+        });
+    if !confirmed {
+        let token = format!("token-{}-{}", fake.confirmations.len() + 1, action.slug());
+        fake.confirmations.push(token.clone());
+        let mut sibling = job(JobState::Running).summary;
+        sibling.id = 9002;
+        "deploy \u{1b}]52;c;aGk=\u{7}\u{1b}[2Jnow".clone_into(&mut sibling.name);
+        sibling.workflow = Some("CI \u{9b}31mred".to_owned());
+        let preview = ActionPreview::new(PreviewFacts {
+            target,
+            job_attempt: 2,
+            run: RunSeen::Now {
+                attempt: 2,
+                completed: true,
+            },
+            superseded: None,
+            confirm: Some(token),
+            paused: false,
+            siblings: vec![sibling],
+            more: false,
+        });
+        return (StatusCode::CONFLICT, axum::Json(preview)).into_response();
+    }
+    let answer = match action {
+        runnerd_core::api::JobAction::Cancel => ActionAnswer::Accepted { status: 202 },
+        _ => ActionAnswer::Refused {
+            refusal: runnerd_core::api::ActionRefusal::Forbidden,
+            status: Some(403),
+            until: None,
+        },
+    };
+    axum::Json(ActionResult::new(&target, answer, 1_792_000_000)).into_response()
+}
+
+async fn cancel(
+    State(fake): State<Shared>,
+    UrlPath(id): UrlPath<u64>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    job_action(&fake, id, runnerd_core::api::JobAction::Cancel, query)
+}
+
+async fn rerun(
+    State(fake): State<Shared>,
+    UrlPath(id): UrlPath<u64>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let failed = query
+        .as_deref()
+        .is_some_and(|query| query.contains("failed=true"));
+    let action = if failed {
+        runnerd_core::api::JobAction::RerunFailed
+    } else {
+        runnerd_core::api::JobAction::Rerun
+    };
+    job_action(&fake, id, action, query)
 }
 
 fn refuse(status: StatusCode, message: &str) -> Response {
@@ -862,6 +957,76 @@ fn a_pause_while_the_repository_runs_a_job_names_the_job_and_how_to_force_it() {
         stdout(&forced).contains("stopped job 9001 on runnerd-5f2a-jvm-1-k3j9"),
         "{}",
         stdout(&forced)
+    );
+}
+
+/// Without --force, cancel and re-run show what GitHub would do and send nothing; with it, they send what the preview
+/// showed, its confirmation included, and fail unless GitHub took it (ADR 0134).
+#[test]
+fn cancel_and_rerun_show_what_they_do_and_send_only_what_was_shown() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let shown = runnerctl(&socket, &["cancel", "9001"]);
+    assert!(!shown.status.success(), "a preview is no cancel");
+    let error = stderr(&shown);
+    for words in [
+        "Cancel run 4182 (attempt 2) of halyard/ledger?",
+        "GitHub cancels the whole run, not one job",
+        "runnerd knows 1 other job of this run",
+        "`runnerctl cancel 9001 --confirm token-1-cancel` sends what this shows, once, within 5 minutes",
+    ] {
+        assert!(error.contains(words), "{words}: {error}");
+    }
+    assert!(
+        !error
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t'),
+        "no escape or control character from a job's name reaches the terminal: {error:?}"
+    );
+    // The command it printed sends that preview's confirmation, not a new one.
+    let cancelled = runnerctl(&socket, &["cancel", "9001", "--confirm", "token-1-cancel"]);
+    assert!(cancelled.status.success(), "{}", stderr(&cancelled));
+    assert_eq!(
+        stdout(&cancelled),
+        "GitHub is cancelling run 4182 (attempt 2) of halyard/ledger; its jobs end as their runners report it.\n"
+    );
+    // A confirmation the daemon does not take: its new preview and command, nothing sent.
+    let stale = runnerctl(&socket, &["cancel", "9001", "--confirm", "made-up"]);
+    assert!(!stale.status.success(), "nothing was sent");
+    assert!(
+        stderr(&stale).contains("`runnerctl cancel 9001 --confirm token-2-cancel`"),
+        "{}",
+        stderr(&stale)
+    );
+    // --force sends a preview unseen, for scripts.
+    let refused = runnerctl(&socket, &["rerun", "--failed", "--force", "9001"]);
+    assert!(!refused.status.success(), "a refusal fails");
+    assert!(
+        stdout(&refused)
+            .starts_with("GitHub refused to re-run the failed jobs of run 4182 (attempt 2) (403)"),
+        "{}",
+        stdout(&refused)
+    );
+    let shown = runnerctl(&socket, &["rerun", "9001"]);
+    assert!(
+        stderr(&shown).contains("`runnerctl rerun 9001 --confirm token-4-rerun`"),
+        "{}",
+        stderr(&shown)
+    );
+    let both = runnerctl(&socket, &["cancel", "9001", "--force", "--confirm", "x"]);
+    assert!(!both.status.success(), "--force and --confirm conflict");
+    let requests = fake.lock().unwrap().requests.clone();
+    assert_eq!(
+        requests,
+        [
+            "POST /v1/jobs/9001/cancel force=false&failed=false",
+            "POST /v1/jobs/9001/cancel force=true&confirm=token-1-cancel&failed=false",
+            "POST /v1/jobs/9001/cancel force=true&confirm=made-up&failed=false",
+            "POST /v1/jobs/9001/rerun-failed force=false&failed=true",
+            "POST /v1/jobs/9001/rerun-failed force=true&confirm=token-3-rerun-failed&failed=true",
+            "POST /v1/jobs/9001/rerun force=false&failed=false",
+        ]
     );
 }
 

@@ -763,6 +763,31 @@ impl GithubApi for FakeGithub {
         Ok(())
     }
 
+    async fn job_action(
+        &self,
+        repository: &str,
+        request: github::JobActionRequest,
+        permit: &github::Permit<'_>,
+    ) -> Result<u16, github::ActionFailure> {
+        if !permit().await {
+            return Err(github::ActionFailure::Withdrawn);
+        }
+        let mut state = self.0.lock().unwrap();
+        state.call(format!("job action {repository} {request:?}"));
+        Ok(202)
+    }
+
+    async fn action_run(
+        &self,
+        _repository: &str,
+        _run: u64,
+    ) -> Result<github::RunNow, github::ActionFailure> {
+        Ok(github::RunNow {
+            attempt: 1,
+            completed: false,
+        })
+    }
+
     fn spend(&self) -> github::Spend {
         self.0.lock().unwrap().spend()
     }
@@ -3396,6 +3421,61 @@ async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_whi
     tokio::time::advance(super::control::CANCEL_GRACE).await;
     engine.tick(Shutdown::No).await;
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+}
+
+/// The owner's job actions follow `[github] job_actions` at start, at each reload and in the status, and go through the
+/// engine's own GitHub client; off, a forced pause still cancels its runs (ADR 0134).
+#[tokio::test]
+async fn job_actions_follow_the_config_and_a_forced_pause_cancels_without_them() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("job-actions");
+    let off = format!("{CONFIG}\n[github]\njob_actions = false\n");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &off);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().job_actions, api::JobActions::Off);
+    assert!(matches!(
+        handle.actions.ask(1, api::JobAction::Cancel, None).await,
+        Err(crate::actions::ActionError::Forbidden(_))
+    ));
+    engine.tick(Shutdown::No).await;
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
+    assert!(
+        github.calls().iter().any(|call| call == "cancel o/r 1"),
+        "a forced pause cancels with job actions off: {:?}",
+        github.calls()
+    );
+    engine.reload(Config::parse(CONFIG).unwrap(), None, None);
+    engine.publish();
+    assert_eq!(handle.status.borrow().job_actions, api::JobActions::On);
+    let crate::actions::Asked::Preview(preview) = handle
+        .actions
+        .ask(1, api::JobAction::Cancel, None)
+        .await
+        .unwrap()
+    else {
+        panic!("sent without a confirmation");
+    };
+    let crate::actions::Asked::Done(result) = handle
+        .actions
+        .ask(1, api::JobAction::Cancel, preview.confirm.as_deref())
+        .await
+        .unwrap()
+    else {
+        panic!("not sent");
+    };
+    assert_eq!(result.outcome, api::ActionOutcome::Accepted);
+    assert!(
+        github
+            .calls()
+            .iter()
+            .any(|call| call == "job action o/r CancelRun { run: 1 }"),
+        "{:?}",
+        github.calls()
+    );
 }
 
 /// A forced pause's grace for a cancelled run goes on over a restart: the runner that still runs once it ends is

@@ -13,6 +13,8 @@ mod log;
 mod query;
 mod timeline;
 
+pub(crate) use log::plain;
+
 #[cfg(feature = "host")]
 pub(crate) use compare::SAMPLE_GAP_INTERVALS;
 pub use compare::{

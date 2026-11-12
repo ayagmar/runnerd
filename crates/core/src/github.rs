@@ -1,26 +1,31 @@
 //! The GitHub REST API as the scheduler and the history need it: queued jobs, a job's steps, just-in-time runner
-//! configs, repository runners and cancelling a run. Owns the token, the pages of a listing, conditional requests and
-//! the answers kept for them, rate-limit backoff, and the count of what it asks and the limit it last read. It must
-//! never put the token in a log line, a `Debug` output or an error, nor send it anywhere but its base URL, and it
-//! decides nothing about scheduling.
+//! configs, repository runners, cancelling a run, and the owner's job actions (ADR 0134). Owns the token (`token`),
+//! the pages of a listing, conditional requests and the answers kept for them, rate-limit backoff, and the count of
+//! what it asks and the limit it last read. It must never put the token in a log line, a `Debug` output or an error,
+//! nor send it anywhere but its base URL, and it decides nothing about scheduling. A job action's request is read for
+//! its status and headers only: its body is never read, and what it returns is a class and a status, never text.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use futures_util::future::BoxFuture;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tracing::info;
 
+use self::token::Tokens;
 use crate::api;
+use crate::command;
 use crate::docker::JitConfig;
 use crate::sync::lock;
 use crate::time;
 
 mod requests;
+mod token;
 
 use requests::Counter;
 pub use requests::{Class, RateLimit, Report, Spend, Tally};
@@ -71,12 +76,19 @@ impl fmt::Debug for Token {
 /// Where the client gets a token: at start and again when GitHub answers 401.
 pub type TokenSource = Box<dyn Fn() -> Result<Token, Error> + Send + Sync>;
 
-/// The `gh` CLI's token for github.com (`gh auth token`).
+/// How long `gh auth token` may take, a keyring's prompt included, before its process group is killed: under a job
+/// action's deadline, so the action can still say what happened.
+pub const TOKEN_DEADLINE: Duration = Duration::from_secs(15);
+
+/// The `gh` CLI's token for github.com (`gh auth token`), in a process group of its own killed past
+/// [`TOKEN_DEADLINE`] or once the daemon stops (`command::RUNNING`).
 pub fn gh_token() -> Result<Token, Error> {
-    let output = std::process::Command::new("gh")
-        .args(["auth", "token", "--hostname", "github.com"])
-        .output()
-        .map_err(|error| Error::Token(format!("cannot run gh: {error}")))?;
+    let output = command::output_within(
+        std::process::Command::new("gh").args(["auth", "token", "--hostname", "github.com"]),
+        TOKEN_DEADLINE,
+        &command::RUNNING,
+    )
+    .map_err(|error| Error::Token(format!("cannot run gh: {error}")))?;
     if !output.status.success() {
         return Err(Error::Token(format!(
             "gh auth token failed: {}",
@@ -308,6 +320,106 @@ pub enum Deleted {
     Busy,
 }
 
+/// A write the owner asks for through `POST /v1/jobs/{id}/cancel` and `POST /v1/jobs/{id}/rerun` (ADR 0134).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobActionRequest {
+    /// `POST /repos/{owner}/{repo}/actions/runs/{run}/cancel`: the whole run.
+    CancelRun {
+        /// The run.
+        run: u64,
+    },
+    /// `POST /repos/{owner}/{repo}/actions/jobs/{job}/rerun`: the job and the jobs that depend on it.
+    RerunJob {
+        /// The job.
+        job: u64,
+    },
+    /// `POST /repos/{owner}/{repo}/actions/runs/{run}/rerun-failed-jobs`: the run's failed jobs and their dependents.
+    RerunFailed {
+        /// The run.
+        run: u64,
+    },
+}
+
+impl JobActionRequest {
+    fn path(self, repository: &str) -> String {
+        match self {
+            JobActionRequest::CancelRun { run } => {
+                format!("/repos/{repository}/actions/runs/{run}/cancel")
+            }
+            JobActionRequest::RerunJob { job } => {
+                format!("/repos/{repository}/actions/jobs/{job}/rerun")
+            }
+            JobActionRequest::RerunFailed { run } => {
+                format!("/repos/{repository}/actions/runs/{run}/rerun-failed-jobs")
+            }
+        }
+    }
+}
+
+/// A workflow run as a job action needs it: which attempt is current, and whether it completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunNow {
+    /// Its current attempt, from 1.
+    pub attempt: u32,
+    /// Whether GitHub says it completed.
+    pub completed: bool,
+}
+
+/// Why a job action's request, or its read of the run, got no success: a class and a status. Holds no text, so
+/// nothing GitHub wrote, and no token, can leave through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionFailure {
+    /// No token could be read: nothing was sent.
+    NoToken,
+    /// GitHub's rate limit: `status` is GitHub's answer (403 or 429), `None` when runnerd held the request back
+    /// itself, sending nothing.
+    RateLimited {
+        /// The HTTP status GitHub answered with, if it did.
+        status: Option<u16>,
+        /// When requests may resume.
+        until: SystemTime,
+    },
+    /// GitHub answered with this status.
+    Status {
+        /// The HTTP status.
+        status: u16,
+    },
+    /// The connection could not be made: nothing was sent.
+    Unreachable,
+    /// No answer in time; the request may have been sent.
+    TimedOut,
+    /// The connection failed otherwise; the request may have been sent.
+    Broken,
+    /// The caller's permit said no once the token was in hand: nothing was sent.
+    Withdrawn,
+}
+
+/// Asked once a job action's token is in hand and before each send of it, the one after a 401 included: whether it
+/// may still go. It may read GitHub itself; nothing is sent while it runs.
+pub type Permit<'permit> = dyn Fn() -> BoxFuture<'permit, bool> + Send + Sync + 'permit;
+
+impl ActionFailure {
+    /// The class and status of `error`, its text dropped.
+    fn of(error: &Error) -> ActionFailure {
+        match error {
+            Error::Token(_) => ActionFailure::NoToken,
+            Error::RateLimited { until } => ActionFailure::RateLimited {
+                status: None,
+                until: *until,
+            },
+            Error::Status { status, .. } => ActionFailure::Status {
+                status: status.as_u16(),
+            },
+            Error::Http { source, .. } if source.is_connect() => ActionFailure::Unreachable,
+            Error::Http { source, .. } if source.is_timeout() => ActionFailure::TimedOut,
+            Error::Http { .. } | Error::Decode { .. } => ActionFailure::Broken,
+        }
+    }
+}
+
+/// A permit that said no: [`Github::exchange`] sent nothing.
+struct Withdrawn;
+
 /// The GitHub calls the scheduler makes. `Github` is the real client; the engine's tests use a fake.
 pub trait GithubApi: Send + Sync {
     /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
@@ -368,6 +480,23 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         run: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Sends an owner's job action once, and returns GitHub's success status (201, 202, …) without reading its body,
+    /// which is an acknowledgement, not a new job. It is never sent again but after a 401, which GitHub answers before
+    /// it acts. `permit` is asked once the token is in hand, before each send, the 401's second included: when it
+    /// says no, nothing is sent and the answer is [`ActionFailure::Withdrawn`].
+    fn job_action(
+        &self,
+        repository: &str,
+        request: JobActionRequest,
+        permit: &Permit<'_>,
+    ) -> impl Future<Output = Result<u16, ActionFailure>> + Send;
+    /// Reads a workflow run's current attempt and whether it completed, for a job action; failures as a class and a
+    /// status.
+    fn action_run(
+        &self,
+        repository: &str,
+        run: u64,
+    ) -> impl Future<Output = Result<RunNow, ActionFailure>> + Send;
     /// What the reads are paced by (ADR 0127): the rate limit as last read, and the registrations and deletes sent.
     fn spend(&self) -> Spend;
 }
@@ -377,11 +506,8 @@ pub trait GithubApi: Send + Sync {
 pub struct Github {
     http: reqwest::Client,
     base: String,
-    /// Run on Tokio's blocking pool: `gh` may wait on a keyring for seconds.
-    token_source: Arc<dyn Fn() -> Result<Token, Error> + Send + Sync>,
-    /// An async lock, held while the source runs: requests that need a token wait without blocking a worker, and
-    /// concurrent 401s read it once.
-    token: tokio::sync::Mutex<Option<Token>>,
+    /// The token, read on a thread of its own: `gh` may wait on a keyring for seconds.
+    tokens: Tokens,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
     etags: Mutex<Conditional>,
     blocked_until: Mutex<Option<SystemTime>>,
@@ -453,6 +579,14 @@ struct RunBody {
     triggering_actor: Option<Account>,
     #[serde(default)]
     pull_requests: Vec<PullRequestNumber>,
+}
+
+/// A run's attempt and status, as a job action reads them.
+#[derive(Deserialize)]
+struct RunAttemptBody {
+    #[serde(default = "first_attempt")]
+    run_attempt: u32,
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -588,8 +722,7 @@ impl Github {
         Ok(Github {
             http,
             base: base.trim_end_matches('/').to_owned(),
-            token_source: Arc::from(token_source),
-            token: tokio::sync::Mutex::new(None),
+            tokens: Tokens::new(Arc::from(token_source)),
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
             blocked_until: Mutex::new(None),
             requests: Mutex::new(Counter::new(Instant::now(), requests::WINDOW)),
@@ -685,8 +818,8 @@ impl Github {
         Ok(pages)
     }
 
-    /// Sends a request with the token, once more with a fresh token after a 401, conditional on `etag` if given.
-    /// Records the rate limit.
+    /// Sends a request with the token, once more with a fresh token after a 401, conditional on `etag` if given, and
+    /// reads its answer. Records the rate limit.
     async fn send(
         &self,
         method: Method,
@@ -694,14 +827,58 @@ impl Github {
         body: Option<&serde_json::Value>,
         etag: Option<&HeaderValue>,
     ) -> Result<Response, Error> {
+        let Ok(answered) = self
+            .exchange(&method, path, body, etag, || async {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await?;
+        let Answered { response, limited } = answered;
+        let status = response.status();
+        if let Some(until) = limited
+            && matches!(
+                status,
+                StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+            )
+        {
+            return Err(Error::RateLimited { until });
+        }
+        let etag = response.headers().get(header::ETAG).cloned();
+        let next = names_next_page(response.headers());
+        let bytes = response.bytes().await.map_err(|source| Error::Http {
+            method: method.clone(),
+            path: path.to_owned(),
+            source: source.without_url(),
+        })?;
+        Ok(Response {
+            status,
+            etag,
+            next,
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// Sends a request with the token, once more with a fresh token after a 401, and gives its answer unread.
+    /// `permit` is asked once the token is in hand, before each send: when it says no, nothing is sent. Records the
+    /// rate limit, and says when it ends if the answer says it is used up.
+    async fn exchange<W, Allowed: Future<Output = Result<(), W>>>(
+        &self,
+        method: &Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        etag: Option<&HeaderValue>,
+        permit: impl Fn() -> Allowed,
+    ) -> Result<Result<Answered, W>, Error> {
         if let Some(until) = self.blocked_until() {
             return Err(Error::RateLimited { until });
         }
-        let class = Class::of(&method, path);
+        let class = Class::of(method, path);
         // The token GitHub refused, once it did.
         let mut refused: Option<Token> = None;
         loop {
-            let token = self.token(refused.as_ref()).await?;
+            let token = self.tokens.get(refused.as_ref()).await?;
+            if let Err(withdrawn) = permit().await {
+                return Ok(Err(withdrawn));
+            }
             let mut request = self
                 .http
                 .request(method.clone(), format!("{}{path}", self.base))
@@ -725,54 +902,19 @@ impl Github {
                 refused = Some(token);
                 continue;
             }
-            if let Some(until) = rate_limited_until(status, response.headers(), SystemTime::now()) {
+            let limited = rate_limited_until(status, response.headers(), SystemTime::now());
+            if let Some(until) = limited {
                 *lock(&self.blocked_until) = Some(until);
-                if matches!(
-                    status,
-                    StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-                ) {
-                    return Err(Error::RateLimited { until });
-                }
             }
-            let etag = response.headers().get(header::ETAG).cloned();
-            let next = names_next_page(response.headers());
-            let bytes = response.bytes().await.map_err(|source| Error::Http {
-                method: method.clone(),
-                path: path.to_owned(),
-                source: source.without_url(),
-            })?;
-            return Ok(Response {
-                status,
-                etag,
-                next,
-                bytes: bytes.to_vec(),
-            });
+            return Ok(Ok(Answered { response, limited }));
         }
     }
+}
 
-    /// The token, read from the source if there is none yet or it is still the one GitHub `refused`: of several
-    /// requests refused at once, the first reads a new one and the others take it.
-    async fn token(&self, refused: Option<&Token>) -> Result<Token, Error> {
-        let mut token = self.token.lock().await;
-        let stale = match (&*token, refused) {
-            (None, _) => true,
-            (Some(current), Some(refused)) => current.0 == refused.0,
-            (Some(_), None) => false,
-        };
-        if stale {
-            let source = self.token_source.clone();
-            *token = Some(
-                tokio::task::spawn_blocking(move || source())
-                    .await
-                    .map_err(|error| {
-                        Error::Token(format!("the token source stopped: {error}"))
-                    })??,
-            );
-        }
-        token
-            .clone()
-            .ok_or_else(|| Error::Token("the token source returned nothing".to_owned()))
-    }
+/// An answer as it came, its body unread, and when the rate limit it says is used up resets.
+struct Answered {
+    response: reqwest::Response,
+    limited: Option<SystemTime>,
 }
 
 impl GithubApi for Github {
@@ -987,6 +1129,61 @@ impl GithubApi for Github {
             return Ok(());
         }
         expect_success(Method::POST, &path, response).map(|_| ())
+    }
+
+    async fn job_action(
+        &self,
+        repository: &str,
+        request: JobActionRequest,
+        permit: &Permit<'_>,
+    ) -> Result<u16, ActionFailure> {
+        let path = request.path(repository);
+        let allowed = || async {
+            if permit().await {
+                Ok(())
+            } else {
+                Err(Withdrawn)
+            }
+        };
+        let answered = match self
+            .exchange(&Method::POST, &path, None, None, allowed)
+            .await
+        {
+            Ok(Ok(answered)) => answered,
+            Ok(Err(Withdrawn)) => return Err(ActionFailure::Withdrawn),
+            Err(error) => return Err(ActionFailure::of(&error)),
+        };
+        // The body is dropped unread: a 202 is the acknowledgement, whatever follows it or does not.
+        let status = answered.response.status();
+        if let Some(until) = answered.limited
+            && matches!(
+                status,
+                StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+            )
+        {
+            return Err(ActionFailure::RateLimited {
+                status: Some(status.as_u16()),
+                until,
+            });
+        }
+        if status.is_success() {
+            Ok(status.as_u16())
+        } else {
+            Err(ActionFailure::Status {
+                status: status.as_u16(),
+            })
+        }
+    }
+
+    async fn action_run(&self, repository: &str, run: u64) -> Result<RunNow, ActionFailure> {
+        let body: RunAttemptBody = self
+            .get(&format!("/repos/{repository}/actions/runs/{run}"))
+            .await
+            .map_err(|error| ActionFailure::of(&error))?;
+        Ok(RunNow {
+            attempt: body.run_attempt,
+            completed: body.status.as_deref() == Some("completed"),
+        })
     }
 
     fn spend(&self) -> Spend {

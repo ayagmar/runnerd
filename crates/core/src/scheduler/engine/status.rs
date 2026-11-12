@@ -71,6 +71,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let previous = self.status.borrow().clone();
         let announced = self.announced_profiles.take();
         let status = api::Status {
+            job_actions: api::JobActions::configured(self.config.github.job_actions),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: mode != Shutdown::No,
             stopping: mode.stopping(),

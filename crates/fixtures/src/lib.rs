@@ -206,6 +206,7 @@ fn host() -> HostBudget {
 fn status() -> Status {
     let jvm = |slot: usize, runner: Option<RunnerStatus>| SlotStatus { slot, runner };
     Status {
+        job_actions: api::JobActions::On,
         version: "0.0.13".to_owned(),
         // `runnerd stop` waits for the running jobs.
         shutting_down: true,
@@ -1508,6 +1509,222 @@ pub fn attention_facts(attention: &api::Attention, shown: usize) -> AttentionFac
     }
 }
 
+/// The fixtures with `[github] job_actions = false`: clients offer neither cancel nor re-run, and say why
+/// (`api::JobActions::why_not`).
+pub fn job_actions_off() -> Daemon {
+    let mut daemon = daemon();
+    daemon.status.job_actions = api::JobActions::Off;
+    daemon
+}
+
+/// Every step of cancelling and re-running a job (ADR 0134), for the confirm flow each client draws: what it asks
+/// first, then each answer GitHub can give.
+#[derive(Debug, Clone)]
+pub struct JobActionFixtures {
+    /// The 409 previews for [`TIMED_OUT`]: a cancel of its run at attempt 2, with two other jobs of the run, one with
+    /// escapes in its name; a re-run of the job, with none known; a re-run of the run's failed jobs while
+    /// halyard/ledger is paused, with more jobs than shown; a cancel whose earlier confirmation was not taken as the
+    /// run moved to attempt 3; and one whose run GitHub would not show, so it has no confirmation to send.
+    pub previews: Vec<api::ActionPreview>,
+    /// One answer of each kind core words: accepted, already finished, refused (403, 404, the rate limit as GitHub
+    /// answered it and as runnerd held it back, no token, a config changed before the send) and unknown (a server
+    /// error, a timeout, a stop).
+    pub results: Vec<api::ActionResult>,
+}
+
+/// The job actions' previews and answers, as core words them at [`NOW`].
+pub fn job_actions(daemon: &Daemon) -> JobActionFixtures {
+    let Some(job) = daemon.job(TIMED_OUT) else {
+        return JobActionFixtures {
+            previews: Vec::new(),
+            results: Vec::new(),
+        };
+    };
+    let job = &job.summary;
+    let target = |action| api::ActionTarget {
+        action,
+        job: job.id,
+        name: job.name.clone(),
+        repository: job.repository.clone(),
+        run: job.run_id,
+        attempt: Some(2),
+    };
+    // Two other jobs of the run, as the history would have them.
+    let mut siblings: Vec<JobSummary> = [RUNNING, LOST]
+        .iter()
+        .filter_map(|id| daemon.job(*id))
+        .map(|other| JobSummary {
+            repository: job.repository.clone(),
+            run_id: job.run_id,
+            ..other.summary.clone()
+        })
+        .collect();
+    // As a workflow could name a job: core cleans it before a client sees it.
+    if let Some(hostile) = siblings.last_mut() {
+        "deploy \u{1b}]52;c;aGk=\u{7}\u{1b}[2Jnow".clone_into(&mut hostile.name);
+    }
+    let read = api::RunSeen::Now {
+        attempt: 2,
+        completed: false,
+    };
+    let preview = |action, run, superseded, paused, siblings: Vec<JobSummary>, more| {
+        let confirm = matches!(run, api::RunSeen::Now { .. })
+            .then(|| format!("{:032x}", u128::from(job.id) * 0x9e37_79b9));
+        api::ActionPreview::new(api::PreviewFacts {
+            target: target(action),
+            job_attempt: job.run_attempt,
+            run,
+            superseded,
+            confirm,
+            paused,
+            siblings,
+            more,
+        })
+    };
+    let previews = vec![
+        preview(
+            api::JobAction::Cancel,
+            read,
+            None,
+            false,
+            siblings.clone(),
+            false,
+        ),
+        preview(api::JobAction::Rerun, read, None, false, Vec::new(), false),
+        preview(
+            api::JobAction::RerunFailed,
+            read,
+            None,
+            true,
+            siblings.clone(),
+            true,
+        ),
+        preview(
+            api::JobAction::Cancel,
+            api::RunSeen::Now {
+                attempt: 3,
+                completed: false,
+            },
+            Some(api::Superseded::AttemptChanged),
+            false,
+            siblings.clone(),
+            false,
+        ),
+        preview(
+            api::JobAction::Cancel,
+            api::RunSeen::Unread { status: Some(404) },
+            None,
+            false,
+            siblings,
+            false,
+        ),
+    ];
+    JobActionFixtures {
+        previews,
+        results: action_results(&target(api::JobAction::Cancel)),
+    }
+}
+
+/// One answer of each kind core words, for `target`'s job.
+fn action_results(target: &api::ActionTarget) -> Vec<api::ActionResult> {
+    let refused = |refusal, status, until| api::ActionAnswer::Refused {
+        refusal,
+        status,
+        until,
+    };
+    let unknown = |cause, status| api::ActionAnswer::Unknown { cause, status };
+    [
+        (
+            api::JobAction::Cancel,
+            api::ActionAnswer::Accepted { status: 202 },
+        ),
+        (
+            api::JobAction::Rerun,
+            api::ActionAnswer::Accepted { status: 201 },
+        ),
+        (
+            api::JobAction::RerunFailed,
+            api::ActionAnswer::Accepted { status: 201 },
+        ),
+        (
+            api::JobAction::Cancel,
+            api::ActionAnswer::AlreadyFinished { status: 409 },
+        ),
+        (
+            api::JobAction::Rerun,
+            refused(api::ActionRefusal::Forbidden, Some(403), None),
+        ),
+        (
+            api::JobAction::Cancel,
+            refused(api::ActionRefusal::NotFound, Some(404), None),
+        ),
+        (
+            api::JobAction::Rerun,
+            refused(api::ActionRefusal::RateLimited, None, Some(NOW + 754)),
+        ),
+        (
+            api::JobAction::Cancel,
+            refused(api::ActionRefusal::NoToken, None, None),
+        ),
+        (
+            api::JobAction::Rerun,
+            refused(api::ActionRefusal::RateLimited, Some(429), Some(NOW + 60)),
+        ),
+        (
+            api::JobAction::Cancel,
+            refused(api::ActionRefusal::Withdrawn, None, None),
+        ),
+        (
+            api::JobAction::Rerun,
+            unknown(api::UnknownCause::ServerError, Some(500)),
+        ),
+        (
+            api::JobAction::Cancel,
+            unknown(api::UnknownCause::TimedOut, None),
+        ),
+        (
+            api::JobAction::RerunFailed,
+            unknown(api::UnknownCause::Stopping, None),
+        ),
+    ]
+    .into_iter()
+    .map(|(action, answer)| {
+        let target = api::ActionTarget {
+            action,
+            ..target.clone()
+        };
+        api::ActionResult::new(&target, answer, NOW)
+    })
+    .collect()
+}
+
+/// What every client states of a job action's answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionFact {
+    /// Core's sentence.
+    pub text: String,
+    /// What it means.
+    pub tone: Tone,
+    /// Whether GitHub took it, or there was nothing to do.
+    pub succeeded: bool,
+}
+
+/// The facts of `result`, as core words them.
+pub fn action_fact(result: &api::ActionResult) -> ActionFact {
+    ActionFact {
+        text: result.message.clone(),
+        tone: result.tone(),
+        succeeded: result.succeeded(),
+    }
+}
+
+/// A job action's answer from a newer daemon: an action, outcome and refusal this version does not know. A client
+/// reads it as an unknown outcome and shows its message, never as accepted.
+pub const FUTURE_ACTION_RESULT: &str = r#"{
+  "action": "teleport", "job": 9204, "repository": "halyard/ledger", "run": 10204, "outcome": "rolled-back",
+  "status": 299, "refusal": "quantum", "message": "GitHub rolled the run back.", "evidence": {"kind": "new"}
+}"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1648,5 +1865,55 @@ mod tests {
         let future: api::Attention = serde_json::from_str(FUTURE_ATTENTION).unwrap();
         assert_eq!(future.items[0].kind, api::AttentionKind::Unknown);
         assert_eq!(future.items[1].fix, None, "a view this version lacks");
+    }
+
+    /// The confirm flow's fixtures reach every answer clients draw, and a newer daemon's answer reads as unknown.
+    #[test]
+    fn the_job_action_fixtures_hold_every_answer() {
+        let fixtures = job_actions(&daemon());
+        assert_eq!(fixtures.previews.len(), 5);
+        assert_eq!(fixtures.previews[0].siblings.len(), 2);
+        assert!(
+            fixtures.previews[0]
+                .siblings
+                .iter()
+                .all(|job| !job.name.chars().any(char::is_control)),
+            "a sibling's escapes are cleaned"
+        );
+        assert_eq!(fixtures.previews[0].attempt, Some(2));
+        assert!(fixtures.previews[0].confirm.is_some());
+        assert_eq!(fixtures.previews[3].attempt, Some(3));
+        assert!(
+            fixtures.previews[3].notes[0].starts_with("The run moved to another attempt"),
+            "{:?}",
+            fixtures.previews[3].notes
+        );
+        assert_eq!(
+            fixtures.previews[4].confirm, None,
+            "a run not read has nothing to confirm"
+        );
+        assert!(
+            fixtures.previews[2]
+                .notes
+                .iter()
+                .any(|note| note.contains("is paused")),
+            "a paused repository's re-run"
+        );
+        let outcomes: std::collections::BTreeSet<String> = fixtures
+            .results
+            .iter()
+            .map(|result| format!("{:?}", result.outcome))
+            .collect();
+        assert_eq!(
+            outcomes.into_iter().collect::<Vec<_>>(),
+            ["Accepted", "AlreadyFinished", "Refused", "Unknown"]
+        );
+        let future: api::ActionResult = serde_json::from_str(FUTURE_ACTION_RESULT).unwrap();
+        assert_eq!(future.outcome, api::ActionOutcome::Unknown);
+        assert!(!action_fact(&future).succeeded);
+        assert_eq!(
+            job_actions_off().status.job_actions.why_not(),
+            Some(api::actions_off())
+        );
     }
 }

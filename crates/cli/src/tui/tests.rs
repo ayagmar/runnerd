@@ -78,6 +78,7 @@ fn repository(name: &str, profile: &str) -> RepositoryStatus {
 fn app() -> App {
     let live = watch::State {
         status: Status {
+            job_actions: runnerd_core::api::JobActions::On,
             version: "0.0.1".to_owned(),
             shutting_down: false,
             stopping: None,

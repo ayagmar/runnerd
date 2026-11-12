@@ -28,6 +28,7 @@ use crate::testdir::Dir;
 use super::notify::{Setup, Timing};
 use super::{ConfigSource, MemoryMax, SyncDir, bind, doctor_cache, serve, serve_for, sync_dir};
 
+mod actions;
 mod attention;
 
 mod lens;
@@ -175,6 +176,7 @@ async fn fake_engine(
 /// The status a test daemon starts with: nothing queued or failing.
 pub(super) fn status() -> Status {
     Status {
+        job_actions: runnerd_core::api::JobActions::On,
         version: "0.1.0".to_owned(),
         shutting_down: false,
         stopping: None,
@@ -237,6 +239,8 @@ struct Daemon {
     sessions: Arc<runnerd_web::Sessions>,
     /// The engine's status as the API reads it.
     status: Arc<watch::Sender<Status>>,
+    /// The GitHub the job actions go to.
+    github: Arc<actions::FakeGithub>,
 }
 
 impl Daemon {
@@ -359,6 +363,7 @@ async fn start_doctored(
     }
     let (sender, receiver) = watch::channel(status());
     let sender = Arc::new(sender);
+    let github = actions::FakeGithub::new();
     let handle = Handle {
         status: receiver,
         control: control.clone(),
@@ -367,6 +372,15 @@ async fn start_doctored(
         records: watch::channel(Records::default()).1,
         build_cache: None,
         disk: watch::channel(None).1,
+        actions: runnerd_core::actions::JobActions::new(
+            github.clone(),
+            store.clone(),
+            control.clone(),
+            runnerd_core::actions::Limits {
+                deadline: Duration::from_secs(2),
+                confirmation: Duration::from_secs(60),
+            },
+        ),
     };
     let config = dir.join("runnerd.toml");
     let file = dir.join("config.toml");
@@ -423,6 +437,7 @@ async fn start_doctored(
         served,
         sessions: sessions_kept,
         status,
+        github,
     }
 }
 
@@ -1463,6 +1478,8 @@ async fn every_route_refuses_other_users() {
         client.put("http://runnerd/v1/config").body(EXAMPLE),
         client.get("http://runnerd/v1/doctor"),
         client.get("http://runnerd/v1/attention"),
+        client.post("http://runnerd/v1/jobs/1/cancel?force=true&confirm=cancel:o/app:1:1"),
+        client.post("http://runnerd/v1/jobs/1/rerun?force=true&confirm=rerun:o/app:1:1"),
     ];
     for request in requests {
         let response = request.send().await.unwrap();

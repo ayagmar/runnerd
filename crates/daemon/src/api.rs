@@ -1,12 +1,13 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
-//! no scheduling state of its own and returns no secret but a pairing link. History reads are in `history`, the event stream in
-//! `events`, pause, resume, reseed, cache clean, the config file and the doctor's route in `control`, records and the
-//! shells in them in `records`. `doctor_cache` keeps the doctor's last run of the host and `attention` what needs
-//! attention, each in one worker of its own. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path; `notify` sends
-//! `[notify]`'s notifications and never returns a target's URL or headers. Signing
-//! every browser out of the dashboard and making its pairing links go through `runnerd_web::Sessions`, which owns
-//! them; a pairing link is the one secret the API returns, to the owner only.
+//! no scheduling state of its own and returns no secret but a pairing link. History reads are in `history`, the event
+//! stream in `events`, cancelling and re-running a job on GitHub in `actions`, pause, resume, reseed, cache clean, the
+//! config file and the doctor's route in `control`, records and the shells in them in `records`. `doctor_cache` keeps
+//! the doctor's last run of the host and `attention` what needs attention, each in one worker of its own. `auto`
+//! applies sizing advice under `[sizing] auto` through `control`'s config path; `notify` sends `[notify]`'s
+//! notifications and never returns a target's URL or headers. Signing every browser out of the dashboard and making
+//! its pairing links go through `runnerd_web::Sessions`, which owns them; a pairing link is the one secret the API
+//! returns, to the owner only.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -32,6 +33,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
 
+mod actions;
 mod attention;
 mod auto;
 mod control;
@@ -184,6 +186,8 @@ fn router(state: AppState) -> Router {
         .route("/v1/jobs", get(history::jobs))
         .route("/v1/jobs/{id}", get(history::job))
         .route("/v1/jobs/{id}/samples", get(history::samples))
+        .route("/v1/jobs/{id}/cancel", post(actions::cancel))
+        .route("/v1/jobs/{id}/rerun", post(actions::rerun))
         .route("/v1/jobs/{id}/logs", get(history::logs))
         .route("/v1/jobs/{id}/log/lines", get(history::styled_lines))
         .route("/v1/jobs/{id}/log/outline", get(history::log_outline))

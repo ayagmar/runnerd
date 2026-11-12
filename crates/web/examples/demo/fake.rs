@@ -24,6 +24,10 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
+    ActionAnswer, ActionPreview, ActionQuery, ActionRefusal, ActionResult, ActionTarget, JobAction,
+    JobActions, PreviewFacts, RunSeen, SIBLINGS_MAX, Superseded, UnknownCause,
+};
+use runnerd_core::api::{
     Activity, ActivityQuery, Bucket, Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory,
     CacheKind, CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor,
     ErrorResponse, Event, EventEnvelope, EventQuery, HostSample, HostSamples, Job, JobMetrics,
@@ -89,6 +93,9 @@ pub struct Fixtures {
     /// What `GET /v1/doctor` answers; `None`, the demo's own. One not run or failed is a 503 with its state's line,
     /// as the daemon answers it.
     pub doctor: Option<Doctor>,
+    /// What GitHub answers a confirmed cancel or re-run; `None`, an answer picked by the job's ID from
+    /// [`action_answers`], so the demo's jobs reach every one.
+    pub action_answer: Option<ActionAnswer>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -576,6 +583,7 @@ impl Fixtures {
             }),
         };
         let status = Status {
+            job_actions: JobActions::On,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             stopping: None,
@@ -756,6 +764,7 @@ impl Fixtures {
             doctor_delay: std::time::Duration::ZERO,
             doctor_error: None,
             doctor: None,
+            action_answer: None,
         }
     }
 
@@ -1324,6 +1333,118 @@ fn pause(fake: &Fake, repository: &str, force: bool) -> Response {
     }
 }
 
+/// Every answer GitHub can give a job action, as the daemon classifies it: the demo answers job `id` with the one at
+/// `id` modulo their count.
+pub fn action_answers(now: u64) -> Vec<ActionAnswer> {
+    vec![
+        ActionAnswer::Accepted { status: 202 },
+        ActionAnswer::AlreadyFinished { status: 409 },
+        ActionAnswer::Refused {
+            refusal: ActionRefusal::Forbidden,
+            status: Some(403),
+            until: None,
+        },
+        ActionAnswer::Unknown {
+            cause: UnknownCause::ServerError,
+            status: Some(504),
+        },
+        ActionAnswer::Refused {
+            refusal: ActionRefusal::RateLimited,
+            status: None,
+            until: Some(now + 754),
+        },
+        ActionAnswer::Unknown {
+            cause: UnknownCause::TimedOut,
+            status: None,
+        },
+        ActionAnswer::Refused {
+            refusal: ActionRefusal::NotFound,
+            status: Some(404),
+            until: None,
+        },
+    ]
+}
+
+/// `POST /v1/jobs/{id}/cancel` and `/rerun` as the daemon answers them: a 409 preview unless `force` comes with the
+/// preview's `confirm`, the config's refusals first, and once confirmed an answer from [`action_answers`].
+fn job_action(fake: &Fake, id: u64, action: JobAction, query: &ActionQuery) -> Response {
+    let Some(job) = find_job(fake, id) else {
+        return not_found(&format!("no job {id} in the history"));
+    };
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let job = job.summary;
+    if job.run_id == 0 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                message: runnerd_core::api::actions_no_run(id),
+            }),
+        )
+            .into_response();
+    }
+    let forbidden =
+        |message: String| (StatusCode::FORBIDDEN, Json(ErrorResponse { message })).into_response();
+    if fixtures.status.job_actions != JobActions::On {
+        return forbidden(runnerd_core::api::actions_off().to_owned());
+    }
+    let Some(paused) = fixtures
+        .status
+        .repositories
+        .iter()
+        .find(|repository| repository.name == job.repository)
+        .map(|repository| repository.paused)
+    else {
+        return forbidden(runnerd_core::api::actions_not_configured(&job.repository));
+    };
+    let target = ActionTarget {
+        action,
+        job: id,
+        name: job.name.clone(),
+        repository: job.repository.clone(),
+        run: job.run_id,
+        attempt: Some(job.run_attempt),
+    };
+    // The demo's runs never move to another attempt, so one confirmation per job and action holds.
+    let token = format!("demo-{}-{id}", action.slug());
+    let confirmed = query.force && query.confirm.as_deref() == Some(token.as_str());
+    if !confirmed {
+        let mut siblings: Vec<JobSummary> = fixtures
+            .jobs
+            .iter()
+            .map(|other| &other.summary)
+            .filter(|other| {
+                other.repository == job.repository && other.run_id == job.run_id && other.id != id
+            })
+            .cloned()
+            .collect();
+        let more = siblings.len() > SIBLINGS_MAX;
+        siblings.truncate(SIBLINGS_MAX);
+        let superseded = query.confirm.is_some().then_some(Superseded::Unknown);
+        let preview = ActionPreview::new(PreviewFacts {
+            target,
+            job_attempt: job.run_attempt,
+            run: RunSeen::Now {
+                attempt: job.run_attempt,
+                completed: job.state.is_final(),
+            },
+            superseded,
+            confirm: Some(token),
+            paused,
+            siblings,
+            more,
+        });
+        return (StatusCode::CONFLICT, Json(preview)).into_response();
+    }
+    fixtures.controls.push(format!("{} {id}", action.slug()));
+    let now = fixtures.now;
+    let answer = fixtures.action_answer.unwrap_or_else(|| {
+        let answers = action_answers(now);
+        let at = usize::try_from(id).unwrap() % answers.len();
+        answers[at]
+    });
+    Json(ActionResult::new(&target, answer, now)).into_response()
+}
+
 fn set_paused(fake: &Fake, repository: &str, paused: bool) -> Response {
     let mut fixtures = fake.fixtures.lock().unwrap();
     let now = fixtures.now;
@@ -1556,6 +1677,30 @@ fn router(fake: Fake) -> Router {
             get(|State(fake): State<Fake>, UrlPath(id): UrlPath<u64>| async move {
                 find_job(&fake, id).map_or_else(|| not_found("no such job"), |job| Json(job).into_response())
             }),
+        )
+        .route(
+            "/v1/jobs/{id}/cancel",
+            post(
+                |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<ActionQuery>| async move {
+                    if query.failed {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(ErrorResponse { message: "a cancel takes no `failed`".to_owned() }),
+                        )
+                            .into_response();
+                    }
+                    job_action(&fake, id, JobAction::Cancel, &query)
+                },
+            ),
+        )
+        .route(
+            "/v1/jobs/{id}/rerun",
+            post(
+                |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<ActionQuery>| async move {
+                    let action = if query.failed { JobAction::RerunFailed } else { JobAction::Rerun };
+                    job_action(&fake, id, action, &query)
+                },
+            ),
         )
         .route(
             "/v1/jobs/{id}/samples",
