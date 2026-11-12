@@ -704,7 +704,8 @@ fn failure(
             .rev()
             .map(StoredLine::styled)
             .find_map(|line| {
-                (line.kind == LineKind::Error)
+                // A line read only in part is no exit message: what was cut off may make it something else.
+                (line.kind == LineKind::Error && line.omitted == 0)
                     .then(|| line.text())
                     .and_then(|text| {
                         text.strip_prefix(EXIT)?

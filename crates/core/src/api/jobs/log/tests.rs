@@ -820,3 +820,23 @@ fn a_step_name_reaches_the_headline_without_its_escapes() {
     let failure = LogOutline::of(&failed, &[]).failure.unwrap();
     assert_eq!(failure.headline(&failed.steps), "Step 1, Run make, failed");
 }
+
+#[test]
+fn a_line_longer_than_the_exit_scan_reads_is_no_exit_code() {
+    // The runner's sentence, then carriage returns up to the scan's bound, then more text on the same line: read
+    // whole it is a quotation, and its first 256 bytes alone would read as the exit message.
+    let sentence = at("00:01.5", "##[error]Process completed with exit code 99.");
+    let quoted = format!(
+        "{sentence}{} This is a quotation, not the runner's exit message.",
+        "\r".repeat(256 - sentence.len())
+    );
+    let steps = vec![step(1, "Test", Some((0, 2)), "failure")];
+    let log = vec![at("00:00.5", "##[group]Run make test"), quoted];
+    let outline = LogOutline::of(&job(JobState::Completed, "failure", steps), &log);
+    assert_eq!(outline.step_lines(1), Some(LineRange { from: 0, to: 2 }));
+    assert_eq!(
+        outline.failure.unwrap().exit_code,
+        None,
+        "a line cut at the scan's bound is not the runner's exit message"
+    );
+}
