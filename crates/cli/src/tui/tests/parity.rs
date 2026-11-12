@@ -8,11 +8,12 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{BuildCacheCounts, Column, JobPage, JobState, Section, View};
+use runnerd_core::api::{BuildCacheCounts, Column, JobAction, JobPage, JobState, Section, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
 use super::super::app::{App, Effect, Msg, View as AppView};
 use super::super::draw::{Theme, draw, view_keys};
+use super::super::prompts::Prompt;
 use super::{key, listed};
 use crate::{human, watch};
 
@@ -449,7 +450,7 @@ fn the_insights_view_says_what_the_months_job_minutes_would_have_cost_as_core_wo
     let (daemon, facts) = fixtures();
     let mut app = app(&daemon);
     app.update(Msg::Savings(Box::new(daemon.savings.clone())));
-    app.update(Msg::Insights(Box::new(runnerd_fixtures::insights(NOW))));
+    app.update(Msg::Insights(Ok(Box::new(runnerd_fixtures::insights(NOW)))));
     let (rows, _) = frame(&app);
     assert!(
         !rows.iter().any(|row| row.contains('$')),
@@ -519,7 +520,7 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
 fn the_insights_view_states_each_insight_and_the_host_as_core_does() {
     let mut app = app(&daemon());
     let insights = runnerd_fixtures::insights(NOW);
-    app.update(Msg::Insights(Box::new(insights.clone())));
+    app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
     app.update(super::tab(View::Insights));
     let (rows, buffer) = frame(&app);
     let all = rows.join("\n");
@@ -639,6 +640,95 @@ fn the_overview_lists_what_needs_attention_in_core_s_words_and_tones() {
         "{}",
         rows[0]
     );
+}
+
+/// The words of `text`, without a popup's or a list's borders, so a wrapped sentence reads as one.
+fn words(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| *word != "│")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn the_selected_attention_item_shows_under_the_list_while_it_is_focused() {
+    let daemon = daemon();
+    let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
+    let mut app = app(&daemon);
+    app.update(Msg::Attention(Ok(attention.clone())));
+    app.update(key(KeyCode::Char('!')));
+    for (at, item) in attention.items.iter().enumerate() {
+        for (width, height) in [(80, 24), (120, 32)] {
+            let (rows, _) = frame_of(&app, width, height);
+            let start: String = item.title.chars().take(10).collect();
+            assert!(
+                shows(&rows, &format!("▲ {start}")),
+                "item {at}'s row stays in the list at {width}x{height}:\n{}",
+                rows.join("\n")
+            );
+            let shown = words(&rows.join(" "));
+            let whole = shown.contains(&words(&item.title))
+                && item
+                    .fix
+                    .as_ref()
+                    .is_none_or(|fix| shown.contains(&words(&fix.line())));
+            // A short terminal cuts a long item's sentence, and says so.
+            assert!(
+                whole || (width < 120 && rows.iter().any(|row| row.trim_end().ends_with(" …"))),
+                "item {at}'s title and fix whole, or marked cut, at {width}x{height}:\n{}",
+                rows.join("\n")
+            );
+        }
+        app.update(key(KeyCode::Char('j')));
+    }
+}
+
+#[test]
+fn the_overview_says_how_many_repositories_and_latest_jobs_do_not_fit() {
+    let daemon = daemon();
+    let app = app(&daemon);
+    for (width, height) in [(60, 20), (80, 24), (120, 32)] {
+        let (rows, _) = frame_of(&app, width, height);
+        let all = rows.join("\n");
+        for (heading, names) in [
+            (
+                "Repositories",
+                daemon
+                    .status
+                    .repositories
+                    .iter()
+                    .map(|repository| format!("■ {}", repository.name))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "Latest jobs",
+                daemon
+                    .finished()
+                    .iter()
+                    .map(|job| job.outcome().label.to_uppercase())
+                    .collect(),
+            ),
+        ] {
+            let Some(row) = rows
+                .iter()
+                .position(|row| row.contains(&format!(" {heading} ")))
+            else {
+                continue;
+            };
+            let listed = rows[row + 1..]
+                .iter()
+                .take_while(|row| !row.contains(" Latest jobs ") && !row.contains(" Slice "))
+                .filter(|row| names.iter().any(|name| row.contains(name.as_str())))
+                .count();
+            if listed < names.len() {
+                let hidden = names.len() - listed;
+                assert!(
+                    rows[row].contains(&format!("{hidden} more below")),
+                    "{heading}: {hidden} not shown at {width}x{height}:\n{all}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -815,6 +905,7 @@ fn cancel_and_re_run_show_core_s_preview_and_send_only_on_y() {
         "x asks for the preview, sending nothing: {asked:?}"
     );
     for preview in &actions.previews {
+        app.update(key(KeyCode::Char(action_key(preview.action))));
         app.update(Msg::Preview(Box::new(preview.clone())));
         let (rows, _) = frame_of(&app, 200, 60);
         // The popup's border is not part of what it says.
@@ -847,6 +938,7 @@ fn cancel_and_re_run_show_core_s_preview_and_send_only_on_y() {
             ),
             None => assert!(answered.is_empty(), "nothing to send: {answered:?}"),
         }
+        app.update(key(KeyCode::Char(action_key(preview.action))));
         app.update(Msg::Preview(Box::new(preview.clone())));
         assert!(
             app.update(key(KeyCode::Char('n'))).is_empty(),
@@ -875,6 +967,301 @@ fn cancel_and_re_run_show_core_s_preview_and_send_only_on_y() {
     let (rows, _) = frame_of(&app, 300, 60);
     let why = off.status.job_actions.why_not().unwrap();
     assert!(shows(&rows, why), "{why}: {}", rows.join("\n"));
+}
+
+/// The key that asks for `action`'s preview.
+fn action_key(action: JobAction) -> char {
+    match action {
+        JobAction::Cancel => 'x',
+        JobAction::Rerun => 'a',
+        JobAction::RerunFailed | JobAction::Unsupported => 'A',
+    }
+}
+
+/// The preview of `action` among the fixtures'.
+fn preview_of(actions: &runnerd_fixtures::JobActionFixtures, action: JobAction) -> Msg {
+    let preview = actions
+        .previews
+        .iter()
+        .find(|preview| preview.action == action)
+        .unwrap();
+    Msg::Preview(Box::new(preview.clone()))
+}
+
+#[test]
+fn a_preview_taller_than_the_screen_keeps_its_notes_and_marks_what_it_leaves_out() {
+    let daemon = daemon();
+    let actions = runnerd_fixtures::job_actions(&daemon);
+    let mut preview = actions
+        .previews
+        .iter()
+        .find(|preview| !preview.siblings.is_empty())
+        .unwrap()
+        .clone();
+    let one = preview.siblings[0].clone();
+    preview.siblings = (0..30)
+        .map(|n| runnerd_core::api::JobSummary {
+            id: one.id + n,
+            ..one.clone()
+        })
+        .collect();
+    let mut app = app(&daemon);
+    open(&mut app, daemon.job(TIMED_OUT).unwrap());
+    app.update(key(KeyCode::Char(action_key(preview.action))));
+    app.update(Msg::Preview(Box::new(preview.clone())));
+    let (rows, _) = frame_of(&app, 80, 24);
+    let all = rows.join("\n");
+    assert!(
+        shows(&rows, "more not shown"),
+        "the jobs left out are marked:\n{all}"
+    );
+    let first_words = |text: &str| {
+        text.split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for note in &preview.notes {
+        assert!(shows(&rows, &first_words(note)), "{note}:\n{all}");
+    }
+    assert!(
+        shows(&rows, &first_words(&preview.siblings_note)),
+        "{}:\n{all}",
+        preview.siblings_note
+    );
+}
+
+#[test]
+fn a_preview_is_shown_only_on_its_job_and_only_for_the_action_asked_last() {
+    let daemon = daemon();
+    let actions = runnerd_fixtures::job_actions(&daemon);
+    let job = daemon.job(TIMED_OUT).unwrap();
+    let mut app = app(&daemon);
+    open(&mut app, job);
+    app.update(key(KeyCode::Char('x')));
+    let (rows, _) = frame_of(&app, 120, 32);
+    assert!(
+        shows(&rows, "reading what it would do"),
+        "the footer says the preview is read: {}",
+        rows.join("\n")
+    );
+
+    // `x`, then `a` before either answers: the cancel's preview is not the one asked last.
+    app.update(key(KeyCode::Char('a')));
+    app.update(preview_of(&actions, JobAction::Cancel));
+    assert!(
+        app.prompts.top().is_none(),
+        "the cancel asked first is not shown"
+    );
+    app.update(preview_of(&actions, JobAction::Rerun));
+    assert!(
+        matches!(app.prompts.top(), Some(Prompt::Action(preview)) if preview.action == JobAction::Rerun),
+        "the re-run asked last is shown"
+    );
+    app.update(key(KeyCode::Char('n')));
+
+    // Asked, then left: the preview that comes after is dropped and `y` sends nothing.
+    app.update(key(KeyCode::Char('x')));
+    app.update(key(KeyCode::Esc));
+    app.update(key(KeyCode::Char('o')));
+    app.update(preview_of(&actions, JobAction::Cancel));
+    assert!(app.prompts.top().is_none(), "no preview over the overview");
+    assert!(
+        app.update(key(KeyCode::Char('y'))).is_empty(),
+        "y on the overview sends nothing"
+    );
+
+    // Asked on one job, answered while another is open.
+    open(&mut app, job);
+    app.update(key(KeyCode::Char('x')));
+    app.update(key(KeyCode::Esc));
+    let other = daemon
+        .finished()
+        .into_iter()
+        .find(|summary| summary.id != job.summary.id)
+        .unwrap();
+    let other = daemon.job(other.id).unwrap();
+    open(&mut app, other);
+    app.update(preview_of(&actions, JobAction::Cancel));
+    assert!(
+        app.prompts.top().is_none(),
+        "job {}'s preview is not shown over job {}",
+        job.summary.id,
+        other.summary.id
+    );
+}
+
+#[test]
+fn a_click_or_the_wheel_answers_a_question_and_sends_nothing() {
+    use super::super::mouse::{List, Target};
+    let daemon = daemon();
+    let actions = runnerd_fixtures::job_actions(&daemon);
+    let mut app = app(&daemon);
+    open(&mut app, daemon.job(TIMED_OUT).unwrap());
+    for input in [
+        Msg::Click(Target::Tab(0)),
+        Msg::Click(Target::Row(List::Log, 0)),
+        Msg::Wheel(1),
+    ] {
+        app.update(key(KeyCode::Char('x')));
+        app.update(preview_of(&actions, JobAction::Cancel));
+        assert!(
+            app.prompts.top().is_some(),
+            "the cancel's question is asked"
+        );
+        let effects = app.update(input);
+        assert!(effects.is_empty(), "the input sends nothing: {effects:?}");
+        assert!(
+            app.prompts.top().is_none(),
+            "the input answers the question"
+        );
+        assert_eq!(app.view, AppView::Job, "the job stays open");
+        assert!(
+            app.update(key(KeyCode::Char('y'))).is_empty(),
+            "a y after it sends nothing"
+        );
+    }
+}
+
+#[test]
+fn keys_the_wheel_and_clicks_move_the_selection_in_each_followed_pane() {
+    use super::super::app::Pane;
+    use super::super::mouse::{List, Target};
+    let daemon = daemon();
+    let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
+    let mut app = app(&daemon);
+    app.update(Msg::Attention(Ok(attention)));
+    assert!(app.notices().len() >= 3, "three items to move over");
+    assert!(app.live.status.queued.len() >= 3, "three queued jobs");
+    assert!(app.live.recent.len() >= 3, "three latest jobs");
+    let selected = |app: &App, pane: Pane| match pane {
+        Pane::Attention => app.notice,
+        Pane::Queue => app.queued,
+        Pane::Latest => app.latest,
+        Pane::Slots | Pane::Repositories => unreachable!(),
+    };
+    for (pane, list) in [
+        (Pane::Attention, List::Attention),
+        (Pane::Queue, List::Queue),
+        (Pane::Latest, List::Latest),
+    ] {
+        while app.pane != pane {
+            app.update(key(KeyCode::Tab));
+        }
+        let start = selected(&app, pane);
+        app.update(key(KeyCode::Char('j')));
+        assert_eq!(selected(&app, pane), start + 1, "j moves down {pane:?}");
+        app.update(Msg::Wheel(1));
+        assert_eq!(
+            selected(&app, pane),
+            start + 2,
+            "the wheel moves down {pane:?}"
+        );
+        app.update(key(KeyCode::Char('k')));
+        assert_eq!(selected(&app, pane), start + 1, "k moves up {pane:?}");
+        app.update(Msg::Click(Target::Row(list, start)));
+        assert_eq!(selected(&app, pane), start, "a click selects in {pane:?}");
+    }
+}
+
+#[test]
+fn an_attention_item_leads_to_its_check_or_insight_once_that_view_is_read() {
+    use runnerd_core::api::Subject;
+    let daemon = daemon();
+    let doctor = runnerd_fixtures::doctor();
+    let attention = runnerd_fixtures::attention(&daemon, &doctor);
+    let insights = runnerd_fixtures::insights(NOW);
+    let mut followed = 0;
+    for (at, item) in attention.items.iter().enumerate() {
+        let wanted = match &item.subject {
+            Subject::Check { name } => doctor.checks.iter().position(|check| &check.name == name),
+            Subject::Insight { key } => insights
+                .insights
+                .iter()
+                .position(|insight| &insight.key == key),
+            _ => continue,
+        }
+        .unwrap();
+        let mut app = app(&daemon);
+        app.update(Msg::Attention(Ok(attention.clone())));
+        app.update(key(KeyCode::Char('!')));
+        for _ in 0..at {
+            app.update(key(KeyCode::Char('j')));
+        }
+        app.update(key(KeyCode::Enter));
+        // The view's read answers after it shows.
+        app.update(Msg::Doctor(Ok(doctor.clone())));
+        app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
+        let selected = match item.subject {
+            Subject::Check { .. } => (AppView::Settings, app.check),
+            _ => (AppView::Insights, app.insight),
+        };
+        assert_eq!(selected, (app.view, wanted), "{} is selected", item.title);
+        followed += 1;
+    }
+    assert!(followed >= 2, "the fixtures point at checks and insights");
+}
+
+#[test]
+fn insights_that_fail_to_read_or_are_not_served_say_so() {
+    for (unread, says) in [
+        (
+            super::super::reading::Unread::Failed("the history is locked".to_owned()),
+            "the history is locked",
+        ),
+        (
+            super::super::reading::Unread::Unsupported,
+            runnerd_core::api::NOT_SUPPORTED,
+        ),
+    ] {
+        let mut app = app(&daemon());
+        app.update(super::tab(View::Insights));
+        app.update(Msg::Insights(Err(unread)));
+        let (rows, _) = frame_of(&app, 120, 32);
+        assert!(shows(&rows, says), "{says}:\n{}", rows.join("\n"));
+    }
+}
+
+#[test]
+fn after_a_reconnect_the_open_job_its_comparison_and_the_jobs_list_are_read_again() {
+    let daemon = daemon();
+    let mut app = app(&daemon);
+    let job = daemon.job(TIMED_OUT).unwrap();
+    open(&mut app, job);
+    let id = job.summary.id;
+    assert_eq!(
+        app.update(key(KeyCode::Char('c'))),
+        vec![Effect::Compare(id)]
+    );
+    app.update(Msg::Compared {
+        job: id,
+        comparison: Err(super::super::reading::Unread::Failed(
+            "timed out".to_owned(),
+        )),
+    });
+    app.update(Msg::Disconnected("runnerd is not running".to_owned()));
+    let effects = app.update(Msg::Reconnected);
+    assert!(
+        effects.contains(&Effect::OpenJob(id)) && effects.contains(&Effect::Compare(id)),
+        "the job is opened and compared again: {effects:?}"
+    );
+
+    app.update(key(KeyCode::Esc));
+    app.update(key(KeyCode::Esc));
+    let effects = app.update(Msg::Snapshot(Box::new(watch::State {
+        status: daemon.status.clone(),
+        running: BTreeMap::new(),
+        samples: BTreeMap::new(),
+        host: None,
+        recent: daemon.finished(),
+    })));
+    assert_eq!(app.view, AppView::History);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::History { .. })),
+        "the jobs list is read again: {effects:?}"
+    );
 }
 
 #[test]
@@ -979,6 +1366,23 @@ fn a_click_selects_a_row_and_a_second_opens_it_and_the_wheel_moves() {
 }
 
 #[test]
+fn the_jobs_table_keeps_room_for_names_at_60_columns() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    history(&mut app, &daemon);
+    let (rows, _) = frame_of(&app, 60, 20);
+    let job = &daemon.finished()[0];
+    for name in [&job.repository, &job.title().to_string()] {
+        let start: String = name.chars().take(12).collect();
+        assert!(
+            shows(&rows, &start),
+            "{start} of {name} at 60 columns:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+#[test]
 fn an_older_daemon_that_ignores_search_says_so_beside_the_list() {
     let (daemon, _) = fixtures();
     let mut app = app(&daemon);
@@ -1007,6 +1411,96 @@ fn an_older_daemon_that_ignores_search_says_so_beside_the_list() {
         ),
         "{}",
         rows.join("\n")
+    );
+}
+
+/// A logged fixture job, opened with its outline read.
+fn logged(app: &mut App, id: u64) -> Vec<Effect> {
+    let logged = runnerd_fixtures::logged_jobs()
+        .into_iter()
+        .find(|logged| logged.job.summary.id == id)
+        .unwrap();
+    open(app, &logged.job);
+    app.update(Msg::Outline {
+        job: id,
+        outline: Ok(logged.outline),
+    })
+}
+
+#[test]
+fn only_a_log_that_grows_says_it_is_followed() {
+    for (id, grows) in [
+        (runnerd_fixtures::LOG_RUNNING, true),
+        (runnerd_fixtures::LOG_FAILED, false),
+        (runnerd_fixtures::LOG_EXPIRED, false),
+        (runnerd_fixtures::LOG_MISSING, false),
+    ] {
+        let mut app = app(&daemon());
+        logged(&mut app, id);
+        app.update(key(KeyCode::Char('G')));
+        let (rows, _) = frame_of(&app, 160, 45);
+        assert_eq!(
+            shows(&rows, "following"),
+            grows,
+            "job {id} says following only while it grows:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+#[test]
+fn a_cut_line_says_how_much_is_not_shown_at_every_width() {
+    let id = runnerd_fixtures::LOG_FAILED;
+    let fact = runnerd_fixtures::log_facts()
+        .into_iter()
+        .find(|fact| fact.job == id)
+        .unwrap();
+    let cut = fact
+        .lines
+        .iter()
+        .find(|line| line.omitted > 0)
+        .expect("the fixture cuts a line");
+    let words = cut.omitted_words().unwrap();
+    for width in [60, 80, 160] {
+        let mut app = app(&daemon());
+        logged(&mut app, id);
+        app.update(Msg::Lines {
+            job: id,
+            lines: fact.lines.clone(),
+        });
+        let (rows, _) = frame_of(&app, width, 90);
+        assert!(
+            shows(&rows, &words),
+            "{words} at {width}:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+#[test]
+fn a_page_of_the_log_that_failed_to_read_is_asked_for_again() {
+    let mut app = app(&daemon());
+    let id = runnerd_fixtures::LOG_FAILED;
+    let asked = logged(&mut app, id);
+    let range = asked
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Lines { range, .. } => Some(*range),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the outline asks for lines: {asked:?}"));
+    app.update(Msg::LinesFailed {
+        job: id,
+        range,
+        why: "connection reset".to_owned(),
+    });
+    let again = app.update(Msg::Lines {
+        job: id,
+        lines: Vec::new(),
+    });
+    assert!(
+        again.contains(&Effect::Lines { job: id, range }),
+        "{range:?} is asked again: {again:?}"
     );
 }
 

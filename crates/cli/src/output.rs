@@ -119,12 +119,27 @@ pub(crate) fn fail(error: &dyn Display) -> ExitCode {
 }
 
 /// Takes over the terminal for `runnerctl tui`: raw mode, the alternate screen and, when taken, the mouse. [`restore`]
-/// gives it back; a panic gives it back too, but for the mouse.
+/// gives it back, and so does a panic: ratatui's hook the screen, ours the mouse.
 #[cfg(feature = "tui")]
 pub(crate) fn full_screen(mouse: Mouse) -> std::io::Result<ratatui::DefaultTerminal> {
+    static HOOKED: std::sync::Once = std::sync::Once::new();
     let terminal = ratatui::try_init()?;
+    if mouse == Mouse::Taken {
+        HOOKED.call_once(|| release_mouse_on_panic(std::io::stdout));
+    }
     mouse.take()?;
     Ok(terminal)
+}
+
+/// On a panic, asks the terminal `out` gives to stop reporting the mouse, then runs the hook that was there: a shell
+/// left with the reporting on prints escape sequences on every click.
+#[cfg(feature = "tui")]
+fn release_mouse_on_panic<W: Write>(out: impl Fn() -> W + Send + Sync + 'static) {
+    let next = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::crossterm::execute!(out(), ratatui::crossterm::event::DisableMouseCapture);
+        next(info);
+    }));
 }
 
 /// Whether the TUI takes the mouse's clicks and wheel from the terminal.
@@ -197,4 +212,48 @@ pub(crate) fn resume(mouse: Mouse) -> std::io::Result<ratatui::DefaultTerminal> 
     ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
     mouse.take()?;
     ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// A writer into a buffer the test reads.
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("poisoned"))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        reason = "the test panics to run the hook"
+    )]
+    fn a_panic_stops_the_terminal_reporting_the_mouse() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let previous = std::panic::take_hook();
+        let out = Arc::clone(&written);
+        super::release_mouse_on_panic(move || Shared(Arc::clone(&out)));
+        let _ = std::panic::catch_unwind(|| panic!("a bug in a frame"));
+        drop(std::panic::take_hook());
+        std::panic::set_hook(previous);
+        let written = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(
+            written.contains("\u{1b}[?1000l"),
+            "mouse reporting is turned off: {written:?}"
+        );
+    }
 }

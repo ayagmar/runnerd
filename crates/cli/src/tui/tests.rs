@@ -46,6 +46,7 @@ use crate::watch;
 
 const NOW: u64 = 1100;
 
+mod log;
 mod parity;
 
 fn profile(name: &str, slots: usize, memory: u64) -> ProfileStatus {
@@ -483,7 +484,14 @@ fn a_refused_pause_is_forced_only_after_y() {
         message: "halyard/ledger runs job 42 on runnerd-ab12-jvm-1".to_owned(),
         jobs: 1,
     }));
-    assert!(screen(&app, 120, 40, false).contains("runs job 42"));
+    for (width, height) in [(120, 40), (80, 24), (70, 20), (60, 20)] {
+        let shown = screen(&app, width, height, false);
+        let footer = shown.lines().last().unwrap();
+        assert!(
+            footer.contains("halyard/ledger runs job 42") && footer.contains("y cancels"),
+            "the repository and job it cancels at {width} columns: {footer}"
+        );
+    }
     assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
     assert_eq!(app.prompts.top(), None, "n answers the question");
 
@@ -2106,7 +2114,7 @@ fn the_insights_view_lists_each_insight_in_its_tone_and_the_health_line_leaves_t
         host: Vec::new(),
     };
     let warning = insights.warning_line().unwrap();
-    app.update(Msg::Insights(Box::new(insights)));
+    app.update(Msg::Insights(Ok(Box::new(insights))));
 
     let wide = screen(&app, 160, 40, false);
     let health = wide.lines().nth(1).unwrap();
@@ -2609,7 +2617,10 @@ fn the_open_job_s_own_bar_among_its_runs_follows_it_through_start_and_a_missed_f
 
     app.update(Msg::Disconnected("runnerd is not running".to_owned()));
     let effects = app.update(Msg::Reconnected);
-    assert!(effects.contains(&Effect::RefreshJob(42)), "{effects:?}");
+    assert!(
+        effects.contains(&Effect::OpenJob(42)),
+        "the job, its outline and its log are read and followed again: {effects:?}"
+    );
     assert!(
         effects
             .iter()
@@ -2855,7 +2866,10 @@ fn a_log_search_asks_the_daemon_and_n_and_shift_n_walk_its_matches() {
     let shown = screen(&app, 120, 40, false);
     assert!(shown.contains("/line 1 1/3"), "on the first match: {shown}");
     app.update(key(KeyCode::Char('n')));
-    assert!(screen(&app, 120, 40, false).contains("/line 1 2/3"));
+    assert!(
+        screen(&app, 120, 40, false).contains("/line 1 2/3"),
+        "n moves to the second match"
+    );
     app.update(key(KeyCode::Char('N')));
     app.update(key(KeyCode::Char('N')));
     assert!(
@@ -2864,7 +2878,10 @@ fn a_log_search_asks_the_daemon_and_n_and_shift_n_walk_its_matches() {
     );
     app.update(key(KeyCode::Esc));
     assert_eq!(app.view, View::Job, "Esc leaves the search first");
-    assert!(!screen(&app, 120, 40, false).contains("/line 1"));
+    assert!(
+        !screen(&app, 120, 40, false).contains("/line 1"),
+        "the search's note goes with it"
+    );
 }
 
 #[test]
@@ -2894,4 +2911,33 @@ fn every_view_keeps_its_header_and_footer_at_every_size() {
             );
         }
     }
+}
+
+#[test]
+fn followed_lines_are_sent_in_batches_of_bounded_size_and_age() {
+    use super::Batch;
+    use tokio::time::Instant;
+    let now = Instant::now();
+    let mut batch = Batch::new(now);
+    for line in 0..499 {
+        batch.push(StyledLine::parse(line, "a burst"), now);
+    }
+    assert!(batch.wait(now).is_some(), "499 lines wait for more");
+    batch.push(StyledLine::parse(499, "a burst"), now);
+    assert_eq!(batch.wait(now), None, "500 lines go at once");
+    assert_eq!(batch.take().len(), 500);
+
+    batch.push(StyledLine::parse(500, "a line"), now);
+    let soon = now + Duration::from_millis(90);
+    assert!(
+        batch
+            .wait(soon)
+            .is_some_and(|wait| wait <= Duration::from_millis(10)),
+        "a batch 90 ms old waits at most until it is 100 ms old"
+    );
+    assert_eq!(
+        batch.wait(now + Duration::from_millis(100)),
+        None,
+        "a batch 100 ms old goes, though lines keep coming"
+    );
 }

@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState};
 use runnerd_core::api::{self, Activity, JobSummary, QueuedJob, RepositoryStatus, WaitKind};
 use unicode_width::UnicodeWidthStr;
 
@@ -52,9 +52,10 @@ pub(super) fn overview(
     };
     // The attention list gives way to the lanes and lists on a short terminal, down to one item.
     let attention_room = rest.saturating_sub(slots + queue_least + LISTS_MIN);
-    let attention_height = attention::wanted(app, ATTENTION_SHOWN).min(
-        attention_room.max(attention::wanted(app, 1).min(rest.saturating_sub(slots + LISTS_MIN))),
-    );
+    let attention_height = attention::wanted(app, ATTENTION_SHOWN, area.width)
+        .min(attention_room.max(
+            attention::wanted(app, 1, area.width).min(rest.saturating_sub(slots + LISTS_MIN)),
+        ));
     let rest = rest.saturating_sub(attention_height);
     let lanes_height = slots.min(rest.saturating_sub(LISTS_MIN.min(rest / 2)));
     let left = rest.saturating_sub(lanes_height);
@@ -77,7 +78,8 @@ pub(super) fn overview(
     // Rows nothing else wants show more of what needs attention.
     let spare = left.saturating_sub(lists_wanted + charts_height);
     let attention_height = attention_height
-        + spare.min(attention::wanted(app, usize::MAX).saturating_sub(attention_height));
+        + spare
+            .min(attention::wanted(app, usize::MAX, area.width).saturating_sub(attention_height));
     let [
         health_area,
         attention_area,
@@ -465,8 +467,20 @@ pub(super) fn repositories(
         })
         .collect();
     let block = list_block("Repositories", focused, theme);
+    let hidden = repositories
+        .len()
+        .saturating_sub(usize::from(block.inner(area).height));
+    let block = more_below(block, hidden, theme);
     hits.rows(block.inner(area), List::Repositories, 0, repositories.len());
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// A list's block saying how many of its rows do not fit, as the queue's heading does.
+fn more_below(block: Block<'_>, hidden: usize, theme: Theme) -> Block<'_> {
+    if hidden == 0 {
+        return block;
+    }
+    block.title_top(Line::styled(format!(" {hidden} more below "), theme.dim()).right_aligned())
 }
 
 /// An outcome as an upper-case badge.
@@ -503,10 +517,11 @@ pub(super) fn latest(
     hits: &mut Hits,
 ) {
     let focused = app.pane == Pane::Latest;
+    let jobs = &app.live.recent;
     let block = list_block("Latest jobs", focused, theme);
     let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let jobs = &app.live.recent;
+    let hidden = jobs.len().saturating_sub(usize::from(inner.height));
+    frame.render_widget(more_below(block, hidden, theme), area);
     let widths = LatestWidths::of(jobs, inner.width, now);
     let rows = jobs.iter().map(|job| {
         let mut cells = vec![

@@ -15,7 +15,7 @@ use runnerd_core::api;
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Pane, Removal, View};
+use super::app::{App, Asked, Connection, JobView, Pane, Refused, Removal, View};
 use super::mouse::{Hits, List, Target};
 use super::overlay::{Overlay, Pick, Picker, Typing};
 use super::prompts::Prompt;
@@ -314,20 +314,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Span::styled("█", theme.dim()),
         ])
     } else if let Some(Prompt::Force(refused)) = prompt {
-        let ask = if refused.jobs == 1 {
-            " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
-        } else {
-            // Jobs of one workflow share a run, so the count is of jobs.
-            format!(
-                " y cancels the runs of {} jobs and pauses, any other key keeps them running: ",
-                refused.jobs
-            )
-        };
-        let rest = usize::from(area.width).saturating_sub(ask.width());
-        Line::from(vec![
-            Span::styled(ask, bold()),
-            Span::styled(fit(&refused.message, rest), theme.wait()),
-        ])
+        force_line(refused, usize::from(area.width), theme)
     } else if let Some(Prompt::Remove(removal)) = prompt {
         let ask = match removal {
             Removal::Job(job) => {
@@ -360,6 +347,14 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             },
             bold(),
         )
+    } else if let Some(asked) = app.job.as_ref().and_then(JobView::asking) {
+        Line::styled(
+            match asked {
+                Asked::Preview(_) => " reading what it would do…",
+                Asked::Send(_) => " sending…",
+            },
+            theme.dim(),
+        )
     } else if let Some(flash) = &app.flash {
         let style = match flash.tone {
             api::Tone::Neutral => Style::new(),
@@ -376,6 +371,32 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         )
     };
     frame.render_widget(line, area);
+}
+
+/// The question a refused pause asks: whether to cancel the runs that hold it, and what they are.
+fn force_line(refused: &Refused, width: usize, theme: Theme) -> Line<'static> {
+    let ask = if refused.jobs == 1 {
+        " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
+    } else {
+        // Jobs of one workflow share a run, so the count is of jobs.
+        format!(
+            " y cancels the runs of {} jobs and pauses, any other key keeps them running: ",
+            refused.jobs
+        )
+    };
+    // Narrow, the question shortens so what it cancels still shows: the start of the message names it.
+    let ask = if ask.width() + refused.message.width().min(40) <= width {
+        ask
+    } else if refused.jobs == 1 {
+        " y cancels its run and pauses: ".to_owned()
+    } else {
+        format!(" y cancels {} jobs' runs and pauses: ", refused.jobs)
+    };
+    let rest = width.saturating_sub(ask.width());
+    Line::from(vec![
+        Span::styled(ask, bold()),
+        Span::styled(fit(&refused.message, rest), theme.wait()),
+    ])
 }
 
 /// The keys that matter on the view, those that do not fit left out from the least used: each view's own first,

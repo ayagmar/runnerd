@@ -58,7 +58,8 @@ pub(super) fn history(
     let shared = usize::from(body.width).saturating_sub(fixed);
     let repository_width = shared / 2;
     let job_width = shared - repository_width;
-    let record_shown = columns.iter().any(|(column, _)| *column == Column::Record);
+    let shown = |wanted: Column| columns.iter().any(|(column, _)| *column == wanted);
+    let record_shown = shown(Column::Record);
     let rows = jobs.iter().map(|job| {
         let mut cells = vec![
             Cell::from(badge(job, theme)),
@@ -71,11 +72,17 @@ pub(super) fn history(
                 theme.dim(),
             )));
         }
-        cells.extend([
-            Cell::from(job.waited(now).map_or_else(String::new, duration)),
-            Cell::from(job.ran(now).map_or_else(String::new, duration)),
-            Cell::from(job.metrics.memory_peak.map_or_else(String::new, bytes)),
-        ]);
+        if shown(Column::Waited) {
+            cells.push(Cell::from(
+                job.waited(now).map_or_else(String::new, duration),
+            ));
+        }
+        cells.push(Cell::from(job.ran(now).map_or_else(String::new, duration)));
+        if shown(Column::MemoryPeak) {
+            cells.push(Cell::from(
+                job.metrics.memory_peak.map_or_else(String::new, bytes),
+            ));
+        }
         if wide {
             cells.push(Cell::from(
                 job.metrics.cpu_average.map_or_else(String::new, cores_used),
@@ -88,10 +95,12 @@ pub(super) fn history(
                     .unwrap_or_default(),
             ));
         }
-        cells.push(Cell::from(Span::styled(
-            ago(job.timeline.queued_at, now),
-            theme.dim(),
-        )));
+        if shown(Column::Queued) {
+            cells.push(Cell::from(Span::styled(
+                ago(job.timeline.queued_at, now),
+                theme.dim(),
+            )));
+        }
         Row::new(cells)
     });
     let header: Vec<_> = columns
@@ -114,7 +123,8 @@ pub(super) fn history(
     table_hits(hits, body, List::History, state.offset(), jobs.len());
 }
 
-/// The table's columns and their widths at `width`: branch and CPU only when wide, the record mark when a job has one.
+/// The table's columns and their widths at `width`: branch and CPU only when wide, the record mark when a job has one,
+/// the memory peak, the wait and when it was queued only when the names keep [`NAMES_MIN`] cells.
 fn columns(jobs: &[JobSummary], width: u16, now: u64) -> Vec<(Column, usize)> {
     let wide = width >= 110;
     let finished = jobs
@@ -152,8 +162,19 @@ fn columns(jobs: &[JobSummary], width: u16, now: u64) -> Vec<(Column, usize)> {
         ));
     }
     columns.push((Column::Queued, finished));
+    // The repository and the job need room to be told apart: the least needed figures give way first.
+    for least in [Column::MemoryPeak, Column::Waited, Column::Queued] {
+        let fixed: usize = columns.iter().map(|(_, width)| width + 1).sum::<usize>() - 1;
+        if usize::from(width).saturating_sub(fixed) >= NAMES_MIN {
+            break;
+        }
+        columns.retain(|(column, _)| *column != least);
+    }
     columns
 }
+
+/// The cells the repository and the job share at the least, before figures give way.
+const NAMES_MIN: usize = 30;
 
 /// What narrows the list and how it is read, as fit `width`: the search, each filter set, the order and range when
 /// not the default, how much of a sorted list shows or the page; and where the daemon predates search and sort, that

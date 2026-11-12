@@ -85,6 +85,12 @@ pub(crate) enum Msg {
         job: u64,
         lines: Vec<StyledLine>,
     },
+    /// A read of lines `range` of the open job's log failed.
+    LinesFailed {
+        job: u64,
+        range: LineRange,
+        why: String,
+    },
     /// A page of a search of the open job's log.
     Found {
         job: u64,
@@ -100,6 +106,11 @@ pub(crate) enum Msg {
     Preview(Box<ActionPreview>),
     /// How GitHub took a cancel or re-run.
     Acted(ActionResult),
+    /// A cancel or re-run of job `job` that could not be asked or sent.
+    ActionFailed {
+        job: u64,
+        why: String,
+    },
     Status(Status),
     Records(Records),
     Sizing(Sizing),
@@ -116,7 +127,7 @@ pub(crate) enum Msg {
     /// The status read again for why each queued job waits; `None` when it could not be read.
     Reasons(Option<Box<Status>>),
     /// What the history says (`GET /v1/insights`).
-    Insights(Box<Insights>),
+    Insights(Result<Box<Insights>, Unread>),
     /// What the jobs' minutes would have cost on GitHub's runners (`GET /v1/savings`).
     Savings(Box<Savings>),
     /// The answer to the open job's request for its latest runs.
@@ -379,6 +390,15 @@ pub(crate) enum Pane {
     Latest,
 }
 
+/// A row an attention item points at, by what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Wanted {
+    /// A doctor's check, by name.
+    Check(String),
+    /// An insight, by key.
+    Insight(String),
+}
+
 /// Whether events arrive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Connection {
@@ -428,9 +448,33 @@ pub(crate) struct JobView {
     pub(crate) comparison: Reading<JobComparison>,
     /// The latest runs of the same job, oldest first, this one among them; `None` until read.
     pub(crate) runs: Option<Vec<JobSummary>>,
+    /// The cancel or re-run asked of the daemon and not answered yet; only its answer is shown.
+    asked: Option<Asked>,
+}
+
+/// A cancel or re-run under way on the open job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// Its preview is being read.
+    Preview(JobAction),
+    /// It was confirmed and is being sent.
+    Send(JobAction),
+}
+
+impl Asked {
+    fn action(self) -> JobAction {
+        match self {
+            Asked::Preview(action) | Asked::Send(action) => action,
+        }
+    }
 }
 
 impl JobView {
+    /// The cancel or re-run whose preview or result is awaited.
+    pub(crate) fn asking(&self) -> Option<Asked> {
+        self.asked
+    }
+
     /// The request for its latest runs. Without a workflow the jobs API matches every workflow's job of that name,
     /// so the answer is filtered again by [`JobView::keep_runs`].
     fn runs_request(&self) -> Effect {
@@ -646,8 +690,10 @@ pub(crate) struct App {
     /// The jobs started and finished in the last 24 hours, once read.
     pub(crate) activity: Option<Activity>,
     /// What the history says; `None` until read.
-    pub(crate) insights: Option<Insights>,
+    pub(crate) insights: Reading<Box<Insights>>,
     pub(crate) insight: usize,
+    /// The check or insight an attention item led to, selected once its view's read answers.
+    wanted: Option<Wanted>,
     /// What the jobs' minutes would have cost on GitHub's runners; `None` until read.
     pub(crate) savings: Option<Savings>,
     /// The host sample time from which the insights are read again.
@@ -714,8 +760,9 @@ impl App {
             reasons_asked: false,
             reasons_stale: false,
             activity,
-            insights: None,
+            insights: Reading::default(),
             insight: 0,
+            wanted: None,
             savings: None,
             insights_due: 0,
             history: History::default(),
@@ -747,6 +794,10 @@ impl App {
     }
 
     pub(crate) fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        // Input moves the selection; only what the daemon changes is followed.
+        if matches!(msg, Msg::Key(_) | Msg::Click(_) | Msg::Wheel(_)) {
+            return self.apply(msg);
+        }
         // Rows of the queue and the latest jobs come and go above the selected one, as queued jobs start and others
         // finish: the selection follows its job, or stays on a row that is there when the job left.
         let queued = self.live.status.queued.get(self.queued).map(|job| job.id);
@@ -785,6 +836,10 @@ impl App {
     fn apply(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(key) => return self.key(key),
+            // A question in the footer is answered by any input, a click or the wheel too: it sends nothing.
+            Msg::Click(_) | Msg::Wheel(_) if self.prompts.top().is_some() => {
+                self.prompts.answer();
+            }
             Msg::Click(target) => return self.click(target),
             Msg::Wheel(rows) => {
                 if let Overlay::Pick(picker) = &mut self.overlay {
@@ -809,32 +864,14 @@ impl App {
                     self.history.timeline.take(timeline);
                 }
             }
-            Msg::Outline { job, outline } => {
-                if let Some(open) = self.open_job(job) {
-                    open.log.take_outline(outline);
-                    return open.wanted();
-                }
-            }
-            Msg::Lines { job, lines } => {
-                if let Some(open) = self.open_job(job) {
-                    open.log.take_lines(lines);
-                }
-            }
-            Msg::Found { job, query, found } => return self.found(job, &query, found),
-            Msg::Compared { job, comparison } => {
-                if let Some(open) = self.open_job(job) {
-                    open.comparison.take(comparison);
-                }
-            }
-            Msg::Preview(preview) => self.prompts.push(Prompt::Action(preview)),
-            Msg::Acted(result) => {
-                let tone = result.tone();
-                let id = result.job;
-                self.flash(result.message, tone);
-                if let Some(open) = self.open_job(id) {
-                    return vec![Effect::RefreshJob(id), open.runs_request()];
-                }
-            }
+            msg @ (Msg::Outline { .. }
+            | Msg::Lines { .. }
+            | Msg::LinesFailed { .. }
+            | Msg::Found { .. }
+            | Msg::Compared { .. }
+            | Msg::Preview(_)
+            | Msg::Acted(_)
+            | Msg::ActionFailed { .. }) => return self.job_answer(msg),
             Msg::Status(status) => self.live.status = status,
             Msg::Records(records) => {
                 self.record = self.record.min(records.records.len().saturating_sub(1));
@@ -853,6 +890,7 @@ impl App {
                 self.doctor.take(doctor);
                 let checks = self.doctor.get().map_or(0, |doctor| doctor.checks.len());
                 self.check = self.check.min(checks.saturating_sub(1));
+                self.select_wanted();
             }
             Msg::Config(config) => self.config.take(config),
             Msg::Attention(attention) => self.attention.take(attention),
@@ -862,8 +900,13 @@ impl App {
             } => self.activity(generation, activity),
             Msg::Reasons(status) => return self.reasons(status.as_deref()),
             Msg::Insights(insights) => {
-                self.insight = self.insight.min(insights.insights.len().saturating_sub(1));
-                self.insights = Some(*insights);
+                self.insights.take(insights);
+                let read = self
+                    .insights
+                    .get()
+                    .map_or(0, |insights| insights.insights.len());
+                self.insight = self.insight.min(read.saturating_sub(1));
+                self.select_wanted();
             }
             Msg::Savings(savings) => self.savings = Some(*savings),
             Msg::Runs { job, list } => match list {
@@ -882,13 +925,77 @@ impl App {
         Vec::new()
     }
 
+    /// An answer about the open job: its log, a search of it, its comparison, or a cancel or re-run.
+    fn job_answer(&mut self, msg: Msg) -> Vec<Effect> {
+        match msg {
+            Msg::Outline { job, outline } => {
+                if let Some(open) = self.open_job(job) {
+                    open.log.take_outline(outline);
+                    return open.wanted();
+                }
+            }
+            Msg::Lines { job, lines } => {
+                if let Some(open) = self.open_job(job) {
+                    open.log.take_lines(lines);
+                    // The keys' row may now lie next to lines not read yet.
+                    return open.wanted();
+                }
+            }
+            Msg::LinesFailed { job, range, why } => {
+                if let Some(open) = self.open_job(job) {
+                    open.log.unask(range);
+                }
+                self.flash(why, api::Tone::Bad);
+            }
+            Msg::Found { job, query, found } => return self.found(job, &query, found),
+            Msg::Compared { job, comparison } => {
+                if let Some(open) = self.open_job(job) {
+                    open.comparison.take(comparison);
+                }
+            }
+            Msg::Preview(preview) => {
+                // Only the answer to what was asked last, on the job still open.
+                if self.view == View::Job
+                    && let Some(open) = self.open_job(preview.job)
+                    && open.asked.map(Asked::action) == Some(preview.action)
+                {
+                    open.asked = None;
+                    self.prompts.push(Prompt::Action(preview));
+                }
+            }
+            Msg::Acted(result) => {
+                let tone = result.tone();
+                let id = result.job;
+                self.flash(result.message, tone);
+                if let Some(open) = self.open_job(id) {
+                    open.asked = None;
+                    return vec![Effect::RefreshJob(id), open.runs_request()];
+                }
+            }
+            Msg::ActionFailed { job, why } => {
+                if let Some(open) = self.open_job(job) {
+                    open.asked = None;
+                }
+                self.flash(why, api::Tone::Bad);
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
     /// Back on the stream: what may have changed while it was away is read again.
     fn reconnected(&mut self) -> Vec<Effect> {
         self.connection = Connection::Live;
         let mut effects = vec![Effect::Attention];
-        if let Some(open) = &self.job {
-            // Its runs too: their end may have been missed with the job's.
-            effects.extend([Effect::RefreshJob(open.job.summary.id), open.runs_request()]);
+        if let Some(open) = &mut self.job {
+            let id = open.job.summary.id;
+            // The job, its samples and its outline again, and its log followed again: the stream that followed it
+            // ended with the connection. Its runs and its comparison too: it may have finished meanwhile.
+            effects.extend([Effect::OpenJob(id), open.runs_request()]);
+            open.comparison = Reading::default();
+            if open.panel == Panel::Compare {
+                effects.push(Effect::Compare(id));
+            }
         }
         effects
     }
@@ -903,7 +1010,12 @@ impl App {
         if self.reasons_asked {
             self.reasons_stale = true;
         }
-        vec![self.ask_activity()]
+        let mut effects = vec![self.ask_activity()];
+        // Jobs that finished meanwhile belong in the list shown, and in its timeline.
+        if self.view == View::History {
+            effects.extend(self.history.request(Rows::Keep));
+        }
+        effects
     }
 
     /// A page of the jobs list, unless a newer one was asked since.
@@ -1432,6 +1544,7 @@ impl App {
                     self.flash(why.to_owned(), api::Tone::Quiet);
                     return Vec::new();
                 }
+                open.asked = Some(Asked::Preview(action));
                 return vec![Effect::Act {
                     job: id,
                     action,
@@ -1516,6 +1629,10 @@ impl App {
                 let Some(confirm) = preview.confirm.clone() else {
                     return Some(Vec::new());
                 };
+                if yes && let Some(open) = self.open_job(preview.job) {
+                    // A refused confirmation comes back as a new preview of the same action.
+                    open.asked = Some(Asked::Send(preview.action));
+                }
                 Effect::Act {
                     job: preview.job,
                     action: preview.action,
@@ -1723,6 +1840,7 @@ impl App {
 
     fn show(&mut self, view: View) -> Vec<Effect> {
         let mut effects = Vec::new();
+        self.wanted = None;
         if self.view == View::Job && view != View::Job {
             self.job = None;
             effects.push(Effect::CloseJob);
@@ -1734,7 +1852,9 @@ impl App {
                 View::Sizing => effects.push(Effect::Sizing),
                 View::Caches => effects.push(Effect::Caches),
                 View::Settings => effects.extend([Effect::Doctor, Effect::Config]),
-                View::Insights if self.insights.is_none() => effects.push(Effect::Insights),
+                View::Insights if self.insights.get().is_none() => {
+                    effects.push(Effect::Insights);
+                }
                 View::Overview | View::Insights | View::Job => {}
             }
         }
@@ -1792,25 +1912,14 @@ impl App {
             }
             Subject::Check { name } => {
                 let effects = self.show(View::Settings);
-                if let Some(at) = self
-                    .doctor
-                    .get()
-                    .and_then(|doctor| doctor.checks.iter().position(|check| &check.name == name))
-                {
-                    self.check = at;
-                }
+                self.wanted = Some(Wanted::Check(name.clone()));
+                self.select_wanted();
                 return effects;
             }
             Subject::Insight { key } => {
                 let effects = self.show(View::Insights);
-                if let Some(at) = self.insights.as_ref().and_then(|insights| {
-                    insights
-                        .insights
-                        .iter()
-                        .position(|insight| &insight.key == key)
-                }) {
-                    self.insight = at;
-                }
+                self.wanted = Some(Wanted::Insight(key.clone()));
+                self.select_wanted();
                 return effects;
             }
             Subject::Host | Subject::Github | Subject::Unknown => {}
@@ -1822,6 +1931,32 @@ impl App {
                 .map(|view| self.show(view))
                 .unwrap_or_default(),
             _ => Vec::new(),
+        }
+    }
+
+    /// Selects the check or insight an attention item led to, once it is read; the read the view asked for may answer
+    /// after the view shows.
+    fn select_wanted(&mut self) {
+        let at = match &self.wanted {
+            Some(Wanted::Check(name)) => self
+                .doctor
+                .get()
+                .and_then(|doctor| doctor.checks.iter().position(|check| &check.name == name))
+                .map(|at| self.check = at),
+            Some(Wanted::Insight(key)) => self
+                .insights
+                .get()
+                .and_then(|insights| {
+                    insights
+                        .insights
+                        .iter()
+                        .position(|insight| &insight.key == key)
+                })
+                .map(|at| self.insight = at),
+            None => None,
+        };
+        if at.is_some() {
+            self.wanted = None;
         }
     }
 
@@ -1936,6 +2071,7 @@ impl App {
             panel: Panel::Log,
             comparison: Reading::default(),
             runs: None,
+            asked: None,
         };
         for sample in &open.samples {
             open.job.observe(sample);
@@ -1978,7 +2114,7 @@ impl App {
             ),
             (View::Insights, _) => (
                 &mut self.insight,
-                self.insights.as_ref().map_or(0, |i| i.insights.len()),
+                self.insights.get().map_or(0, |i| i.insights.len()),
             ),
             (View::Caches, _) => (
                 &mut self.cache,

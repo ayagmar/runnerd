@@ -224,24 +224,44 @@ pub(super) fn preview(
                 .map(|line| Line::styled(line, theme.wait())),
         );
     }
-    if !preview.siblings.is_empty() {
-        lines.push(Line::from(""));
-        for sibling in &preview.siblings {
+    let note: Vec<Line<'static>> = wrap(&preview.siblings_note, inner)
+        .into_iter()
+        .map(|line| Line::styled(line, theme.dim()))
+        .collect();
+    // The other jobs of the run give way first, then the end, each leaving a mark that more is there.
+    let room = usize::from(area.height.saturating_sub(2));
+    let mut siblings: Vec<Line<'static>> = preview
+        .siblings
+        .iter()
+        .map(|sibling| {
             let badge = badge(sibling, theme);
             let id = format!("{} ", sibling.id);
             let room = inner.saturating_sub(id.width() + badge.width() + 2);
-            lines.push(Line::from(vec![
+            Line::from(vec![
                 Span::styled(id, theme.dim()),
                 Span::raw(format!("{}  ", fit(&sibling.title().to_string(), room))),
                 badge,
-            ]));
-        }
+            ])
+        })
+        .collect();
+    let spare = room.saturating_sub(lines.len() + note.len() + 1);
+    if siblings.len() > spare {
+        let hidden = siblings.len() + 1 - spare.max(1);
+        siblings.truncate(spare.saturating_sub(1));
+        siblings.push(Line::styled(
+            format!("… {hidden} more not shown"),
+            theme.dim(),
+        ));
     }
-    lines.extend(
-        wrap(&preview.siblings_note, inner)
-            .into_iter()
-            .map(|line| Line::styled(line, theme.dim())),
-    );
+    if !siblings.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(siblings);
+    }
+    lines.extend(note);
+    if lines.len() > room && room > 0 {
+        lines.truncate(room - 1);
+        lines.push(Line::styled("… the rest does not fit", theme.dim()));
+    }
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
     let popup = centred(area, width, height);
     hits.cover(popup);

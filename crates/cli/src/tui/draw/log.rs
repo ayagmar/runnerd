@@ -26,12 +26,13 @@ pub(super) fn log(
 ) {
     let view = &open.log;
     let rows = view.rows();
+    let cursor = view.cursor_in(&rows);
     let sections = view.sections();
     let block = Block::new()
         .borders(Borders::TOP)
         .border_style(theme.dim())
         .title(Span::styled(" Log ", bold()))
-        .title_top(Line::styled(note(open, rows.len()), theme.dim()).right_aligned());
+        .title_top(Line::styled(note(open, rows.len(), cursor), theme.dim()).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if rows.is_empty() {
@@ -45,9 +46,7 @@ pub(super) fn log(
     }
     let height = usize::from(inner.height);
     let last = rows.len().saturating_sub(height);
-    let first = view
-        .cursor()
-        .map_or(last, |cursor| cursor.saturating_sub(height / 2).min(last));
+    let first = cursor.map_or(last, |cursor| cursor.saturating_sub(height / 2).min(last));
     let gutter = view.read().max(1).to_string().len().max(
         rows.iter()
             .filter_map(|row| match row {
@@ -91,7 +90,7 @@ pub(super) fn log(
                     theme.dim(),
                 ),
             };
-            if view.cursor() == Some(at) {
+            if cursor == Some(at) {
                 line.patch_style(selected())
             } else {
                 line
@@ -103,7 +102,7 @@ pub(super) fn log(
 }
 
 /// The log's heading note: what core says of its evidence, the search and where it stands, and whether it follows.
-fn note(open: &JobView, rows: usize) -> String {
+fn note(open: &JobView, rows: usize, cursor: Option<usize>) -> String {
     let view = &open.log;
     let mut parts = Vec::new();
     match view.outline() {
@@ -122,10 +121,20 @@ fn note(open: &JobView, rows: usize) -> String {
             found.count()
         ));
     }
-    parts.push(match view.cursor() {
-        None => "following".to_owned(),
-        Some(at) => format!("{} rows up, G follows", rows.saturating_sub(at + 1)),
-    });
+    // Only a log that grows is followed; the end of one that does not is just its end.
+    let grows = match view.outline() {
+        Reading::Read(outline) => outline.evidence.grows(),
+        Reading::Unread(_) => !open.job.summary.state.is_final(),
+    };
+    match cursor {
+        None if grows => parts.push("following".to_owned()),
+        None => {}
+        Some(at) if grows => parts.push(format!(
+            "{} rows up, G follows",
+            rows.saturating_sub(at + 1)
+        )),
+        Some(at) => parts.push(format!("{} rows up, G ends", rows.saturating_sub(at + 1))),
+    }
     format!(" {} ", parts.join(" · "))
 }
 
@@ -232,6 +241,11 @@ pub(super) fn styled_line(
         format!("{:>gutter$} ", styled.line + 1),
         theme.dim(),
     )];
+    // A cut line's words take their room first: they say the line is not whole.
+    let omitted = styled
+        .omitted_words()
+        .map(|omitted| format!(" … {omitted}"));
+    let width = width.saturating_sub(omitted.as_ref().map_or(0, |omitted| omitted.width()));
     let mut used = gutter + 1;
     for run in &styled.runs {
         if used >= width {
@@ -258,8 +272,8 @@ pub(super) fn styled_line(
         used += text.width();
         spans.push(Span::styled(text, style));
     }
-    if let Some(omitted) = styled.omitted_words() {
-        spans.push(Span::styled(format!(" … {omitted}"), theme.dim()));
+    if let Some(omitted) = omitted {
+        spans.push(Span::styled(omitted, theme.dim()));
     }
     Line::from(spans)
 }

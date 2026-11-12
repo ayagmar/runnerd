@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use runnerd_core::api::{self, Fix};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Theme, fit, length, list_block, selected};
+use super::{Theme, fit, length, list_block, selected, wrap};
 use crate::tui::app::{App, Pane};
 use crate::tui::mouse::{Hits, List};
 use crate::tui::reading::{Reading, Unread};
@@ -27,18 +27,46 @@ pub(super) fn count(app: &App, theme: Theme) -> Option<Span<'static>> {
     ))
 }
 
-/// The rows the list wants: its items, at most `most`, and a line for the rest; one for a daemon without the list;
-/// none when nothing needs attention.
-pub(super) fn wanted(app: &App, most: usize) -> u16 {
+/// The rows the list wants `width` cells wide: its items, at most `most`, and a line for the rest, and while it is
+/// focused the selected item whole under them; one for a daemon without the list; none when nothing needs attention.
+pub(super) fn wanted(app: &App, most: usize, width: u16) -> u16 {
     match &app.attention {
         Reading::Read(attention) if attention.items.is_empty() => 0,
         Reading::Read(attention) => {
             let shown = attention.items.len().min(most);
-            length(shown + 1 + usize::from(attention.more(shown).is_some()))
+            length(
+                shown
+                    + 1
+                    + usize::from(attention.more(shown).is_some())
+                    + detail(app, usize::from(width), Theme { colour: false }).len(),
+            )
         }
         Reading::Unread(Unread::Unsupported) => 1,
         Reading::Unread(_) => 0,
     }
+}
+
+/// The selected item's title, then what clears it, dim, each wrapped to `width`; nothing unless the list is focused.
+fn detail(app: &App, width: usize, theme: Theme) -> Vec<Line<'static>> {
+    let Some(item) = app
+        .notices()
+        .get(app.notice)
+        .filter(|_| app.pane == Pane::Attention)
+    else {
+        return Vec::new();
+    };
+    let mut lines: Vec<Line<'static>> = wrap(&item.title, width.saturating_sub(2))
+        .into_iter()
+        .map(|line| Line::raw(format!("  {line}")))
+        .collect();
+    if let Some(fix) = &item.fix {
+        lines.extend(
+            wrap(&fix.line(), width.saturating_sub(2))
+                .into_iter()
+                .map(|line| Line::styled(format!("  {line}"), theme.dim())),
+        );
+    }
+    lines
 }
 
 /// The items, most urgent first: the mark and title, then what clears it, dim, and how old its evidence is on the
@@ -69,6 +97,20 @@ pub(super) fn attention(
     let block = list_block("Attention", focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // The selected item's title and fix whole, under the list, leaving it a row.
+    let mut detail = detail(app, usize::from(inner.width), theme);
+    // The list keeps the selected item's row, and the row counting the rest.
+    let list_least = 1 + u16::from(attention.items.len() > 1);
+    let detail_height = length(detail.len()).min(inner.height.saturating_sub(list_least));
+    if detail.len() > usize::from(detail_height) {
+        detail.truncate(usize::from(detail_height));
+        if let Some(last) = detail.last_mut() {
+            last.spans.push(Span::styled(" …", theme.dim()));
+        }
+    }
+    let [inner, detail_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(detail_height)]).areas(inner);
+    frame.render_widget(ratatui::widgets::Paragraph::new(detail), detail_area);
     let more_row = attention.items.len() > usize::from(inner.height);
     let shown = usize::from(inner.height)
         .saturating_sub(usize::from(more_row))

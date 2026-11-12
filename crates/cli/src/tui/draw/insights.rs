@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{Theme, bold, fit, heading, length, selected, wrap};
 use crate::tui::app::App;
 use crate::tui::mouse::{Hits, List};
+use crate::tui::reading::{Reading, Unread};
 
 pub(super) fn insights(
     frame: &mut Frame<'_>,
@@ -20,12 +21,20 @@ pub(super) fn insights(
     hits: &mut Hits,
 ) {
     let name = api::View::Insights.title();
-    let Some(insights) = &app.insights else {
-        let [title, rest] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        heading(frame, title, name, String::new(), theme);
-        frame.render_widget(Line::styled("reading…", theme.dim()), rest);
-        return;
+    let insights = match &app.insights {
+        Reading::Read(insights) => insights,
+        Reading::Unread(why) => {
+            let [title, rest] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+            heading(frame, title, name, String::new(), theme);
+            let text = match why {
+                Unread::Waiting => "reading…".to_owned(),
+                Unread::Unsupported => api::NOT_SUPPORTED.to_owned(),
+                Unread::Failed(why) => why.clone(),
+            };
+            frame.render_widget(Line::styled(text, theme.dim()), rest);
+            return;
+        }
     };
     let width = usize::from(area.width);
     let savings: Vec<String> = app

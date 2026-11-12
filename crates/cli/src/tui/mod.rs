@@ -525,7 +525,6 @@ async fn attention(client: &Client) -> Result<api::Attention, Unread> {
     }
 }
 
-/// The cache volumes.
 /// A request about jobs: one job's page, or the jobs list and timeline.
 async fn jobs_request(client: Client, send: UnboundedSender<Msg>, effect: Effect) {
     match effect {
@@ -560,13 +559,17 @@ async fn jobs_request(client: Client, send: UnboundedSender<Msg>, effect: Effect
             let _ = send.send(match client.job_action(job, action, &query).await {
                 Ok(JobActionAnswer::Confirm(preview)) => Msg::Preview(preview),
                 Ok(JobActionAnswer::Done(result)) => Msg::Acted(result),
-                Err(error) if error.is_unsupported() => Msg::Failed(
-                    api::JobActions::Unsupported
+                Err(error) if error.is_unsupported() => Msg::ActionFailed {
+                    job,
+                    why: api::JobActions::Unsupported
                         .why_not()
                         .unwrap_or(api::NOT_SUPPORTED)
                         .to_owned(),
-                ),
-                Err(error) => Msg::Failed(error.to_string()),
+                },
+                Err(error) => Msg::ActionFailed {
+                    job,
+                    why: error.to_string(),
+                },
             });
         }
         Effect::History {
@@ -699,12 +702,12 @@ async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u
 /// Reads the insights and what the jobs' minutes would have cost, and sends them; a read that fails sends nothing,
 /// and the last one read stays shown.
 async fn read_insights(client: Client, send: UnboundedSender<Msg>) {
-    if let Ok(insights) = client
+    let insights = client
         .get_query::<Insights>("/v1/insights", &InsightsQuery::default())
         .await
-    {
-        let _ = send.send(Msg::Insights(Box::new(insights)));
-    }
+        .map(Box::new)
+        .map_err(unread);
+    let _ = send.send(Msg::Insights(insights));
     if let Ok(savings) = client.get::<Savings>("/v1/savings").await {
         let _ = send.send(Msg::Savings(Box::new(savings)));
     }
@@ -794,22 +797,25 @@ async fn read_lines(client: Client, send: UnboundedSender<Msg>, job: u64, range:
         follow: false,
     };
     let mut lines = Vec::new();
-    match client.styled_lines(job, &query).await {
+    let failed = match client.styled_lines(job, &query).await {
         Ok(mut read) => loop {
             match read.next().await {
                 Ok(Some(line)) => lines.push(line),
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = send.send(Msg::Failed(format!("log of job {job}: {error}")));
-                    break;
-                }
+                Ok(None) => break None,
+                Err(error) => break Some(error),
             }
         },
-        Err(error) => {
-            let _ = send.send(Msg::Failed(format!("log of job {job}: {error}")));
-        }
-    }
+        Err(error) => Some(error),
+    };
     let _ = send.send(Msg::Lines { job, lines });
+    if let Some(error) = failed {
+        // The range may be asked for again.
+        let _ = send.send(Msg::LinesFailed {
+            job,
+            range,
+            why: format!("log of job {job}: {error}"),
+        });
+    }
 }
 
 /// Reads the job, its samples, its log's outline and its last lines; follows the lines until the job's record is
@@ -860,27 +866,83 @@ async fn styled_lines(
     };
     let mut read = client.styled_lines(job, &query).await?;
     // The lines stored come at once, then those that follow one by one: sent in batches as they come.
-    let mut batch: Vec<StyledLine> = Vec::new();
+    let mut batch = Batch::new(Instant::now());
     loop {
-        let next = if batch.is_empty() {
+        let next = if batch.lines.is_empty() {
             read.next().await?
-        } else if let Ok(next) = tokio::time::timeout(Duration::from_millis(20), read.next()).await
+        } else if let Some(wait) = batch.wait(Instant::now())
+            && let Ok(next) = tokio::time::timeout(wait, read.next()).await
         {
             next?
         } else {
-            let lines = std::mem::take(&mut batch);
-            if send.send(Msg::Lines { job, lines }).is_err() {
+            if send
+                .send(Msg::Lines {
+                    job,
+                    lines: batch.take(),
+                })
+                .is_err()
+            {
                 return Ok(());
             }
             continue;
         };
         match next {
-            Some(line) => batch.push(line),
+            Some(line) => batch.push(line, Instant::now()),
             None => break,
         }
     }
-    let _ = send.send(Msg::Lines { job, lines: batch });
+    let _ = send.send(Msg::Lines {
+        job,
+        lines: batch.take(),
+    });
     Ok(())
+}
+
+/// Lines a batch holds at most.
+const BATCH_LINES: usize = 500;
+/// The longest a line waits in a batch, through a burst that does not pause.
+const BATCH_AGE: Duration = Duration::from_millis(100);
+/// A pause this long sends the batch.
+const BATCH_QUIET: Duration = Duration::from_millis(20);
+
+/// Followed lines not sent yet, so the screen is drawn once per batch rather than once per line. Lives as long as one
+/// read of the log.
+#[derive(Debug)]
+struct Batch {
+    lines: Vec<StyledLine>,
+    /// When its first line came.
+    since: Instant,
+}
+
+impl Batch {
+    fn new(now: Instant) -> Batch {
+        Batch {
+            lines: Vec::new(),
+            since: now,
+        }
+    }
+
+    fn push(&mut self, line: StyledLine, now: Instant) {
+        if self.lines.is_empty() {
+            self.since = now;
+        }
+        self.lines.push(line);
+    }
+
+    /// How long to wait for another line before it is sent: up to [`BATCH_QUIET`], and never past [`BATCH_AGE`]
+    /// after its first line. `None` when it is due now, as when it holds [`BATCH_LINES`].
+    fn wait(&self, now: Instant) -> Option<Duration> {
+        if self.lines.len() >= BATCH_LINES {
+            return None;
+        }
+        let age = now.saturating_duration_since(self.since);
+        let wait = BATCH_QUIET.min(BATCH_AGE.saturating_sub(age));
+        (!wait.is_zero()).then_some(wait)
+    }
+
+    fn take(&mut self) -> Vec<StyledLine> {
+        std::mem::take(&mut self.lines)
+    }
 }
 
 /// The plain log of a daemon without the styled lines, styled here by core's parser.

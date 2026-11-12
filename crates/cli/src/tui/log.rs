@@ -5,14 +5,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use runnerd_core::api::{
-    LINES_MAX, LineKind, LineRange, LogOutline, LogSearch, StepLog, StyledLine,
-};
+use runnerd_core::api::{LineKind, LineRange, LogOutline, LogSearch, StepLog, StyledLine};
 
 use super::reading::{Reading, Unread};
 
-/// Lines kept of one log; past it, those farthest from the lines read last go.
+/// Lines kept of one log; past it, those farthest from the row the keys are on go.
 pub(crate) const LOG_KEPT: usize = 20_000;
+
+/// Lines asked for at once: a few screens either side of the row the keys are on.
+const PAGE: u64 = 1_000;
+
+/// How many rows either side of the keys' row are read when they are not yet: more than a screen shows.
+const NEAR: usize = 100;
 
 /// A part of the log the keys can fold, by its first line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,6 +42,26 @@ pub(crate) struct Section {
     pub(crate) kind: SectionKind,
     /// `to` is `u64::MAX` for lines still to come.
     pub(crate) range: LineRange,
+}
+
+/// The row the keys are on, by what it shows rather than its place, so rows that come or go above it leave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum At {
+    /// A section's header, by its first line.
+    Section(u64),
+    /// A group's header, by its first line.
+    Group(u64),
+    /// A line, read or not yet.
+    Line(u64),
+}
+
+impl At {
+    /// The line it stands at.
+    fn line(self) -> u64 {
+        match self {
+            At::Section(line) | At::Group(line) | At::Line(line) => line,
+        }
+    }
 }
 
 /// One row of the log on the screen.
@@ -137,7 +161,7 @@ pub(crate) struct LogView {
     /// Ranges asked for and not since forgotten, so a range is asked once.
     asked: Vec<LineRange>,
     /// The row the keys are on; `None` follows the last.
-    cursor: Option<usize>,
+    cursor: Option<At>,
     found: Option<Found>,
 }
 
@@ -152,7 +176,50 @@ impl LogView {
 
     /// The row the keys are on; `None` while it follows the last.
     pub(crate) fn cursor(&self) -> Option<usize> {
-        self.cursor
+        self.cursor_in(&self.rows())
+    }
+
+    /// The place in `rows`, as [`LogView::rows`] gives them, of the row the keys are on: the row it was, or, when
+    /// that is folded away, the row nearest its line. `None` while it follows the last.
+    pub(crate) fn cursor_in(&self, rows: &[Row]) -> Option<usize> {
+        let at = self.cursor?;
+        let sections = self.sections();
+        rows.iter()
+            .position(
+                |row| match (self.at_of(&sections, *row, Way::Forward), at) {
+                    (Some(At::Line(_)), At::Line(line)) => covers(*row, line),
+                    (shown, _) => shown == Some(at),
+                },
+            )
+            .or_else(|| {
+                rows.iter()
+                    .enumerate()
+                    .min_by_key(|(_, row)| distance(**row, &sections, self, at.line()))
+                    .map(|(place, _)| place)
+            })
+    }
+
+    /// What `row` shows; a row of lines not read yet stands at its first line, or its last when reached from below.
+    fn at_of(&self, sections: &[Section], row: Row, way: Way) -> Option<At> {
+        match row {
+            Row::Section(at) => sections
+                .get(at)
+                .map(|section| At::Section(section.range.from)),
+            Row::Group(at) => self.group_start(at).map(At::Group),
+            Row::Line(line) => Some(At::Line(line)),
+            Row::Missing(range) => Some(At::Line(match way {
+                Way::Forward => range.from,
+                Way::Backward => range.to.saturating_sub(1),
+            })),
+        }
+    }
+
+    /// Puts the keys on `row` of `rows`.
+    fn put(&mut self, rows: &[Row], at: usize, way: Way) {
+        let sections = self.sections();
+        self.cursor = rows
+            .get(at)
+            .and_then(|row| self.at_of(&sections, *row, way));
     }
 
     /// How many lines are read.
@@ -160,76 +227,78 @@ impl LogView {
         self.lines.len()
     }
 
-    /// Takes the outline: the failed step, or else the step that runs, opens, and a failed job's rows start at it.
+    /// Takes the outline. On the first, a failed job's rows start at its failed step, open: or, when that step has no
+    /// lines of its own, at the last part that has. A log of one part opens it. While the log grows and the keys follow
+    /// it, every outline opens the last step with lines and its groups that have not ended, so what comes shows.
     pub(crate) fn take_outline(&mut self, answer: Result<LogOutline, Unread>) {
         let first = self.outline.get().is_none();
         self.outline.take(answer);
         let Some(outline) = self.outline.get() else {
             return;
         };
+        let follows = outline.evidence.grows() && self.cursor.is_none();
+        let failed = outline.failure.as_ref().map(|failure| failure.step);
+        let running = follows
+            .then(|| {
+                outline
+                    .steps
+                    .iter()
+                    .rev()
+                    .find_map(|step| lines(step.lines))
+            })
+            .flatten();
+        let unended: Vec<u64> = if follows {
+            outline
+                .groups
+                .iter()
+                .filter(|group| group.end.is_none())
+                .map(|group| group.start)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(running) = running {
+            self.open.insert(Fold::Section(running.from));
+        }
+        for start in unended {
+            self.open.insert(Fold::Group(start));
+        }
         if !first {
             return;
         }
-        let open = outline
-            .failure
-            .as_ref()
-            .and_then(|failure| failure.step)
-            .or_else(|| {
-                outline
-                    .evidence
-                    .grows()
-                    .then(|| {
-                        outline
-                            .steps
-                            .iter()
-                            .rev()
-                            .find(|step| lines(step.lines).is_some())
-                    })
-                    .flatten()
-                    .map(|step| step.number)
-            });
         let sections = self.sections();
-        let chosen = open.and_then(|number| {
-            sections
+        if let Some(step) = failed {
+            let section = sections
                 .iter()
-                .position(|section| section.kind == SectionKind::Step(number))
-        });
-        match (chosen, sections.as_slice()) {
-            (Some(at), _) => {
-                if let Some(section) = sections.get(at) {
-                    self.open.insert(Fold::Section(section.range.from));
-                }
-                if outline.failure.is_some() {
-                    self.cursor = Some(
-                        self.rows()
-                            .iter()
-                            .position(|row| *row == Row::Section(at))
-                            .unwrap_or(0),
-                    );
-                }
+                .find(|section| step.is_some_and(|step| section.kind == SectionKind::Step(step)))
+                .or_else(|| {
+                    sections
+                        .iter()
+                        .rev()
+                        .find(|section| section.kind != SectionKind::Flat)
+                });
+            if let Some(section) = section {
+                self.open.insert(Fold::Section(section.range.from));
+                self.cursor = Some(At::Section(section.range.from));
             }
+        } else if running.is_none()
+            && let [
+                only,
+                Section {
+                    kind: SectionKind::Flat,
+                    ..
+                },
+            ] = sections.as_slice()
+        {
             // One part with nothing to choose between: it opens.
-            (
-                None,
-                [
-                    only,
-                    Section {
-                        kind: SectionKind::Flat,
-                        ..
-                    },
-                ],
-            ) => {
-                self.open.insert(Fold::Section(only.range.from));
-            }
-            (None, _) => {}
+            self.open.insert(Fold::Section(only.range.from));
         }
     }
 
-    /// Takes lines read, in any order; past [`LOG_KEPT`], the lines farthest from them go.
+    /// Takes lines read, in any order; past [`LOG_KEPT`], the lines farthest from the keys go, or the first ones while
+    /// the keys follow the last.
     pub(crate) fn take_lines(&mut self, read: Vec<StyledLine>) {
-        let Some(near) = read.first().map(|line| line.line) else {
-            return;
-        };
+        let near = self.cursor.map_or(u64::MAX, At::line);
         for line in read {
             self.lines.insert(line.line, line);
         }
@@ -347,7 +416,11 @@ impl LogView {
                     line += 1;
                     continue;
                 }
-                let next_read = self.lines.range(line..to).next().map(|(at, _)| *at);
+                // A search's match is a row even where the lines around it are not read yet.
+                let next_read = [&self.lines, self.found_lines()]
+                    .into_iter()
+                    .filter_map(|lines| lines.range(line..to).next().map(|(at, _)| *at))
+                    .min();
                 let next_group = groups.range(line..to).next().map(|(at, _)| *at);
                 let until = [next_read, next_group, Some(to)]
                     .into_iter()
@@ -366,6 +439,11 @@ impl LogView {
 
     fn last_line(&self) -> Option<u64> {
         self.lines.keys().next_back().copied()
+    }
+
+    fn found_lines(&self) -> &BTreeMap<u64, StyledLine> {
+        static NONE: BTreeMap<u64, StyledLine> = BTreeMap::new();
+        self.found.as_ref().map_or(&NONE, |found| &found.lines)
     }
 
     /// Line `line` as read, with a search's matches marked while the search stands.
@@ -394,41 +472,71 @@ impl LogView {
         self.outline.get()?.groups.get(at).map(|group| group.start)
     }
 
-    /// The ranges the rows lack that were not asked for yet, at most [`LINES_MAX`] lines each; they count as asked.
+    /// The lines to read next, not asked for yet, at most [`PAGE`] each; they count as asked. Only rows of lines not
+    /// read yet within [`NEAR`] rows of the keys are read: the page around the keys' line when it is not read, the
+    /// page next to the lines shown otherwise.
     pub(crate) fn wants(&mut self) -> Vec<LineRange> {
+        let rows = self.rows();
+        let Some(last) = rows.len().checked_sub(1) else {
+            return Vec::new();
+        };
+        let at = self.cursor_in(&rows).unwrap_or(last);
+        let line = self.cursor.map(At::line);
         let mut wanted = Vec::new();
-        for row in self.rows() {
-            let Row::Missing(range) = row else {
+        for (place, row) in rows
+            .iter()
+            .enumerate()
+            .take(at.saturating_add(NEAR).saturating_add(1))
+            .skip(at.saturating_sub(NEAR))
+        {
+            let Row::Missing(range) = *row else {
                 continue;
             };
-            let range = LineRange {
-                from: range.from,
-                to: range.to.min(range.from + u64::from(LINES_MAX)),
+            let target = match line {
+                Some(line) if range.from <= line && line < range.to => line,
+                _ if place < at => range.to.saturating_sub(1),
+                _ => range.from,
             };
+            let page = page_around(range, target);
             if self
                 .asked
                 .iter()
-                .any(|asked| asked.from <= range.from && range.from < asked.to)
+                .any(|asked| asked.from < page.to && page.from < asked.to)
             {
                 continue;
             }
-            self.asked.push(range);
-            wanted.push(range);
+            self.asked.push(page);
+            wanted.push(page);
         }
         wanted
     }
 
+    /// A read of `range` failed: it may be asked for again.
+    pub(crate) fn unask(&mut self, range: LineRange) {
+        self.asked.retain(|asked| *asked != range);
+    }
+
     /// Moves the keys `by` rows; past the last, it follows the log again.
     pub(crate) fn step(&mut self, by: isize) {
-        let len = self.rows().len();
-        let at = self.cursor.unwrap_or(len.saturating_sub(1));
+        let rows = self.rows();
+        let len = rows.len();
+        let at = self.cursor_in(&rows).unwrap_or(len.saturating_sub(1));
         let next = at.saturating_add_signed(by);
-        self.cursor = (next < len.saturating_sub(1)).then_some(next);
+        if next < len.saturating_sub(1) {
+            let way = if by < 0 { Way::Backward } else { Way::Forward };
+            self.put(&rows, next, way);
+        } else {
+            self.cursor = None;
+        }
     }
 
     /// To the first row.
     pub(crate) fn start(&mut self) {
-        self.cursor = Some(0);
+        let rows = self.rows();
+        self.put(&rows, 0, Way::Forward);
+        if self.cursor.is_none() {
+            self.cursor = Some(At::Line(0));
+        }
     }
 
     /// To the last row, following the log.
@@ -439,32 +547,29 @@ impl LogView {
     /// Opens or closes the section or group the keys are on.
     pub(crate) fn toggle(&mut self) {
         let rows = self.rows();
-        let Some(row) = self
-            .cursor
-            .or_else(|| rows.len().checked_sub(1))
-            .and_then(|at| rows.get(at).copied())
-        else {
+        let Some(at) = self.cursor_in(&rows).or_else(|| rows.len().checked_sub(1)) else {
             return;
         };
-        let fold = match row {
-            Row::Section(at) => self
-                .sections()
-                .get(at)
+        let sections = self.sections();
+        let fold = match rows.get(at) {
+            Some(Row::Section(at)) => sections
+                .get(*at)
                 .map(|section| Fold::Section(section.range.from)),
-            Row::Group(at) => self.group_start(at).map(Fold::Group),
-            Row::Line(_) | Row::Missing(_) => None,
+            Some(Row::Group(at)) => self.group_start(*at).map(Fold::Group),
+            Some(Row::Line(_) | Row::Missing(_)) | None => None,
         };
         if let Some(fold) = fold {
             if !self.open.remove(&fold) {
                 self.open.insert(fold);
             }
-            self.cursor = rows.iter().position(|candidate| *candidate == row);
+            self.put(&rows, at, Way::Forward);
         }
     }
 
     /// Puts the keys on row `at`.
     pub(crate) fn point(&mut self, at: usize) {
-        self.cursor = Some(at);
+        let rows = self.rows();
+        self.put(&rows, at, Way::Forward);
     }
 
     /// A new search: the matches come with [`LogView::take_found`].
@@ -510,15 +615,7 @@ impl LogView {
                 }
             }
         }
-        let rows = self.rows();
-        self.cursor = rows
-            .iter()
-            .position(|row| match row {
-                Row::Line(at) => *at == line,
-                Row::Missing(range) => range.from <= line && line < range.to,
-                Row::Section(_) | Row::Group(_) => false,
-            })
-            .or(self.cursor);
+        self.cursor = Some(At::Line(line));
     }
 }
 
@@ -527,6 +624,40 @@ impl LogView {
 pub(crate) enum Way {
     Forward,
     Backward,
+}
+
+/// Whether `row` shows `line`, read or not yet.
+fn covers(row: Row, line: u64) -> bool {
+    match row {
+        Row::Line(at) => at == line,
+        Row::Missing(range) => range.from <= line && line < range.to,
+        Row::Section(_) | Row::Group(_) => false,
+    }
+}
+
+/// How many lines `row` stands from `line`.
+fn distance(row: Row, sections: &[Section], view: &LogView, line: u64) -> u64 {
+    match row {
+        Row::Section(at) => sections
+            .get(at)
+            .map_or(u64::MAX, |section| section.range.from.abs_diff(line)),
+        Row::Group(at) => view
+            .group_start(at)
+            .map_or(u64::MAX, |start| start.abs_diff(line)),
+        Row::Line(at) => at.abs_diff(line),
+        Row::Missing(_) if covers(row, line) => 0,
+        Row::Missing(range) => range.from.abs_diff(line).min(range.to.abs_diff(line)),
+    }
+}
+
+/// At most [`PAGE`] lines of `range` around `line`.
+fn page_around(range: LineRange, line: u64) -> LineRange {
+    let from = range.from.max(line.saturating_sub(PAGE / 2));
+    let to = range.to.min(from.saturating_add(PAGE));
+    LineRange {
+        from: range.from.max(to.saturating_sub(PAGE)),
+        to,
+    }
 }
 
 /// A step's lines, when the outline knows them and there are some.

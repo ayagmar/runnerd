@@ -34,8 +34,16 @@ headers, the separator. A parity test checks that repository and job names are n
 **The job page.** On a failed job, core's failure summary comes first. The log is rows of `LogView`: a header per step
 and group that folds, lines in core's styles and colours, a match of the search reversed. `/` asks the daemon to search
 the log, `n` and `N` walk the matches, wrapping. `c` swaps the log for the comparison with an earlier run. `x`, `a` and
-`A` ask core for a preview of cancel, re-run and re-run failed; the preview is drawn over the page, and only `y` sends
-its confirmation. Nothing is offered while `Status::job_actions` says no.
+`A` ask core for a preview of cancel, re-run and re-run failed; the footer says it is being read, and only the
+preview of the action asked last, for the job still open, is drawn over the page. Only `y` sends its confirmation; a
+click or the wheel answers a question as any other key does. Nothing is offered while `Status::job_actions` says no.
+
+**Reading the log.** The row the keys are on is kept as what it shows (a header, or a line read or not), so lines that
+arrive or are forgotten above it do not move it. Lines are read 1,000 at a time, only next to the rows within 100 of
+the keys, and of the 20,000 kept, those farthest from the keys go first. A match in lines not read yet is a row of its
+own, and the lines around it are read. While a running job is followed, each outline opens its last step and its
+groups not yet ended. Followed lines are drawn in batches of at most 500 lines or 100 ms. Back from an outage, the open
+job is opened again: its record, outline and log are read and followed anew.
 
 **The jobs view.** `/` searches names, workflows and branches; `f` opens a list of filters, each a list of its
 values; `s` picks one of `JobOrder::ALL`, `t` one of `JobRange::ALL`; `l` swaps the table for the timeline of each
