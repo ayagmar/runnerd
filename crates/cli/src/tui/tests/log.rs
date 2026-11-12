@@ -128,11 +128,14 @@ fn moving_through_a_long_step_reads_small_pages_near_the_keys_once_each() {
     let Row::Line(line) = on(&view) else {
         panic!("on a line");
     };
-    view.take_lines(lines(0, 20_000));
+    view.take_lines(lines(5_000, 20_000));
+    // Full, a page far from the keys comes: lines far from them go, not the ones under them nor the page.
+    view.take_lines(lines(0, 1_000));
     assert!(
         view.line(line).is_some(),
         "line {line} under the keys is kept"
     );
+    assert!(view.line(0).is_some(), "the page just read is kept");
 }
 
 #[test]
@@ -220,4 +223,89 @@ fn a_failed_step_without_lines_of_its_own_opens_the_last_part_with_lines() {
     )));
     assert_eq!(on(&view), Row::Section(1), "the keys are on step 2");
     assert!(view.is_open(Row::Section(1)), "step 2 opens");
+}
+
+/// Reads what the log wants until it wants nothing, as `app` does after each key and each page: every page asked is
+/// answered at once. Returns the pages asked; fails past `most`, as a log that asks without end would.
+fn settle(view: &mut LogView, total: u64, most: usize) -> Vec<LineRange> {
+    let mut asked = Vec::new();
+    loop {
+        let pages = view.wants();
+        if pages.is_empty() {
+            return asked;
+        }
+        for page in pages {
+            asked.push(page);
+            assert!(asked.len() <= most, "the reads do not end: {asked:?}");
+            view.take_lines(lines(page.from, page.to.min(total)));
+        }
+    }
+}
+
+#[test]
+fn folding_a_long_step_of_a_followed_job_ends_its_reads() {
+    let mut view = LogView::default();
+    // Step 1 runs, and opens as the step followed.
+    view.take_outline(Ok(outline(
+        LogEvidence::Running,
+        100,
+        &[(1, StepLog::Lines(range(0, 100)))],
+        Vec::new(),
+        None,
+    )));
+    view.take_lines(lines(0, 100));
+    settle(&mut view, 100, 1_000);
+    // Step 2 starts.
+    view.take_outline(Ok(outline(
+        LogEvidence::Running,
+        25_100,
+        &[
+            (1, StepLog::Lines(range(0, 100))),
+            (2, StepLog::Lines(range(100, 25_100))),
+        ],
+        Vec::new(),
+        None,
+    )));
+    // Step 2 prints more than the lines kept, followed in batches.
+    for from in (100..25_100).step_by(500) {
+        view.take_lines(lines(from, (from + 500).min(25_100)));
+        settle(&mut view, 25_100, 1_000);
+    }
+    // Step 3 starts.
+    view.take_outline(Ok(outline(
+        LogEvidence::Running,
+        25_110,
+        &[
+            (1, StepLog::Lines(range(0, 100))),
+            (2, StepLog::Lines(range(100, 25_100))),
+            (3, StepLog::Lines(range(25_100, 25_110))),
+        ],
+        Vec::new(),
+        None,
+    )));
+    view.take_lines(lines(25_100, 25_110));
+    settle(&mut view, 25_110, 1_000);
+
+    // The keys go to step 2's header and fold it.
+    let header = view
+        .rows()
+        .iter()
+        .position(|row| *row == Row::Section(1))
+        .expect("step 2 has a header");
+    view.point(header);
+    view.toggle();
+    assert!(!view.is_open(Row::Section(1)), "step 2 is folded");
+    assert!(view.is_open(Row::Section(0)), "step 1 stays open");
+    let asked = settle(&mut view, 25_110, 50);
+    for (at, page) in asked.iter().enumerate() {
+        assert!(
+            !asked[..at].contains(page),
+            "{page:?} is read twice: {asked:?}"
+        );
+    }
+    assert!(
+        view.rows().contains(&Row::Line(25_105)),
+        "step 3's lines stay read: {:?}",
+        view.rows()
+    );
 }

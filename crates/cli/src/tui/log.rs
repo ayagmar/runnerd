@@ -295,33 +295,57 @@ impl LogView {
         }
     }
 
-    /// Takes lines read, in any order; past [`LOG_KEPT`], the lines farthest from the keys go, or the first ones while
-    /// the keys follow the last.
+    /// Takes lines read, in any order. Past [`LOG_KEPT`], the kept lines farthest in rows from the keys' row go,
+    /// those no row shows (folded away) first, as [`LogView::wants`] measures nearness in rows too: a line it would
+    /// read again is never the one forgotten. No line of `read` goes, and only the ranges asked that lost a line may
+    /// be asked again.
     pub(crate) fn take_lines(&mut self, read: Vec<StyledLine>) {
-        let near = self.cursor.map_or(u64::MAX, At::line);
+        let (Some(first), Some(last)) = (
+            read.iter().map(|line| line.line).min(),
+            read.iter().map(|line| line.line).max(),
+        ) else {
+            return;
+        };
         for line in read {
             self.lines.insert(line.line, line);
         }
-        let mut forgot = false;
-        while self.lines.len() > LOG_KEPT {
-            let (Some(first), Some(last)) = (
-                self.lines.keys().next().copied(),
-                self.lines.keys().next_back().copied(),
-            ) else {
-                break;
-            };
-            let gone = if near.abs_diff(first) > near.abs_diff(last) {
-                first
-            } else {
-                last
-            };
-            self.lines.remove(&gone);
-            forgot = true;
+        let excess = self.lines.len().saturating_sub(LOG_KEPT);
+        if excess == 0 {
+            return;
         }
-        if forgot {
-            // What went may be asked for again.
-            self.asked.clear();
+        let rows = self.rows();
+        let keys = self.keys_row(&rows);
+        let mut shown: BTreeMap<u64, usize> = BTreeMap::new();
+        for (place, row) in rows.iter().enumerate() {
+            if let Row::Line(line) = row {
+                shown.insert(*line, place.abs_diff(keys));
+            }
         }
+        let mut candidates: Vec<(usize, u64)> = self
+            .lines
+            .keys()
+            .filter(|line| !(first..=last).contains(*line))
+            .map(|line| (shown.get(line).copied().unwrap_or(usize::MAX), *line))
+            .collect();
+        // Farthest first; of lines as far, those farthest from the keys' line.
+        let near = self.cursor.map_or(u64::MAX, At::line);
+        candidates.sort_by_key(|(rows, line)| std::cmp::Reverse((*rows, near.abs_diff(*line))));
+        let gone: BTreeSet<u64> = candidates
+            .into_iter()
+            .take(excess)
+            .map(|(_, line)| line)
+            .collect();
+        for line in &gone {
+            self.lines.remove(line);
+        }
+        // What went may be asked for again; nothing else.
+        self.asked
+            .retain(|asked| gone.range(asked.from..asked.to).next().is_none());
+    }
+
+    /// The place in `rows` of the keys' row: the last while they follow.
+    fn keys_row(&self, rows: &[Row]) -> usize {
+        self.cursor_in(rows).unwrap_or(rows.len().saturating_sub(1))
     }
 
     /// The parts of the log in order: each step's lines and those no step got, each under a header that folds them,
@@ -477,10 +501,10 @@ impl LogView {
     /// page next to the lines shown otherwise.
     pub(crate) fn wants(&mut self) -> Vec<LineRange> {
         let rows = self.rows();
-        let Some(last) = rows.len().checked_sub(1) else {
+        if rows.is_empty() {
             return Vec::new();
-        };
-        let at = self.cursor_in(&rows).unwrap_or(last);
+        }
+        let at = self.keys_row(&rows);
         let line = self.cursor.map(At::line);
         let mut wanted = Vec::new();
         for (place, row) in rows
