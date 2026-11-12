@@ -125,10 +125,31 @@ pub(crate) fn full_screen() -> std::io::Result<ratatui::DefaultTerminal> {
     ratatui::try_init()
 }
 
-/// Leaves raw mode and the alternate screen.
+/// Leaves raw mode and the alternate screen and shows the cursor, each tried whatever the others answered: keys and
+/// screen can be two terminals, and one of them gone must not leave the other as the TUI had it. The error is the
+/// first that is not a terminal gone ([`gone`]), else the first.
 #[cfg(feature = "tui")]
 pub(crate) fn restore() -> std::io::Result<()> {
-    ratatui::try_restore()
+    use ratatui::crossterm::cursor::Show;
+    use ratatui::crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+    let raw = disable_raw_mode();
+    let screen = ratatui::crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+    let cursor = ratatui::crossterm::execute!(std::io::stdout(), Show);
+    [raw, screen, cursor]
+        .into_iter()
+        .filter_map(Result::err)
+        .min_by_key(gone)
+        .map_or(Ok(()), Err)
+}
+
+/// Whether a terminal's error means it is gone. Once hung up, or its other end closed, its writes and modes fail
+/// with EIO, and `/dev/tty`, which crossterm opens when stdin no longer answers as a terminal, with ENXIO.
+#[cfg(feature = "tui")]
+pub(crate) fn gone(error: &std::io::Error) -> bool {
+    use rustix::io::Errno;
+    [Errno::IO, Errno::NXIO]
+        .iter()
+        .any(|gone| error.raw_os_error() == Some(gone.raw_os_error()))
 }
 
 /// Takes the terminal again after [`restore`], as when continued after Ctrl-Z. The new terminal has drawn nothing

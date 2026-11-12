@@ -2,8 +2,12 @@
 //! rest of `runnerctl`: a snapshot from `/v1/*`, then `/v1/events`. This module runs the loop: it feeds keys, events
 //! and answers to `app`'s reducer, makes the requests the reducer asks for, and draws with `draw` after each batch
 //! and every second, at most once per `FRAME`. It decides nothing itself. Whatever ends or stops it (`q`, SIGINT,
-//! SIGTERM, SIGHUP, Ctrl-Z, SIGTSTP) gives the terminal back first; SIGCONT takes it again.
+//! SIGTERM, SIGHUP, Ctrl-Z, SIGTSTP) gives the terminal back first; SIGCONT takes it again. A terminal that goes
+//! away, as when an SSH connection drops, ends it as `q` does.
 
+use std::convert::Infallible;
+use std::io::IsTerminal;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,6 +20,7 @@ use runnerd_core::api::{
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -46,7 +51,7 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
     let mut signals = Signals::new().map_err(|error| local(&error))?;
     let (send, mut receive) = mpsc::unbounded_channel();
     let feed = tokio::spawn(feed(client.clone(), events, send.clone(), RETRY));
-    let keys = Keys::spawn(send.clone());
+    let mut keys = Keys::spawn(send.clone());
     let mut terminal = match output::full_screen() {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -70,7 +75,7 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
     let ended = loop {
         if changed && Instant::now() >= next_frame {
             if let Err(error) = terminal.draw(|frame| draw::draw(frame, &app, now(), theme)) {
-                break Err(local(&error));
+                break Err(error);
             }
             changed = false;
             next_frame = Instant::now() + FRAME;
@@ -87,11 +92,12 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
                     Received::Continue => resume(&mut terminal),
                 };
                 if let Err(error) = taken {
-                    break Err(local(&error));
+                    break Err(error);
                 }
                 changed = true;
                 continue;
             },
+            () = keys.ended() => break Ok(()),
             _ = tick.tick() => {
                 changed = true;
                 continue;
@@ -119,17 +125,37 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
             }
         }
         if let Some(error) = failed {
-            break Err(local(&error));
+            break Err(error);
         }
         if quit {
             break Ok(());
         }
     };
-    let restored = output::restore().map_err(|error| local(&error));
+    let restored = give_back(terminal);
     keys.stop();
     feed.abort();
     requests.close_log();
-    ended.and(restored)
+    unless_gone(ended)
+        .and(unless_gone(restored))
+        .map_err(|error| local(&error))
+}
+
+/// Gives the terminal back for good.
+fn give_back(terminal: ratatui::DefaultTerminal) -> std::io::Result<()> {
+    let restored = output::restore();
+    // Its drop shows the cursor, which `restore` did, and prints a failure on stderr, which panics when stderr is a
+    // terminal gone.
+    std::mem::forget(terminal);
+    restored
+}
+
+/// What the terminal answered, a terminal that is gone counting as done: there is nothing left to draw on or give
+/// back.
+fn unless_gone(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(error) if output::gone(&error) => Ok(()),
+        result => result,
+    }
 }
 
 /// The event stream and the state it starts from. The stream opens first, so nothing that happens while the
@@ -307,17 +333,24 @@ fn short(error: &ClientError) -> String {
     }
 }
 
-/// Reads keys on a thread of its own, since the terminal's reads block.
+/// Reads keys on a thread of its own, since the terminal's reads block, and waits on a second one for that terminal
+/// to go away (hung up, or its other end closed). Either thread ending ends the TUI: no keys means no `q`. The wait
+/// is apart from the reads because crossterm, once it has read part of a sequence such as `ESC [`, reads a terminal
+/// that is gone again and again without returning.
 struct Keys {
     stop: Arc<AtomicBool>,
-    thread: std::thread::JoinHandle<()>,
+    /// Never sent, like `watched`: each resolves when its thread drops the sender, however the thread ends.
+    read: oneshot::Receiver<Infallible>,
+    watched: oneshot::Receiver<Infallible>,
 }
 
 impl Keys {
     fn spawn(send: UnboundedSender<Msg>) -> Keys {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
-        let thread = std::thread::spawn(move || {
+        let (reading, read) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _reading = reading;
             while !stopped.load(Ordering::Relaxed) {
                 // Polled, not read, so that `stop` is seen within a tenth of a second.
                 match terminal::poll(Duration::from_millis(100)) {
@@ -336,13 +369,53 @@ impl Keys {
                 }
             }
         });
-        Keys { stop, thread }
+        let (watching, watched) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _watching = watching;
+            if let Ok(input) = keyboard() {
+                wait_gone(&input);
+            }
+        });
+        Keys {
+            stop,
+            read,
+            watched,
+        }
     }
 
+    /// Once either thread ended; cancel-safe.
+    async fn ended(&mut self) {
+        tokio::select! {
+            _ = &mut self.read => {}
+            _ = &mut self.watched => {}
+        }
+    }
+
+    /// Tells the reader to stop and does not wait for it: the process exits next, which ends a read in progress.
     fn stop(self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.thread.join();
     }
+}
+
+/// The terminal crossterm reads keys from: stdin when it is one, else `/dev/tty`.
+fn keyboard() -> std::io::Result<OwnedFd> {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return stdin.as_fd().try_clone_to_owned();
+    }
+    let tty = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    Ok(tty.into())
+}
+
+/// Returns once `input` is gone. It asks for no events, so a key does not wake it; the kernel reports a hangup, an
+/// error and a closed descriptor whatever was asked.
+fn wait_gone(input: &OwnedFd) {
+    use rustix::event::{PollFd, PollFlags, poll};
+    let mut fds = [PollFd::new(input, PollFlags::empty())];
+    while poll(&mut fds, None) == Err(rustix::io::Errno::INTR) {}
 }
 
 /// Makes the requests the reducer asks for, each in a task of its own whose answer comes back as a message, so the
