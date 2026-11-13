@@ -352,3 +352,87 @@ fn a_jobs_long_text_is_cut_as_a_list_shows_it_and_a_page_ends_before_its_byte_bu
     let all = pages(&query, &wide).concat();
     assert_eq!(all, (1..=500).rev().collect::<Vec<_>>(), "every job once");
 }
+
+#[test]
+fn every_order_a_client_offers_is_read_as_asked_and_never_sends_before_where_it_cannot_page() {
+    let jobs: Vec<JobSummary> = (1..=6)
+        .map(|id| ran(id, 100 + id, Some(100 + 2 * id), Some(300)))
+        .collect();
+    let mut words = std::collections::BTreeSet::new();
+    for order in JobOrder::ALL {
+        assert!(
+            words.insert(order.words()),
+            "{order:?} has words of its own"
+        );
+        // A query paged once, then given the order: what a client does when the reader picks another sort.
+        let mut query = JobQuery {
+            before: Some(4),
+            limit: Some(2),
+            ..JobQuery::default()
+        };
+        order.apply(&mut query);
+        assert_eq!(JobOrder::of(&query), order, "{order:?} reads back");
+        assert_eq!(
+            query.check(),
+            Ok(()),
+            "{order:?} is a query the daemon takes"
+        );
+        let list = query.page(&jobs).unwrap();
+        if !order.pages() {
+            // The list's own words for a sorted page are the picker's.
+            let shown = list.shown_words().unwrap();
+            assert!(shown.ends_with(order.words()), "{shown} for {order:?}");
+        }
+    }
+    assert_eq!(
+        JobOrder::ALL.iter().filter(|order| order.pages()).count(),
+        1
+    );
+}
+
+#[test]
+fn a_range_reaches_back_from_now_and_all_kept_has_no_bound() {
+    let now = 10 * 24 * 3600;
+    let since: Vec<Option<u64>> = JobRange::ALL.iter().map(|range| range.since(now)).collect();
+    assert_eq!(
+        since,
+        [
+            Some(now - 24 * 3600),
+            Some(now - 7 * 24 * 3600),
+            Some(0),
+            None
+        ],
+        "30 days before day 10 is clamped to the epoch"
+    );
+    assert_eq!(JobRange::default(), JobRange::All);
+    for range in JobRange::ALL {
+        let window = range.timeline(now).window(now);
+        assert!(
+            window.is_ok(),
+            "{range:?}'s timeline is one the daemon takes: {window:?}"
+        );
+    }
+    assert_eq!(
+        JobRange::Day.timeline(now).window(now).unwrap().from,
+        now - 24 * 3600
+    );
+    let words: std::collections::BTreeSet<_> =
+        JobRange::ALL.iter().map(|range| range.words()).collect();
+    assert_eq!(words.len(), JobRange::ALL.len());
+    let filters: std::collections::BTreeSet<_> = RecordFilter::ALL
+        .iter()
+        .map(|filter| filter.words())
+        .collect();
+    assert_eq!(filters.len(), RecordFilter::ALL.len());
+    for mark in [RecordMark::Kept, RecordMark::Removed, RecordMark::Skipped] {
+        let filter = RecordFilter::ALL
+            .into_iter()
+            .find(|filter| *filter != RecordFilter::Any && filter.admits(Some(mark)))
+            .unwrap();
+        assert_eq!(
+            Some(filter.words()),
+            mark.words(),
+            "a filter reads as the mark it admits"
+        );
+    }
+}

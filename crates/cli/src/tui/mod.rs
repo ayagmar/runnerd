@@ -8,32 +8,43 @@
 use std::convert::Infallible;
 use std::io::IsTerminal;
 use std::os::fd::{AsFd, OwnedFd};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self as terminal, Event as TerminalEvent};
-use runnerd_core::api::{
-    Activity, ActivityQuery, EventQuery, HostSampleQuery, HostSamples, Insights, InsightsQuery,
-    Job, JobPage, PauseQuery, Paused, Records, SampleSeries, Savings, Sizing, Status,
+use ratatui::crossterm::event::{
+    self as terminal, Event as TerminalEvent, MouseButton, MouseEvent, MouseEventKind,
 };
-use runnerd_core::client::{Client, ClientError, Events, StatusCode};
+use runnerd_core::api::{
+    self, Activity, ActivityQuery, Caches, CompareQuery, ConfigCheck, ConfigFile, Doctor,
+    EventQuery, HostSampleQuery, HostSamples, Insights, InsightsQuery, Job, JobList, JobQuery,
+    LineRange, LogLinesQuery, LogQuery, PauseQuery, Paused, Records, SampleSeries, Savings, Sizing,
+    Status, StyledLine,
+};
+use runnerd_core::client::{Client, ClientError, Events, JobActionAnswer, StatusCode};
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::output::Mouse;
 use crate::{Error, now, output, watch};
 
 mod app;
 mod draw;
+mod log;
+mod mouse;
+mod overlay;
 mod prompts;
+mod reading;
 #[cfg(test)]
 mod tests;
 
-use app::{App, Effect, LOG_LINES, Msg, Refused, Removal, Resizing};
+use app::{App, ConfigRead, Effect, LOG_LINES, Msg, Refused, Removal, Resizing};
 use draw::Theme;
+use mouse::Hits;
+use reading::Unread;
 
 /// The shortest time between two frames, about 30 a second.
 const FRAME: Duration = Duration::from_millis(33);
@@ -45,14 +56,16 @@ const HOST_HISTORY: u64 = 30 * 60;
 const DAY: u64 = 24 * 3600;
 
 /// Reads the snapshot, takes over the terminal and runs until `q`. The terminal is given back however it ends.
-pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
+pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(), Error> {
     let (events, mut app) = snapshot(client).await?;
     // Before raw mode, so that no signal can end the process with the terminal raw.
     let mut signals = Signals::new().map_err(|error| local(&error))?;
     let (send, mut receive) = mpsc::unbounded_channel();
     let feed = tokio::spawn(feed(client.clone(), events, send.clone(), RETRY));
-    let mut keys = Keys::spawn(send.clone());
-    let mut terminal = match output::full_screen() {
+    // Where the last frame drew what a click can reach, for the keys thread to find what a click lands on.
+    let hits = Arc::new(Mutex::new(Hits::default()));
+    let mut keys = Keys::spawn(send.clone(), hits.clone());
+    let mut terminal = match output::full_screen(mouse) {
         Ok(terminal) => terminal,
         Err(error) => {
             // Raw mode may be on even though the alternate screen failed.
@@ -74,8 +87,13 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
     let mut next_frame = Instant::now();
     let ended = loop {
         if changed && Instant::now() >= next_frame {
-            if let Err(error) = terminal.draw(|frame| draw::draw(frame, &app, now(), theme)) {
+            let mut drawn = Hits::default();
+            if let Err(error) = terminal.draw(|frame| drawn = draw::draw(frame, &app, now(), theme))
+            {
                 break Err(error);
+            }
+            if let Ok(mut hits) = hits.lock() {
+                *hits = drawn;
             }
             changed = false;
             next_frame = Instant::now() + FRAME;
@@ -88,8 +106,8 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
             received = signals.next() => {
                 let taken = match received {
                     Received::Quit => break Ok(()),
-                    Received::Suspend => suspend(&mut terminal),
-                    Received::Continue => resume(&mut terminal),
+                    Received::Suspend => suspend(&mut terminal, mouse),
+                    Received::Continue => resume(&mut terminal, mouse),
                 };
                 if let Err(error) = taken {
                     break Err(error);
@@ -112,7 +130,7 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
             for effect in app.update(msg) {
                 match effect {
                     Effect::Quit => quit = true,
-                    Effect::Suspend => failed = suspend(&mut terminal).err().or(failed),
+                    Effect::Suspend => failed = suspend(&mut terminal, mouse).err().or(failed),
                     effect => requests.make(effect),
                 }
             }
@@ -177,7 +195,9 @@ async fn snapshot(client: &Client) -> Result<(Events, App), Error> {
     }
     // An activity read that fails leaves the health figures out rather than the whole screen.
     let activity = activity(client).await.ok();
-    Ok((events, App::new(live, activity, host.samples, series)))
+    let mut app = App::new(live, activity, host.samples, series);
+    app.update(Msg::Attention(attention(client).await));
+    Ok((events, app))
 }
 
 /// The jobs started and finished in the last day.
@@ -237,16 +257,16 @@ impl Signals {
 }
 
 /// Gives the terminal back and stops, as Ctrl-Z does in a shell; once continued, takes the terminal again.
-fn suspend(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
+fn suspend(terminal: &mut ratatui::DefaultTerminal, mouse: Mouse) -> std::io::Result<()> {
     output::restore()?;
     // The process group, as the terminal's own Ctrl-Z would; SIGSTOP, because SIGTSTP now comes back here.
     rustix::process::kill_current_process_group(rustix::process::Signal::STOP)?;
-    resume(terminal)
+    resume(terminal, mouse)
 }
 
 /// Takes the terminal again and draws all of it at the next frame, since the shell or another program drew over it.
-fn resume(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
-    *terminal = output::resume()?;
+fn resume(terminal: &mut ratatui::DefaultTerminal, mouse: Mouse) -> std::io::Result<()> {
+    *terminal = output::resume(mouse)?;
     Ok(())
 }
 
@@ -345,7 +365,7 @@ struct Keys {
 }
 
 impl Keys {
-    fn spawn(send: UnboundedSender<Msg>) -> Keys {
+    fn spawn(send: UnboundedSender<Msg>, hits: Arc<Mutex<Hits>>) -> Keys {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let (reading, read) = oneshot::channel();
@@ -361,6 +381,10 @@ impl Keys {
                 let msg = match terminal::read() {
                     Ok(TerminalEvent::Key(key)) => Msg::Key(key),
                     Ok(TerminalEvent::Resize(..)) => Msg::Resize,
+                    Ok(TerminalEvent::Mouse(event)) => match clicked(event, &hits) {
+                        Some(msg) => msg,
+                        None => continue,
+                    },
                     Ok(_) => continue,
                     Err(_) => return,
                 };
@@ -394,6 +418,22 @@ impl Keys {
     /// Tells the reader to stop and does not wait for it: the process exits next, which ends a read in progress.
     fn stop(self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// What a mouse event asks: a left click on what the last frame drew there, or a turn of the wheel.
+fn clicked(event: MouseEvent, hits: &Mutex<Hits>) -> Option<Msg> {
+    /// Rows a turn of the wheel moves.
+    const WHEEL: isize = 3;
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => hits
+            .lock()
+            .ok()?
+            .at(event.column, event.row)
+            .map(Msg::Click),
+        MouseEventKind::ScrollDown => Some(Msg::Wheel(WHEEL)),
+        MouseEventKind::ScrollUp => Some(Msg::Wheel(-WHEEL)),
+        _ => None,
     }
 }
 
@@ -440,92 +480,19 @@ impl Requests {
                 self.log = Some(tokio::spawn(open_job(client, send, id)));
             }
             Effect::CloseJob => self.close_log(),
-            Effect::RefreshJob(id) => {
-                tokio::spawn(async move {
-                    answer(
-                        &send,
-                        client.get::<Job>(&format!("/v1/jobs/{id}")).await,
-                        Msg::Job,
-                    );
-                });
+            Effect::RefreshJob(_)
+            | Effect::Outline(_)
+            | Effect::Lines { .. }
+            | Effect::Search { .. }
+            | Effect::Compare(_)
+            | Effect::Act { .. }
+            | Effect::History { .. }
+            | Effect::Timeline { .. }
+            | Effect::Runs { .. } => {
+                tokio::spawn(jobs_request(client, send, effect));
             }
-            Effect::History { generation, query } => {
-                tokio::spawn(read_jobs(client, send, query, move |page| Msg::History {
-                    generation,
-                    page,
-                }));
-            }
-            Effect::Pause { repository, force } => {
-                tokio::spawn(async move {
-                    let msg = pause(&client, repository, force).await;
-                    let _ = send.send(msg);
-                });
-            }
-            Effect::Resume { repository } => {
-                tokio::spawn(async move {
-                    let _ = send.send(unpause(&client, repository).await);
-                });
-            }
-            Effect::Records => {
-                tokio::spawn(async move {
-                    answer(&send, client.get("/v1/records").await, Msg::Records);
-                });
-            }
-            Effect::RemoveRecords(removal) => {
-                tokio::spawn(async move {
-                    let path = match removal {
-                        Removal::Job(job) => format!("/v1/records/{job}"),
-                        Removal::All => "/v1/records?all=true".to_owned(),
-                    };
-                    let removed = crate::remove_records(&client, &path).await;
-                    let _ = send.send(match removed {
-                        Ok(removed) => Msg::Done(removed.line()),
-                        Err(error) => Msg::Failed(error.to_string()),
-                    });
-                    answer(
-                        &send,
-                        client.get::<Records>("/v1/records").await,
-                        Msg::Records,
-                    );
-                });
-            }
-            Effect::Sizing => {
-                tokio::spawn(async move {
-                    answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
-                });
-            }
-            Effect::Activity { generation } => {
-                tokio::spawn(read_activity(client, send, generation));
-            }
-            Effect::Insights => {
-                tokio::spawn(read_insights(client, send));
-            }
-            Effect::Reasons => {
-                tokio::spawn(async move {
-                    let status = client.get::<Status>("/v1/status").await.ok();
-                    let _ = send.send(Msg::Reasons(status.map(Box::new)));
-                });
-            }
-            Effect::Runs { job, query } => {
-                tokio::spawn(read_jobs(client, send, query, move |page| Msg::Runs {
-                    job,
-                    page,
-                }));
-            }
-            Effect::Resize(resizing) => {
-                tokio::spawn(write_resize(client, send, resizing));
-            }
-            Effect::Reseed { profile } => {
-                tokio::spawn(async move {
-                    let requested = client
-                        .post(&format!("/v1/profiles/{profile}/reseed"), &())
-                        .await;
-                    status(&client, &send).await;
-                    let _ = send.send(match requested {
-                        Ok(_) => Msg::Done(runnerd_core::api::reseed_requested(&profile)),
-                        Err(error) => Msg::Failed(error.to_string()),
-                    });
-                });
+            effect => {
+                tokio::spawn(daemon_request(client, send, effect));
             }
         }
     }
@@ -535,6 +502,190 @@ impl Requests {
             log.abort();
         }
     }
+}
+
+/// Why a read gave nothing: a daemon without the route, or the error.
+fn unread(error: ClientError) -> Unread {
+    if error.is_unsupported() {
+        Unread::Unsupported
+    } else {
+        match error {
+            ClientError::Api { message, .. } => Unread::Failed(message),
+            error => Unread::Failed(error.to_string()),
+        }
+    }
+}
+
+/// What needs attention; a daemon without the route says it is not supported.
+async fn attention(client: &Client) -> Result<api::Attention, Unread> {
+    match client.attention().await {
+        Ok(Some(attention)) => Ok(attention),
+        Ok(None) => Err(Unread::Unsupported),
+        Err(error) => Err(unread(error)),
+    }
+}
+
+/// A request about jobs: one job's page, or the jobs list and timeline.
+async fn jobs_request(client: Client, send: UnboundedSender<Msg>, effect: Effect) {
+    match effect {
+        Effect::RefreshJob(id) => {
+            answer(
+                &send,
+                client.get::<Job>(&format!("/v1/jobs/{id}")).await,
+                Msg::Job,
+            );
+        }
+        Effect::Outline(job) => {
+            let outline = client.log_outline(job).await.map_err(unread);
+            let _ = send.send(Msg::Outline { job, outline });
+        }
+        Effect::Lines { job, range } => read_lines(client, send, job, range).await,
+        Effect::Search { job, query } => {
+            let found = client.search_log(job, &query).await.map_err(unread);
+            let _ = send.send(Msg::Found {
+                job,
+                query: query.q,
+                found,
+            });
+        }
+        Effect::Compare(job) => {
+            let comparison = client
+                .compare(job, &CompareQuery::default())
+                .await
+                .map_err(unread);
+            let _ = send.send(Msg::Compared { job, comparison });
+        }
+        Effect::Act { job, action, query } => {
+            let _ = send.send(match client.job_action(job, action, &query).await {
+                Ok(JobActionAnswer::Confirm(preview)) => Msg::Preview(preview),
+                Ok(JobActionAnswer::Done(result)) => Msg::Acted(result),
+                Err(error) if error.is_unsupported() => Msg::ActionFailed {
+                    job,
+                    why: api::JobActions::Unsupported
+                        .why_not()
+                        .unwrap_or(api::NOT_SUPPORTED)
+                        .to_owned(),
+                },
+                Err(error) => Msg::ActionFailed {
+                    job,
+                    why: error.to_string(),
+                },
+            });
+        }
+        Effect::History {
+            generation,
+            query,
+            range,
+        } => {
+            let query = JobQuery {
+                since: range.since(now()),
+                ..query
+            };
+            read_jobs(client, send, query, move |list| Msg::History {
+                generation,
+                list,
+            })
+            .await;
+        }
+        Effect::Timeline { generation, range } => {
+            let timeline = client
+                .timeline(&range.timeline(now()))
+                .await
+                .map_err(unread);
+            let _ = send.send(Msg::Timeline {
+                generation,
+                timeline,
+            });
+        }
+        Effect::Runs { job, query } => {
+            read_jobs(client, send, query, move |list| Msg::Runs { job, list }).await;
+        }
+        _ => {}
+    }
+}
+
+/// A request about the daemon: pausing, records, sizing, caches, the doctor, the config and what is read on a pace.
+async fn daemon_request(client: Client, send: UnboundedSender<Msg>, effect: Effect) {
+    match effect {
+        Effect::Pause { repository, force } => {
+            let _ = send.send(pause(&client, repository, force).await);
+        }
+        Effect::Resume { repository } => {
+            let _ = send.send(unpause(&client, repository).await);
+        }
+        Effect::Records => answer(&send, client.get("/v1/records").await, Msg::Records),
+        Effect::RemoveRecords(removal) => {
+            let path = match removal {
+                Removal::Job(job) => format!("/v1/records/{job}"),
+                Removal::All => "/v1/records?all=true".to_owned(),
+            };
+            let removed = crate::remove_records(&client, &path).await;
+            let _ = send.send(match removed {
+                Ok(removed) => Msg::Done(removed.line()),
+                Err(error) => Msg::Failed(error.to_string()),
+            });
+            answer(
+                &send,
+                client.get::<Records>("/v1/records").await,
+                Msg::Records,
+            );
+        }
+        Effect::Sizing => answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing),
+        Effect::Caches => read_caches(client, send).await,
+        Effect::Empty(volume) => {
+            let emptied = client
+                .post(&format!("/v1/caches/{volume}/clean"), &())
+                .await;
+            let _ = send.send(match emptied {
+                Ok(_) => Msg::Done(format!("{volume} emptied")),
+                Err(error) => Msg::Failed(error.to_string()),
+            });
+            read_caches(client, send).await;
+        }
+        Effect::Doctor => {
+            let doctor = client.get::<Doctor>("/v1/doctor").await.map_err(unread);
+            let _ = send.send(Msg::Doctor(doctor));
+        }
+        Effect::Config => {
+            let _ = send.send(Msg::Config(read_config(&client).await));
+        }
+        Effect::Attention => {
+            let _ = send.send(Msg::Attention(attention(&client).await));
+        }
+        Effect::Activity { generation } => read_activity(client, send, generation).await,
+        Effect::Insights => read_insights(client, send).await,
+        Effect::Reasons => {
+            let status = client.get::<Status>("/v1/status").await.ok();
+            let _ = send.send(Msg::Reasons(status.map(Box::new)));
+        }
+        Effect::Resize(resizing) => write_resize(client, send, resizing).await,
+        Effect::Reseed { profile } => {
+            let requested = client
+                .post(&format!("/v1/profiles/{profile}/reseed"), &())
+                .await;
+            status(&client, &send).await;
+            let _ = send.send(match requested {
+                Ok(_) => Msg::Done(api::reseed_requested(&profile)),
+                Err(error) => Msg::Failed(error.to_string()),
+            });
+        }
+        _ => {}
+    }
+}
+
+async fn read_caches(client: Client, send: UnboundedSender<Msg>) {
+    let caches = client.get::<Caches>("/v1/caches").await.map_err(unread);
+    let _ = send.send(Msg::Caches(caches));
+}
+
+/// The daemon's config and its check, as `runnerctl config check` reads them.
+async fn read_config(client: &Client) -> Result<ConfigRead, Unread> {
+    let file: ConfigFile = client.get("/v1/config").await.map_err(unread)?;
+    let check: ConfigCheck = client
+        .post_toml("/v1/config/check", file.text.clone())
+        .await
+        .map_err(unread)?;
+    Ok(ConfigRead { file, check })
 }
 
 /// Reads the day's activity again. Like the snapshot, a daemon without it keeps the figures it has: no flash every
@@ -551,29 +702,26 @@ async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u
 /// Reads the insights and what the jobs' minutes would have cost, and sends them; a read that fails sends nothing,
 /// and the last one read stays shown.
 async fn read_insights(client: Client, send: UnboundedSender<Msg>) {
-    if let Ok(insights) = client
+    let insights = client
         .get_query::<Insights>("/v1/insights", &InsightsQuery::default())
         .await
-    {
-        let _ = send.send(Msg::Insights(Box::new(insights)));
-    }
+        .map(Box::new)
+        .map_err(unread);
+    let _ = send.send(Msg::Insights(insights));
     if let Ok(savings) = client.get::<Savings>("/v1/savings").await {
         let _ = send.send(Msg::Savings(Box::new(savings)));
     }
 }
 
-/// Reads a page of jobs and sends it, or why it could not be read, as `msg` makes it.
+/// Reads a list of jobs and sends it, or why it could not be read, as `msg` makes it.
 async fn read_jobs(
     client: Client,
     send: UnboundedSender<Msg>,
-    query: runnerd_core::api::JobQuery,
-    msg: impl FnOnce(Result<JobPage, String>) -> Msg,
+    query: JobQuery,
+    msg: impl FnOnce(Result<JobList, String>) -> Msg,
 ) {
-    let page = client
-        .get_query::<JobPage>("/v1/jobs", &query)
-        .await
-        .map_err(|error| error.to_string());
-    let _ = send.send(msg(page));
+    let list = client.jobs(&query).await.map_err(|error| error.to_string());
+    let _ = send.send(msg(list));
 }
 
 /// Sends what a request answered, or why it failed.
@@ -641,7 +789,37 @@ async fn pause(client: &Client, repository: Option<String>, force: bool) -> Msg 
     }
 }
 
-/// Reads the job, its samples and its log; follows the log until the job's record is final.
+/// Reads lines `range` of a job's log, styled, and sends them as one batch.
+async fn read_lines(client: Client, send: UnboundedSender<Msg>, job: u64, range: LineRange) {
+    let query = LogLinesQuery {
+        from: Some(range.from),
+        limit: Some(u32::try_from(range.to.saturating_sub(range.from)).unwrap_or(u32::MAX)),
+        follow: false,
+    };
+    let mut lines = Vec::new();
+    let failed = match client.styled_lines(job, &query).await {
+        Ok(mut read) => loop {
+            match read.next().await {
+                Ok(Some(line)) => lines.push(line),
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        },
+        Err(error) => Some(error),
+    };
+    let _ = send.send(Msg::Lines { job, lines });
+    if let Some(error) = failed {
+        // The range may be asked for again.
+        let _ = send.send(Msg::LinesFailed {
+            job,
+            range,
+            why: format!("log of job {job}: {error}"),
+        });
+    }
+}
+
+/// Reads the job, its samples, its log's outline and its last lines; follows the lines until the job's record is
+/// final. A daemon without the outline gets the plain log, styled here by core's parser, under no outline.
 async fn open_job(client: Client, send: UnboundedSender<Msg>, id: u64) {
     let job = match client.get::<Job>(&format!("/v1/jobs/{id}")).await {
         Ok(job) => job,
@@ -660,12 +838,143 @@ async fn open_job(client: Client, send: UnboundedSender<Msg>, id: u64) {
             .await,
         Msg::Samples,
     );
-    let lines = send.clone();
-    let read = crate::logs(&client, id, follow, from, move |text| {
-        lines.send(Msg::LogLine { job: id, text }).is_ok()
-    })
-    .await;
+    let outline = client.log_outline(id).await.map_err(unread);
+    let plain = outline == Err(Unread::Unsupported);
+    let _ = send.send(Msg::Outline { job: id, outline });
+    let read = if plain {
+        plain_lines(&client, &send, id, follow, from).await
+    } else {
+        styled_lines(&client, &send, id, follow, from).await
+    };
     if let Err(error) = read {
         let _ = send.send(Msg::Failed(format!("log of job {id}: {error}")));
     }
+}
+
+/// The log's last lines, styled, then each line as it comes while `follow`.
+async fn styled_lines(
+    client: &Client,
+    send: &UnboundedSender<Msg>,
+    job: u64,
+    follow: bool,
+    from: u64,
+) -> Result<(), ClientError> {
+    let query = LogLinesQuery {
+        from: Some(from),
+        limit: Some(u32::try_from(LOG_LINES).unwrap_or(u32::MAX)),
+        follow,
+    };
+    let mut read = client.styled_lines(job, &query).await?;
+    // The lines stored come at once, then those that follow one by one: sent in batches as they come.
+    let mut batch = Batch::new(Instant::now());
+    loop {
+        let next = if batch.lines.is_empty() {
+            read.next().await?
+        } else if let Some(wait) = batch.wait(Instant::now())
+            && let Ok(next) = tokio::time::timeout(wait, read.next()).await
+        {
+            next?
+        } else {
+            if send
+                .send(Msg::Lines {
+                    job,
+                    lines: batch.take(),
+                })
+                .is_err()
+            {
+                return Ok(());
+            }
+            continue;
+        };
+        match next {
+            Some(line) => batch.push(line, Instant::now()),
+            None => break,
+        }
+    }
+    let _ = send.send(Msg::Lines {
+        job,
+        lines: batch.take(),
+    });
+    Ok(())
+}
+
+/// Lines a batch holds at most.
+const BATCH_LINES: usize = 500;
+/// The longest a line waits in a batch, through a burst that does not pause.
+const BATCH_AGE: Duration = Duration::from_millis(100);
+/// A pause this long sends the batch.
+const BATCH_QUIET: Duration = Duration::from_millis(20);
+
+/// Followed lines not sent yet, so the screen is drawn once per batch rather than once per line. Lives as long as one
+/// read of the log.
+#[derive(Debug)]
+struct Batch {
+    lines: Vec<StyledLine>,
+    /// When its first line came.
+    since: Instant,
+}
+
+impl Batch {
+    fn new(now: Instant) -> Batch {
+        Batch {
+            lines: Vec::new(),
+            since: now,
+        }
+    }
+
+    fn push(&mut self, line: StyledLine, now: Instant) {
+        if self.lines.is_empty() {
+            self.since = now;
+        }
+        self.lines.push(line);
+    }
+
+    /// How long to wait for another line before it is sent: up to [`BATCH_QUIET`], and never past [`BATCH_AGE`]
+    /// after its first line. `None` when it is due now, as when it holds [`BATCH_LINES`].
+    fn wait(&self, now: Instant) -> Option<Duration> {
+        if self.lines.len() >= BATCH_LINES {
+            return None;
+        }
+        let age = now.saturating_duration_since(self.since);
+        let wait = BATCH_QUIET.min(BATCH_AGE.saturating_sub(age));
+        (!wait.is_zero()).then_some(wait)
+    }
+
+    fn take(&mut self) -> Vec<StyledLine> {
+        std::mem::take(&mut self.lines)
+    }
+}
+
+/// The plain log of a daemon without the styled lines, styled here by core's parser.
+async fn plain_lines(
+    client: &Client,
+    send: &UnboundedSender<Msg>,
+    job: u64,
+    follow: bool,
+    from: u64,
+) -> Result<(), ClientError> {
+    let mut read = client
+        .logs(
+            job,
+            &LogQuery {
+                follow,
+                from: Some(from),
+            },
+        )
+        .await?;
+    let mut line = from;
+    while let Some(text) = read.next().await? {
+        let styled = StyledLine::parse(line, &text);
+        line += 1;
+        if send
+            .send(Msg::Lines {
+                job,
+                lines: vec![styled],
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
 }

@@ -5,21 +5,31 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use runnerd_core::api::{
-    Job, JobSummary, Phase, PhaseKind, RecordNote, RecordState, RunComparison,
+    self, ActionPreview, FailureSummary, Job, JobSummary, Phase, PhaseKind, RecordNote,
+    RecordState, RunComparison,
 };
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
 use super::budget::scale;
-use super::log::log;
+use super::compare::compare;
+use super::log::{log, styled_line};
 use super::overview::{badge, reason};
 use super::resources::{job_charts, job_spark};
 use super::steps::steps;
-use super::{bold, fit, heading, length, spark};
-use crate::human::{self, bytes, duration};
-use crate::tui::app::{App, JobView};
+use super::{bold, centred, fit, heading, length, spark, wrap};
+use crate::human::{self, Tone, bytes, duration};
+use crate::tui::app::{App, JobView, Panel};
+use crate::tui::mouse::Hits;
+use crate::tui::reading::Reading;
+
+/// The most lines of a failed step's excerpt the summary shows.
+const EXCERPT_SHOWN: usize = 6;
+
+/// The fewest rows the log keeps before steps and charts give theirs up.
+const LOG_MIN: u16 = 8;
 
 pub(super) fn job(
     frame: &mut Frame<'_>,
@@ -28,9 +38,20 @@ pub(super) fn job(
     open: &JobView,
     now: u64,
     theme: Theme,
+    hits: &mut Hits,
 ) {
     let job = &open.job;
     let summary = &job.summary;
+    let width = usize::from(area.width);
+    // On a failed job, what its log says of the failure comes first.
+    let failure = match open.log.outline() {
+        Reading::Read(outline) => outline.failure.as_ref(),
+        Reading::Unread(_) => None,
+    };
+    let failure_lines = failure.map_or_else(Vec::new, |failure| {
+        failure_lines(failure, job, width, theme)
+    });
+    let failure_height = length(failure_lines.len()).min(area.height / 3);
     // A queued job has no steps yet, nor their heading.
     let steps_wanted = if job.steps.is_empty() {
         0
@@ -42,22 +63,25 @@ pub(super) fn job(
     } else {
         0
     };
-    let fixed = 3 + 2 + runs_height;
+    let fixed = 3 + failure_height + 2 + runs_height;
     // Until a runner has it there is nothing to chart.
     let charted = summary.runner.is_some() || !open.samples.is_empty();
     // What held its CPU back takes a row of its own under the figures.
     let cpu_held = summary.cpu_held(now).filter(|_| charted);
     let held_height = u16::from(cpu_held.is_some());
-    let full_charts = charted && area.height >= fixed + steps_wanted + 7 + held_height + 6;
+    let full_charts = charted && area.height >= fixed + steps_wanted + 7 + held_height + LOG_MIN;
     let charts_height = held_height
         + match (charted, full_charts) {
             (false, _) => 0,
             (true, true) => 7,
             (true, false) => 2,
         };
-    let steps_height = steps_wanted.min(area.height.saturating_sub(fixed + charts_height + 4));
+    let charts_height = charts_height.min(area.height.saturating_sub(fixed + LOG_MIN));
+    let steps_height =
+        steps_wanted.min(area.height.saturating_sub(fixed + charts_height + LOG_MIN));
     let [
         head,
+        failure_area,
         timeline_area,
         steps_area,
         charts_area,
@@ -65,6 +89,7 @@ pub(super) fn job(
         log_area,
     ] = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(failure_height),
         Constraint::Length(2),
         Constraint::Length(steps_height),
         Constraint::Length(charts_height),
@@ -73,6 +98,46 @@ pub(super) fn job(
     ])
     .areas(area);
 
+    head_lines(frame, head, app, job, now, theme);
+    frame.render_widget(Paragraph::new(failure_lines), failure_area);
+    let waiting = app
+        .live
+        .status
+        .queued
+        .iter()
+        .find(|queued| queued.id == summary.id)
+        .filter(|_| summary.timeline.started_at.is_none());
+    let reason = waiting.map(|queued| reason(app, queued, now, width, theme));
+    timeline(frame, timeline_area, summary, reason.as_ref(), now, theme);
+    steps(frame, steps_area, job, now, theme);
+    let cpu_held = cpu_held.as_deref();
+    if charts_height > 0 {
+        match (charted, full_charts) {
+            (false, _) => {}
+            (true, true) => job_charts(frame, charts_area, app, open, cpu_held, theme),
+            (true, false) => job_spark(frame, charts_area, app, open, cpu_held, theme),
+        }
+    }
+    if runs_height > 0 {
+        job_runs(
+            frame,
+            runs_area,
+            app,
+            summary,
+            &job.compare(open.runs.as_deref().unwrap_or_default(), now),
+            now,
+            theme,
+        );
+    }
+    match open.panel {
+        Panel::Log => log(frame, log_area, open, now, theme, hits),
+        Panel::Compare => compare(frame, log_area, open, now, theme),
+    }
+}
+
+/// The job's repository, its name and outcome, and its details.
+fn head_lines(frame: &mut Frame<'_>, head: Rect, app: &App, job: &Job, now: u64, theme: Theme) {
+    let summary = &job.summary;
     let width = usize::from(head.width);
     let details = fit_details(job_details(app, job, now), width);
     let badge = badge(summary, theme);
@@ -86,10 +151,7 @@ pub(super) fn job(
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("■ ", style),
-                Span::styled(
-                    fit(&summary.repository, width.saturating_sub(2)),
-                    theme.dim(),
-                ),
+                Span::raw(fit(&summary.repository, width.saturating_sub(2))),
             ]),
             Line::from(vec![
                 Span::styled(fit(&title, title_width), bold()),
@@ -100,34 +162,120 @@ pub(super) fn job(
         ]),
         head,
     );
-    let waiting = app
-        .live
-        .status
-        .queued
-        .iter()
-        .find(|queued| queued.id == summary.id)
-        .filter(|_| summary.timeline.started_at.is_none());
-    let reason = waiting.map(|queued| reason(app, queued, now, usize::from(area.width), theme));
-    timeline(frame, timeline_area, summary, reason.as_ref(), now, theme);
-    steps(frame, steps_area, job, now, theme);
-    let cpu_held = cpu_held.as_deref();
-    match (charted, full_charts) {
-        (false, _) => {}
-        (true, true) => job_charts(frame, charts_area, app, open, cpu_held, theme),
-        (true, false) => job_spark(frame, charts_area, app, open, cpu_held, theme),
-    }
-    if runs_height > 0 {
-        job_runs(
-            frame,
-            runs_area,
-            app,
-            summary,
-            &job.compare(open.runs.as_deref().unwrap_or_default(), now),
-            now,
-            theme,
+}
+
+/// A failed job's failure as its log says it: core's headline in the failure's colour, the step's last lines, and
+/// the command that opens a shell in its record while it is kept.
+fn failure_lines(
+    failure: &FailureSummary,
+    job: &Job,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        fit(&failure.headline(&job.steps), width)
+            .trim_end()
+            .to_owned(),
+        theme.tone(Tone::Bad).add_modifier(Modifier::BOLD),
+    )];
+    if let Some(excerpt) = &failure.excerpt {
+        let gutter = excerpt
+            .iter()
+            .map(|line| (line.line + 1).to_string().len())
+            .max()
+            .unwrap_or(1);
+        let skip = excerpt.len().saturating_sub(EXCERPT_SHOWN);
+        lines.extend(
+            excerpt
+                .iter()
+                .skip(skip)
+                .map(|line| styled_line(line, gutter, width, theme)),
         );
     }
-    log(frame, log_area, open, theme);
+    if let Some(shell) = &failure.shell {
+        lines.push(Line::from(vec![
+            Span::styled("shell into its record: ", theme.dim()),
+            Span::styled(shell.clone(), bold()),
+        ]));
+    }
+    lines
+}
+
+/// Cancel's or a re-run's preview over the page: what core says it would do, before anything is sent. The footer
+/// asks for `y`; without a confirmation from core there is nothing to send.
+pub(super) fn preview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    preview: &ActionPreview,
+    theme: Theme,
+    hits: &mut Hits,
+) {
+    let width = area.width.saturating_sub(4).min(78);
+    let inner = usize::from(width.saturating_sub(4));
+    let mut lines: Vec<Line<'static>> = wrap(&preview.title, inner)
+        .into_iter()
+        .map(|line| Line::styled(line, bold()))
+        .collect();
+    lines.extend(wrap(&preview.scope, inner).into_iter().map(Line::from));
+    for note in &preview.notes {
+        lines.extend(
+            wrap(note, inner)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.wait())),
+        );
+    }
+    let note: Vec<Line<'static>> = wrap(&preview.siblings_note, inner)
+        .into_iter()
+        .map(|line| Line::styled(line, theme.dim()))
+        .collect();
+    // The other jobs of the run give way first, then the end, each leaving a mark that more is there.
+    let room = usize::from(area.height.saturating_sub(2));
+    let mut siblings: Vec<Line<'static>> = preview
+        .siblings
+        .iter()
+        .map(|sibling| {
+            let badge = badge(sibling, theme);
+            let id = format!("{} ", sibling.id);
+            let room = inner.saturating_sub(id.width() + badge.width() + 2);
+            Line::from(vec![
+                Span::styled(id, theme.dim()),
+                Span::raw(format!("{}  ", fit(&sibling.title().to_string(), room))),
+                badge,
+            ])
+        })
+        .collect();
+    let spare = room.saturating_sub(lines.len() + note.len() + 1);
+    if siblings.len() > spare {
+        let hidden = siblings.len() + 1 - spare.max(1);
+        siblings.truncate(spare.saturating_sub(1));
+        siblings.push(Line::styled(
+            format!("… {hidden} more not shown"),
+            theme.dim(),
+        ));
+    }
+    if !siblings.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(siblings);
+    }
+    lines.extend(note);
+    if lines.len() > room && room > 0 {
+        lines.truncate(room - 1);
+        lines.push(Line::styled("… the rest does not fit", theme.dim()));
+    }
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let popup = centred(area, width, height);
+    hits.cover(popup);
+    frame.render_widget(Clear, popup);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(theme.of(api::Tone::Warn))
+        .title(Span::styled(format!(" {} ", preview.confirm_label), bold()));
+    let text = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(lines),
+        text.inner(ratatui::layout::Margin::new(1, 0)),
+    );
 }
 
 /// The open job's details under its name, each with its rank: when they do not fit one line, the least important

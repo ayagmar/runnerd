@@ -142,3 +142,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Accepted |
 | [0134](0134-a-job-action-is-previewed-then-sent-to-github-once.md) | A job action is previewed, then sent to GitHub once | Accepted |
 | [0135](0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md) | The job history is searched, sorted and laid out by core | Accepted |
+| [0137](0137-the-tui-follows-core-s-views.md) | The TUI follows core's views, one row per slot, and reads what an older daemon lacks as not supported | Accepted |

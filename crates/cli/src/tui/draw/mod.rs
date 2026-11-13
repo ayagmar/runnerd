@@ -1,8 +1,10 @@
-//! What `runnerctl tui` draws: the overview (budget, slots, the slice, repositories, latest jobs), the history, the
-//! records, sizing and one job (timeline, steps on one time axis, memory and CPU, its log). Reads `App` and the time
-//! only; panes that do not fit a small terminal are left out or drawn one line each. Colours follow the web dashboard:
-//! profiles in config order take its palette, mint first and pink second; without colour, glyphs and bold carry the
-//! meaning.
+//! What `runnerctl tui` draws: the overview (what needs attention, health, budget, a lane per slot, the queue,
+//! repositories, latest jobs, the slice), the jobs (a table or a timeline), records, insights, sizing, caches, the
+//! doctor and one job (timeline, steps on one time axis, memory and CPU, its failure, its folded log, its comparison).
+//! Reads `App` and the time only, and returns where it drew what a click can reach; panes that do not fit a small
+//! terminal are left out or drawn one line each. Body text is the terminal's own colour; dim is for secondary
+//! metadata only, never a name. Colours follow the web dashboard: profiles in config order take its palette, mint
+//! first and pink second; without colour, glyphs and bold carry the meaning.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -13,26 +15,37 @@ use runnerd_core::api;
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Outcome, Pane, Removal, View};
+use super::app::{App, Asked, Connection, JobView, Pane, Refused, Removal, View};
+use super::mouse::{Hits, List, Target};
+use super::overlay::{Overlay, Pick, Picker, Typing};
 use super::prompts::Prompt;
 use crate::human::Tone;
+use caches::caches;
 use history::history;
+use insights::insights;
 use job::{drop_least, job};
 use overview::overview;
 use records::records;
+use settings::settings;
 use sizing::sizing;
 
+mod attention;
 mod budget;
+mod caches;
+mod compare;
 mod history;
+mod insights;
 mod job;
 mod log;
 mod overview;
 mod records;
 mod resources;
+mod settings;
 mod sizing;
 mod slice;
 mod slots;
 mod steps;
+mod timeline;
 
 /// The web dashboard's profile colours as xterm-256 colours: mint, pink, lavender, yellow, blue, peach.
 const PROFILES: [u8; 6] = [194, 224, 189, 229, 153, 223];
@@ -86,6 +99,14 @@ impl Theme {
         self.fg(Color::Indexed(WAIT))
     }
 
+    /// Core's tone of a fact as a style.
+    pub(super) fn of(self, tone: api::Tone) -> Style {
+        match tone {
+            api::Tone::Warn => self.wait().add_modifier(Modifier::BOLD),
+            tone => self.tone(tone.into()),
+        }
+    }
+
     pub(super) fn tone(self, tone: Tone) -> Style {
         match tone {
             Tone::Plain => Style::new(),
@@ -111,54 +132,56 @@ fn selected() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
 }
 
-/// The whole screen.
-pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
+/// The whole screen, and where it drew what a click can reach.
+pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) -> Hits {
+    let mut hits = Hits::default();
     let [top, body, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    header(frame, top, app, theme);
+    header(frame, top, app, theme, &mut hits);
     match app.view {
-        View::Overview => overview(frame, body, app, now, theme),
-        View::History => history(frame, body, app, now, theme),
-        View::Records => records(frame, body, app, now, theme),
-        View::Sizing => sizing(frame, body, app, now, theme),
+        View::Overview => overview(frame, body, app, now, theme, &mut hits),
+        View::History => history(frame, body, app, now, theme, &mut hits),
+        View::Records => records(frame, body, app, now, theme, &mut hits),
+        View::Insights => insights(frame, body, app, theme, &mut hits),
+        View::Sizing => sizing(frame, body, app, now, theme, &mut hits),
+        View::Caches => caches(frame, body, app, now, theme, &mut hits),
+        View::Settings => settings(frame, body, app, now, theme, &mut hits),
         View::Job => {
             if let Some(open) = &app.job {
-                job(frame, body, app, open, now, theme);
+                job(frame, body, app, open, now, theme, &mut hits);
             }
         }
     }
     footer(frame, bottom, app, theme);
-    if app.help {
-        help(frame, body);
+    match &app.overlay {
+        Overlay::Help => help(frame, body, &mut hits),
+        Overlay::Pick(picker) => pick(frame, body, picker, theme, &mut hits),
+        Overlay::None | Overlay::Input(_) => {}
     }
+    if let Some(Prompt::Action(preview)) = app.prompts.top() {
+        job::preview(frame, body, preview, theme, &mut hits);
+    }
+    hits
 }
 
-fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut Hits) {
     let mut spans = vec![Span::styled(" runnerd ", bold())];
     let version = Span::styled(format!("{}  ", app.live.status.version), theme.dim());
-    for (key, (shown, _)) in (1..).zip(View::tabs()) {
-        if app.view.group() == Some(shown) {
-            // A view of several sections names the one open.
-            let title = match app.view.section().filter(|_| View::of(shown).len() > 1) {
-                Some(section) => format!(" {key} {} · {} ", shown.title(), section.title()),
-                None => format!(" {key} {} ", shown.title()),
-            };
-            spans.push(Span::styled(title, selected()));
-        } else {
-            spans.push(Span::raw(format!(" {key} {} ", shown.title())));
-        }
-    }
-    if let Some(open) = &app.job {
-        spans.push(Span::styled(
-            format!(" job {} ", open.job.summary.id),
-            selected(),
-        ));
-    }
+    let job = app
+        .job
+        .as_ref()
+        .map(|open| Span::styled(format!(" job {} ", open.job.summary.id), selected()));
     let mut right = Vec::new();
+    // What needs attention, counted, in the tone of its most urgent item; a click or `!` opens it.
+    let attention = attention::count(app, theme);
+    if let Some(count) = &attention {
+        right.push(count.clone());
+        right.push(Span::raw("  "));
+    }
     if let Some(stopping) = app.live.status.stopping_line() {
         right.push(Span::styled(format!("{stopping}  "), theme.wait()));
     }
@@ -172,40 +195,126 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     // GitHub's rate limit goes first when the tabs do not fit beside it.
     if let Some(limited) = app.live.status.github_line() {
         let limited = Span::styled(format!("{limited}  "), theme.wait());
-        if Line::from(spans.clone()).width() + limited.width() + Line::from(right.clone()).width()
-            <= usize::from(area.width)
-        {
-            right.insert(0, limited);
+        let least = " runnerd ".width()
+            + Line::from(tabs_of(app, TabNames::Open)).width()
+            + job.as_ref().map_or(0, Span::width);
+        if least + limited.width() + Line::from(right.clone()).width() <= usize::from(area.width) {
+            right.insert(usize::from(attention.is_some()) * 2, limited);
         }
     }
     let right = Line::from(right);
-    // The version goes first when the tabs and the connection do not fit beside it.
-    if Line::from(spans.clone()).width() + version.width() + right.width()
-        <= usize::from(area.width)
+    // Where the tabs and what is on the right do not fit, the tabs not open show their digit only.
+    let mut tabs = tabs_of(app, TabNames::Whole);
+    let job_width = job.as_ref().map_or(0, Span::width);
+    if " runnerd ".width() + Line::from(tabs.clone()).width() + job_width + right.width()
+        > usize::from(area.width)
     {
-        spans.insert(1, version);
+        tabs = tabs_of(app, TabNames::Open);
     }
-    frame.render_widget(Line::from(spans), area);
-    frame.render_widget(right.alignment(Alignment::Right), area);
+    spans.extend(tabs.iter().cloned());
+    spans.extend(job);
+    // The version goes first when the tabs and the connection do not fit beside it.
+    let with_version = Line::from(spans.clone()).width() + version.width() + right.width()
+        <= usize::from(area.width);
+    if with_version {
+        spans.insert(1, version.clone());
+    }
+    let mut x = area.x + length(" runnerd ".width());
+    if with_version {
+        x += length(version.width());
+    }
+    for (tab, span) in tabs.iter().enumerate() {
+        let width = length(span.width());
+        hits.add(
+            Rect {
+                x,
+                width: width.min(area.right().saturating_sub(x)),
+                ..area
+            },
+            Target::Tab(tab),
+        );
+        x += width;
+    }
+    let left = Line::from(spans);
+    // What is on the right takes what the tabs leave, cut at its end.
+    let right_width = length(right.width()).min(area.width.saturating_sub(length(left.width())));
+    frame.render_widget(left, area);
+    frame.render_widget(
+        right.alignment(Alignment::Right),
+        Rect {
+            x: area.right().saturating_sub(right_width),
+            width: right_width,
+            ..area
+        },
+    );
+    if let Some(count) = attention {
+        hits.add(
+            Rect {
+                x: area.right().saturating_sub(right_width),
+                width: length(count.width()).min(right_width),
+                ..area
+            },
+            Target::Attention,
+        );
+    }
+}
+
+/// How much of a tab's name the header has room for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabNames {
+    /// Every tab named.
+    Whole,
+    /// Only the open tab named; the others show their digit.
+    Open,
+}
+
+/// The header's tabs, in core's order: the open one reversed, and a view of several sections names the one open.
+fn tabs_of(app: &App, names: TabNames) -> Vec<Span<'static>> {
+    (1..)
+        .zip(View::tabs())
+        .map(|(key, (shown, _))| {
+            if app.view.group() == Some(shown) {
+                let title = match app.view.section().filter(|_| View::of(shown).len() > 1) {
+                    Some(section) => format!(" {key} {} · {} ", shown.title(), section.title()),
+                    None => format!(" {key} {} ", shown.title()),
+                };
+                Span::styled(title, selected())
+            } else if names == TabNames::Whole {
+                Span::raw(format!(" {key} {} ", shown.title()))
+            } else {
+                Span::raw(format!(" {key} "))
+            }
+        })
+        .collect()
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let prompt = app.prompts.top();
-    let line = if let Some(Prompt::Force(refused)) = prompt {
-        let ask = if refused.jobs == 1 {
-            " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
-        } else {
-            // Jobs of one workflow share a run, so the count is of jobs.
-            format!(
-                " y cancels the runs of {} jobs and pauses, any other key keeps them running: ",
-                refused.jobs
-            )
+    let line = if let Overlay::Input(input) = &app.overlay {
+        let ask = match input.typing {
+            Typing::Jobs => " search names, workflows and branches: ",
+            Typing::Log => " search the log's messages: ",
         };
-        let rest = usize::from(area.width).saturating_sub(ask.width());
+        let room = usize::from(area.width).saturating_sub(ask.width() + 1);
+        // The end of what is typed stays in sight.
+        let text: String = {
+            let mut shown: Vec<char> = Vec::new();
+            for character in input.text.chars().rev() {
+                shown.push(character);
+                if shown.iter().collect::<String>().width() > room {
+                    shown.pop();
+                    break;
+                }
+            }
+            shown.into_iter().rev().collect()
+        };
         Line::from(vec![
             Span::styled(ask, bold()),
-            Span::styled(fit(&refused.message, rest), theme.wait()),
+            Span::raw(text),
+            Span::styled("█", theme.dim()),
         ])
+    } else if let Some(Prompt::Force(refused)) = prompt {
+        force_line(refused, usize::from(area.width), theme)
     } else if let Some(Prompt::Remove(removal)) = prompt {
         let ask = match removal {
             Removal::Job(job) => {
@@ -224,11 +333,32 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             ),
             bold(),
         )
+    } else if let Some(Prompt::Empty(volume)) = prompt {
+        Line::styled(
+            format!(" y empties {volume}, any other key keeps it"),
+            bold(),
+        )
+    } else if let Some(Prompt::Action(preview)) = prompt {
+        Line::styled(
+            if preview.confirm.is_some() {
+                format!(" y: {}, any other key sends nothing", preview.confirm_label)
+            } else {
+                " any key closes; nothing can be sent".to_owned()
+            },
+            bold(),
+        )
+    } else if let Some(asked) = app.job.as_ref().and_then(JobView::asking) {
+        Line::styled(
+            match asked {
+                Asked::Preview(_) => " reading what it would do…",
+                Asked::Send(_) => " sending…",
+            },
+            theme.dim(),
+        )
     } else if let Some(flash) = &app.flash {
-        let style = if flash.outcome == Outcome::Failed {
-            theme.tone(Tone::Bad)
-        } else {
-            theme.memory()
+        let style = match flash.tone {
+            api::Tone::Neutral => Style::new(),
+            tone => theme.of(tone),
         };
         Line::styled(format!(" {}", flash.text), style)
     } else {
@@ -241,6 +371,32 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         )
     };
     frame.render_widget(line, area);
+}
+
+/// The question a refused pause asks: whether to cancel the runs that hold it, and what they are.
+fn force_line(refused: &Refused, width: usize, theme: Theme) -> Line<'static> {
+    let ask = if refused.jobs == 1 {
+        " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
+    } else {
+        // Jobs of one workflow share a run, so the count is of jobs.
+        format!(
+            " y cancels the runs of {} jobs and pauses, any other key keeps them running: ",
+            refused.jobs
+        )
+    };
+    // Narrow, the question shortens so what it cancels still shows: the start of the message names it.
+    let ask = if ask.width() + refused.message.width().min(40) <= width {
+        ask
+    } else if refused.jobs == 1 {
+        " y cancels its run and pauses: ".to_owned()
+    } else {
+        format!(" y cancels {} jobs' runs and pauses: ", refused.jobs)
+    };
+    let rest = width.saturating_sub(ask.width());
+    Line::from(vec![
+        Span::styled(ask, bold()),
+        Span::styled(fit(&refused.message, rest), theme.wait()),
+    ])
 }
 
 /// The keys that matter on the view, those that do not fit left out from the least used: each view's own first,
@@ -259,15 +415,20 @@ fn footer_keys(app: &App, width: usize) -> String {
             if app.pane == Pane::Slots {
                 keys.push((2, "R reseed"));
             }
+            if !app.notices().is_empty() && app.pane != Pane::Attention {
+                keys.insert(0, (1, "! attention"));
+            }
             keys
         }
         View::History => vec![
-            (2, "j/k move"),
+            (1, "/ search"),
+            (1, "f filter"),
+            (2, "s sort"),
+            (2, "t time"),
+            (2, "l timeline"),
+            (3, "x clear"),
             (2, "enter open"),
-            (1, "c outcome"),
-            (1, "s repository"),
-            (1, "w workflow"),
-            (1, "] [ page"),
+            (3, "] [ page"),
         ],
         View::Records => vec![
             (2, "j/k move"),
@@ -275,14 +436,24 @@ fn footer_keys(app: &App, width: usize) -> String {
             (1, "d remove"),
             (1, "D remove all"),
         ],
+        View::Insights => vec![(2, "j/k move")],
         View::Sizing => vec![(2, "j/k move"), (1, "a apply the advice")],
-        View::Job => vec![
-            (2, "j/k scroll"),
-            (2, "G follow"),
-            (1, "p/r pause/resume"),
-            (3, "R reseed"),
-            (1, "esc back"),
-        ],
+        View::Caches => vec![(2, "j/k move"), (1, "d empty")],
+        View::Settings => vec![(2, "j/k move"), (1, "u read again")],
+        View::Job => {
+            let mut keys = vec![
+                (1, "enter fold"),
+                (1, "/ search"),
+                (2, "n/N match"),
+                (1, "c compare"),
+            ];
+            if app.live.status.job_actions.offered() {
+                keys.push((2, "x cancel"));
+                keys.push((2, "a/A re-run"));
+            }
+            keys.extend([(3, "G follow"), (1, "esc back")]);
+            keys
+        }
     };
     keys.extend([(4, views.as_str()), (0, "? help"), (0, "q quit")]);
     let line = |keys: &[(u8, &str)]| {
@@ -302,58 +473,139 @@ pub(super) fn view_keys(tabs: &[(api::View, View)]) -> (String, String) {
         .iter()
         .map(|(shown, _)| shown.title().to_lowercase())
         .collect();
-    (
-        digits.join(" "),
-        format!("{}; o and h too", names.join(", ")),
-    )
+    (digits.join(" "), names.join(", "))
 }
 
-fn help(frame: &mut Frame<'_>, area: Rect) {
-    let (digits, views) = view_keys(&View::tabs());
-    // At most 20, so it fits a terminal of 24 rows.
-    let keys: [(&str, &str); 17] = [
-        (digits.as_str(), views.as_str()),
-        ("digit again", "the view's next section, such as records"),
-        ("tab", "overview: slots, waiting, repositories, latest"),
-        ("j k ↓ ↑", "move, or scroll the log"),
-        ("PgDn PgUp", "move by ten"),
-        ("enter esc", "open the job; back from it"),
-        ("G g", "follow the log, or go to its start"),
-        ("p r", "pause the repository, or resume it"),
-        ("P U", "pause every repository, or resume them"),
-        ("R", "reseed the profile's snapshot"),
-        ("c s w", "history: cycle outcome, repository, workflow"),
-        ("] [", "history: next and previous page"),
-        ("d D", "records: remove the record, or every record"),
-        ("a", "sizing: write the advice into the config"),
-        ("?", "this help; any key closes it"),
-        ("ctrl-z", "suspend; the shell's fg brings it back"),
-        ("q ctrl-c", "quit"),
-    ];
-    let width = area.width.min(60);
-    let height = area
-        .height
-        .min(u16::try_from(keys.len()).unwrap_or(u16::MAX) + 2);
-    let popup = Rect {
+/// The rows of a table drawn in `table` under its header, from `offset`, as `list`'s targets.
+fn table_hits(hits: &mut Hits, table: Rect, list: List, offset: usize, count: usize) {
+    let [_, rows] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(table);
+    hits.rows(rows, list, offset, count.saturating_sub(offset));
+}
+
+/// A box of `width` and `height` in the middle of `area`, at most as large.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
         width,
         height,
-    };
+    }
+}
+
+fn help(frame: &mut Frame<'_>, area: Rect, hits: &mut Hits) {
+    let (digits, views) = view_keys(&View::tabs());
+    // At most 20, so it fits a terminal of 24 rows.
+    let keys: [(&str, &str); 20] = [
+        (digits.as_str(), views.as_str()),
+        ("digit again", "the view's next section, such as records"),
+        ("tab", "overview: the next pane"),
+        ("j k ↓ ↑", "move, or scroll the log; PgDn PgUp by ten"),
+        ("enter esc", "open; back"),
+        ("!", "what needs attention"),
+        ("/ n N", "search; the next and the previous match"),
+        ("f s t", "jobs: filter, sort, time range"),
+        ("l x", "jobs: timeline; clear the filters"),
+        ("] [", "jobs: the next and the previous page"),
+        ("enter", "job: fold or unfold the step or group"),
+        ("G g", "follow the log, or go to its start"),
+        ("c", "job: compare with an earlier run"),
+        ("x a A", "job: cancel, re-run it, re-run the failed"),
+        ("p r P U", "pause or resume the repository, or all"),
+        ("R", "reseed the profile's snapshot"),
+        ("d D", "remove a record, or all; empty a cache"),
+        ("a u", "sizing: write the advice; settings: read again"),
+        ("click wheel", "select, again to open; scroll"),
+        ("? ctrl-z q", "this help; suspend; quit"),
+    ];
+    let popup = centred(area, 62, length(keys.len()) + 2);
     let lines: Vec<Line<'_>> = keys
         .iter()
         .map(|(key, what)| {
             Line::from(vec![
-                Span::styled(format!(" {key:<10}"), bold()),
+                Span::styled(format!(" {key:<12}"), bold()),
                 Span::raw(*what),
             ])
         })
         .collect();
+    hits.cover(popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Keys ")),
         popup,
     );
+}
+
+/// The list open over the view, the option the keys are on reversed; in the list of filters, what each is set to.
+fn pick(frame: &mut Frame<'_>, area: Rect, picker: &Picker, theme: Theme, hits: &mut Hits) {
+    let column = |column: api::Column| format!(" {} ", column.title());
+    let title = match picker.pick {
+        Pick::Filters => " Filter ".to_owned(),
+        Pick::Order => " Sort ".to_owned(),
+        Pick::Range => column(api::Column::Queued),
+        Pick::Outcome => column(api::Column::Outcome),
+        Pick::Repository => column(api::Column::Repository),
+        Pick::Workflow => column(api::Column::Workflow),
+        Pick::Branch => column(api::Column::Branch),
+        Pick::Record => column(api::Column::Record),
+    };
+    let choices = picker.choices();
+    let label_width = choices
+        .iter()
+        .map(|choice| choice.label.width())
+        .max()
+        .unwrap_or(0);
+    let note_width = choices
+        .iter()
+        .map(|choice| choice.note.width())
+        .max()
+        .unwrap_or(0);
+    let wanted = label_width + if note_width > 0 { note_width + 2 } else { 0 } + 4;
+    let popup = centred(area, length(wanted.max(24)), length(choices.len()) + 2);
+    let inner = Block::bordered().inner(popup);
+    let shown = usize::from(inner.height);
+    // The option the keys are on stays in sight.
+    let first = picker.at().saturating_sub(shown.saturating_sub(1));
+    let width = usize::from(inner.width).saturating_sub(2);
+    let lines: Vec<Line<'_>> = choices
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .map(|(at, choice)| {
+            let line = if choice.note.is_empty() {
+                Line::from(format!(" {}", fit(&choice.label, width)))
+            } else {
+                let room = width.saturating_sub(label_width + 2);
+                Line::from(vec![
+                    Span::raw(format!(" {:<label_width$}  ", choice.label)),
+                    Span::styled(fit(&choice.note, room), theme.dim()),
+                ])
+            };
+            if at == picker.at() {
+                line.style(selected())
+            } else {
+                line
+            }
+        })
+        .collect();
+    hits.cover(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        popup,
+    );
+    for (offset, at) in (first..choices.len()).take(shown).enumerate() {
+        hits.add(
+            Rect {
+                y: inner.y + length(offset),
+                height: 1,
+                ..inner
+            },
+            Target::Choice(at),
+        );
+    }
 }
 
 /// A section's title on the left and a note on the right, on one line.

@@ -280,6 +280,12 @@ impl StyledLine {
     pub fn text(&self) -> String {
         self.runs.iter().map(|run| run.text.as_str()).collect()
     }
+
+    /// What a reader is told of the bytes it does not show: `80.0K not shown`; `None` when it shows them all. The
+    /// plain log (`GET /v1/jobs/{id}/logs`) has the whole line.
+    pub fn omitted_words(&self) -> Option<String> {
+        (self.omitted > 0).then(|| format!("{} not shown", crate::config::ByteSize(self.omitted)))
+    }
 }
 
 /// A line's timestamp in ms, when it starts with one as the runner writes it (`2026-10-23T01:08:56.1234567Z `),

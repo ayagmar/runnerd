@@ -54,6 +54,28 @@ pub enum Baseline {
 }
 
 impl Baseline {
+    /// What the job is compared against, at `now`: `against job 9510 on main, queued 2h ago`; `None` when there is
+    /// no baseline, which [`Baseline::words`] says why.
+    pub fn against(&self, now: u64) -> Option<String> {
+        let Baseline::Chosen {
+            job,
+            branch,
+            queued_at,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let on = branch
+            .as_deref()
+            .map(|branch| format!(" on {}", title(branch)))
+            .unwrap_or_default();
+        Some(format!(
+            "against job {job}{on}, queued {}",
+            crate::api::ago(*queued_at, now)
+        ))
+    }
+
     /// Why there is none, worded; `None` when there is one.
     pub fn words(&self) -> Option<String> {
         match self {

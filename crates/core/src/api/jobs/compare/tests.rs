@@ -447,3 +447,24 @@ fn samples_are_read_only_for_a_comparison_with_a_baseline() {
     JobComparison::in_history(10, None, &history, usage).unwrap();
     assert_eq!(reads.get(), 2, "both jobs' samples, once each");
 }
+
+#[test]
+fn a_chosen_baseline_says_which_run_and_when_and_none_says_why_instead() {
+    let chosen = Baseline::Chosen {
+        job: 9510,
+        branch: Some("main\u{1b}[31m".to_owned()),
+        queued_at: 1000,
+        asked: false,
+    };
+    assert_eq!(
+        chosen.against(1000 + 7200).as_deref(),
+        Some("against job 9510 on main, queued 2h 00m ago"),
+        "the branch loses its escape sequence"
+    );
+    assert_eq!(chosen.words(), None);
+    let none = Baseline::Unavailable {
+        reason: Unavailable::NoEarlierSuccess,
+    };
+    assert_eq!(none.against(2000), None);
+    assert!(none.words().is_some(), "an unavailable baseline says why");
+}

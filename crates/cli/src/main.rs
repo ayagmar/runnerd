@@ -93,13 +93,19 @@ enum Command {
     ///
     /// Redraws in place on a terminal; otherwise prints one line per event.
     Watch,
-    /// Full-screen dashboard: a line on CI's health (what runs, what waits and for how long), the budget, slots with
-    /// their memory and CPU, the queue with why each job waits, history, and each job's steps and log.
+    /// Full-screen dashboard: what needs attention, CI's health, the budget and each slot's job, the queue with why
+    /// each job waits, the jobs with search, filters and a timeline, insights, sizing and caches, the doctor's checks,
+    /// and each job's steps, failure and folded log, with cancel and re-run.
     ///
-    /// Keys: 1 overview, 2 history, 3 records, 4 sizing, tab and j/k to move, enter to open a job, p/r to pause or
-    /// resume, ? for all.
+    /// Keys: 1-5 the views, tab and j/k to move, enter to open, / to search, ? for all. The mouse clicks and scrolls
+    /// unless --no-mouse or RUNNERCTL_NO_MOUSE is set.
     #[cfg(feature = "tui")]
-    Tui,
+    Tui {
+        /// Leave the mouse to the terminal: no clicks or wheel in the TUI, and the terminal's own selection works.
+        /// RUNNERCTL_NO_MOUSE set to anything but empty does the same.
+        #[arg(long)]
+        no_mouse: bool,
+    },
     /// Give a repository, or every one, no new runners, also after a restart. Refused while it runs a job, unless
     /// --force.
     Pause {
@@ -461,14 +467,16 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         }
         Command::Watch => watch(client, json, paint).await?,
         #[cfg(feature = "tui")]
-        Command::Tui => {
+        Command::Tui { no_mouse } => {
             if json || !output::is_terminal() {
                 return Err(Error::Local(
                     "runnerctl tui needs a terminal; `runnerctl watch` prints events as lines"
                         .to_owned(),
                 ));
             }
-            tui::run(client, paint.colour).await?;
+            let mouse = !no_mouse
+                && std::env::var_os("RUNNERCTL_NO_MOUSE").is_none_or(|value| value.is_empty());
+            tui::run(client, paint.colour, output::Mouse::from(mouse)).await?;
         }
         Command::Pause {
             repository, force, ..

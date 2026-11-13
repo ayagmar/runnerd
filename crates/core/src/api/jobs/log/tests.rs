@@ -842,3 +842,14 @@ fn a_line_longer_than_the_exit_scan_reads_is_no_exit_code() {
         "a line cut at the scan's bound is not the runner's exit message"
     );
 }
+
+#[test]
+fn a_line_says_in_cores_words_how_much_of_it_is_not_shown() {
+    let short = StyledLine::parse(0, "2026-10-23T01:08:56.1234567Z hello");
+    assert_eq!(short.omitted_words(), None, "a whole line says nothing");
+    let long = StyledLine::parse(
+        1,
+        &"x".repeat(usize::try_from(LINE_BYTES_MAX).unwrap() + 2048),
+    );
+    assert_eq!(long.omitted_words().as_deref(), Some("2K not shown"));
+}
