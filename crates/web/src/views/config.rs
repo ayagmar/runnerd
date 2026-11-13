@@ -2,7 +2,8 @@
 //! drawn as the budget it asks for; saving writes it and has the daemon reload it. From the sizing page, the editor
 //! starts with a profile's advised memory and slots in the file, or those an auto sizing change replaced,
 //! unsaved. Also the doctor's checks, which the page asks for once it shows, since the doctor takes a while; and a
-//! QR code that signs another device in.
+//! QR code that signs another device in. The editor numbers its lines and marks the one a parse error is on;
+//! "Review changes" shows what the text changes in the file, line by line, before "Save and reload" writes it.
 
 use std::fmt::Write as _;
 
@@ -13,7 +14,7 @@ use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::{Config, profile_sizes, resize_profile, resized_at};
 use serde::Deserialize;
 
-use super::{Page, page};
+use super::{Page, heading, page};
 use crate::chart::ratio;
 use crate::format;
 
@@ -196,11 +197,9 @@ fn quoted(revision: &str) -> Option<String> {
 
 /// The whole page; `proxies` are `[web] origins`, where another device can be signed in.
 pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
+    let path = html! { p.muted { code { (view.file.path) } } };
     let main = html! {
-        div.section-head.page-head {
-            h1.visually-hidden { (Section::Config.title()) }
-            p.muted { code { (view.file.path) } }
-        }
+        (heading(runnerd_core::api::View::Settings.title(), Some(Page::Config), Some(path)))
         div.config-layout {
             section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)]
                 "data-signals:_edited"="false" {
@@ -208,14 +207,21 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                 // Before the editor, so it is read and reached before the text it describes.
                 @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
                 label.visually-hidden for="toml" { "runnerd.toml" }
-                // The parser drops a line break right after the tag: this one, so the text's own first line stays.
-                textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
-                    data-bind:toml="" data-indicator:_checking="" data-on:input="$_edited = true"
-                    "data-on:input__debounce.400ms"="@post('/config/check')" { "\n" (view.text) }
+                // Line numbers beside the text, which the page's script keeps in step with it; lines do not wrap, so
+                // a number stays beside its line.
+                div.editor-frame {
+                    pre.gutter #toml-gutter aria-hidden="true" { (gutter(&view.text)) }
+                    // The parser drops a line break right after the tag: this one, so the text's own first line stays.
+                    textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28" wrap="off"
+                        data-gutter="toml-gutter"
+                        data-bind:toml="" data-indicator:_checking="" data-on:input="$_edited = true; document.getElementById('config-diff')?.replaceChildren()"
+                        "data-on:input__debounce.400ms"="@post('/config/check')" { "\n" (view.text) }
+                }
+                div #config-diff {}
                 div.editor-actions {
-                    button.button type="button" data-indicator:_saving=""
-                        data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
-                        data-on:click="@put('/config')" { "Save and reload" }
+                    button.button type="button" data-indicator:_reviewing="" data-review
+                        data-attr:aria-busy="$_reviewing && 'true'" data-attr:aria-disabled="$_reviewing && 'true'"
+                        data-on:click="!$_reviewing && @post('/config/diff')" { "Review changes" }
                     button.button-quiet type="button" data-indicator:_checking=""
                         data-on:click="@post('/config/check')" { "Check" }
                     p.muted { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
@@ -273,6 +279,12 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
             }
             // A valid config's message repeats the figures below it.
             @if !check.valid { p.check-message { (check.message) } }
+            @if let Some(error) = Config::parse_error(text) {
+                p.error-line data-error-line=(error.line) {
+                    button.button-quiet type="button" data-on:click=(go_to_line(error.line)) { "Line " (error.line) }
+                    " " (error.message)
+                }
+            }
             @if let Some(budget) = budget {
                 dl.facts {
                     div { dt { (needed_name) } dd { (format::bytes(needed)) } }
@@ -316,6 +328,150 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
             }
         }
     }
+}
+
+/// The editor's line numbers for `text`.
+fn gutter(text: &str) -> String {
+    let lines = text.lines().count().max(1);
+    (1..=lines)
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Selects line `line`, counted from 1, in the editor and scrolls to it.
+fn go_to_line(line: usize) -> String {
+    format!(
+        "const t = document.getElementById('toml'); const lines = t.value.split('\\n'); \
+         const start = lines.slice(0, {index}).reduce((sum, each) => sum + each.length + 1, 0); \
+         const end = start + (lines[{index}] ?? '').length; t.focus(); t.setSelectionRange(start, end); \
+         t.scrollTop = Math.max(0, {index} * parseFloat(getComputedStyle(t).lineHeight) - t.clientHeight / 3)",
+        index = line.saturating_sub(1)
+    )
+}
+
+/// One line of a diff: in both texts, only in the file, or only in the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLine<'text> {
+    Same(&'text str),
+    Removed(&'text str),
+    Added(&'text str),
+}
+
+/// The most cells the line-by-line comparison fills between the texts' common start and end; past it the middle is
+/// shown removed, then added.
+const DIFF_CELLS: usize = 2_000_000;
+
+/// `before` to `after` line by line: their common start and end, and between them the longest common subsequence.
+fn diff_lines<'text>(before: &'text str, after: &'text str) -> Vec<DiffLine<'text>> {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (old_mid, new_mid) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
+    let mut lines: Vec<DiffLine<'text>> = old[..head]
+        .iter()
+        .map(|line| DiffLine::Same(line))
+        .collect();
+    if old_mid.len().saturating_mul(new_mid.len()) > DIFF_CELLS {
+        lines.extend(old_mid.iter().map(|line| DiffLine::Removed(line)));
+        lines.extend(new_mid.iter().map(|line| DiffLine::Added(line)));
+    } else {
+        // `common[i][j]`: the longest common subsequence of `old_mid[i..]` and `new_mid[j..]`.
+        let width = new_mid.len() + 1;
+        let mut common = vec![0u32; (old_mid.len() + 1) * width];
+        for i in (0..old_mid.len()).rev() {
+            for j in (0..new_mid.len()).rev() {
+                common[i * width + j] = if old_mid[i] == new_mid[j] {
+                    common[(i + 1) * width + j + 1] + 1
+                } else {
+                    common[(i + 1) * width + j].max(common[i * width + j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < old_mid.len() || j < new_mid.len() {
+            if i < old_mid.len() && j < new_mid.len() && old_mid[i] == new_mid[j] {
+                lines.push(DiffLine::Same(old_mid[i]));
+                i += 1;
+                j += 1;
+            } else if j < new_mid.len()
+                && (i == old_mid.len() || common[i * width + j + 1] >= common[(i + 1) * width + j])
+            {
+                lines.push(DiffLine::Added(new_mid[j]));
+                j += 1;
+            } else {
+                lines.push(DiffLine::Removed(old_mid[i]));
+                i += 1;
+            }
+        }
+    }
+    lines.extend(
+        old[old.len() - tail..]
+            .iter()
+            .map(|line| DiffLine::Same(line)),
+    );
+    lines
+}
+
+/// Lines of context kept around each change.
+const DIFF_CONTEXT: usize = 2;
+
+/// What the editor's text changes in the file, the changed lines with a little context, and the button that saves
+/// it; in `#config-diff`.
+pub(crate) fn diff(file: &str, text: &str) -> Markup {
+    let lines = diff_lines(file, text);
+    let changed: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !matches!(line, DiffLine::Same(_)))
+        .map(|(index, _)| index)
+        .collect();
+    let near = |index: usize| {
+        changed
+            .iter()
+            .any(|at| index + DIFF_CONTEXT >= *at && index <= at + DIFF_CONTEXT)
+    };
+    // The text this diff compared: a save from it sends this, and the dashboard refuses a save of other text.
+    let reviewed = crate::views::digest(text);
+    html! {
+        div #config-diff .config-diff tabindex="-1" data-init="el.focus()" data-dismiss-to="[data-review]" {
+            @if changed.is_empty() {
+                p.muted { "The text is the file as it is: nothing to save." }
+                button.button-quiet type="button" data-dismiss { "Close" }
+            } @else {
+                h3 { "What saving changes" }
+                ol.diff {
+                    @for (index, line) in lines.iter().enumerate() {
+                        @if near(index) {
+                            @if index > 0 && !near(index - 1) { li.skip aria-hidden="true" { "…" } }
+                            @match line {
+                                DiffLine::Same(text) => { li.same { span.sign aria-hidden="true" { " " } (text) } }
+                                DiffLine::Removed(text) => { li.removed { span.sign { span.visually-hidden { "Removed: " } span aria-hidden="true" { "−" } } (text) } }
+                                DiffLine::Added(text) => { li.added { span.sign { span.visually-hidden { "Added: " } span aria-hidden="true" { "+" } } (text) } }
+                            }
+                        }
+                    }
+                }
+                div.editor-actions {
+                    button.button type="button" data-indicator:_saving=""
+                        data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
+                        data-on:click=(format!("@put('/config', {{payload: {{toml: $toml, revision: $revision, reviewed: {}}}}})", crate::views::js(&reviewed))) { "Save and reload" }
+                    button.button-quiet type="button" data-dismiss { "Keep editing" }
+                }
+            }
+        }
+    }
+}
+
+/// `#config-diff` emptied, once the text is saved.
+pub(crate) fn diff_cleared() -> Markup {
+    html! { div #config-diff {} }
 }
 
 fn path_unchanged() -> &'static str {
@@ -464,5 +620,40 @@ pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>, now: u64) -> Markup {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_diff_keeps_the_common_lines_and_shows_each_change_once() {
+        let before = "[slice]\nmemory_max = \"30G\"\n\n[[profiles]]\nname = \"jvm\"\nmemory = \"9G\"\nslots = 2\n";
+        let after = "[slice]\nmemory_max = \"30G\"\n\n[[profiles]]\nname = \"jvm\"\nmemory = \"8G\"\nslots = 3\ncpus = 4\n";
+        let lines = diff_lines(before, after);
+        let removed: Vec<_> = lines
+            .iter()
+            .filter_map(|line| match line {
+                DiffLine::Removed(text) => Some(*text),
+                _ => None,
+            })
+            .collect();
+        let added: Vec<_> = lines
+            .iter()
+            .filter_map(|line| match line {
+                DiffLine::Added(text) => Some(*text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, ["memory = \"9G\"", "slots = 2"]);
+        assert_eq!(added, ["memory = \"8G\"", "slots = 3", "cpus = 4"]);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| matches!(line, DiffLine::Same(_)))
+                .count(),
+            5
+        );
     }
 }

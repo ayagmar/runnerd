@@ -35,7 +35,7 @@ pub(crate) enum Page {
 
 impl Page {
     /// The page a view opens on: its own, or its first section's.
-    fn of(view: View) -> Page {
+    pub(crate) fn of(view: View) -> Page {
         match view.sections().first() {
             Some(section) => Page::of_section(*section),
             None => match view {
@@ -45,7 +45,7 @@ impl Page {
         }
     }
 
-    fn of_section(section: Section) -> Page {
+    pub(crate) fn of_section(section: Section) -> Page {
         match section {
             Section::History => Page::History,
             Section::Records => Page::Records,
@@ -68,7 +68,7 @@ impl Page {
         }
     }
 
-    fn path(self) -> &'static str {
+    pub(crate) fn path(self) -> &'static str {
         match self {
             Page::Overview => "/",
             Page::History => "/history",
@@ -169,6 +169,18 @@ impl Live<'_> {
     }
 }
 
+/// The keys the dashboard answers, as the help lists them: what is pressed, and what it does.
+const KEYS: [(&str, &str); 8] = [
+    ("1 to 5", "Open a view"),
+    ("j / k", "Next or previous row"),
+    ("Enter", "Open the row"),
+    ("/", "Search the page"),
+    ("Ctrl K", "Commands"),
+    ("?", "These keys"),
+    ("Esc", "Close, or leave a field"),
+    ("Tab", "Every control, in reading order"),
+];
+
 /// A full page: the navigation, `main`, and, with `live`, the event stream that keeps its regions current.
 pub(crate) fn page(
     title: &str,
@@ -178,13 +190,6 @@ pub(crate) fn page(
 ) -> Markup {
     let nav = View::ALL.map(|view| (view, Page::of(view).path(), view.title()));
     let view = active.map(Page::view);
-    // The sections of the view shown, when it has several: every page of the group stays one click away.
-    let sections: Vec<_> = view
-        .map(View::sections)
-        .unwrap_or_default()
-        .iter()
-        .map(|section| (Page::of_section(*section), section.title()))
-        .collect();
 
     html! {
         (DOCTYPE)
@@ -205,6 +210,7 @@ pub(crate) fn page(
                 link rel="stylesheet" href=(assets::path("style.css"));
                 script src=(assets::path("theme.js")) {}
                 script type="module" src=(assets::path("datastar.js")) {}
+                script type="module" src=(assets::path("keys.js")) {}
             }
             body data-signals=[live.map(Live::signals)] {
                 a.skip href="#main" { "Skip to content" }
@@ -214,45 +220,91 @@ pub(crate) fn page(
                         "runnerd"
                     }
                     nav aria-label="Dashboard" {
-                        @for (shown, href, label) in nav {
-                            @if view == Some(shown) {
-                                a href=(href) aria-current="page" { (label) }
-                            } @else {
-                                a href=(href) { (label) }
+                        @for (index, (shown, href, label)) in nav.iter().enumerate() {
+                            @let key = (index + 1).to_string();
+                            a href=(href) data-key=(key) aria-keyshortcuts=(key)
+                                aria-current=[(view == Some(*shown)).then_some("page")] {
+                                (label)
+                                kbd.nav-key aria-hidden="true" { (key) }
                             }
                         }
                     }
-                    @if let Some(live) = live {
-                        // The indicator before the init: it has to listen when the request starts.
-                        span.connection data-indicator:_live=""
-                            data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: 10000}})", live.url))
-                            data-class:online="$_live"
-                            data-attr:title="$_live ? 'Updates as it happens' : 'Not connected; retrying'" {
-                            span.dot aria-hidden="true" {}
-                            span data-text="$_live ? 'Live' : 'Offline'" { "Live" }
+                    div.tools {
+                        @if let Some(live) = live {
+                            // The indicator before the init: it has to listen when the request starts.
+                            span.connection data-indicator:_live=""
+                                data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: 10000}})", live.url))
+                                data-class:online="$_live"
+                                data-attr:title="$_live ? 'Updates as it happens' : 'Not connected; retrying'" {
+                                span.dot aria-hidden="true" {}
+                                span data-text="$_live ? 'Live' : 'Offline'" { "Live" }
+                            }
                         }
-                    }
-                    button.theme type="button" data-theme-toggle aria-label="Switch between light and dark" {
-                        svg viewBox="0 0 20 20" aria-hidden="true" {
-                            circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" {}
-                            path d="M10 2a8 8 0 0 1 0 16z" fill="currentColor" {}
+                        button.tool type="button" data-open-palette aria-label="Commands" aria-keyshortcuts="Control+K" title="Commands (Ctrl K)" {
+                            svg viewBox="0 0 20 20" aria-hidden="true" {
+                                circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2" {}
+                                path d="M12.6 12.6 17 17" stroke="currentColor" stroke-width="2" stroke-linecap="square" {}
+                            }
                         }
-                    }
-                }
-                @if sections.len() > 1 {
-                    nav.sections aria-label=(view.map_or("", View::title)) {
-                        @for (page, label) in &sections {
-                            @if active == Some(*page) {
-                                a href=(page.path()) aria-current="page" { (label) }
-                            } @else {
-                                a href=(page.path()) { (label) }
+                        button.tool.keys-button type="button" data-open-keys aria-label="Keys" aria-keyshortcuts="?" title="Keys (?)" {
+                            svg viewBox="0 0 20 20" aria-hidden="true" {
+                                rect x="1.5" y="4.5" width="17" height="11" fill="none" stroke="currentColor" stroke-width="1.6" {}
+                                path d="M5 8h1.5M9.25 8h1.5M13.5 8H15M6 12h8" stroke="currentColor" stroke-width="1.6" {}
+                            }
+                        }
+                        button.tool.theme type="button" data-theme-toggle aria-label="Switch between light and dark" {
+                            svg viewBox="0 0 20 20" aria-hidden="true" {
+                                circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2" {}
+                                path d="M10 2a8 8 0 0 1 0 16z" fill="currentColor" {}
                             }
                         }
                     }
                 }
                 main #main { (main) }
                 div #notice role="status" aria-live="polite" {}
+                dialog #keys .sheet aria-labelledby="keys-title" {
+                    div.sheet-head {
+                        h2 #keys-title { "Keys" }
+                        button.button-quiet type="button" data-close { "Close" }
+                    }
+                    dl.key-list {
+                        @for (key, what) in KEYS {
+                            div { dt { kbd { (key) } } dd { (what) } }
+                        }
+                    }
+                }
+                dialog #palette .sheet.palette aria-label="Commands" {
+                    label.visually-hidden for="palette-input" { "Go to a page, a row, or a job number" }
+                    input #palette-input type="text" autocomplete="off" spellcheck="false" role="combobox"
+                        aria-controls="palette-list" aria-expanded="true" placeholder="Go to…";
+                    ul #palette-list role="listbox" aria-label="Commands" {}
+                }
             }
+        }
+    }
+}
+
+/// A page's visible title and, in a view of several sections, the sections as tabs, the one shown marked; `aside`
+/// sits at the end of the row, such as a page's own figures.
+pub(crate) fn heading(title: &str, active: Option<Page>, aside: Option<Markup>) -> Markup {
+    let view = active.map(Page::view);
+    let sections: Vec<_> = view
+        .map(View::sections)
+        .unwrap_or_default()
+        .iter()
+        .map(|section| (Page::of_section(*section), section.title()))
+        .collect();
+    html! {
+        div.page-title {
+            h1 { (title) }
+            @if sections.len() > 1 {
+                nav.sections aria-label=(view.map_or("", View::title)) {
+                    @for (page, label) in &sections {
+                        a href=(page.path()) aria-current=[(active == Some(*page)).then_some("page")] { (label) }
+                    }
+                }
+            }
+            @if let Some(aside) = aside { div.page-aside { (aside) } }
         }
     }
 }
@@ -336,6 +388,17 @@ pub(crate) fn profile_class(status: &Status, profile: &str) -> String {
         "p-none".to_owned()
     } else {
         format!("p{}", index % 6)
+    }
+}
+
+/// The CSS class of a tone, as core gives it: `tone-bad`, `tone-warn`, `tone-good`, `tone-neutral` or `tone-quiet`.
+pub(crate) fn tone_class(tone: api::Tone) -> &'static str {
+    match tone {
+        api::Tone::Bad => "tone-bad",
+        api::Tone::Warn => "tone-warn",
+        api::Tone::Good => "tone-good",
+        api::Tone::Neutral => "tone-neutral",
+        api::Tone::Quiet => "tone-quiet",
     }
 }
 

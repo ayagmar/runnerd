@@ -142,10 +142,13 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/insights", get(insights))
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/log", get(job_log))
+        .route("/jobs/{id}/cancel", post(actions::cancel_job))
+        .route("/jobs/{id}/rerun", post(actions::rerun_job))
         .route("/live/overview", get(live::overview))
         .route("/live/jobs/{id}", get(live::job))
         .route("/config", get(config).put(actions::save_config))
         .route("/config/check", post(actions::check_config))
+        .route("/config/diff", post(actions::review_config))
         .route("/config/doctor", get(config_doctor))
         .route(
             "/v1/repositories/{owner}/{name}/pause",
@@ -292,9 +295,13 @@ async fn config_doctor(State(app): State<App>) -> Response {
     Html(views::config::doctor(&doctor, now()).into_string()).into_response()
 }
 
-async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
+async fn job(
+    State(app): State<App>,
+    UrlPath(id): UrlPath<u64>,
+    Query(query): Query<views::job::JobPageQuery>,
+) -> Response {
     page(
-        JobView::load(&app.daemon, id, now())
+        JobView::load(&app.daemon, id, now(), &query)
             .await
             .map(|job| views::job::render(&job)),
     )

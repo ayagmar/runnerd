@@ -66,6 +66,23 @@ pub struct LogSearch {
     pub next: Option<u64>,
 }
 
+impl LogSearch {
+    /// What a reader is told of the matches for `query`: `3 lines hold “panic”`, `No line's message holds “panic”`,
+    /// with `in the lines read` while lines remain unscanned. A client shows it as a sentence.
+    pub fn found_words(&self, query: &str) -> String {
+        let unread = if self.next.is_some() {
+            " in the lines read"
+        } else {
+            ""
+        };
+        match self.matches.len() {
+            0 => format!("no line's message holds “{query}”{unread}"),
+            1 => format!("1 line holds “{query}”{unread}"),
+            count => format!("{count} lines hold “{query}”{unread}"),
+        }
+    }
+}
+
 /// A query, ready to find.
 #[derive(Debug, Clone)]
 pub struct LogNeedle {

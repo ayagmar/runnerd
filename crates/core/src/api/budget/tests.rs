@@ -456,3 +456,74 @@ fn a_reload_never_replaces_the_cap_a_running_container_started_with() {
         Some("capped at 8G and 4 CPUs")
     );
 }
+
+#[test]
+fn the_hosts_line_as_figures_says_each_clause_once_and_leaves_free_to_the_bar() {
+    let mut status = status(AdmissionPolicy::Measured, Some(46 * G));
+    assert!(
+        status.budget.host_figures().is_empty(),
+        "no figures without a reading of the host"
+    );
+    let mut reading = host(13 * G, false);
+    reading.memory.holders = vec![
+        crate::api::Holder {
+            name: "java".to_owned(),
+            memory: 9 * G,
+        },
+        crate::api::Holder {
+            name: "qemu".to_owned(),
+            memory: 5 * G,
+        },
+    ];
+    reading.memory.swap = Some(Swap {
+        total: 16 * G,
+        free: 4 * G,
+    });
+    status.budget.host = Some(reading);
+    let figures: Vec<(&str, String, Option<String>)> = status
+        .budget
+        .host_figures()
+        .into_iter()
+        .map(|figure| (figure.label, figure.value, figure.note))
+        .collect();
+    let outside = status
+        .budget
+        .host
+        .as_ref()
+        .map(|host| host.memory.outside());
+    assert_eq!(
+        figures,
+        vec![
+            ("Host available", "20G of 64G".to_owned(), None),
+            ("Swap used", "12G of 16G".to_owned(), None),
+            ("Leaves the slice", "13G of its 46G".to_owned(), None),
+            (
+                "Outside CI",
+                crate::config::ByteSize(outside.unwrap_or(0)).to_string(),
+                Some("most java 9G and qemu 5G".to_owned())
+            ),
+        ]
+    );
+    let line = status.budget.host_line().unwrap_or_default();
+    for (_, value, _) in &figures[..3] {
+        assert!(
+            line.contains(value.as_str()),
+            "{value} is the line's: {line}"
+        );
+    }
+    assert!(
+        figures.iter().all(|(_, value, _)| !value.contains("free")),
+        "what is free is the bar's: {figures:?}"
+    );
+    if let Some(host) = status.budget.host.as_mut() {
+        host.stalled = true;
+    }
+    let stalled = status.budget.host_figures();
+    assert!(
+        stalled
+            .iter()
+            .any(|figure| figure.label == "Leaves the slice"
+                && figure.value.contains("no runner starts")),
+        "a stalling host says no runner starts: {stalled:?}"
+    );
+}

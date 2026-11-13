@@ -839,7 +839,17 @@ async fn every_page_renders_from_the_daemons_data() {
 
     let history = dashboard.page(&cookie, "/history").await;
     assert_eq!(history.status, StatusCode::OK);
-    assert!(history.body.contains("Jobs per day") && history.body.contains("playwright"));
+    assert!(
+        history.body.contains("playwright"),
+        "the list lists the jobs"
+    );
+    let trends = dashboard.page(&cookie, "/history?lens=trends").await;
+    assert!(
+        trends.body.contains("Jobs per day"),
+        "the trends lens charts them"
+    );
+    let timeline = dashboard.page(&cookie, "/history?lens=timeline").await;
+    assert_eq!(timeline.status, StatusCode::OK);
 
     let caches = dashboard.page(&cookie, "/caches").await;
     assert_eq!(caches.status, StatusCode::OK);
@@ -871,20 +881,22 @@ async fn a_job_waiting_for_cpu_never_reads_as_needing_what_is_free() {
 
 #[tokio::test]
 async fn the_overviews_regions_come_in_the_order_a_narrow_screen_shows_them() {
-    // The keyboard and a screen reader follow the markup, which a narrow screen shows as it is: the queue first. A
-    // wide screen's two columns come from the grid, never from reordering.
+    // The keyboard and a screen reader follow the markup, which a narrow screen shows as it is: health, then what
+    // needs attention, then the machine, then the work. A wide screen's two columns come from the grid, never from
+    // reordering.
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
     let at = |id: &str| body.find(&format!(r#"id="{id}""#)).unwrap();
     let regions = [
         "health",
-        "queue",
+        "attention",
         "budget",
         "slots",
+        "host",
+        "queue",
         "recent",
         "repositories",
-        "host",
     ];
     assert!(
         regions.windows(2).all(|pair| at(pair[0]) < at(pair[1])),
@@ -915,7 +927,7 @@ async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await;
     let body = &overview.body;
-    let queue = &body[body.find(r#"id="queue""#).unwrap()..body.find(r#"id="budget""#).unwrap()];
+    let queue = &body[body.find(r#"id="queue""#).unwrap()..body.find(r#"id="recent""#).unwrap()];
     let lint = queue.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
     let visual_diff = queue.find("/job/120055991710");
     assert!(
@@ -928,7 +940,7 @@ async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits
         "each queued job says why it waits: {queue}"
     );
     assert!(
-        queue.contains(r#"<li data-class:linked="$_repo == 'halyard/storefront'""#),
+        queue.contains(r#"<li data-row data-class:linked="$_repo == 'halyard/storefront'""#),
         "a queued row lights up with its repository: {queue}"
     );
     assert_eq!(
@@ -1029,15 +1041,16 @@ async fn the_health_figures_count_the_24_hours_up_to_now_by_when_jobs_started_an
     }
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
-    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    let health =
+        &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="attention""#).unwrap()];
     let failed = &health[health.find("Failed, 24 h").unwrap()..];
     assert!(
-        failed.contains(r#"<span class="figure-main">1</span>"#)
+        failed.contains(r#"href="/history?outcome=failure">1</a>"#)
             && failed.contains("of 2 finished"),
         "one of the two jobs that ended in the day failed: {failed}"
     );
     assert!(
-        health.contains(r#"<div class="failing"><dt>Failed, 24 h"#)
+        health.contains(r#"<div class="tone-bad"><dt>Failed, 24 h"#)
             && failed.contains("1 by their runner"),
         "a job lost with its runner turns the figure red: {failed}"
     );
@@ -1088,8 +1101,8 @@ async fn the_budget_names_the_mirror_and_each_seed_container() {
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await;
     for expected in [
-        "<strong>512M</strong> held by the mirror",
-        "<strong>9G</strong> held by jvm's seed container",
+        r#"aria-label="512M held by the mirror""#,
+        r#"aria-label="9G held by jvm's seed container""#,
         r#"<span class="name">jvm seed</span>"#,
     ] {
         assert!(
@@ -1117,7 +1130,7 @@ async fn the_budget_names_a_shell_open_in_a_record() {
     assert!(
         overview
             .body
-            .contains("<strong>9G</strong> held by the shell in job 42's record"),
+            .contains(r#"aria-label="9G held by the shell in job 42's record""#),
         "the shell's memory is not shown as free: {}",
         overview.body
     );
@@ -1156,38 +1169,16 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
             "{profile} {slot}'s card exists and lights up with its block"
         );
     }
-    // Every block's line is in the readout, toggled by a class: hiding one with `display: none` would let the
-    // readout shrink and grow, and move the bar under the pointer.
-    let lens = &overview[overview.find(r#"<p class="lens""#).unwrap()..];
-    let lens = &lens[..lens.find("</p>").unwrap()];
-    for (profile, slot) in [("jvm", 1), ("jvm", 2), ("node", 1), ("node", 2)] {
-        assert!(
-            lens.contains(&format!(
-                "data-class:on=\"$_slot == '{}'\"",
-                slot_id(profile, slot)
-            )),
-            "the readout has a line for {profile} {slot}"
-        );
-    }
-    assert!(
-        !lens.contains("display: none") && !lens.contains("data-show"),
-        "the readout's lines keep their place while hidden"
-    );
-    // A block is named by what it shows and described by its line of the readout.
+    // A block names what it holds to a screen reader, as core words its slot's state.
     for (key, line) in [
         (&jvm_1, "of 9G in jvm 1, CI / build on halyard/ledger"),
         (&jvm_2, "9G jvm 2, idle"),
     ] {
+        let block = selector_of(&overview, key, "<a ");
         assert!(
-            selector_of(&overview, key, "<a ")
-                .contains(&format!(r#"aria-describedby="lens-{key}""#)),
-            "{key}'s block is described by its line"
+            block.contains(line),
+            "{key}'s block reads {line:?}: {block}"
         );
-        let described = &overview[overview.find(&format!(r#"<span id="lens-{key}""#)).unwrap()..];
-        let text = described[..described.find("</span>").unwrap()]
-            .replace("<strong>", "")
-            .replace("</strong>", "");
-        assert!(text.ends_with(line), "{key}'s line reads {line:?}");
     }
     assert!(
         overview.contains("of 33G free past every slot's cap; "),
@@ -1238,13 +1229,16 @@ async fn a_job_whose_own_steps_failed_does_not_turn_the_failed_figure_red() {
     }
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
-    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    let health =
+        &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="attention""#).unwrap()];
     assert!(
-        health.contains(r#"Failed, 24 h</dt><dd><span class="figure-main">1</span>"#),
+        health.contains(
+            r#"Failed, 24 h</dt><dd><a class="figure-main" href="/history?outcome=failure">1</a>"#
+        ),
         "the failure counts: {health}"
     );
     assert!(
-        !health.contains(r#"class="failing""#) && !health.contains("by their runner"),
+        !health.contains(r#"class="tone-bad""#) && !health.contains("by their runner"),
         "a failing test is the repository's, not runnerd's: {health}"
     );
 }
@@ -1266,8 +1260,11 @@ async fn a_live_overview_lets_a_job_age_out_of_its_24_hours_with_no_job_event() 
     }
     let cookie = dashboard.sign_in().await;
     let mut stream = dashboard.stream(&cookie, "/live/overview").await;
-    let failed =
-        |count: u32| format!(r#"Failed, 24 h</dt><dd><span class="figure-main">{count}</span>"#);
+    let failed = |count: u32| {
+        format!(
+            r#"Failed, 24 h</dt><dd><a class="figure-main" href="/history?outcome=failure">{count}</a>"#
+        )
+    };
     read_until(&mut stream, |text| text.contains(&failed(1))).await;
     // Only host samples from here on, as on an idle evening.
     let events = dashboard.fake.events.clone();
@@ -1297,7 +1294,7 @@ async fn a_live_overview_lets_a_job_age_out_of_its_24_hours_with_no_job_event() 
 }
 
 #[tokio::test]
-async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
+async fn a_slots_block_follows_its_jobs_new_sample() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let mut stream = dashboard.stream(&cookie, "/live/overview").await;
@@ -1321,12 +1318,9 @@ async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
             },
         })
         .unwrap();
-    // The page keeps only which block is selected; its line comes in the patch, rendered from the new sample.
-    let line = format!(
-        "data-class:on=\"$_slot == '{}'\"><strong>5G</strong> of 9G in jvm 1",
-        slot_id("jvm", 1)
-    );
-    read_until(&mut stream, |text| text.contains(&line)).await;
+    // The block's line comes in the patch, rendered from the new sample.
+    let line = r#"aria-label="5G of 9G in jvm 1"#;
+    read_until(&mut stream, |text| text.contains(line)).await;
 }
 
 #[tokio::test]
@@ -1692,7 +1686,18 @@ async fn a_stream_opened_by_the_page_it_just_rendered_sends_none_of_its_regions_
     // A page that names no regions gets them all.
     let mut fresh = dashboard.stream(&cookie, "/live/overview").await;
     let first = read_until(&mut fresh, |text| text.contains("datastar-patch-signals")).await;
-    assert_eq!(first.matches("<section").count(), 7, "{first}");
+    for id in [
+        "health",
+        "attention",
+        "budget",
+        "slots",
+        "host",
+        "queue",
+        "recent",
+        "repositories",
+    ] {
+        assert!(first.contains(&format!(r#"id="{id}""#)), "{id}: {first}");
+    }
 }
 
 #[tokio::test]
@@ -1701,7 +1706,7 @@ async fn the_overview_shows_a_repository_resumed_from_another_client() {
     dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
     let cookie = dashboard.sign_in().await;
     let mut stream = dashboard.stream(&cookie, "/live/overview").await;
-    let first = read_until(&mut stream, |text| text.contains(r#"id="recent""#)).await;
+    let first = read_until(&mut stream, |text| text.contains(r#"id="repositories""#)).await;
     assert!(
         first.contains("badge neutral"),
         "halyard/ledger shows paused: {first}"
@@ -1923,6 +1928,21 @@ async fn a_job_stream_that_misses_log_lines_fails_so_the_page_connects_again() {
     assert_eq!(end, "failed");
 }
 
+/// `html` without its tags.
+fn strip_tags(html: &str) -> String {
+    let mut text = String::new();
+    let mut inside = false;
+    for c in html.chars() {
+        match c {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => text.push(c),
+            _ => {}
+        }
+    }
+    text
+}
+
 /// The log lines a browser shows, as `(number, text)`: what the job page rendered, then each of the job stream's
 /// patches to `#log-lines` applied the way Datastar applies them.
 struct ShownLog(Vec<(Option<u64>, String)>);
@@ -1937,7 +1957,14 @@ impl ShownLog {
                 let number = attributes
                     .split_once("value=\"")
                     .map(|(_, value)| value.split('"').next().unwrap().parse().unwrap());
-                (number, rest.split_once("</li>").unwrap().0.to_owned())
+                let inner = rest.split_once("</li>").unwrap().0;
+                // The text after the line's number, its runs' tags taken out.
+                let text = inner
+                    .split_once(r#"<span class="text">"#)
+                    .map_or(inner, |(_, text)| {
+                        text.strip_suffix("</span>").unwrap_or(text)
+                    });
+                (number, strip_tags(text))
             })
             .collect()
     }
@@ -2745,10 +2772,7 @@ async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_records_
         .page(&cookie, &format!("/jobs/{failed}"))
         .await
         .body;
-    assert!(
-        job.contains("Open a shell") && job.contains(&format!("runnerctl shell {failed}")),
-        "{job}"
-    );
+    assert!(job.contains(&format!("runnerctl shell {failed}")), "{job}");
     let records = dashboard.page(&cookie, "/records").await.body;
     assert!(
         records.contains(&format!("@delete('/v1/records/{failed}')")),
@@ -3062,7 +3086,7 @@ async fn a_jobs_page_compares_it_with_the_same_jobs_latest_runs_only() {
 }
 
 #[tokio::test]
-async fn history_filters_are_links_that_keep_the_other_filters() {
+async fn the_history_form_keeps_the_filters_in_force_and_its_sorts_keep_them_too() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let page = dashboard
@@ -3070,14 +3094,18 @@ async fn history_filters_are_links_that_keep_the_other_filters() {
         .await
         .body;
     let filters = &page[page.find(r#"class="filters""#).unwrap()..];
-    let filters = &filters[..filters.find("</nav>").unwrap()];
+    let filters = &filters[..filters.find("</form>").unwrap()];
     assert!(
-        filters.contains(r#"<a href="/history?outcome=success&amp;workflow=E2E">E2E</a>"#),
-        "a workflow's link keeps the outcome: {filters}"
+        filters.contains(r#"<option value="success" selected>"#),
+        "the outcome in force is selected: {filters}"
     );
     assert!(
-        filters.contains(r#"<a href="/history?outcome=success" aria-current="true">Succeeded</a>"#),
-        "the outcome in force is marked: {filters}"
+        filters.contains(r#"<option value="E2E">E2E</option>"#),
+        "a workflow is offered: {filters}"
+    );
+    assert!(
+        page.contains(r#"href="/history?outcome=success&amp;sort=wait""#),
+        "a column's sort keeps the outcome: {page}"
     );
     let e2e = dashboard.page(&cookie, "/history?workflow=E2E").await.body;
     let rows = &e2e[e2e.find("<tbody>").unwrap()..];
@@ -3095,7 +3123,8 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let off = dashboard.page(&cookie, "/sizing").await.body;
     assert!(off.contains("Auto sizing is off"), "{off}");
     assert!(
-        off.contains("<dt>Warm starts</dt><dd>310 of 400, p50 2s (others 21s)</dd>"),
+        off.contains(r#"data-label="warm">310 of 400</td>"#)
+            && off.contains("Warm starts p50 2s, others 21s"),
         "{off}"
     );
     {
@@ -3219,16 +3248,12 @@ async fn a_warm_runner_reads_as_warm_not_as_a_runner_waiting_for_its_job() {
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
     assert!(
-        body.contains("A warm runner for halyard/ledger, waiting for a job, "),
-        "its slot card: {body}"
+        body.contains(r#"aria-label="jvm 2: a warm runner for halyard/ledger, waiting for a job""#),
+        "its lane: {body}"
     );
     assert!(
         body.contains("1 warm, waiting for jobs"),
         "health counts it apart from starting runners: {body}"
-    );
-    assert!(
-        body.contains("jvm 2, a warm runner for halyard/ledger, waiting for a job"),
-        "the budget bar's block: {body}"
     );
 }
 
@@ -3500,5 +3525,352 @@ async fn the_demo_daemon_previews_a_job_action_and_its_jobs_reach_every_answer()
         reached.len(),
         fake::action_answers(NOW).len(),
         "the demo's jobs reach every answer: {reached:?}"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_job_needs_the_session_and_the_dashboards_origin() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let path = format!("/jobs/{LEDGER_RUNNING}/cancel");
+    let without = dashboard.request("POST", &path, &[]).await;
+    assert_eq!(without.status, StatusCode::UNAUTHORIZED);
+    let foreign = dashboard
+        .request(
+            "POST",
+            &format!("{path}?confirm=demo-cancel-{LEDGER_RUNNING}"),
+            &[("cookie", &cookie), ("origin", "http://evil.example")],
+        )
+        .await;
+    assert_eq!(foreign.status, StatusCode::FORBIDDEN);
+    let rerun = dashboard
+        .request(
+            "POST",
+            &format!("/jobs/{LEDGER_RUNNING}/rerun"),
+            &[("cookie", &cookie), ("origin", "http://evil.example")],
+        )
+        .await;
+    assert_eq!(rerun.status, StatusCode::FORBIDDEN);
+    assert!(
+        dashboard.fake.fixtures.lock().unwrap().controls.is_empty(),
+        "nothing reached the daemon"
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_is_sent_only_with_the_confirmation_of_the_preview_the_user_saw() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    let path = format!("/jobs/{LEDGER_RUNNING}/cancel");
+    assert!(
+        page.contains(&format!("@post('{path}', {{payload: {{}}}})")),
+        "the job page asks for a preview, with no confirmation: {page}"
+    );
+    let sent = || dashboard.fake.fixtures.lock().unwrap().controls.clone();
+    // The daemon's 409: a preview, and nothing sent.
+    let preview = dashboard
+        .write(&cookie, "POST", &path, &serde_json::json!({ "confirm": "" }))
+        .await;
+    assert_eq!(preview.status, StatusCode::OK);
+    assert!(preview.body.contains("action-preview"), "{}", preview.body);
+    assert!(sent().is_empty(), "a preview is never confirmed by itself");
+    let token = format!("demo-cancel-{LEDGER_RUNNING}");
+    assert!(
+        preview.body.contains(&token) && !preview.body.contains(&format!("?confirm={token}")),
+        "its button sends the preview's confirmation in the body, not in the URL: {}",
+        preview.body
+    );
+    // A confirmation in the URL is not read: only the body's is.
+    let in_url = dashboard
+        .write(&cookie, "POST", &format!("{path}?confirm={token}"), &serde_json::json!({}))
+        .await;
+    assert!(in_url.body.contains("action-preview"), "{}", in_url.body);
+    assert!(sent().is_empty(), "a token in the URL sends nothing");
+    // A confirmation the daemon did not issue gets a preview again.
+    let stale = dashboard
+        .write(&cookie, "POST", &path, &serde_json::json!({ "confirm": "demo-cancel-1" }))
+        .await;
+    assert!(stale.body.contains("action-preview"), "{}", stale.body);
+    assert!(sent().is_empty(), "a stale confirmation sends nothing");
+    let done = dashboard
+        .write(&cookie, "POST", &path, &serde_json::json!({ "confirm": token }))
+        .await;
+    assert_eq!(done.status, StatusCode::OK);
+    assert!(
+        !done.body.contains("action-preview") && done.body.contains(r#"id="job-action""#),
+        "the preview is cleared: {}",
+        done.body
+    );
+    assert_eq!(sent(), [format!("cancel {LEDGER_RUNNING}")]);
+}
+
+#[tokio::test]
+async fn a_job_offers_cancel_and_re_run_only_while_the_daemon_takes_them() {
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().status.job_actions = runnerd_core::api::JobActions::Off;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    assert!(
+        !page.contains("/cancel')") && !page.contains("/rerun"),
+        "no action is offered while they are off: {page}"
+    );
+}
+
+#[tokio::test]
+async fn every_page_carries_the_keys_hooks_and_a_pointer_path_to_each() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    for path in ["/", "/history", "/insights", "/sizing", "/config"] {
+        let page = dashboard.page(&cookie, path).await.body;
+        for key in 1..=5 {
+            assert!(
+                page.contains(&format!(r#"data-key="{key}""#)),
+                "{path}: view {key} has its key"
+            );
+        }
+        assert!(
+            page.contains(r#"<script type="module" src="/assets/keys.js"#),
+            "{path} loads the keys"
+        );
+        for (dialog, opener) in [
+            (r#"id="keys""#, "data-open-keys"),
+            (r#"id="palette""#, "data-open-palette"),
+        ] {
+            assert!(
+                page.contains(dialog) && page.contains(opener),
+                "{path}: {dialog} and a button that opens it"
+            );
+        }
+    }
+    let history = dashboard.page(&cookie, "/history").await.body;
+    assert!(
+        history.contains("data-search") && history.contains("data-row"),
+        "the jobs page has a search for / and rows for j and k"
+    );
+}
+
+#[tokio::test]
+async fn an_older_runnerd_s_missing_routes_read_as_not_supported_never_as_empty() {
+    use runnerd_core::api::Feature;
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().older = true;
+    let cookie = dashboard.sign_in().await;
+    let said = |feature: Feature| crate::format::sentence(&feature.unsupported());
+    let overview = dashboard.page(&cookie, "/").await;
+    assert_eq!(overview.status, StatusCode::OK);
+    assert!(
+        overview.body.contains(&said(Feature::Attention)),
+        "{}",
+        overview.body
+    );
+    let timeline = dashboard.page(&cookie, "/history?lens=timeline").await;
+    assert_eq!(timeline.status, StatusCode::OK);
+    assert!(
+        timeline.body.contains(&said(Feature::Timeline)),
+        "{}",
+        timeline.body
+    );
+    let failed = runnerd_fixtures::log_facts()[0].job;
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{failed}?q=error"))
+        .await;
+    assert_eq!(job.status, StatusCode::OK);
+    for feature in [Feature::LogOutline, Feature::LogSearch, Feature::Comparison] {
+        assert!(
+            job.body.contains(&said(feature)),
+            "{feature:?}: {}",
+            job.body
+        );
+    }
+    let cancel = dashboard
+        .write(
+            &cookie,
+            "POST",
+            &format!("/jobs/{failed}/cancel"),
+            &serde_json::json!({}),
+        )
+        .await;
+    let why = runnerd_core::api::JobActions::Unsupported
+        .why_not()
+        .unwrap();
+    assert!(
+        cancel.body.contains(&crate::format::sentence(why)),
+        "{}",
+        cancel.body
+    );
+}
+
+#[tokio::test]
+async fn a_job_that_fails_while_its_page_is_open_gets_its_failure_log_comparison_and_record() {
+    use runnerd_core::api::{JobState, RecordNote};
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard
+        .stream(&cookie, &format!("/live/jobs/{LEDGER_RUNNING}"))
+        .await;
+    read_until(&mut stream, |text| text.contains("log-lines")).await;
+    let summary = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.state = JobState::Completed;
+        job.summary.conclusion = Some("failure".to_owned());
+        job.summary.timeline.finished_at = Some(NOW + 2);
+        job.record = Some(RecordNote {
+            created_at: Some(NOW + 2),
+            bytes: Some(300 << 20),
+            ..RecordNote::default()
+        });
+        job.summary.clone()
+    };
+    dashboard
+        .fake
+        .events
+        .send(EventEnvelope {
+            id: None,
+            at: NOW + 2,
+            event: Event::JobFinished { job: summary },
+        })
+        .unwrap();
+    let update = read_until(&mut stream, |text| text.contains(r#"id="compare""#)).await;
+    let finished = &update[update.rfind(r#"id="failure""#).unwrap()..];
+    for id in [r#"id="log""#, r#"id="compare""#, r#"id="record""#] {
+        assert!(finished.contains(id), "{id} is patched as the job ends: {finished}");
+    }
+    assert!(
+        finished.contains("log-view") && !finished.contains("data-follow"),
+        "the log is outlined, no longer followed: {finished}"
+    );
+}
+
+#[tokio::test]
+async fn each_log_line_id_is_on_the_page_once_so_a_link_to_it_reaches_the_log() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    for facts in runnerd_fixtures::log_facts() {
+        let page = dashboard
+            .page(&cookie, &format!("/jobs/{}", facts.job))
+            .await
+            .body;
+        for line in &facts.lines {
+            let id = format!(r#"id="L{}""#, line.line + 1);
+            assert!(
+                page.matches(&id).count() <= 1,
+                "job {}: {id} is on the page once",
+                facts.job
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn save_and_reload_writes_only_the_text_its_diff_showed() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let reviewed = with_jvm_memory(&dashboard, "8G");
+    let diff = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/config/diff",
+            &serde_json::json!({ "toml": reviewed }),
+        )
+        .await;
+    let digest = crate::views::digest(&reviewed);
+    assert!(
+        diff.body.contains(&format!("reviewed: '{digest}'")),
+        "the diff's save names the text it compared: {}",
+        diff.body
+    );
+    // A line typed after the diff was asked for, which the diff never showed.
+    let typed = format!("{reviewed}\n# typed after the review\n");
+    let refused = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": typed, "reviewed": digest }),
+        )
+        .await;
+    assert!(
+        refused.body.contains(&crate::format::sentence(
+            runnerd_core::config::Config::unreviewed()
+        )),
+        "{}",
+        refused.body
+    );
+    assert_ne!(
+        dashboard.fake.fixtures.lock().unwrap().config,
+        typed,
+        "text nobody reviewed is not saved"
+    );
+    let saved = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": reviewed, "reviewed": digest }),
+        )
+        .await;
+    assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
+    assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, reviewed);
+}
+
+#[tokio::test]
+async fn removing_a_record_keeps_the_others_whose_job_left_the_history_unlinked() {
+    use runnerd_fixtures::LENS_ORPHAN;
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let records = dashboard.page(&cookie, "/records").await.body;
+    let other = runnerd_fixtures::lens_records()
+        .records
+        .iter()
+        .map(|record| record.job)
+        .find(|job| *job != LENS_ORPHAN && records.contains(&format!("@delete('/v1/records/{job}')")))
+        .unwrap();
+    let removed = dashboard
+        .write(
+            &cookie,
+            "DELETE",
+            &format!("/v1/records/{other}"),
+            &serde_json::json!({}),
+        )
+        .await;
+    let gone = crate::format::sentence(runnerd_core::api::Records::history_gone());
+    assert!(
+        removed.body.contains(&gone)
+            && !removed.body.contains(&format!(r#"href="/jobs/{LENS_ORPHAN}""#)),
+        "the record whose job left the history still says so: {}",
+        removed.body
+    );
+}
+
+#[tokio::test]
+async fn the_timeline_lens_link_keeps_only_the_range_it_draws() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, "/history?repository=halyard%2Fledger&q=zzz&range=7d")
+        .await
+        .body;
+    assert!(
+        page.contains(r#"href="/history?range=7d&amp;lens=timeline""#)
+            || page.contains(r#"href="/history?lens=timeline&amp;range=7d""#),
+        "the timeline draws every repository, so its link says no filter: {page}"
+    );
+    assert!(
+        page.contains(r#"href="/history?repository=halyard%2Fledger&amp;lens=trends""#)
+            || page.contains(r#"href="/history?lens=trends&amp;repository=halyard%2Fledger""#),
+        "the trends chart the repository: {page}"
     );
 }

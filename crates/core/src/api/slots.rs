@@ -154,6 +154,8 @@ impl Health {
 /// tiles, the TUI on one line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Figure {
+    /// Which of the four it is, for a client that links or places one: never its label's text.
+    pub kind: HealthKind,
     /// What it counts: `Running`, `Waiting`, `Wait p95, 24 h` or `Failed, 24 h`.
     pub label: &'static str,
     /// The figure itself.
@@ -164,6 +166,19 @@ pub struct Figure {
     pub notes: Vec<String>,
     /// What it means.
     pub tone: Tone,
+}
+
+/// Which health figure a [`Figure`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthKind {
+    /// Slots running a job.
+    Running,
+    /// Jobs waiting for a runner, which the queue lists.
+    Waiting,
+    /// The last day's p95 wait.
+    Wait,
+    /// The last day's failed jobs, which the history lists by outcome.
+    Failed,
 }
 
 impl Health {
@@ -185,6 +200,7 @@ impl Health {
         };
         let mut figures = vec![
             Figure {
+                kind: HealthKind::Running,
                 label: "Running",
                 value: self.running.to_string(),
                 of: Some(format!("of {} slots", self.slots)),
@@ -192,6 +208,7 @@ impl Health {
                 tone: Tone::Neutral,
             },
             Figure {
+                kind: HealthKind::Waiting,
                 label: "Waiting",
                 value: self.waiting.to_string(),
                 of: None,
@@ -202,6 +219,7 @@ impl Health {
         if let Some(day) = activity {
             let started = day.started.len();
             figures.push(Figure {
+                kind: HealthKind::Wait,
                 label: "Wait p95, 24 h",
                 value: day.wait_p95().map_or_else(|| "–".to_owned(), duration),
                 of: None,
@@ -214,6 +232,7 @@ impl Health {
             let runner =
                 (day.runner_failed > 0).then(|| format!("{} by their runner", day.runner_failed));
             figures.push(Figure {
+                kind: HealthKind::Failed,
                 label: "Failed, 24 h",
                 value: day.failed.to_string(),
                 of: Some(format!("of {} finished", day.finished)),

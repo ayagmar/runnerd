@@ -260,6 +260,12 @@ impl Records {
          shell where it failed"
     }
 
+    /// What a kept record says when the job history no longer has its job, as `GET /v1/jobs/{id}` answers 404 once
+    /// `history.jobs` pruned it: its image is kept, so its shell still opens, but it has no job page.
+    pub fn history_gone() -> &'static str {
+        "its job is past the history; its shell still opens"
+    }
+
     /// Whether a shell is open in `job`'s record.
     pub fn shell_open(&self, job: u64) -> bool {
         self.shells.contains(&job)

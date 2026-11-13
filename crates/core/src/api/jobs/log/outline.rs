@@ -420,6 +420,12 @@ struct Segment {
 }
 
 impl LogOutline {
+    /// What a client says when it outlines only the log's last `shown` lines, `first` lines in: `The last 5000 lines;
+    /// the full log has the 1200 before them`. `None` when it shows them all.
+    pub fn tail_words(first: u64, shown: usize) -> Option<String> {
+        (first > 0).then(|| format!("the last {shown} lines; the full log has the {first} before them"))
+    }
+
     /// Assembles a job's outline from what the store keeps, all read at one time. `read` returns the stored lines
     /// a [`LineRead`] asks for: the start of the first and last line of each segment, and a failed step's last
     /// lines, the most of them cut to a few hundred bytes.

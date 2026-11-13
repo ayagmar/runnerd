@@ -9,7 +9,7 @@ use runnerd_core::api::{
 };
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Page, page, time_ago};
+use super::{Page, heading, page, time_ago};
 use crate::format;
 
 /// Everything the insights page shows.
@@ -36,12 +36,13 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
     let count = insights.insights.len();
     let day = &view.digest;
     let main = html! {
-        div.page-head {
-            h1.visually-hidden { (View::Insights.title()) }
-            p.figures {
-                span.big { (count) @if count == 1 { " insight" } @else { " insights" } }
+        (heading(View::Insights.title(), Some(Page::Insights), Some(html! {
+            p.page-figure {
+                strong { (count) @if count == 1 { " insight" } @else { " insights" } }
                 span.muted { " " (insights.window_line()) }
             }
+        })))
+        div.page-head {
             p.muted {
                 "Last 24 hours: " (day.summary_line()) "."
             }

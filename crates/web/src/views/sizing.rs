@@ -11,7 +11,7 @@ use runnerd_core::api::{
 };
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Page, page};
+use super::{Page, heading, page};
 use crate::chart::ratio;
 use crate::format;
 
@@ -39,19 +39,15 @@ pub(crate) fn render(view: &SizingView) -> Markup {
         .iter()
         .map(|p| u64::from(p.starts.total()))
         .sum();
+    let since = html! { p.page-figure { strong { (jobs) " jobs" } span.muted { " since " (format::date(sizing.since)) } } };
     let main = html! {
-        div.page-head {
-            h1.visually-hidden { (Section::Sizing.title()) }
-            p.figures {
-                span.big { (jobs) " jobs" }
-                span.muted { " since " (format::date(sizing.since)) }
-            }
-            p.muted { (format::sentence(&sizing.method_line())) "." }
-        }
+        (heading(runnerd_core::api::View::Capacity.title(), Some(Page::Sizing), Some(since)))
+        (profiles_table(sizing))
         (auto_plan(view))
         @for (index, profile) in sizing.profiles.iter().enumerate() {
             (profile_section(sizing, profile, index))
         }
+        p.muted.method { (format::sentence(&sizing.method_line())) "." }
     };
     page(Section::Sizing.title(), Some(Page::Sizing), None, &main)
 }
@@ -86,7 +82,7 @@ fn auto_plan(view: &SizingView) -> Markup {
             h2 #auto-title { "Auto sizing is on" }
             p { "runnerd " (plan.rules()) "." }
             @if let Some(blocked) = plan.blocked_line() {
-                p.warning { (blocked) "." }
+                p.notice.tone-warn { (blocked) "." }
             }
             ul.plan-list {
                 @for (index, profile) in sizing.profiles.iter().enumerate() {
@@ -131,6 +127,49 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
     }
 }
 
+/// Every profile in one table: its size, its jobs, how busy and how long waited, and core's advice, plain.
+fn profiles_table(sizing: &Sizing) -> Markup {
+    html! {
+        div.table-wrap {
+            table.job-table.profiles-table {
+                thead {
+                    tr {
+                        th scope="col" { "Profile" }
+                        th scope="col" .number { "Memory" }
+                        th scope="col" .number { (JOBS_HEADING) }
+                        th scope="col" .number { "Slots busy" }
+                        th scope="col" .number { "Waited p50 / p95" }
+                        th scope="col" .number { "Warm starts" }
+                        th scope="col" .number { "CPU p99" }
+                        th scope="col" { "Advice" }
+                    }
+                }
+                tbody {
+                    @for (index, profile) in sizing.profiles.iter().enumerate() {
+                        tr class=(format!("p{}", index % 6)) data-row {
+                            th scope="row" { a href=(format!("#sizing-{index}")) { span.swatch aria-hidden="true" {} (profile.name) } }
+                            td.number data-label="memory" { (format::bytes(profile.memory)) " × " (profile.slots) }
+                            td.number data-label="jobs" { (profile.starts.total()) }
+                            td.number data-label="busy" { (profile.busy) "%" }
+                            td.number data-label="waited" { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) }
+                            td.number data-label="warm" {
+                                @if profile.starts.warm > 0 { (profile.starts.warm) " of " (profile.starts.total()) } @else { "–" }
+                            }
+                            td.number data-label="CPU p99" {
+                                @match profile.peaks.cpu_p99() {
+                                    Some(p99) => { (format::cores_used(p99)) " of " (profile.cpus) }
+                                    None => { "–" }
+                                }
+                            }
+                            td { span class=(advice_class(profile.advice)) { (sizing.advice_line(profile)) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn advice_class(advice: Advice) -> &'static str {
     match advice.tone() {
         Tone::Bad => "advice raise",
@@ -161,35 +200,15 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
         section class=(format!("sizing-profile p{}", index % 6)) aria-labelledby=(id) {
             div.section-head {
                 h2 #(id) { span.swatch aria-hidden="true" {} (profile.name) }
-                dl.facts {
-                    div { dt { "Memory" } dd { (format::bytes(profile.memory)) " × " (profile.slots) } }
-                    div { dt { (JOBS_HEADING) } dd { (profile.starts.total()) } }
-                    div { dt { "Slots busy" } dd { (profile.busy) "%" } }
-                    div { dt { "Waited p50 / p95" } dd { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) } }
+                p.muted {
                     @if profile.starts.warm > 0 {
-                        div {
-                            dt { "Warm starts" }
-                            dd {
-                                (profile.starts.warm) " of " (profile.starts.total())
-                                ", p50 " (format::duration(profile.starts.warm_p50))
-                                " (others " (format::duration(profile.starts.cold_p50)) ")"
-                            }
-                        }
+                        "Warm starts p50 " (format::duration(profile.starts.warm_p50)) ", others " (format::duration(profile.starts.cold_p50))
                     }
-                    div {
-                        dt { "CPU p99" }
-                        dd {
-                            @match peaks.cpu_p99() {
-                                Some(p99) => { (format::cores_used(p99)) " of " (profile.cpus) }
-                                None => { (peaks.cpu_runs_line(profile.cpus)) }
-                            }
-                        }
-                    }
+                    @if peaks.cpu_p99().is_none() { " " (peaks.cpu_runs_line(profile.cpus)) }
                 }
             }
             @if peaks.jobs > 0 { (scale(sizing, profile)) }
-            div class=(advice_class(profile.advice)) {
-                p { (sizing.advice_line(profile)) }
+            div class=(format!("advice-row {}", advice_class(profile.advice))) {
                 @if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
                     a.button href=(format!("/config?{}", serde_urlencoded::to_string([("resize", &profile.name)]).unwrap_or_default())) {
                         "Review memory " (format::bytes(change.memory)) ", " (change.slots) " slots in the config"

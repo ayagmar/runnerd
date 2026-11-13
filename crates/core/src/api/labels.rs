@@ -87,6 +87,39 @@ impl Section {
     }
 }
 
+/// What a client reads from the daemon that a runnerd older than the client may not serve: a route it lacks, which
+/// the client says is not supported rather than empty (`ClientError::is_unsupported`, `JobList::understood`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// `GET /v1/attention`.
+    Attention,
+    /// `GET /v1/jobs/{id}/log/outline` and `/log/lines`.
+    LogOutline,
+    /// `GET /v1/jobs/{id}/log/search`.
+    LogSearch,
+    /// The search, sorts and record filter of `GET /v1/jobs`.
+    JobSearch,
+    /// `GET /v1/timeline`.
+    Timeline,
+    /// `GET /v1/jobs/{id}/compare`.
+    Comparison,
+}
+
+impl Feature {
+    /// What a client says in its place: `this runnerd does not outline logs: it is older than this client`.
+    pub fn unsupported(self) -> String {
+        let what = match self {
+            Feature::Attention => "list what needs attention",
+            Feature::LogOutline => "outline logs",
+            Feature::LogSearch => "search logs",
+            Feature::JobSearch => "search, sort or filter jobs by their records",
+            Feature::Timeline => "draw its slots over time",
+            Feature::Comparison => "compare a job with an earlier run",
+        };
+        format!("this runnerd does not {what}: it is older than this client")
+    }
+}
+
 /// A column of a table of jobs or of records, as the history, `runnerctl jobs` and the records name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {

@@ -913,6 +913,15 @@ impl<'de> Deserialize<'de> for Origin {
     }
 }
 
+/// Where a config's text stops parsing ([`Config::parse_error`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    /// The line, counted from 1.
+    pub line: usize,
+    /// What is wrong there, as the parser says it.
+    pub message: String,
+}
+
 /// Why a config cannot be used.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -1128,6 +1137,27 @@ impl Config {
     /// Parses a config from TOML text.
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
         Ok(toml::from_str(text)?)
+    }
+
+    /// Why a save from a diff is refused when the text changed after the diff was shown: the save would write lines
+    /// nobody reviewed.
+    pub fn unreviewed() -> &'static str {
+        "not saved: the text changed after its changes were shown; review them again"
+    }
+
+    /// Where `text` stops parsing as a config: the line, counted from 1, and the parser's words without its own
+    /// excerpt of the text, for an editor that marks the line. `None` when it parses, and for an error the parser
+    /// places nowhere.
+    pub fn parse_error(text: &str) -> Option<ParseError> {
+        let Err(error) = toml::from_str::<Config>(text) else {
+            return None;
+        };
+        let span = error.span()?;
+        let before = text.get(..span.start)?;
+        Some(ParseError {
+            line: before.matches('\n').count() + 1,
+            message: error.message().trim().to_owned(),
+        })
     }
 
     /// Parses `text` and validates it against the `MemoryMax` that `memory_max` reads for the slice it names:

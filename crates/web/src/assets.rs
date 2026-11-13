@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-const FILES: [(&str, &str, &[u8]); 9] = [
+const FILES: [(&str, &str, &[u8]); 10] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -17,6 +17,11 @@ const FILES: [(&str, &str, &[u8]); 9] = [
         "theme.js",
         "text/javascript; charset=utf-8",
         include_bytes!("../assets/theme.js"),
+    ),
+    (
+        "keys.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../assets/keys.js"),
     ),
     (
         "datastar.js",
