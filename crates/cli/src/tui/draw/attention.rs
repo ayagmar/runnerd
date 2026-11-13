@@ -84,7 +84,7 @@ pub(super) fn attention(
         Reading::Unread(Unread::Unsupported) => {
             frame.render_widget(
                 Line::styled(
-                    format!("{MARK} attention: {}", api::NOT_SUPPORTED),
+                    format!("{MARK} {}", api::Feature::Attention.unsupported()),
                     theme.dim(),
                 ),
                 area,

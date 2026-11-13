@@ -381,7 +381,7 @@ fn actions(view: &JobView) -> Markup {
         @if view.actions.offered() {
             div.job-actions {
                 @for action in JobAction::for_job(summary) {
-                    button.button-quiet type="button" data-indicator:_asking="" data-asks
+                    button.button-quiet type="button" data-indicator:_asking="" data-asks=(asks(*action))
                         data-attr:aria-busy="$_asking && 'true'" data-attr:aria-disabled="$_asking && 'true'"
                         data-on:click=(format!("!$_asking && @post('{}', {{payload: {{}}}})", action_path(summary.id, *action))) {
                         (action.confirm_label()) "…"
@@ -391,6 +391,15 @@ fn actions(view: &JobView) -> Markup {
         } @else if let Some(why) = view.actions.why_not() {
             p.muted.job-actions-off { (format::sentence(why)) "." }
         }
+    }
+}
+
+/// How the button that asks for `action` is named in `data-asks`, so its preview gives focus back to it.
+fn asks(action: JobAction) -> &'static str {
+    match action {
+        JobAction::Cancel => "cancel",
+        JobAction::RerunFailed => "rerun-failed",
+        JobAction::Rerun | JobAction::Unsupported => "rerun",
     }
 }
 
@@ -413,7 +422,7 @@ pub(crate) fn action_path(id: u64, action: JobAction) -> String {
 pub(crate) fn action_preview(id: u64, action: JobAction, preview: &ActionPreview) -> Markup {
     html! {
         div #job-action .action-preview role="dialog" aria-labelledby="action-title" tabindex="-1"
-            data-init="el.focus()" data-dismiss-to="[data-asks]" {
+            data-init="el.focus()" data-dismiss-to=(format!("[data-asks=\"{}\"]", asks(action))) {
             h2 #action-title { (preview.title) }
             p { (format::sentence(&preview.scope)) }
             @for note in &preview.notes { p.muted { (format::sentence(note)) } }

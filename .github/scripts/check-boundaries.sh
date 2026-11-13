@@ -119,4 +119,16 @@ if [ -n "$worded" ]; then
 else
   echo "build cache wording: ok"
 fi
+
+# What an older daemon lacks is said by core, named for what it lacks (`api::Feature::unsupported`): a client that
+# writes `NOT_SUPPORTED` beside words of its own words the fact a second way. Tests included, so a parity test asserts
+# core's words too.
+bare=$(grep -rn 'NOT_SUPPORTED' crates/cli/src crates/web/src crates/daemon/src || true)
+if [ -n "$bare" ]; then
+  printf '%s\n' "$bare" >&2
+  echo "a 'not supported' line is worded by the client: use api::Feature::unsupported" >&2
+  status=1
+else
+  echo "not supported wording: ok"
+fi
 exit "$status"

@@ -36,7 +36,10 @@ pub(super) fn settings(
         Reading::Read(doctor) => doctor,
         Reading::Unread(why) => {
             heading(frame, doctor_title, "Doctor", String::new(), theme);
-            frame.render_widget(Line::styled(unread(why), theme.dim()), checks_area);
+            frame.render_widget(
+                Line::styled(unread(why, api::Feature::Doctor), theme.dim()),
+                checks_area,
+            );
             return;
         }
     };
@@ -62,11 +65,11 @@ pub(super) fn settings(
     }
 }
 
-/// What a read that gave nothing says.
-fn unread(why: &Unread) -> String {
+/// What a read of `feature` that gave nothing says.
+fn unread(why: &Unread, feature: api::Feature) -> String {
     match why {
         Unread::Waiting => "reading…".to_owned(),
-        Unread::Unsupported => api::NOT_SUPPORTED.to_owned(),
+        Unread::Unsupported => feature.unsupported(),
         Unread::Failed(why) => why.clone(),
     }
 }
@@ -78,7 +81,7 @@ fn config_lines(config: &Reading<ConfigRead>, width: usize, theme: Theme) -> Vec
         Reading::Unread(why) => {
             return vec![
                 Line::styled(api::Section::Config.title(), bold()),
-                Line::styled(unread(why), theme.dim()),
+                Line::styled(unread(why, api::Feature::Config), theme.dim()),
                 Line::from(""),
             ];
         }

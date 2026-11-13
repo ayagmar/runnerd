@@ -103,6 +103,14 @@ pub enum Feature {
     Timeline,
     /// `GET /v1/jobs/{id}/compare`.
     Comparison,
+    /// `GET /v1/insights`.
+    Insights,
+    /// `GET /v1/caches`.
+    Caches,
+    /// `GET /v1/doctor`.
+    Doctor,
+    /// `GET /v1/config`.
+    Config,
 }
 
 impl Feature {
@@ -116,6 +124,10 @@ impl Feature {
             Feature::JobSearch => "search, sort and record filter",
             Feature::Timeline => "timeline",
             Feature::Comparison => "comparison",
+            Feature::Insights => "insights",
+            Feature::Caches => "caches",
+            Feature::Doctor => "doctor",
+            Feature::Config => "config",
         };
         format!("{what}: {NOT_SUPPORTED}")
     }

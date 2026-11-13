@@ -108,7 +108,7 @@ fn note(open: &JobView, rows: usize, cursor: Option<usize>) -> String {
     match view.outline() {
         Reading::Read(outline) => parts.extend(outline.evidence.words().map(str::to_owned)),
         Reading::Unread(Unread::Unsupported) => {
-            parts.push(format!("outline {}", api::NOT_SUPPORTED));
+            parts.push(api::Feature::LogOutline.unsupported());
         }
         Reading::Unread(_) => {}
     }

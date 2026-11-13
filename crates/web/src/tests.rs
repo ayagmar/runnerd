@@ -3968,3 +3968,33 @@ async fn a_mistyped_address_reads_as_a_page_never_as_a_plain_text_error() {
         past_u64.body
     );
 }
+
+#[tokio::test]
+async fn a_job_action_s_preview_gives_focus_back_to_the_button_that_asked_for_it() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let failed = runnerd_fixtures::log_facts()[0].job;
+    let page = dashboard
+        .page(&cookie, &format!("/jobs/{failed}"))
+        .await
+        .body;
+    for asks in ["rerun", "rerun-failed"] {
+        assert!(
+            page.contains(&format!(r#"data-asks="{asks}""#)),
+            "the {asks} button is named: {page}"
+        );
+    }
+    let preview = dashboard
+        .write(
+            &cookie,
+            "POST",
+            &format!("/jobs/{failed}/rerun?failed=true"),
+            &serde_json::json!({}),
+        )
+        .await
+        .body;
+    assert!(
+        preview.contains(r#"data-dismiss-to="[data-asks=&quot;rerun-failed&quot;]""#),
+        "the re-run of failed jobs points back at its own button, not the first: {preview}"
+    );
+}

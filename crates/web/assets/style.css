@@ -2603,6 +2603,8 @@ th a.sort:hover {
 .tl-track {
   position: relative;
   overflow: hidden;
+  /* The bars' hit areas stack inside the track, under every bar. */
+  isolation: isolate;
 }
 
 .tl-bar,
@@ -2626,6 +2628,8 @@ th a.sort:hover {
 }
 
 .tl-bar {
+  /* Placed by the page so neighbours keep a pixel each (`laid_out`); `--from` is where its job began. */
+  left: var(--left);
   background: var(--muted);
   box-shadow: inset -1px 0 0 var(--surface);
 }
@@ -2635,11 +2639,13 @@ th a.sort:hover {
 .tl-bar.running { background: var(--cpu); }
 .tl-bar:is(.queued, .warn) { background: var(--wait); }
 
-/* A bar is a few pixels wide: its target reaches 8px past each side. */
+/* A bar is a few pixels wide: its target reaches 8px past each side, under every bar, so a neighbour's own box
+   always wins over this one's margin. */
 .tl-bar::before {
   content: '';
   position: absolute;
   inset: -0.35rem -8px;
+  z-index: -1;
 }
 
 .tl-bar.on,

@@ -903,9 +903,9 @@ fn bar_key(index: usize) -> String {
 
 /// A bar over when its job ran, and the wait before it. Pointed at, focused or tapped, it is named in the readout
 /// under the lanes; a tap on a bar not named yet names it, the next opens it.
-fn timeline_bar(timeline: &SlotTimeline, bar: &TimelineBar, index: usize) -> Markup {
+fn timeline_bar(timeline: &SlotTimeline, bar: &TimelineBar, index: usize, left: &str) -> Markup {
     let outcome = bar.outcome();
-    let begins = bar.started_at.unwrap_or(bar.queued_at);
+    let begins = begins(bar);
     // A bar that goes on reaches the window's end; one whose end is unknown is a mark where it began, and the lane's
     // gap after it says the rest is unknown.
     let ends = match bar.end {
@@ -925,13 +925,68 @@ fn timeline_bar(timeline: &SlotTimeline, bar: &TimelineBar, index: usize) -> Mar
             span.tl-wait aria-hidden="true" style=(format!("--from: {waits:.4}; --to: {from:.4}")) {}
         }
         a class=(format!("tl-bar {}", outcome_kind_class(outcome.kind))) href=(format!("/jobs/{}", bar.job))
-            style=(format!("--from: {from:.4}; --to: {to:.4}")) title=(label) aria-label=(label) data-row
+            style=(format!("--from: {from:.4}; --to: {to:.4}; --left: {left}")) title=(label) aria-label=(label) data-row
             data-class:on=(format!("$_bar == '{key}'"))
             data-on:pointerenter=(format!("evt.pointerType == 'mouse' && ($_bar = '{key}')"))
             // Keyboard focus names it; a tap's focus does not, so the tap's click names it rather than opening it.
             data-on:focus=(format!("el.matches(':focus-visible') && ($_bar = '{key}')"))
             data-on:click=(format!("$_bar != '{key}' && (evt.preventDefault(), $_bar = '{key}')")) {}
     }
+}
+
+/// When a bar begins on the timeline: when its job started, else when it was queued.
+fn begins(bar: &TimelineBar) -> u64 {
+    bar.started_at.unwrap_or(bar.queued_at)
+}
+
+/// The most a bar's share of a track can be and still be one of its least pixels: 3px of a 250px track, a phone's.
+const BAR_MIN_SHARE: f64 = 0.012;
+/// How many earlier bars may push a bar to the right.
+const BAR_PUSHED_BY: usize = 12;
+
+/// A lane's bars in the order they begin, each by its index in `bars` with the CSS `left` of its box. Every bar is at
+/// least 3px wide and keeps 3px of its own: it starts no sooner than 3px past the bar before it, and no later than
+/// leaves 3px for each bar after it before the track's end. The later bar is drawn over the earlier, so each keeps a
+/// pixel a pointer or finger can reach, at any track width. CSS's `max()` and `min()` do the arithmetic in pixels.
+fn laid_out(timeline: &SlotTimeline, bars: &[TimelineBar]) -> Vec<(usize, String)> {
+    let mut order: Vec<usize> = (0..bars.len()).collect();
+    order.sort_by_key(|index| bars.get(*index).map(begins));
+    let starts: Vec<f64> = order
+        .iter()
+        .filter_map(|index| bars.get(*index))
+        .map(|bar| place(timeline, begins(bar)))
+        .collect();
+    let count = starts.len();
+    order
+        .iter()
+        .zip(&starts)
+        .enumerate()
+        .map(|(rank, (index, from))| {
+            let mut terms = vec![format!("{:.3}%", from * 100.0)];
+            for back in 1..=rank.min(BAR_PUSHED_BY) {
+                let earlier = starts[rank - back];
+                #[allow(clippy::cast_precision_loss, reason = "a count of a dozen bars")]
+                let reach = earlier + back as f64 * BAR_MIN_SHARE;
+                if reach > *from {
+                    terms.push(format!("calc({:.3}% + {}px)", earlier * 100.0, back * 3));
+                }
+            }
+            let left = if terms.len() > 1 {
+                format!("max({})", terms.join(", "))
+            } else {
+                terms.swap_remove(0)
+            };
+            let room = count - rank;
+            #[allow(clippy::cast_precision_loss, reason = "a count of bars in one lane")]
+            let crowded = from + room as f64 * BAR_MIN_SHARE > 1.0;
+            let left = if crowded {
+                format!("min({left}, calc(100% - {}px))", room * 3)
+            } else {
+                left
+            };
+            (*index, left)
+        })
+        .collect()
 }
 
 /// The range the timeline draws: the last day unless a longer one is asked for, which core caps at what a timeline
@@ -1008,7 +1063,7 @@ fn timeline(history: &History) -> Markup {
                             @for gap in lane.gaps(timeline).iter().filter(|gap| gap.kind == GapKind::Unknown) {
                                 span.tl-gap aria-hidden="true" title=(gap.kind.words()) style=(format!("--from: {:.4}; --to: {:.4}", place(timeline, gap.span.from), place(timeline, gap.span.to))) {}
                             }
-                            @for (bar, index) in lane.bars.iter().zip(*start..) { (timeline_bar(timeline, bar, index)) }
+                            @for (index, left) in laid_out(timeline, &lane.bars) { (timeline_bar(timeline, &lane.bars[index], start + index, &left)) }
                         }
                     }
                 }
@@ -1016,7 +1071,7 @@ fn timeline(history: &History) -> Markup {
                     li.tl-lane.p-none {
                         span.tl-name { (format::sentence(SlotTimeline::UNASSIGNED)) }
                         div.tl-track {
-                            @for (bar, index) in timeline.unassigned.iter().zip(assigned..) { (timeline_bar(timeline, bar, index)) }
+                            @for (index, left) in laid_out(timeline, &timeline.unassigned) { (timeline_bar(timeline, &timeline.unassigned[index], assigned + index, &left)) }
                         }
                     }
                 }
