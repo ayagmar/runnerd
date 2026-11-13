@@ -500,3 +500,24 @@ fn what_a_job_took_from_the_mirror_shows_without_network_samples() {
         "a job with nothing measured lists nothing"
     );
 }
+
+#[test]
+fn a_job_offers_cancel_while_it_goes_and_a_re_run_once_final_and_of_failed_jobs_once_failed() {
+    use crate::api::JobAction;
+    assert_eq!(
+        JobAction::for_job(&job(JobState::Queued, None)),
+        &[JobAction::Cancel]
+    );
+    assert_eq!(
+        JobAction::for_job(&job(JobState::Running, None)),
+        &[JobAction::Cancel]
+    );
+    assert_eq!(
+        JobAction::for_job(&job(JobState::Completed, Some("success"))),
+        &[JobAction::Rerun]
+    );
+    assert_eq!(
+        JobAction::for_job(&job(JobState::Completed, Some("failure"))),
+        &[JobAction::Rerun, JobAction::RerunFailed]
+    );
+}

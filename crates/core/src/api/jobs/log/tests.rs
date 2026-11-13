@@ -853,3 +853,42 @@ fn a_line_says_in_cores_words_how_much_of_it_is_not_shown() {
     );
     assert_eq!(long.omitted_words().as_deref(), Some("2K not shown"));
 }
+
+#[test]
+fn a_search_says_how_many_lines_hold_the_query_and_whether_lines_remain_unread() {
+    let found = |matches: Vec<u64>, next: Option<u64>| LogSearch {
+        matches,
+        lines: Vec::new(),
+        next,
+    };
+    assert_eq!(
+        found(Vec::new(), None).found_words("panic"),
+        "no line's message holds “panic”"
+    );
+    assert_eq!(
+        found(Vec::new(), Some(9)).found_words("panic"),
+        "no line's message holds “panic” in the lines read",
+        "a search that stopped early does not say the log lacks it"
+    );
+    assert_eq!(found(vec![3], None).found_words("x"), "1 line holds “x”");
+    assert_eq!(
+        found(vec![3, 4], Some(9)).found_words("x"),
+        "2 lines hold “x” in the lines read"
+    );
+}
+
+#[test]
+fn a_fold_counts_its_lines_in_the_singular_for_one() {
+    assert_eq!(LogOutline::count_words(1), "1 line");
+    assert_eq!(LogOutline::count_words(0), "0 lines");
+    assert_eq!(LogOutline::count_words(5), "5 lines");
+}
+
+#[test]
+fn an_outline_of_the_last_lines_says_how_many_the_full_log_has_before_them() {
+    assert_eq!(LogOutline::tail_words(0, 40), None, "every line shown");
+    assert_eq!(
+        LogOutline::tail_words(1200, 5000).as_deref(),
+        Some("the last 5000 lines; the full log has the 1200 before them")
+    );
+}

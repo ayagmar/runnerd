@@ -1,5 +1,6 @@
 //! The dashboard's writes: pause (forced or not) and resume of one repository or every one, reseed, empty a cache,
-//! remove records, check and save the config. Each passes the request on to the daemon's API and answers with HTML Datastar patches
+//! remove records, check and save the config, and cancel or re-run a job: a first ask shows the daemon's preview,
+//! and only its confirm button, carrying the confirmation that preview issued, sends. Each passes the request on to the daemon's API and answers with HTML Datastar patches
 //! in: the region as it is now, or a notice saying what the daemon refused and why. Datastar applies only 200
 //! responses, so a refusal is a 200 with the notice. Nothing here decides what is allowed; the daemon does.
 
@@ -8,11 +9,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
+use runnerd_core::api::{ActionQuery, JobAction, JobActions};
 use runnerd_core::api::{
-    Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
-    Status, force_pause_consequence, reseed_requested,
+    Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RemoveRecordsQuery, RemovedRecords, Status,
+    force_pause_consequence, reseed_requested,
 };
-use runnerd_core::client::{Body, Reply};
+use runnerd_core::client::{Body, ClientError, JobActionAnswer, Reply};
 use serde::Deserialize;
 
 use crate::App;
@@ -244,13 +246,17 @@ async fn remove_records(app: &App, path: &str) -> Response {
     };
     let removed: RemovedRecords = serde_json::from_slice(&reply.body).unwrap_or_default();
     let notice = views::notice(&crate::format::sentence(&removed.line()), Tone::Done);
-    let records = app.daemon.get::<Records>("/v1/records").await;
-    let status = app.daemon.get::<Status>("/v1/status").await;
-    match (status, records) {
-        (Ok(status), Ok(records)) => {
-            html(&[records::section(&status, &records, crate::now()), notice])
-        }
-        _ => html(&[notice]),
+    match records::RecordsView::load(&app.daemon, crate::now()).await {
+        Ok(view) => html(&[
+            records::section(
+                &view.status,
+                &view.records,
+                view.in_history.as_ref(),
+                view.now,
+            ),
+            notice,
+        ]),
+        Err(_) => html(&[notice]),
     }
 }
 
@@ -261,6 +267,9 @@ pub(crate) struct Edit {
     /// The revision of the config the editor started from; a config replaced since is not overwritten.
     #[serde(default)]
     revision: Option<String>,
+    /// The digest of the text a diff showed, sent by that diff's "Save and reload"; a save of other text is refused.
+    #[serde(default)]
+    reviewed: Option<String>,
 }
 
 /// `POST /config/check`: the result region for the text in the editor.
@@ -275,8 +284,29 @@ pub(crate) async fn check_config(State(app): State<App>, Json(edit): Json<Edit>)
     }
 }
 
+/// `POST /config/diff`: what the editor's text changes in the file as it is now, before "Save and reload".
+pub(crate) async fn review_config(State(app): State<App>, Json(edit): Json<Edit>) -> Response {
+    match app.daemon.get::<ConfigFile>("/v1/config").await {
+        Ok(file) => html(&[config::diff(&file.text, &edit.toml)]),
+        Err(error) => refused(&error.to_string()),
+    }
+}
+
 /// `PUT /config`: saves the text in the editor and has the daemon reload it, or says why the daemon would not.
 pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) -> Response {
+    if edit
+        .reviewed
+        .as_deref()
+        .is_some_and(|reviewed| !reviewed.is_empty() && reviewed != views::digest(&edit.toml))
+    {
+        return html(&[
+            config::diff_cleared(),
+            views::notice(
+                &crate::format::sentence(runnerd_core::config::Config::unreviewed()),
+                Tone::Failed,
+            ),
+        ]);
+    }
     let path = match &edit.revision {
         Some(revision) => format!(
             "/v1/config?{}",
@@ -306,6 +336,7 @@ pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) 
             let doctor = config::doctor_pending(revision.as_deref());
             html(&[
                 config::result(&check, &edit.toml, &Outcome::Saved { path, revision }),
+                config::diff_cleared(),
                 doctor,
             ])
         }
@@ -313,5 +344,87 @@ pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) 
             html(&[config::result(&check, &edit.toml, &Outcome::Refused)])
         }
         _ => refused(&format!("Not saved: {}", reply.message())),
+    }
+}
+
+/// `POST /jobs/{id}/rerun?failed=true`: the query of a re-run. The confirmation goes in the body, never in the URL.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct JobActionQuery {
+    #[serde(default)]
+    failed: bool,
+}
+
+/// What a job action's body says: the confirmation of the preview the user saw, which only that preview's button
+/// sends, as its payload. A body without one, or that is not JSON, asks for a preview.
+#[derive(Debug, Default, Deserialize)]
+struct Confirmation {
+    #[serde(default)]
+    confirm: Option<String>,
+}
+
+impl Confirmation {
+    fn of(body: &[u8]) -> Option<String> {
+        serde_json::from_slice::<Confirmation>(body)
+            .ok()
+            .and_then(|signals| signals.confirm)
+            .filter(|confirm| !confirm.is_empty())
+    }
+}
+
+/// Cancels the job's run, once the preview the user saw is confirmed.
+pub(crate) async fn cancel_job(
+    State(app): State<App>,
+    Path(id): Path<u64>,
+    body: axum::body::Bytes,
+) -> Response {
+    job_action(&app, id, JobAction::Cancel, Confirmation::of(&body)).await
+}
+
+/// Re-runs the job, or its run's failed jobs, once the preview the user saw is confirmed.
+pub(crate) async fn rerun_job(
+    State(app): State<App>,
+    Path(id): Path<u64>,
+    Query(query): Query<JobActionQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    let action = if query.failed {
+        JobAction::RerunFailed
+    } else {
+        JobAction::Rerun
+    };
+    job_action(&app, id, action, Confirmation::of(&body)).await
+}
+
+/// Without a confirmation, asks for the daemon's preview and shows it; with one, sends it. A preview is never
+/// confirmed here: a second preview, the target having changed, is shown as the first was.
+async fn job_action(app: &App, id: u64, action: JobAction, confirm: Option<String>) -> Response {
+    let ask = ActionQuery {
+        force: confirm.is_some(),
+        confirm,
+        failed: action == JobAction::RerunFailed,
+    };
+    match app.daemon.job_action(id, action, &ask).await {
+        Ok(JobActionAnswer::Confirm(preview)) => {
+            html(&[views::job::action_preview(id, action, &preview)])
+        }
+        Ok(JobActionAnswer::Done(result)) => html(&[
+            views::job::action_cleared(),
+            views::notice(
+                &crate::format::sentence(&result.message),
+                if result.succeeded() {
+                    Tone::Done
+                } else {
+                    Tone::Failed
+                },
+            ),
+        ]),
+        Err(error) if error.is_unsupported() => refused(&crate::format::sentence(
+            JobActions::Unsupported.why_not().unwrap_or_default(),
+        )),
+        Err(ClientError::Api { message, .. }) => html(&[
+            views::job::action_cleared(),
+            views::notice(&crate::format::sentence(&message), Tone::Failed),
+        ]),
+        Err(error) => refused(&error.to_string()),
     }
 }

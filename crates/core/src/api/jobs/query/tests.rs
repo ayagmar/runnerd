@@ -436,3 +436,30 @@ fn a_range_reaches_back_from_now_and_all_kept_has_no_bound() {
         );
     }
 }
+
+#[test]
+fn a_list_says_what_it_is_when_cut_or_when_an_older_daemon_ignored_the_search() {
+    let jobs: Vec<JobSummary> = (1..=6)
+        .map(|id| ran(id, 100 + id, Some(100 + 2 * id), Some(300)))
+        .collect();
+    let mut list = JobQuery {
+        sort: Some(JobSort::Wait),
+        limit: Some(2),
+        ..JobQuery::default()
+    }
+    .page(&jobs)
+    .unwrap();
+    assert_eq!(
+        list.shown_line().as_deref(),
+        Some("2 of 6 jobs, longest wait first; a search or the filters narrow it")
+    );
+    assert_eq!(list.unread_words(), None, "this daemon read the query");
+    list.applied = None;
+    assert_eq!(
+        list.unread_words().as_deref(),
+        Some(
+            "search, sort and record filter: not supported by this runnerd; this is every job, newest first"
+        ),
+        "an older daemon's list never reads as a result"
+    );
+}

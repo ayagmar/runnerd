@@ -91,19 +91,32 @@ fn assert_rows(html: &str, facts: &[JobRow], figures: bool) {
 
 #[tokio::test]
 async fn a_host_limit_past_memory_max_reads_as_core_says_it() {
-    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::past_memory_max()).await;
-    let shown = text(&dashboard.page(&cookie, "/").await.body);
-    for fact in [&facts.host, &facts.free, &facts.host_part] {
-        assert!(shown.contains(fact.as_str()), "{fact}: {shown}");
+    let (dashboard, cookie, daemon, facts) =
+        dashboard_of(runnerd_fixtures::past_memory_max()).await;
+    let html = dashboard.page(&cookie, "/").await.body;
+    host_reads_as_core_says_it(&html, &daemon, &facts);
+}
+
+/// The host's figures, each its label and value, and the bar's free and held parts, each named by its line.
+fn host_reads_as_core_says_it(html: &str, daemon: &Daemon, facts: &Facts) {
+    let shown = text(html);
+    let figures = daemon.status.budget.host_figures();
+    assert!(!figures.is_empty(), "the fixture reads the host");
+    for figure in figures {
+        let line = format!("{} {}", figure.label, figure.value);
+        assert!(shown.contains(&line), "{line}: {shown}");
+    }
+    for part in [&facts.free, &facts.host_part] {
+        let label = format!(r#"aria-label="{}""#, maud::html! { (part) }.into_string());
+        assert!(html.contains(&label), "{label}: {html}");
     }
 }
 
 #[tokio::test]
 async fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_them() {
-    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::host_credit()).await;
+    let (dashboard, cookie, daemon, facts) = dashboard_of(runnerd_fixtures::host_credit()).await;
     let html = dashboard.page(&cookie, "/").await.body;
-    let shown = text(&html);
-    assert!(shown.contains(&facts.host), "{}: {shown}", facts.host);
+    host_reads_as_core_says_it(&html, &daemon, &facts);
     for wait in &facts.waits {
         assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
     }
@@ -111,14 +124,12 @@ async fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_the
 
 #[tokio::test]
 async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_does() {
-    let (dashboard, cookie, _, facts) = dashboard().await;
+    let (dashboard, cookie, daemon, facts) = dashboard().await;
     let html = dashboard.page(&cookie, "/").await.body;
     let shown = text(&html);
     assert!(shown.contains(&facts.budget), "{shown}");
     assert!(shown.contains(&facts.cpu), "{shown}");
-    for fact in [&facts.host, &facts.free, &facts.host_part] {
-        assert!(shown.contains(fact.as_str()), "{fact}: {shown}");
-    }
+    host_reads_as_core_says_it(&html, &daemon, &facts);
     assert!(shown.contains(&facts.savings), "{}: {shown}", facts.savings);
     assert!(
         shown.contains(facts.stopping),
@@ -138,14 +149,27 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         .join(" ");
         assert!(shown.contains(&line), "{line}: {shown}");
         // The oldest wait follows the clock the dashboard reads, not the fixtures'.
-        for note in figure.notes.iter().filter(|_| figure.label != "Waiting") {
+        for note in figure
+            .notes
+            .iter()
+            .filter(|_| figure.kind != runnerd_core::api::HealthKind::Waiting)
+        {
             assert!(shown.contains(note), "{note}: {shown}");
         }
     }
-    // A running slot shows its job instead.
-    for slot in facts.slots.iter().filter(|slot| slot.word != "running") {
-        let line = sentence(&slot.line);
-        assert!(shown.contains(&line), "{line}: {shown}");
+    // Each lane: its line names it, its state word shows; a running one shows its job beside.
+    for slot in &facts.slots {
+        let label = format!(
+            r#"aria-label="{}""#,
+            maud::html! { (format!("{} {}: {}", slot.profile, slot.slot, slot.line)) }
+                .into_string()
+        );
+        assert!(html.contains(&label), "{label}: {html}");
+        let word = format!(r#"<span class="lane-state">{}</span>"#, slot.word);
+        assert!(
+            slot.word == "running" || html.contains(&word),
+            "{word}: {html}"
+        );
     }
     for wait in &facts.waits {
         let reason = format!(
@@ -443,4 +467,215 @@ async fn doctor_checks_that_are_not_current_follow_core_s_line_and_none_reads_as
             );
         }
     }
+}
+
+#[tokio::test]
+async fn attention_states_each_item_its_fix_and_the_rest_as_core_does() {
+    let (dashboard, cookie, daemon, _) = dashboard().await;
+    let doctor = runnerd_fixtures::doctor();
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.doctor = Some(doctor.clone());
+        fixtures.insights = Some(runnerd_fixtures::insights(runnerd_fixtures::NOW));
+    }
+    let attention = runnerd_fixtures::attention(&daemon, &doctor);
+    let html = dashboard.page(&cookie, "/").await.body;
+    let region =
+        &html[html.find(r#"id="attention""#).unwrap()..html.find(r#"id="budget-title""#).unwrap()];
+    let shown = text(region);
+    let facts = runnerd_fixtures::attention_facts(&attention, 4);
+    assert!(facts.items.len() > 2, "the fixtures fold some on a phone");
+    for (fact, item) in facts.items.iter().zip(&attention.items) {
+        assert!(shown.contains(&fact.title), "{}: {shown}", fact.title);
+        assert!(
+            region.contains(&format!(
+                "attention-item {}",
+                crate::views::tone_class(fact.tone)
+            )),
+            "{} is {:?}: {region}",
+            fact.title,
+            fact.tone
+        );
+        let fix = match &item.fix {
+            Some(runnerd_core::api::Fix::Command { command }) => Some(command.clone()),
+            _ => fact.fix.clone(),
+        };
+        if let Some(fix) = fix {
+            assert!(shown.contains(&fix), "{fix}: {shown}");
+        }
+    }
+    for more in [attention.more(2), facts.more].into_iter().flatten() {
+        assert!(shown.contains(&more), "{more}: {shown}");
+    }
+}
+
+#[tokio::test]
+async fn a_jobs_log_states_its_failure_evidence_and_colours_as_core_does() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    for facts in runnerd_fixtures::log_facts() {
+        let html = dashboard
+            .page(&cookie, &format!("/jobs/{}", facts.job))
+            .await
+            .body;
+        let shown = text(&html);
+        if let Some(headline) = &facts.headline {
+            let at = html.find("failure-summary").unwrap_or(usize::MAX);
+            assert!(
+                at < html.find(r#"id="log-title""#).unwrap_or(0),
+                "job {}: the failure comes before the log",
+                facts.job
+            );
+            assert!(shown.contains(headline.as_str()), "{headline}: {shown}");
+        }
+        if let Some(evidence) = facts.evidence {
+            let said = sentence(evidence);
+            assert!(shown.contains(&said), "job {}: {said}: {shown}", facts.job);
+        }
+        // An `##[endgroup]` closes its fold and is not a line of its own.
+        let drawn = facts
+            .lines
+            .iter()
+            .filter(|line| line.kind != runnerd_core::api::LineKind::EndGroup);
+        for line in drawn.filter(|_| facts.headline.is_some()) {
+            let id = format!(r#"id="L{}""#, line.line + 1);
+            assert!(html.contains(&id), "job {}: {id}", facts.job);
+            for run in line.runs.iter().filter(|run| !run.text.trim().is_empty()) {
+                let words = run.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(shown.contains(&words), "{words}: {shown}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_jobs_lenses_state_marks_gaps_ends_and_comparisons_as_core_does() {
+    use runnerd_fixtures::{LENS_COMPARED, LENS_FIRST_RUN, LENS_ORPHAN};
+    // The lenses' jobs at the dashboard's clock, so a week back from it reaches them.
+    let dashboard = Dashboard::serving(&[], fake::Fixtures::new(crate::now())).await;
+    let cookie = dashboard.sign_in().await;
+    let facts = runnerd_fixtures::lens_facts();
+    let list = dashboard.page(&cookie, "/history?range=30d").await.body;
+    for mark in &facts.marks {
+        let row = row_of(&list, mark.job);
+        let shown = format!(
+            r#"<span class="record-mark {}">{}</span>"#,
+            crate::views::tone_class(mark.tone),
+            mark.words
+        );
+        assert!(row.contains(&shown), "job {}: {shown}: {row}", mark.job);
+    }
+    let timeline = dashboard
+        .page(&cookie, "/history?lens=timeline&range=7d")
+        .await
+        .body;
+    for gap in facts
+        .gaps
+        .iter()
+        .filter(|gap| gap.words != runnerd_core::api::GapKind::NoJob.words())
+    {
+        assert!(
+            timeline.contains(&format!(r#"title="{}""#, gap.words)),
+            "{}: {timeline}",
+            gap.words
+        );
+    }
+    for end in &facts.ends {
+        let bar = &timeline[timeline
+            .find(&format!(r#"href="/jobs/{}""#, end.job))
+            .unwrap()..];
+        let bar = &bar[..bar.find("</a>").unwrap()];
+        assert!(
+            bar.contains(end.words),
+            "job {}: {}: {bar}",
+            end.job,
+            end.words
+        );
+    }
+    let compared = text(
+        &dashboard
+            .page(&cookie, &format!("/jobs/{LENS_COMPARED}"))
+            .await
+            .body,
+    );
+    for delta in &facts.compared {
+        for figure in [&delta.label, &delta.this, &delta.baseline, &delta.change] {
+            assert!(compared.contains(figure.as_str()), "{figure}: {compared}");
+        }
+    }
+    let first = text(
+        &dashboard
+            .page(&cookie, &format!("/jobs/{LENS_FIRST_RUN}"))
+            .await
+            .body,
+    );
+    assert!(
+        first.contains(&sentence(&facts.first_run)),
+        "{}: {first}",
+        facts.first_run
+    );
+    let records = dashboard.page(&cookie, "/records").await.body;
+    let at = records.find(&LENS_ORPHAN.to_string()).unwrap();
+    let orphan = &records[records[..at].rfind("<tr").unwrap()..];
+    let orphan = &orphan[..orphan.find("</tr>").unwrap()];
+    assert!(
+        orphan.contains(&sentence(runnerd_core::api::Records::history_gone()))
+            && !orphan.contains(&format!(r#"href="/jobs/{LENS_ORPHAN}""#)),
+        "a record whose history is gone says so and links nowhere: {orphan}"
+    );
+}
+
+#[test]
+fn a_job_actions_preview_and_answer_state_core_s_words() {
+    use runnerd_core::api::JobAction;
+    let fixtures = runnerd_fixtures::job_actions(&daemon());
+    for preview in &fixtures.previews {
+        let html = crate::views::job::action_preview(1, JobAction::Cancel, preview).into_string();
+        let shown = text(&html);
+        assert!(shown.contains(&preview.title), "{}: {shown}", preview.title);
+        assert!(
+            shown.contains(&sentence(&preview.scope)),
+            "{}: {shown}",
+            preview.scope
+        );
+        for note in &preview.notes {
+            assert!(shown.contains(&sentence(note)), "{note}: {shown}");
+        }
+        assert_eq!(
+            html.contains(&preview.confirm_label) && html.contains("payload: {confirm: "),
+            preview.confirm.is_some(),
+            "a preview without a confirmation offers nothing to send: {html}"
+        );
+    }
+    for result in &fixtures.results {
+        let fact = runnerd_fixtures::action_fact(result);
+        let html = crate::views::notice(
+            &sentence(&result.message),
+            if result.succeeded() {
+                crate::views::Tone::Done
+            } else {
+                crate::views::Tone::Failed
+            },
+        )
+        .into_string();
+        assert!(
+            text(&html).contains(&sentence(&fact.text)),
+            "{}: {html}",
+            fact.text
+        );
+        assert_eq!(result.succeeded(), fact.succeeded);
+    }
+}
+
+#[tokio::test]
+async fn with_job_actions_off_a_job_says_why_and_offers_neither() {
+    let (dashboard, cookie, daemon, _) = dashboard_of(runnerd_fixtures::job_actions_off()).await;
+    let job = daemon.jobs[0].summary.id;
+    let html = dashboard.page(&cookie, &format!("/jobs/{job}")).await.body;
+    let why = daemon.status.job_actions.why_not().unwrap();
+    assert!(text(&html).contains(&sentence(why)), "{why}: {html}");
+    assert!(
+        !html.contains("/cancel')") && !html.contains("/rerun"),
+        "{html}"
+    );
 }

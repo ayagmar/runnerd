@@ -182,7 +182,7 @@ const NAMES_MIN: usize = 30;
 pub(super) fn history_note(filters: &History, width: usize) -> String {
     let mut details = Vec::new();
     if filters.list.as_ref().is_some_and(|list| !list.understood()) {
-        details.push((0, format!("search and sort {}", api::NOT_SUPPORTED)));
+        details.push((0, api::Feature::JobSearch.unsupported()));
     }
     if let Some(search) = &filters.search {
         details.push((0, format!("/{search}")));

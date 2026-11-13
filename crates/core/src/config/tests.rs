@@ -1139,3 +1139,20 @@ fn a_resized_profile_is_found_where_its_sizes_were_written_not_in_a_comment_or_a
     assert_eq!(advice.line_from(None), "memory 3.25G, slots 4");
     assert_eq!(super::resized_at("[profiles.node", "node", advice), None);
 }
+
+#[test]
+fn a_config_that_does_not_parse_names_the_line_an_editor_marks() {
+    assert_eq!(
+        Config::parse_error(MINIMAL),
+        None,
+        "a config that parses has none"
+    );
+    let text = format!("{MINIMAL}\n[host\nslice = 1\n");
+    let error = Config::parse_error(&text).unwrap();
+    let marked = text.lines().nth(error.line - 1).unwrap_or_default();
+    assert_eq!(marked, "[host", "{error:?}");
+    assert!(
+        !error.message.is_empty() && !error.message.contains('|'),
+        "{error:?}"
+    );
+}

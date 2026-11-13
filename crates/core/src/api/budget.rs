@@ -15,6 +15,27 @@ pub struct Reading {
     pub text: String,
 }
 
+/// One figure of the host's reading, as [`Budget::host_figures`] gives it: `Host available` `23G of 64G`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostFigure {
+    /// What it measures, such as `Leaves the slice`.
+    pub label: &'static str,
+    /// The figure, such as `30G of its 33G`.
+    pub value: String,
+    /// What it is made of, when that needs saying: `most java 9.3G and qemu-system-x86 5.8G`.
+    pub note: Option<String>,
+}
+
+impl HostFigure {
+    fn new(label: &'static str, value: String) -> HostFigure {
+        HostFigure {
+            label,
+            value,
+            note: None,
+        }
+    }
+}
+
 impl Reading {
     /// The figure and its words as one line.
     pub fn line(&self) -> String {
@@ -133,6 +154,71 @@ impl Budget {
             line = format!("{line}; {}", host.memory.outside_line());
         }
         Some(line)
+    }
+
+    /// The host's line ([`Budget::host_line`]) as figures, for a client that lays them out in a row rather than as a
+    /// sentence: what the host has available, the swap used, the share of time it stalled for memory, what it leaves the
+    /// slice, what the host's limit counts of what runs while a credit stands (ADR 0108), and what programs outside CI
+    /// hold. What is free is the bar's own part ([`BudgetParts::free`]), so it is not a figure here. Empty without a
+    /// recent reading of the host.
+    pub fn host_figures(&self) -> Vec<HostFigure> {
+        let Some(host) = self.host.as_ref() else {
+            return Vec::new();
+        };
+        let memory = &host.memory;
+        let size = |bytes: u64| ByteSize(bytes).to_string();
+        let mut available = format!("{} of {}", size(memory.available), size(memory.total));
+        if memory.growable() > 0 {
+            available = format!("{available}, growing to {}", size(memory.grown()));
+        }
+        let mut figures = vec![HostFigure::new("Host available", available)];
+        if let Some(swap) = memory.swap {
+            figures.push(HostFigure::new(
+                "Swap used",
+                format!("{} of {}", size(swap.used()), size(swap.total)),
+            ));
+        }
+        if let Some(full) = memory.full.filter(|full| full.avg10 > 0) {
+            figures.push(HostFigure::new("Stalled for memory", percent(full.avg10)));
+        }
+        let leaves = if host.stalled {
+            "nothing while it stalls: no runner starts".to_owned()
+        } else {
+            match self.memory_max {
+                Some(max) if !self.closed() && self.host_withheld().is_some() => {
+                    self.host_share(host.limit, max)
+                }
+                _ => size(host.limit),
+            }
+        };
+        figures.push(HostFigure::new("Leaves the slice", leaves));
+        let growth_counts = self.counted.is_some_and(|counted| counted.kept.is_some());
+        if let Some(growth) = host
+            .growth_clause(self.memory_in_use)
+            .filter(|_| !growth_counts)
+        {
+            figures.push(HostFigure {
+                note: Some(growth),
+                ..HostFigure::new("What runs counts", size(host.counts(self.memory_in_use)))
+            });
+        }
+        if !memory.holders.is_empty() {
+            let named: Vec<String> = memory
+                .holders
+                .iter()
+                .map(|holder| format!("{} {}", holder.name, size(holder.memory)))
+                .collect();
+            let note = match named.as_slice() {
+                [one] => format!("most {one}"),
+                [rest @ .., last] => format!("most {} and {last}", rest.join(", ")),
+                [] => String::new(),
+            };
+            figures.push(HostFigure {
+                note: Some(note),
+                ..HostFigure::new("Outside CI", size(memory.outside()))
+            });
+        }
+        figures
     }
 
     /// What the host's `limit` leaves the slice of `max`, its `MemoryMax`: `25G of its 46G`. A limit past `max` holds

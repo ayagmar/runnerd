@@ -108,8 +108,10 @@ commands run through core's `command`, which kills each one's process group past
 `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
 check), `views` (one per page: overview, history, records, sizing, insights, caches, config, and a job; the navigation
-names the five views and the sections of the one shown), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
-`assets` (the files the pages load, the web app manifest and icons included).
+names the five views and the sections of the one shown), `live` (each page's event stream), `actions` (the writes, passed on to the API: cancel and re-run
+only with the confirmation of the preview the user saw, [ADR 0136](docs/adr/0136-the-dashboard-is-laid-out-by-task.md)), and
+`assets` (the files the pages load, the web app manifest and icons included, and `keys.js`, the keys and the
+command palette, the only script beside Datastar).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
 writes only through the API on the Unix socket ([ADR 0020](docs/adr/0020-dashboard-is-an-api-client-on-loopback.md)).

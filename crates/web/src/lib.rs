@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -142,10 +143,13 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/insights", get(insights))
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/log", get(job_log))
+        .route("/jobs/{id}/cancel", post(actions::cancel_job))
+        .route("/jobs/{id}/rerun", post(actions::rerun_job))
         .route("/live/overview", get(live::overview))
         .route("/live/jobs/{id}", get(live::job))
         .route("/config", get(config).put(actions::save_config))
         .route("/config/check", post(actions::check_config))
+        .route("/config/diff", post(actions::review_config))
         .route("/config/doctor", get(config_doctor))
         .route(
             "/v1/repositories/{owner}/{name}/pause",
@@ -162,12 +166,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/v1/records", delete(actions::remove_all_records))
         .route("/v1/records/{job}", delete(actions::remove_record))
         .route("/assets/{name}", get(assets::serve))
-        .fallback(|| async {
-            (
-                StatusCode::NOT_FOUND,
-                views::error_page("Not found", "There is no page at this address."),
-            )
-        })
+        .fallback(|| async { not_found() })
         .with_state(App {
             daemon,
             proxies,
@@ -208,6 +207,21 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
+/// The page for an address nothing is at.
+fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        views::error_page("Not found", "There is no page at this address."),
+    )
+        .into_response()
+}
+
+/// A page's query string as it reads, or none of it when it does not: an old or mistyped link shows the page
+/// rather than a plain-text error.
+fn lenient<T: Default>(query: Result<Query<T>, QueryRejection>) -> T {
+    query.map(|Query(query)| query).unwrap_or_default()
+}
+
 /// A page, or the daemon's error as one.
 fn page(rendered: Result<Markup, ClientError>) -> Response {
     match rendered {
@@ -237,7 +251,11 @@ async fn overview(State(app): State<App>) -> Response {
     )
 }
 
-async fn history(State(app): State<App>, Query(filter): Query<Filter>) -> Response {
+async fn history(
+    State(app): State<App>,
+    filter: Result<Query<Filter>, QueryRejection>,
+) -> Response {
+    let filter = lenient(filter);
     page(
         History::load(&app.daemon, filter, now())
             .await
@@ -277,7 +295,11 @@ async fn insights(State(app): State<App>) -> Response {
     )
 }
 
-async fn config(State(app): State<App>, Query(query): Query<ConfigQuery>) -> Response {
+async fn config(
+    State(app): State<App>,
+    query: Result<Query<ConfigQuery>, QueryRejection>,
+) -> Response {
+    let query = lenient(query);
     page(
         ConfigView::load(&app.daemon, query)
             .await
@@ -292,9 +314,18 @@ async fn config_doctor(State(app): State<App>) -> Response {
     Html(views::config::doctor(&doctor, now()).into_string()).into_response()
 }
 
-async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
+async fn job(
+    State(app): State<App>,
+    UrlPath(id): UrlPath<String>,
+    query: Result<Query<views::job::JobPageQuery>, QueryRejection>,
+) -> Response {
+    // No job has a number past a u64's, which the palette never offers: an address no job is at.
+    let Ok(id) = id.parse::<u64>() else {
+        return not_found();
+    };
+    let query = lenient(query);
     page(
-        JobView::load(&app.daemon, id, now())
+        JobView::load(&app.daemon, id, now(), &query)
             .await
             .map(|job| views::job::render(&job)),
     )

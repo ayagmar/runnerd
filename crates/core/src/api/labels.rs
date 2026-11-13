@@ -87,6 +87,52 @@ impl Section {
     }
 }
 
+/// What a client reads from the daemon that a runnerd older than the client may not serve: a route it lacks, which
+/// the client says is not supported rather than empty (`ClientError::is_unsupported`, `JobList::understood`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// `GET /v1/attention`.
+    Attention,
+    /// `GET /v1/jobs/{id}/log/outline` and `/log/lines`.
+    LogOutline,
+    /// `GET /v1/jobs/{id}/log/search`.
+    LogSearch,
+    /// The search, sorts and record filter of `GET /v1/jobs`.
+    JobSearch,
+    /// `GET /v1/timeline`.
+    Timeline,
+    /// `GET /v1/jobs/{id}/compare`.
+    Comparison,
+    /// `GET /v1/insights`.
+    Insights,
+    /// `GET /v1/caches`.
+    Caches,
+    /// `GET /v1/doctor`.
+    Doctor,
+    /// `GET /v1/config`.
+    Config,
+}
+
+impl Feature {
+    /// What a client says in its place: `log search: not supported by this runnerd`, [`NOT_SUPPORTED`] named for
+    /// what is missing.
+    pub fn unsupported(self) -> String {
+        let what = match self {
+            Feature::Attention => "attention",
+            Feature::LogOutline => "log outline",
+            Feature::LogSearch => "log search",
+            Feature::JobSearch => "search, sort and record filter",
+            Feature::Timeline => "timeline",
+            Feature::Comparison => "comparison",
+            Feature::Insights => "insights",
+            Feature::Caches => "caches",
+            Feature::Doctor => "doctor",
+            Feature::Config => "config",
+        };
+        format!("{what}: {NOT_SUPPORTED}")
+    }
+}
+
 /// A column of a table of jobs or of records, as the history, `runnerctl jobs` and the records name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {

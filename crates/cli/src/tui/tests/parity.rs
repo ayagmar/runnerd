@@ -739,7 +739,7 @@ fn an_older_daemon_without_the_attention_route_reads_as_not_supported_never_as_e
     )));
     let (rows, _) = frame(&app);
     assert!(
-        shows(&rows, runnerd_core::api::NOT_SUPPORTED),
+        shows(&rows, &runnerd_core::api::Feature::Attention.unsupported()),
         "{}",
         rows.join("\n")
     );
@@ -1207,18 +1207,18 @@ fn insights_that_fail_to_read_or_are_not_served_say_so() {
     for (unread, says) in [
         (
             super::super::reading::Unread::Failed("the history is locked".to_owned()),
-            "the history is locked",
+            "the history is locked".to_owned(),
         ),
         (
             super::super::reading::Unread::Unsupported,
-            runnerd_core::api::NOT_SUPPORTED,
+            runnerd_core::api::Feature::Insights.unsupported(),
         ),
     ] {
         let mut app = app(&daemon());
         app.update(super::tab(View::Insights));
         app.update(Msg::Insights(Err(unread)));
         let (rows, _) = frame_of(&app, 120, 32);
-        assert!(shows(&rows, says), "{says}:\n{}", rows.join("\n"));
+        assert!(shows(&rows, &says), "{says}:\n{}", rows.join("\n"));
     }
 }
 
@@ -1405,10 +1405,7 @@ fn an_older_daemon_that_ignores_search_says_so_beside_the_list() {
     });
     let (rows, _) = frame(&app);
     assert!(
-        shows(
-            &rows,
-            &format!("search and sort {}", runnerd_core::api::NOT_SUPPORTED)
-        ),
+        shows(&rows, &runnerd_core::api::Feature::JobSearch.unsupported()),
         "{}",
         rows.join("\n")
     );

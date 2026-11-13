@@ -54,7 +54,7 @@ pub(super) fn timeline(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, t
         }
         Reading::Unread(Unread::Unsupported) => {
             frame.render_widget(
-                Line::styled(format!("timeline {}", api::NOT_SUPPORTED), theme.dim()),
+                Line::styled(api::Feature::Timeline.unsupported(), theme.dim()),
                 area,
             );
             return;
@@ -68,14 +68,7 @@ pub(super) fn timeline(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, t
         }
     };
     let timeline = &from_first_bar(timeline);
-    let label_width = timeline
-        .lanes
-        .iter()
-        .map(|lane| lane_label(&lane.profile, lane.slot).width())
-        .chain([UNASSIGNED.width()])
-        .max()
-        .unwrap_or(0)
-        .min(16);
+    let label_width = label_width(timeline);
     let cells = usize::from(area.width).saturating_sub(label_width + 1);
     let mut lines = vec![axis(timeline, label_width, cells, now, theme)];
     for lane in &timeline.lanes {
@@ -148,7 +141,21 @@ fn from_first_bar(timeline: &SlotTimeline) -> SlotTimeline {
 }
 
 /// The lane of waits no runner took.
-pub(super) const UNASSIGNED: &str = "no slot";
+pub(super) const UNASSIGNED: &str = SlotTimeline::UNASSIGNED;
+
+/// The labels' column: as wide as the widest lane's label, counting the unassigned lane's only when it is drawn, and
+/// at most 16 cells.
+pub(super) fn label_width(timeline: &SlotTimeline) -> usize {
+    let unassigned = (!timeline.unassigned.is_empty()).then(|| UNASSIGNED.width());
+    timeline
+        .lanes
+        .iter()
+        .map(|lane| lane_label(&lane.profile, lane.slot).width())
+        .chain(unassigned)
+        .max()
+        .unwrap_or(0)
+        .min(16)
+}
 
 /// A lane's label: `jvm 1`.
 pub(super) fn lane_label(profile: &str, slot: usize) -> String {
@@ -229,4 +236,37 @@ pub(super) fn lane_marks(
         }
     }
     marks
+}
+
+#[cfg(test)]
+mod tests {
+    use unicode_width::UnicodeWidthStr;
+
+    use super::{UNASSIGNED, label_width, lane_label};
+
+    #[test]
+    fn the_label_column_widens_for_the_unassigned_lane_only_while_it_is_drawn() {
+        let mut timeline = runnerd_fixtures::lens_timeline();
+        let widest = timeline
+            .lanes
+            .iter()
+            .map(|lane| lane_label(&lane.profile, lane.slot).width())
+            .max()
+            .unwrap();
+        assert!(
+            widest < UNASSIGNED.width(),
+            "the fixture's lanes are narrower than the unassigned lane's label"
+        );
+        assert!(
+            !timeline.unassigned.is_empty(),
+            "the fixture has unassigned bars"
+        );
+        assert_eq!(label_width(&timeline), UNASSIGNED.width());
+        timeline.unassigned.clear();
+        assert_eq!(
+            label_width(&timeline),
+            widest,
+            "no unassigned lane, so its label takes no cells from the chart"
+        );
+    }
 }

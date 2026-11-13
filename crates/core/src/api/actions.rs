@@ -37,6 +37,19 @@ pub enum JobAction {
 }
 
 impl JobAction {
+    /// The actions a client offers on `job` as it stands: cancel while it is queued or runs, a re-run once it is
+    /// final, and once it failed, a re-run of its run's failed jobs too. GitHub decides the rest; a client offers
+    /// none while `Status::job_actions` is not on ([`JobActions::offered`]).
+    pub fn for_job(job: &JobSummary) -> &'static [JobAction] {
+        if !job.state.is_final() {
+            &[JobAction::Cancel]
+        } else if job.outcome().kind == super::OutcomeKind::Failed {
+            &[JobAction::Rerun, JobAction::RerunFailed]
+        } else {
+            &[JobAction::Rerun]
+        }
+    }
+
     /// Its name in a log line.
     pub fn slug(self) -> &'static str {
         match self {

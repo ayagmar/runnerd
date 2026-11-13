@@ -368,6 +368,7 @@ async fn run_overview(
         let mut jobs_changed = false;
         let mut status_changed = false;
         let mut day_changed = day_read.elapsed() >= DAY_AGE;
+        let mut attention_changed = false;
         for event in batch {
             match event {
                 Event::JobSample { job, sample } => data.add_job_sample(job, sample),
@@ -375,9 +376,8 @@ async fn run_overview(
                     data.add_host_sample(sample);
                     status_changed |= status_read.elapsed() >= STATUS_AGE;
                 }
-                // The overview draws no attention list yet (ADR 0132).
+                Event::AttentionChanged { .. } => attention_changed = true,
                 Event::LogLine { .. }
-                | Event::AttentionChanged { .. }
                 | Event::CacheReseeded { .. }
                 | Event::RecordCreated { .. }
                 | Event::RecordDeleted { .. }
@@ -413,6 +413,9 @@ async fn run_overview(
         if jobs_changed {
             data.reload_running(&app.daemon).await?;
             data.recent = overview::read_recent(&app.daemon, &data.status).await?;
+        }
+        if attention_changed {
+            data.attention = app.daemon.attention().await?;
         }
         if day_changed {
             data.reload_day(&app.daemon, crate::now()).await?;
@@ -499,7 +502,8 @@ async fn run_job(
         .await?;
     let mut events = Box::pin(envelopes(events));
     let mut stopping = app.stopping.clone();
-    let mut data = JobView::load(&app.daemon, id, crate::now()).await?;
+    let mut data =
+        JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default()).await?;
     let mut next_line = data.log_from + data.log.len() as u64;
     // The lines after the page's last, which the page names, so each line shows once whether the page got it from
     // its render or from an earlier connection this one retries. A page that names none, or one too far behind,
@@ -536,6 +540,11 @@ async fn run_job(
             return Ok(End::Done);
         }
         if data.job.summary.state.is_final() {
+            // The parts a running job's page lacks: its failure, its outlined log, the comparison and the record.
+            let full =
+                JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default()).await?;
+            let finished = PatchElements::new(job::finished(&full).into_string());
+            let _ = patches.send(finished.write_as_axum_sse_event()).await;
             return Ok(End::Done);
         }
         let first = match next_event(&mut events, patches, &mut stopping).await {

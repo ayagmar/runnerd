@@ -1059,7 +1059,7 @@ impl App {
                 if page.matches.is_empty()
                     && open.log.found().is_some_and(|found| found.count() == 0)
                 {
-                    self.flash(format!("no line holds \"{query}\""), api::Tone::Quiet);
+                    self.flash(page.found_words(query), api::Tone::Quiet);
                     return Vec::new();
                 }
                 open.log.take_found(query, page);
@@ -1067,10 +1067,7 @@ impl App {
             }
             Err(Unread::Unsupported) => {
                 open.log.clear_search();
-                self.flash(
-                    format!("log search: {}", api::NOT_SUPPORTED),
-                    api::Tone::Quiet,
-                );
+                self.flash(api::Feature::LogSearch.unsupported(), api::Tone::Quiet);
             }
             Err(Unread::Failed(why)) => {
                 open.log.clear_search();

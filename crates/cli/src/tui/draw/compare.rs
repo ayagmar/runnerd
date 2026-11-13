@@ -37,7 +37,7 @@ pub(super) fn compare(frame: &mut Frame<'_>, area: Rect, open: &JobView, now: u6
         Reading::Unread(Unread::Waiting) => vec![Line::styled("reading…", theme.dim())],
         Reading::Unread(Unread::Unsupported) => {
             vec![Line::styled(
-                format!("comparing {}", api::NOT_SUPPORTED),
+                api::Feature::Comparison.unsupported(),
                 theme.dim(),
             )]
         }

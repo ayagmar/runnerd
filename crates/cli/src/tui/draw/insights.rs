@@ -29,7 +29,7 @@ pub(super) fn insights(
             heading(frame, title, name, String::new(), theme);
             let text = match why {
                 Unread::Waiting => "reading…".to_owned(),
-                Unread::Unsupported => api::NOT_SUPPORTED.to_owned(),
+                Unread::Unsupported => api::Feature::Insights.unsupported(),
                 Unread::Failed(why) => why.clone(),
             };
             frame.render_widget(Line::styled(text, theme.dim()), rest);

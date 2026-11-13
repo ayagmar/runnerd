@@ -563,7 +563,7 @@ async fn jobs_request(client: Client, send: UnboundedSender<Msg>, effect: Effect
                     job,
                     why: api::JobActions::Unsupported
                         .why_not()
-                        .unwrap_or(api::NOT_SUPPORTED)
+                        .unwrap_or_default()
                         .to_owned(),
                 },
                 Err(error) => Msg::ActionFailed {

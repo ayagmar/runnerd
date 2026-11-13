@@ -76,7 +76,8 @@ pub use attention::{
     ATTENTION_MAX, Attention, AttentionItem, AttentionKind, Fix, Subject, attention_items,
 };
 pub use budget::{
-    BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, Reading, SlotPart,
+    BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, HostFigure, Reading,
+    SlotPart,
 };
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
@@ -116,7 +117,7 @@ pub use jobs::{
     LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
-pub use labels::{Column, JOBS_HEADING, NOT_SUPPORTED, Section, View};
+pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
@@ -132,7 +133,7 @@ pub use sizing::{
     SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Spread, Starts, need,
     period, sampled_note,
 };
-pub use slots::{Figure, Health, SlotState};
+pub use slots::{Figure, Health, HealthKind, SlotState};
 pub use stats::StatsSummary;
 pub use storage::{
     ACTIONS_CACHE, BUILD_CACHE_TOOLS, BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL,

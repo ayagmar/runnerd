@@ -6,8 +6,8 @@ use runnerd_core::api::{
 };
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Page, Parts, page, profile_class, time_ago};
-use crate::chart::{Base, Limit, Series, TimeChart, nice_top};
+use super::{Page, Parts, heading, page, profile_class, time_ago};
+use crate::chart::Sparkline;
 use crate::format;
 
 const WINDOW: u64 = 30 * 86_400;
@@ -37,19 +37,26 @@ impl CachesView {
     }
 }
 
-/// Reseed for a snapshot, empty for the rest; the daemon refuses either while a runner uses the volume.
+/// Reseed for a snapshot, empty for the rest, folded under a quiet toggle until chosen; the daemon refuses either
+/// while a runner uses the volume.
 fn action(volume: &CacheVolume) -> Markup {
-    if let CacheKind::Snapshot { profile } = &volume.kind {
+    let button = if let CacheKind::Snapshot { profile } = &volume.kind {
         html! {
-            button.button-quiet.volume-action type="button"
+            button.button-quiet type="button"
                 data-on:click=(format!("@post('/v1/profiles/{profile}/reseed')"))
-                aria-label=(format!("Reseed {profile}'s snapshot from slot 1")) { "Reseed" }
+                aria-label=(format!("Reseed {profile}'s snapshot from slot 1")) { "Reseed from slot 1" }
         }
     } else {
         html! {
-            button.button-quiet.volume-action type="button"
+            button.button-danger type="button"
                 data-on:click=(format!("confirm('Empty {}? Its next job starts cold.') && @post('/v1/caches/{}/clean')", volume.name, volume.name))
-                aria-label=(format!("Empty {}", volume.name)) { "Empty" }
+                aria-label=(format!("Empty {}", volume.name)) { "Empty it" }
+        }
+    };
+    html! {
+        details.volume-action {
+            summary aria-label=(format!("Actions for {}", volume.name)) { "…" }
+            div.volume-action-menu { (button) }
         }
     }
 }
@@ -57,67 +64,85 @@ fn action(volume: &CacheVolume) -> Markup {
 /// The whole page.
 pub(crate) fn render(view: &CachesView) -> Markup {
     let total: u64 = view.caches.volumes.iter().map(|volume| volume.bytes).sum();
-    let main = html! {
-        div.page-head {
-            h1.visually-hidden { (Section::Caches.title()) }
-            p.figures title="Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." {
-                span.big { (format::bytes(total)) }
-                span.muted {
-                    " in " (view.caches.volumes.len()) " volumes"
-                    @if let Some(at) = view.caches.measured_at { ", measured " (time_ago(at, view.now)) }
-                    @else { ", not measured yet" }
-                }
+    let figure = html! {
+        p.page-figure title="Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." {
+            strong { (format::bytes(total)) }
+            span.muted {
+                " in " (view.caches.volumes.len()) " volumes"
+                @if let Some(at) = view.caches.measured_at { ", measured " (time_ago(at, view.now)) }
+                @else { ", not measured yet" }
             }
         }
+    };
+    let main = html! {
+        (heading(runnerd_core::api::View::Capacity.title(), Some(Page::Caches), Some(figure)))
         (volumes(view))
     };
     page(Section::Caches.title(), Some(Page::Caches), None, &main)
 }
 
-/// A card per volume: its size, its bound, and its size over time.
+/// One table of every volume: what it caches, its size against its bound, its size over 30 days as a sparkline, and
+/// its action folded away until chosen.
 pub(crate) fn volumes(view: &CachesView) -> Markup {
     let start = view.now.saturating_sub(WINDOW);
     html! {
-        @if view.caches.volumes.is_empty() {
-            p.muted { "No volumes yet: runnerd creates them when a profile's first runner starts." }
-        }
-        ul #volumes .volume-grid {
-            @for volume in &view.caches.volumes {
-                @let label = volume.kind.description();
-                @let limit = volume.limit_status();
-                @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
-                @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
-                @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes);
-                li class=(format!("volume {class}")) {
-                    div.volume-head {
-                        h2 { (label) }
-                        (action(volume))
-                    }
-                    p.volume-name { code { (volume.name) } }
-                    p.volume-size {
-                        span class=(if limit.as_ref().is_some_and(|limit| limit.over) { "big over-limit" } else { "big" }) { (format::bytes(volume.bytes)) }
-                        @if let Some(limit) = &limit { span.muted { " of " (format::bytes(limit.limit)) ", " (limit.label) } }
-                    }
-                    @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
-                        p.muted { "For " (BUILD_CACHE_TOOLS) }
-                        p.muted { (build.week_line()) }
-                        p.muted { (build.actions_cache_line()) }
-                    }
-                    @if points.len() > 1 {
-                        (TimeChart {
-                            title: format!("Size of {} over 30 days", volume.name),
-                            start,
-                            end: view.now,
-                            window: None,
-                            live: None,
-                            series: vec![Series { label: "size".to_owned(), class: "memory", points, area: true }],
-                            limits: limit.map(|limit| Limit { value: limit.limit, label: limit.label, class: "" }).into_iter().collect(),
-                            value: format::bytes,
-                            time: format::short_date,
-                            gap: u64::MAX,
-                        }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), Base::Binary), &Parts::default()))
-                    } @else {
-                        p.muted { "One measurement so far." }
+        div #volumes {
+            @if view.caches.volumes.is_empty() {
+                p.muted { "No volumes yet: runnerd creates them when a profile's first runner starts." }
+            } @else {
+                div.table-wrap {
+                    table.job-table.cache-table {
+                        thead {
+                            tr {
+                                th scope="col" { "Volume" }
+                                th scope="col" .number { "Size" }
+                                th scope="col" { "Bound" }
+                                th scope="col" { "30 days" }
+                                th scope="col" { span.visually-hidden { "Action" } }
+                            }
+                        }
+                        tbody {
+                            @for volume in &view.caches.volumes {
+                                @let limit = volume.limit_status();
+                                @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
+                                @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
+                                @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes).max(volume.limit.unwrap_or(0));
+                                tr class=(class) data-row {
+                                    th scope="row" {
+                                        span.record-job {
+                                            span.swatch aria-hidden="true" {}
+                                            span.job-name { (volume.kind.description()) }
+                                            span.repo { code { (volume.name) } }
+                                            @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
+                                                span.repo.cache-note { "For " (BUILD_CACHE_TOOLS) ". " (format::sentence(&build.week_line())) ". " (format::sentence(&build.actions_cache_line())) }
+                                            }
+                                        }
+                                    }
+                                    td.number data-label="size" {
+                                        span class=[limit.as_ref().filter(|limit| limit.over).map(|_| "over-limit")] { (format::bytes(volume.bytes)) }
+                                    }
+                                    td.muted data-label="bound" {
+                                        @if let Some(limit) = &limit { (format::bytes(limit.limit)) ", " (limit.label) } @else { "–" }
+                                    }
+                                    td.spark {
+                                        @if points.len() > 1 {
+                                            (Sparkline {
+                                                points: &points,
+                                                start,
+                                                end: view.now,
+                                                window: WINDOW,
+                                                top: peak,
+                                                class: "memory",
+                                                live: None,
+                                            }.render(&Parts::default()))
+                                        } @else {
+                                            span.muted { "one reading" }
+                                        }
+                                    }
+                                    td.action { (action(volume)) }
+                                }
+                            }
+                        }
                     }
                 }
             }

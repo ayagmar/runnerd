@@ -517,6 +517,29 @@ impl JobList {
         self.applied.is_some()
     }
 
+    /// What a client says above a list an older daemon answered without reading its search, sort or record filter:
+    /// that it cannot, and what the list is instead. `None` when the daemon read them.
+    pub fn unread_words(&self) -> Option<String> {
+        (!self.understood()).then(|| {
+            format!(
+                "{}; this is every job, newest first",
+                crate::api::Feature::JobSearch.unsupported()
+            )
+        })
+    }
+
+    /// [`JobList::shown_words`] as a client says it above the list, with what to do about the rest: `50 of 1234 jobs,
+    /// longest wait first; a search or the filters narrow it`.
+    pub fn shown_line(&self) -> Option<String> {
+        self.shown_words()
+            .map(|shown| format!("{shown}; a search or the filters narrow it"))
+    }
+
+    /// What a client says of a page with no jobs.
+    pub fn none_words() -> &'static str {
+        "no jobs match"
+    }
+
     /// What a sorted page shows of its list when it is not all of it: `50 of 1234 jobs, longest wait first`.
     /// `None` in the default order, which pages, and when the page holds every job.
     pub fn shown_words(&self) -> Option<String> {

@@ -1,7 +1,8 @@
 //! What every client says a slot does, and how it counts whether CI keeps up.
 
 use crate::api::{
-    Activity, Budget, ProfileStatus, QueuedJob, RunnerStatus, SlotStatus, Started, Status, Tone,
+    Activity, Budget, HealthKind, ProfileStatus, QueuedJob, RunnerStatus, SlotStatus, Started,
+    Status, Tone,
 };
 
 fn runner(busy: bool, warm: bool) -> RunnerStatus {
@@ -163,6 +164,16 @@ fn the_health_figures_word_what_every_client_shows() {
                 "1 by their runner".to_owned()
             ),
         ]
+    );
+    assert_eq!(
+        figures.iter().map(|figure| figure.kind).collect::<Vec<_>>(),
+        [
+            HealthKind::Running,
+            HealthKind::Waiting,
+            HealthKind::Wait,
+            HealthKind::Failed
+        ],
+        "each figure says which it is, so a client never reads its label"
     );
     assert_eq!(figures[1].tone, Tone::Warn);
     assert_eq!(figures[3].tone, Tone::Bad);

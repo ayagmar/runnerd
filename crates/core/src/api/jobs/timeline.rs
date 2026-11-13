@@ -309,6 +309,22 @@ pub struct SlotKey {
 }
 
 impl SlotTimeline {
+    /// What the lane of [`SlotTimeline::unassigned`] is named.
+    pub const UNASSIGNED: &'static str = "no runner here";
+
+    /// What a timeline with no bar in its window says.
+    pub const NONE: &'static str = "no job ran or waited in this window";
+
+    /// What a timeline that left bars out says, read at `now`: `more than 2000 jobs and runners in this window: jobs
+    /// that began before 5h 00m ago are left out`. `None` when it left none out.
+    pub fn cut_line(&self, now: u64) -> Option<String> {
+        let cut = self.cut_before?;
+        Some(format!(
+            "more than {TIMELINE_BARS_MAX} jobs and runners in this window: jobs that began before {} are left out",
+            crate::api::ago(cut, now)
+        ))
+    }
+
     /// Lays out what the store read: jobs into their slot's lane or the unassigned one, the latest
     /// [`TIMELINE_BARS_MAX`] bars and runners kept, names made safe.
     pub fn assemble(rows: TimelineRows) -> SlotTimeline {

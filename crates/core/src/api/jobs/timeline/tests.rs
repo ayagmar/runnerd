@@ -218,6 +218,18 @@ fn past_the_cap_the_latest_bars_are_kept_and_the_cut_is_said() {
     assert_eq!(timeline.unassigned.len(), TIMELINE_BARS_MAX);
     assert_eq!(timeline.unassigned[0].job, 2, "the oldest is left out");
     assert_eq!(timeline.cut_before, Some(1000));
+    assert_eq!(
+        timeline.cut_line(1000 + 3600).as_deref(),
+        Some(
+            "more than 2000 jobs and runners in this window: jobs that began before 1h 00m ago are left out"
+        ),
+        "a client says what was cut and from when"
+    );
+    assert_eq!(
+        SlotTimeline::of(&jobs[..3], WINDOW, vec![WINDOW], 0).cut_line(2000),
+        None,
+        "nothing cut, nothing said"
+    );
 }
 
 #[test]

@@ -96,6 +96,8 @@ pub struct Fixtures {
     /// What GitHub answers a confirmed cancel or re-run; `None`, an answer picked by the job's ID from
     /// [`action_answers`], so the demo's jobs reach every one.
     pub action_answer: Option<ActionAnswer>,
+    /// Answer as a runnerd older than this client: the routes it lacks answer the daemon's 404 for no such endpoint.
+    pub older: bool,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -765,6 +767,7 @@ impl Fixtures {
             doctor_error: None,
             doctor: None,
             action_answer: None,
+            older: false,
         }
     }
 
@@ -1592,7 +1595,7 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
 fn attention(fixtures: &Fixtures) -> Attention {
     let items = attention_items(
         &fixtures.status,
-        &doctor(fixtures),
+        &fixtures.doctor.clone().unwrap_or_else(|| doctor(fixtures)),
         Some(&insights(fixtures)),
         fixtures.now,
     );
@@ -1639,9 +1642,23 @@ fn router(fake: Fake) -> Router {
         )
         .route(
             "/v1/jobs",
-            get(|State(fake): State<Fake>, Query(query): Query<JobQuery>| async move {
-                match fake.fixtures.lock().unwrap().page(&query) {
-                    Ok(list) => Json(list).into_response(),
+            get(|State(fake): State<Fake>, Query(mut query): Query<JobQuery>| async move {
+                let fixtures = fake.fixtures.lock().unwrap();
+                // A runnerd older than search and sorting ignores them and does not say how it read the query.
+                if fixtures.older {
+                    query.q = None;
+                    query.sort = None;
+                    query.order = None;
+                    query.record = None;
+                }
+                match fixtures.page(&query) {
+                    Ok(mut list) => {
+                        if fixtures.older {
+                            list.applied = None;
+                            list.total = None;
+                        }
+                        Json(list).into_response()
+                    }
                     Err(message) => (StatusCode::BAD_REQUEST, Json(ErrorResponse { message })).into_response(),
                 }
             }),
@@ -1907,6 +1924,8 @@ fn router(fake: Fake) -> Router {
             get(|State(fake): State<Fake>| async move { Json(attention(&fake.fixtures.lock().unwrap())) }),
         )
         .route("/v1/events", get(events))
+        .fallback(|| async { no_such_endpoint() })
+        .layer(axum::middleware::from_fn_with_state(fake.clone(), as_older))
         .with_state(fake)
 }
 
@@ -1932,6 +1951,42 @@ async fn events(
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// What the daemon answers a route it does not have.
+fn no_such_endpoint() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            message: "no such endpoint".to_owned(),
+        }),
+    )
+        .into_response()
+}
+
+/// While [`Fixtures::older`] holds, the routes a runnerd older than this client lacks are not there.
+async fn as_older(
+    State(fake): State<Fake>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    let newer = matches!(path, "/v1/attention" | "/v1/timeline")
+        || (path.starts_with("/v1/jobs/")
+            && [
+                "/compare",
+                "/cancel",
+                "/rerun",
+                "/log/outline",
+                "/log/lines",
+                "/log/search",
+            ]
+            .iter()
+            .any(|route| path.ends_with(route)));
+    if newer && fake.fixtures.lock().unwrap().older {
+        return no_such_endpoint();
+    }
+    next.run(request).await
 }
 
 /// Serves the fake daemon on a new socket at `path` until the runtime stops.

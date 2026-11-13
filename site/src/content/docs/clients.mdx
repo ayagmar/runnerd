@@ -24,17 +24,19 @@ The navigation has five views: Overview, Jobs (History and Records), Insights, C
 
 | Page | Shows |
 |---|---|
-| Overview | slots running, jobs waiting, the p95 wait over 24 hours, failures (red only when a runner failed, not when a job's tests do); each waiting job with why it waits; the memory budget as a bar, hatched where the host or [measured admission](../admission/#measured-admission) closes it; a card per slot; the latest jobs; pause and resume per repository, which lasts across restarts |
-| History | the last 30 days in charts, then every matching job; filters by repository, workflow and outcome combine and can be bookmarked; workflow and outcome filter the job list only, the charts use the repository filter |
-| Records | the [records of failed jobs](../running/#records-of-failed-jobs) with size and age; remove one or all |
-| Sizing | per profile, memory peaks against the cap, waits, how busy the slots were and the [advice](../admission/#sizing), which a button opens in the config editor, unsaved; what [auto sizing](../admission/#auto-sizing) changes next and has changed, with a link that opens the last change undone |
+| Overview | what needs attention, when anything does; slots running, jobs waiting, the p95 wait over 24 hours and failures in one row; the machine: the host's figures, then the memory budget as lanes, a lane per slot with its running job's step, memory and CPU and a row each for the mirror, what is free and what is hatched where the host or [measured admission](../admission/#measured-admission) closes it, and the slice's memory and CPU; each waiting job with why it waits; the latest jobs; pause and resume per repository, which lasts across restarts |
+| Jobs | every job, searched by job name, workflow or branch and filtered by repository, workflow, branch, outcome, time and record; a column header sorts, showing the first page of that order; the **Timeline** lens draws what each slot ran over a day or a week, the **Trends** lens charts the last 30 days. Every filter is in the link, so a view can be bookmarked |
+| Records | the [records of failed jobs](../running/#records-of-failed-jobs) with size and age, including records whose job has left the history; remove one or all |
+| Sizing | per profile, memory, jobs, waits, warm starts and CPU in one table with the [advice](../admission/#sizing), which a button opens in the config editor, unsaved; what [auto sizing](../admission/#auto-sizing) changes next and has changed, with a link that opens the last change undone |
 | Insights | a card per [insight](../insights/), warnings first; the last 24 hours; each repository's waits this week against the week before, warm and cold apart |
-| Caches | each volume's size over 30 days; the build cache's 7-day hit rate and whether it serves [GitHub Actions' cache](../running/#github-actions-cache); reseed a snapshot or empty a cache |
-| Config | `runnerd.toml` in an editor that checks it as you type against `MemoryMax` and saves only when it fits; **Add a device** shows a QR code |
+| Caches | each volume in one table with its size over 30 days; the build cache's 7-day hit rate and whether it serves [GitHub Actions' cache](../running/#github-actions-cache); reseed a snapshot or empty a cache from a volume's menu |
+| Config | `runnerd.toml` in an editor with line numbers that checks it as you type against `MemoryMax`, marks the line a parse error is on, and shows the changes before **Save and reload**; the doctor's checks; **Add a device** shows a QR code |
+
+Keys: `1` to `5` open the views, `j` and `k` move between rows and `Enter` opens one, `/` goes to the page's search, `?` lists the keys, `Esc` leaves a field, and `Ctrl K` opens a palette of pages, rows and job numbers. Keys typed into a field stay in it, and each has a button for a pointer or a finger.
 
 <Shot
   name="overview"
-  alt="The overview: slots running, jobs waiting with their reasons, the budget bar and a card per slot."
+  alt="The overview: what needs attention, the health figures, a lane per slot laid over the memory budget, and jobs waiting with their reasons."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
@@ -46,7 +48,7 @@ The navigation has five views: Overview, Jobs (History and Records), Insights, C
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-A job's page shows its wait, split at when runnerd first saw the job queued (*Seen by runnerd*, missing for a job a waiting runner took before runnerd listed it, and for jobs older runnerd versions recorded) and when its runner started, its steps on one time axis, memory and CPU against the container's caps (with what [admission](../admission/#measured-admission) reserved when that was less), how often the CPU cap held it back, its latest 30 runs, and the log. For a failed job kept as a record it also shows the `runnerctl shell` command.
+A job's page shows its wait, split at when runnerd first saw the job queued (*Seen by runnerd*, missing for a job a waiting runner took before runnerd listed it, and for jobs older runnerd versions recorded) and when its runner started, its steps on one time axis, memory and CPU against the container's caps (with what [admission](../admission/#measured-admission) reserved when that was less), how often the CPU cap held it back, how it compares with the job's previous run, its latest 30 runs, and the log. A failed job's page opens on what failed: the step, its exit code, its last lines and, while its record is kept, the `runnerctl shell` command. The log is folded by step, the failed step open; each line has a link, and a search finds text in the lines' messages. While [`[github] job_actions`](../configuration/#github) is on, **Cancel run**, **Re-run job** and **Re-run failed jobs** show what GitHub would do and send nothing until confirmed.
 
 <Shot
   name="history"
