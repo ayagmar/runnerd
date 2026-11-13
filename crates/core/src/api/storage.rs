@@ -1,10 +1,10 @@
 //! What the disk runnerd keeps means as every client shows it: what each cache volume holds and what its limit does,
-//! what the build cache did for a job and over a week, where GitHub Actions' cache is served, how full the records are and what became of a job's record,
+//! what the build cache did for a job and over a week, where GitHub Actions' cache is served, how full the records are (the doctor's `records` check too) and what became of a job's record,
 //! and how much of a job's log is stored. Plain derivations of the API's types; clients only lay them out.
 
 use super::{
-    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, LogSummary, RecordLimits,
-    RecordNote, RecordRemoval, Records, Tone, period,
+    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Check, CheckStatus, LogSummary,
+    RecordLimits, RecordNote, RecordRemoval, Records, Tone, period,
 };
 use crate::config::ByteSize;
 
@@ -15,6 +15,34 @@ pub const RECORDS_NEAR_FULL: u64 = 80;
 /// Whether records taking `bytes` are near `max_total` (`RECORDS_NEAR_FULL`).
 pub fn records_near_full(bytes: u64, max_total: u64) -> bool {
     u128::from(bytes) * 100 >= u128::from(max_total) * u128::from(RECORDS_NEAR_FULL)
+}
+
+/// The doctor's `records` check for records taking `bytes` of `[records] max_total`: a warning with what to run when
+/// they are near it (`records_near_full`), else how much they take.
+pub fn records_check(bytes: u64, max_total: u64) -> Check {
+    let taken = format!(
+        "the records of failed jobs take {} of [records] max_total = {}",
+        ByteSize(bytes),
+        ByteSize(max_total)
+    );
+    if records_near_full(bytes, max_total) {
+        Check {
+            name: "records".to_owned(),
+            status: CheckStatus::Warn,
+            detail: format!("{taken}; new ones remove the oldest to fit"),
+            fix: Some(
+                "runnerctl records rm --older-than 2d, or raise max_total under [records]"
+                    .to_owned(),
+            ),
+        }
+    } else {
+        Check {
+            name: "records".to_owned(),
+            status: CheckStatus::Info,
+            detail: taken,
+            fix: None,
+        }
+    }
 }
 
 impl CacheKind {

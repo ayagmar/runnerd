@@ -1245,13 +1245,19 @@ fn documented_defaults() -> Vec<Documented> {
         for line in text.lines() {
             if line.starts_with("##") {
                 let heading = line.trim_start_matches('#').trim();
-                table = heading
+                let named = heading
                     .strip_prefix('`')
                     .and_then(|heading| heading.strip_suffix('`'))
-                    .and_then(|heading| {
-                        REFERENCE_SECTIONS.iter().find(|(name, _)| *name == heading)
-                    })
-                    .map(|(_, table)| *table);
+                    .filter(|heading| heading.starts_with('['));
+                table = named.map(|named| {
+                    REFERENCE_SECTIONS
+                        .iter()
+                        .find(|(name, _)| *name == named)
+                        .map_or_else(
+                            || panic!("{page} documents {named}, which REFERENCE_SECTIONS lacks"),
+                            |(_, table)| *table,
+                        )
+                });
                 continue;
             }
             let (Some(table), true) = (table, line.starts_with("| `")) else {
@@ -1315,10 +1321,12 @@ fn reference_config(table: &str, key: &str, value: Option<&str>) -> String {
 #[test]
 fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() {
     let rows = documented_defaults();
-    assert!(
-        rows.len() > 30,
-        "the reference's tables were read: {} keys",
-        rows.len()
+    // Every key the reference gives a TOML default for, `targets` too; a row that stops reading as one changes the
+    // count.
+    assert_eq!(
+        rows.len(),
+        36,
+        "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();
     for Documented {

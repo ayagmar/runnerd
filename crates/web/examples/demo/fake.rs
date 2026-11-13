@@ -39,7 +39,7 @@ use runnerd_core::api::{
 use runnerd_core::api::{
     Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
 };
-use runnerd_core::api::{Attention, DoctorState, attention_items, records_near_full};
+use runnerd_core::api::{Attention, DoctorState, attention_items};
 use runnerd_core::api::{
     AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
     WaitSpread, WeekWaits,
@@ -1585,32 +1585,10 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
     }
 }
 
-/// The doctor's records check over the fake's records, in the daemon's words (`doctor::records_check`).
+/// The doctor's records check over the fake's records, as the daemon words it.
 fn records_check(records: &Records) -> Check {
-    let bytes: u64 = records.records.iter().map(|record| record.bytes).sum();
-    let max_total = runnerd_core::config::ByteSize(records.limits.max_total);
-    let taken = format!(
-        "the records of failed jobs take {} of [records] max_total = {max_total}",
-        runnerd_core::config::ByteSize(bytes)
-    );
-    if records_near_full(bytes, records.limits.max_total) {
-        Check {
-            name: "records".to_owned(),
-            status: CheckStatus::Warn,
-            detail: format!("{taken}; new ones remove the oldest to fit"),
-            fix: Some(
-                "runnerctl records rm --older-than 2d, or raise max_total under [records]"
-                    .to_owned(),
-            ),
-        }
-    } else {
-        Check {
-            name: "records".to_owned(),
-            status: CheckStatus::Info,
-            detail: taken,
-            fix: None,
-        }
-    }
+    let bytes = records.records.iter().map(|record| record.bytes).sum();
+    runnerd_core::api::records_check(bytes, records.limits.max_total)
 }
 
 /// What needs attention, as core words it from the fake's status, doctor and insights; the revision is a hash of the
