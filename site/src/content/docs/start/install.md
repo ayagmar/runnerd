@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Install runnerd, write a starter config and a user unit with runnerd init, and start the service.
+description: What runnerd needs, the install command, runnerd init, and how to check a release.
 ---
 
 ## Requirements
@@ -53,7 +53,7 @@ Send a workflow job here with:
 A job runs here only when every label in its runs-on is in its repository's labels in runnerd.toml; other jobs, such as runs-on: ubuntu-latest, stay on GitHub's runners.
 ```
 
-Run the root commands `init` printed, then the three `systemctl` and `runnerctl` lines. A public repository gets a warning with its fix:
+Run the root commands `init` printed, then the three `systemctl` and `runnerctl` lines; [Your first job](../first-job/) goes on from there. A public repository gets a warning with its fix:
 
 ```text
 WARN  repository: halyard/docs-site is public: anyone who opens a pull request on it can run code on this host, and their jobs share runnerd's caches with your trusted jobs
@@ -65,9 +65,9 @@ WARN  repository: halyard/docs-site is public: anyone who opens a pull request o
 | `--slice NAME` | another slice than `runnerd.slice` |
 | `--config PATH` | write the config elsewhere |
 | `--force` | replace files that exist; without it `init` writes neither |
-| `--memory-ceiling SIZE` | for a VM whose memory grows on demand, such as Hyper-V Dynamic Memory: the most it can grow to, written as `memory_ceiling` ([A host whose memory grows](../admission/#a-host-whose-memory-grows)) |
+| `--memory-ceiling SIZE` | for a VM whose memory grows on demand, such as Hyper-V Dynamic Memory: the most it can grow to, written as `memory_ceiling` ([A host whose memory grows](../../concepts/admission/#a-host-whose-memory-grows)) |
 
-`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory or the slice's `MemoryMax` if smaller. A slot is also no larger than the host has available now, less the mirror's 512M, [the host's margin](../admission/#the-hosts-memory) and 512M for what starts with runnerd. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../configuration/) says what to change.
+`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory or the slice's `MemoryMax` if smaller. A slot is also no larger than the host has available now, less the mirror's 512M, [the host's margin](../../concepts/admission/#the-hosts-memory) and 512M for what starts with runnerd. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../../reference/configuration/) lists every key; [Sizing](../../guides/sizing/) says what to change.
 
 ## Directory and version
 

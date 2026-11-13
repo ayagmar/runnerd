@@ -42,7 +42,7 @@ here=site/scripts/capture
 for part in $what; do
   case "$part" in
     terminal)
-      for command in status caches; do
+      for command in status caches insights; do
         target/debug/runnerctl --socket "$RUNNERD_CAPTURE_SOCKET" "$command" >"site/src/assets/terminal/$command.txt"
       done
       ;;

@@ -1,0 +1,18 @@
+This month: 277 job-minutes here, about $1.66 at GitHub's 2-core Linux rate before your plan's free minutes (1 job not priced)
+  277 minutes of 30 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.66
+  1 job not priced: lost, so how long they ran is not known
+  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
+Last 30 days: 277 job-minutes here, about $1.66 at GitHub's 2-core Linux rate before your plan's free minutes (1 job not priced)
+  277 minutes of 30 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.66
+  1 job not priced: lost, so how long they ran is not known
+  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
+
+warning slower    halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.
+warning near-cap  halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing is off: raise jvm's memory, or turn it on.
+warning cpu-held  halyard/ledger: CI / build was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota throttling it in 15% of its run or more. Auto sizing is off: set jvm's cpus to 10, or turn it on.
+warning flaky     halyard/storefront: CI / e2e failed and then passed on a re-run in 2 of its 31 runs.
+notice  waits     halyard/storefront: 1 job in 20 waits 4m 10s or more for a runner this week, up from 1m 30s the week before.
+
+REPOSITORY          JOBS  WAIT P50     P95  WARM P50  COLD P50  P95 WEEK BEFORE
+halyard/ledger       184        3s     41s        2s       24s              44s
+halyard/storefront   212        9s  4m 10s        2s       47s           1m 30s

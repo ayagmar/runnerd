@@ -55,6 +55,8 @@ jobs:
               - 'deny.toml'
               - '.github/scripts/check-boundaries.sh'
               - '.github/scripts/check-wire-compat.sh'
+              # runnerd-core's tests read the configuration reference's defaults.
+              - 'site/src/content/docs/reference/configuration*.md'
               - '.github/workflows/ci.yml'
             # The commands the docs show, and the code that defines them.
             docs:
@@ -65,6 +67,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.github/scripts/check-docs-commands.sh'
+              - 'site/scripts/reference/**'
               - '.github/workflows/ci.yml'
             deny:
               - '**/Cargo.toml'

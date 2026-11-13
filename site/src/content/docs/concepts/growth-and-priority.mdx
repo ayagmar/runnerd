@@ -1,0 +1,52 @@
+---
+title: Growth count and priority
+description: How measured admission counts what runs with room for growth, and how a job that waited long for memory goes first.
+---
+
+## The growth count
+
+Each reservation is a job's worst case, and jobs rarely peak at once. So under `measured` both `MemoryMax` and the host's limit count what runs uses, plus room for it to grow:
+
+- what each runner uses, by its last sample;
+- the whole take of a runner whose samples are not recent;
+- room for growth: the three largest gaps between a runner's take and its use, or every young runner's gap if that is more, and never less than 6G. A runner is young before its first sample, in its job's first minute, and when this daemon did not see its job start. A start in flight counts as one, at its reservation.
+
+Nothing changes for a runner: it reserves, learns and is recorded as before. The difference from the plain count is a credit, and it never exceeds 14G, what the slice has under 90% of `MemoryMax`, less 2G, or what the host has available past its margin and a quarter of its memory. So if every runner reached its reservation at once, they could pass `MemoryMax` by at most 14G, against 6G under the older credits. The status line says what the count does:
+
+```text
+36.8G of 46G counted in ci.slice by predicted peaks: 42.8G reserved, 6G pooled; what runs uses 22G and keeps 14.8G for its growth
+```
+
+It rests and counts by the older, smaller credits (up to 6G for settled runners of different jobs, and the host keeping the two largest jobs' room) while:
+
+- the host stalls, has under its margin and a quarter of its memory available, or a slice or host reading is not recent: for 5 minutes from then, and again if it still is;
+- what runs grew past the room it kept within 10 minutes, for 30 minutes;
+- under 10 minutes have passed since runnerd started, or since a reload turned the count on or changed `MemoryMax` or `memory_ceiling`. Such a reload keeps a brake that ends later.
+
+```text
+the growth count rests until 15:02 UTC: what ran grew 10G in 10m, past the 9G kept
+```
+
+When the count rises, starts wait until it fits again; no running job stops for it. [Insights](../../guides/insights/#the-hosts-memory-while-ci-ran) report how low the host went while a credit stood. `pooled_count = false` under `[host]` counts every reservation for both budgets.
+
+## A starved job goes first
+
+Smaller runners can take all the memory that frees up, so a large runner would never fit. Once a pool's next job has waited 10 minutes for memory with a free slot, no younger job starts until a runner of that pool does. Its next jobs then wait 2 minutes, until a listing shows its queue empty, so a pool of many large jobs is not held to one runner per 10 minutes. It works under `caps` and `measured`, and there is nothing to set.
+
+- One job holds at a time, for memory and [CPU](../cpu/) together: the oldest one that waited long enough. A job with no free slot, or a paused or backing-off pool, does not hold.
+- A job holds only for room that running jobs would give back. A runner bigger than the slice beside the mirror, or a host short because of programs outside the slice, holds nothing: younger jobs go on, and the job keeps saying why it waits.
+- The jobs behind it say `Behind <job>, which waits for memory`. A job with no free slot of its own keeps saying that.
+- Runners already started keep running. No warm runner starts meanwhile.
+- While the slice is at 90% of `MemoryMax` or the host stalls, no job holds. Nothing starts then anyway, and waits keep their age.
+- The wait ends when a runner of the pool is in its slot, or when the job leaves the queue. It starts again after a pause, a backoff, a reseed or image pull, or a restart, and the pool is back to 10 minutes. A failed GitHub listing keeps both, and nothing is held back until a listing answers.
+
+A younger job still starts behind that job if all of this holds:
+
+- It has a free slot and fits the budgets left. In the waiting job's profile, it leaves that job a free slot too.
+- The running jobs' usual run times say when the waiting job's room gathers, and that is still ahead. That time counts [the growth count](#the-growth-count) at its lowest, since it can fall with no job ending. A job older than the waiting one that lacks room or a slot sets an earlier time if it could start sooner. A runner with no job yet, a job with no estimate and a job past its usual end all count as ending now.
+- Every job its runner could take usually ends by then. The usual run time is the p95 of a job's last 20 successful runs, from 3 of them. A pool with one queued job that has no estimate stays behind.
+- Everything that started behind a barrier since the wait reached its limit, this runner included, leaves the waiting job its room even at its caps, and any older job's if that is larger. A runner counts whether or not it got a job. Runners started for older jobs don't count: the waiting job waits for them anyway.
+
+So if every job takes exactly its usual run time, the waiting job starts when it would with nothing behind it. Usual run times err long, so a job that ends early can bring the room while a job behind the barrier still runs, and the waiting job then waits for that one too. It always fits once the runners from before that moment and any older jobs' have ended, even if a job behind it hangs.
+
+Small jobs still pay when none of that holds: memory stays free that one of them could have used. `runnerd simulate --priority` shows what it does on your history.

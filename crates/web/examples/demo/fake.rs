@@ -1567,12 +1567,7 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
         checks: vec![
             Check { name: "Docker".to_owned(), status: CheckStatus::Pass, detail: "29.1.3, reachable".to_owned(), fix: None },
             Check { name: "sysbox".to_owned(), status: CheckStatus::Pass, detail: "sysbox-runc registered".to_owned(), fix: None },
-            Check {
-                name: "slice".to_owned(),
-                status: CheckStatus::Warn,
-                detail: "runnerd.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
-                fix: Some("systemctl edit runnerd.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
-            },
+            records_check(&fixtures.records),
             Check {
                 name: "repository".to_owned(),
                 status: CheckStatus::Warn,
@@ -1588,6 +1583,12 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
         ],
         state: Some(DoctorState::Ready { at: fixtures.now - 180 }),
     }
+}
+
+/// The doctor's records check over the fake's records, as the daemon words it.
+fn records_check(records: &Records) -> Check {
+    let bytes = records.records.iter().map(|record| record.bytes).sum();
+    runnerd_core::api::records_check(bytes, records.limits.max_total)
 }
 
 /// What needs attention, as core words it from the fake's status, doctor and insights; the revision is a hash of the

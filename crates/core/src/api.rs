@@ -137,7 +137,7 @@ pub use slots::{Figure, Health, HealthKind, SlotState};
 pub use stats::StatsSummary;
 pub use storage::{
     ACTIONS_CACHE, BUILD_CACHE_TOOLS, BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL,
-    RecordState, actions_cache_place, records_near_full,
+    RecordState, actions_cache_place, records_check, records_near_full,
 };
 pub use tone::{Tone, Toned};
 pub(crate) use units::days_from_civil;

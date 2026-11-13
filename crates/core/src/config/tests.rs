@@ -1156,3 +1156,210 @@ fn a_config_that_does_not_parse_names_the_line_an_editor_marks() {
         "{error:?}"
     );
 }
+
+/// The smallest config the reference's defaults are tried in, by table, with each table's keys; `[name]` is an array
+/// of tables. As site/scripts/reference/config.py writes it.
+const REFERENCE_BASE: &[(&str, &[(&str, &str)])] = &[
+    (
+        "host",
+        &[
+            ("slice", r#""runnerd.slice""#),
+            ("isolation", r#""sysbox""#),
+        ],
+    ),
+    ("caches", &[]),
+    (
+        "caches.mirror",
+        &[
+            ("enabled", "true"),
+            ("memory", r#""512M""#),
+            ("cpus", "1"),
+            ("ttl", r#""168h""#),
+        ],
+    ),
+    ("caches.pnpm", &[("max_size", r#""5G""#)]),
+    ("caches.maven", &[("max_size", r#""5G""#)]),
+    ("caches.build", &[]),
+    (
+        "profiles.jvm",
+        &[
+            ("image", r#""ghcr.io/ayagmar/runnerd-runner:jvm-0.1.0""#),
+            ("cpus", "8"),
+            ("memory", r#""9G""#),
+            ("slots", "2"),
+        ],
+    ),
+    (
+        "[repositories]",
+        &[
+            ("name", r#""halyard/ledger""#),
+            ("profile", r#""jvm""#),
+            ("labels", r#"["self-hosted"]"#),
+        ],
+    ),
+    ("history", &[]),
+    ("records", &[]),
+    ("sizing", &[]),
+    ("web", &[]),
+    ("github", &[]),
+    ("notify", &[]),
+    (
+        "[notify.targets]",
+        &[
+            ("name", r#""phone""#),
+            ("kind", r#""ntfy""#),
+            ("url", r#""https://ntfy.sh/halyard-ci""#),
+        ],
+    ),
+];
+
+/// The reference's headings, as the tables of `REFERENCE_BASE` they document.
+const REFERENCE_SECTIONS: &[(&str, &str)] = &[
+    ("[host]", "host"),
+    ("[caches]", "caches"),
+    ("[profiles.<name>]", "profiles.jvm"),
+    ("[[repositories]]", "[repositories]"),
+    ("[history]", "history"),
+    ("[records]", "records"),
+    ("[sizing]", "sizing"),
+    ("[github]", "github"),
+    ("[web]", "web"),
+    ("[notify]", "notify"),
+    ("[[notify.targets]]", "[notify.targets]"),
+];
+
+/// A key the reference gives a default as a TOML value for: its table, its name and that value.
+struct Documented {
+    table: String,
+    key: String,
+    default: String,
+}
+
+/// Every key of the configuration reference's tables whose default is one code span, such as `"caps"`.
+fn documented_defaults() -> Vec<Documented> {
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site/src/content/docs/reference");
+    let mut rows = Vec::new();
+    for page in ["configuration.md", "configuration-more.md"] {
+        let text = std::fs::read_to_string(docs.join(page)).unwrap();
+        let mut table = None;
+        for line in text.lines() {
+            if line.starts_with("##") {
+                let heading = line.trim_start_matches('#').trim();
+                let named = heading
+                    .strip_prefix('`')
+                    .and_then(|heading| heading.strip_suffix('`'))
+                    .filter(|heading| heading.starts_with('['));
+                table = named.map(|named| {
+                    REFERENCE_SECTIONS
+                        .iter()
+                        .find(|(name, _)| *name == named)
+                        .map_or_else(
+                            || panic!("{page} documents {named}, which REFERENCE_SECTIONS lacks"),
+                            |(_, table)| *table,
+                        )
+                });
+                continue;
+            }
+            let (Some(table), true) = (table, line.starts_with("| `")) else {
+                continue;
+            };
+            let cells: Vec<&str> = line
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect();
+            let [keys, default, ..] = cells.as_slice() else {
+                continue;
+            };
+            let Some(default) = default
+                .strip_prefix('`')
+                .and_then(|default| default.strip_suffix('`'))
+                .filter(|default| !default.contains('`') && !default.starts_with('$'))
+            else {
+                continue;
+            };
+            for key in keys.split('`').skip(1).step_by(2) {
+                let (table, key) = match key.rsplit_once('.') {
+                    Some((sub, leaf)) => (format!("{table}.{sub}"), leaf),
+                    None => (table.to_owned(), key),
+                };
+                rows.push(Documented {
+                    table,
+                    key: key.to_owned(),
+                    default: default.to_owned(),
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// `REFERENCE_BASE` as TOML, with `key` of `table` left out, or set to `value`.
+fn reference_config(table: &str, key: &str, value: Option<&str>) -> String {
+    let mut lines = Vec::new();
+    for (name, keys) in REFERENCE_BASE {
+        lines.push(match name.strip_prefix('[') {
+            Some(array) => format!("[[{array}]"),
+            None => format!("[{name}]"),
+        });
+        lines.extend(
+            keys.iter()
+                .filter(|(k, _)| !(*name == table && *k == key))
+                .map(|(k, v)| format!("{k} = {v}")),
+        );
+        if *name == table
+            && let Some(value) = value
+        {
+            lines.push(format!("{key} = {value}"));
+        }
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
+
+#[test]
+fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() {
+    let rows = documented_defaults();
+    // Every key the reference gives a TOML default for, `targets` too; a row that stops reading as one changes the
+    // count.
+    assert_eq!(
+        rows.len(),
+        36,
+        "the reference's keys with a default to check"
+    );
+    let mut wrong = Vec::new();
+    for Documented {
+        table,
+        key,
+        default,
+    } in &rows
+    {
+        // A key that is a table of its own in the base config (`targets`) is documented by its own table.
+        let own = [format!("{table}.{key}"), format!("[{table}.{key}]")];
+        if REFERENCE_BASE
+            .iter()
+            .any(|(name, _)| own.iter().any(|own| own == name))
+        {
+            continue;
+        }
+        let omitted = Config::parse(&reference_config(table, key, None));
+        let given = Config::parse(&reference_config(table, key, Some(default)));
+        match (omitted, given) {
+            (Ok(omitted), Ok(given)) if format!("{omitted:?}") == format!("{given:?}") => {}
+            (Ok(_), Ok(_)) => wrong.push(format!(
+                "[{table}] {key}: the reference says {default}, the config differs"
+            )),
+            (omitted, given) => wrong.push(format!(
+                "[{table}] {key} = {default}: left out {:?}, given {:?}",
+                omitted.err().map(|error| error.to_string()),
+                given.err().map(|error| error.to_string())
+            )),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the reference's defaults are the config's:\n{}",
+        wrong.join("\n")
+    );
+}

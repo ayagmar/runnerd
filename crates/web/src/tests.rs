@@ -2411,7 +2411,7 @@ async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_c
             assert!(page.body.contains(expected), "{path} lacks {expected:?}");
         }
         assert!(
-            !page.body.contains("MemoryHigh=30G"),
+            !page.body.contains("[records] max_total = 20G"),
             "{path} has no check before the doctor answers"
         );
     }
@@ -2426,7 +2426,7 @@ async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_c
     let doctor = dashboard.page(&cookie, "/config/doctor").await;
     assert_eq!(doctor.status, StatusCode::OK);
     assert!(
-        doctor.body.contains(r#"id="doctor""#) && doctor.body.contains("MemoryHigh=30G"),
+        doctor.body.contains(r#"id="doctor""#) && doctor.body.contains("[records] max_total = 20G"),
         "{}",
         doctor.body
     );

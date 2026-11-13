@@ -23,6 +23,7 @@ CLASSES = {
     "7f7f7f": "dim",
     "d7ffd7": "p0",
     "ffd7d7": "p1",
+    "d7d7ff": "p2",
     "87d787": "mem",
     "afafff": "cpu",
     "ffd75f": "wait",
@@ -30,10 +31,13 @@ CLASSES = {
 }
 # name, columns, rows, keys pressed first (a key is a string; "wait:N" waits N seconds)
 FRAMES = [
-    ("overview", 136, 28, []),
     ("overview-96", 96, 26, []),
-    ("job", 120, 36, ["\r", "wait:2"]),
+    # Jobs, the outcome filter's list, failure, then the first failed job, its failed step opened.
+    ("job", 120, 36, ["2", "f", "\r", "j", "\r", "wait:2", "\r", "wait:3"]),
 ]
+
+# Colours the frames used that CLASSES lacks, which the site would draw in the default foreground.
+UNSTYLED = set()
 
 
 def render(screen, cols, rows):
@@ -43,6 +47,8 @@ def render(screen, cols, rows):
         runs = []
         for x in range(cols):
             cell = screen.buffer[y][x]
+            if cell.fg not in CLASSES:
+                UNSTYLED.add(cell.fg)
             classes = [CLASSES.get(cell.fg, "")]
             if cell.bold:
                 classes.append("b")
@@ -108,3 +114,5 @@ def capture(name, cols, rows, keys):
 
 for frame in FRAMES:
     capture(*frame)
+if UNSTYLED:
+    raise SystemExit(f"tui.py: colours without a class: {sorted(UNSTYLED)}; add them to CLASSES and Tui's styles")

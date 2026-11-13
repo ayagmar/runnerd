@@ -9,8 +9,8 @@ starts only the jobs those paths can affect:
 
 | Job | Runs on a pull request that changes |
 |---|---|
-| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, the wire check against the previous release, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh`, `.github/scripts/check-wire-compat.sh` |
-| `docs-commands`: builds `runnerd` and `runnerctl` and checks every command and option the docs show against their `--help` | `README.md`, `site/src/content/docs/**`, `crates/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/scripts/check-docs-commands.sh` |
+| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, the wire check against the previous release, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh`, `.github/scripts/check-wire-compat.sh`, `site/src/content/docs/reference/configuration*.md` (a core test reads its defaults) |
+| `docs-commands`: builds `runnerd` and `runnerctl`, checks every command and option the docs show against their `--help`, that the CLI reference pages are what `--help` prints (`python3 site/scripts/reference/cli.py target/debug` rewrites them), and that the configuration reference lists every key the config accepts | `README.md`, `site/src/content/docs/**`, `crates/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/scripts/check-docs-commands.sh`, `site/scripts/reference/**` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build, then a check that every internal link and `#anchor` of the built pages resolves | `site/**`, `.github/scripts/check-site-links.py` |
@@ -133,10 +133,10 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    finds them; today they are:
    - `examples/runnerd.toml`: each profile's `image` tag (the doctor tests compare it with the crate version);
    - `crates/core/src/config.rs` and `crates/core/src/docker.rs`: the doc comments that show an image tag;
-   - the site: `install.md`, `configuration.mdx`, `admission.mdx`, `clients.mdx`, `src/pages/index.astro`, and the TUI
+   - the site: the pages under `site/src/content/docs` that `git grep` lists, `src/pages/index.astro`, and the TUI
      frames, dashboard screenshots and terminal transcripts in `site/src/assets/`, which are recaptured rather than
      edited: `site/scripts/capture/capture.sh` builds the dashboard's demo daemon (a fake one on a scratch socket,
-     never a real runnerd), runs `runnerctl tui`, `status` and `caches` and a headless Chromium against it, and
+     never a real runnerd), runs `runnerctl tui`, `status`, `caches` and `insights` and a headless Chromium against it, and
      rewrites them. It needs `uv` and a Chromium for playwright-core (`CHROMIUM=/path/to/chrome-headless-shell`).
 
    `crates/wire-compat` names the previous release, not this one; it moves after the tag (step 6).

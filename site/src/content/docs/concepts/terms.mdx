@@ -1,0 +1,63 @@
+---
+title: Terms
+description: Slot, profile, pool, slice, budget, warm runner, record, attention and the job history, each in a few lines.
+---
+
+import Budget from '../../../components/diagrams/Budget.astro';
+
+## Slot
+
+One concurrent job of a profile. Each job gets a new container; the slot keeps a volume over the profile's read-only snapshot, so the next job in it finds the Docker images, `~/.cache` and tool cache the last one left. A queued job starts in the free slot that last ran the same job (repository, workflow, job name), else one that ran a job of its repository, else the lowest free slot. [Caches](../../guides/caches/#warm-caches) says what a slot keeps.
+
+## Profile and pool
+
+A profile is a runner size and image: `cpus`, `memory`, `slots` and `image` under `[profiles.<name>]`. A pool is one `[[repositories]]` entry: a repository, the profile its jobs run on, and the labels it serves. A repository can have several pools, one per profile ([Split light and heavy jobs](../../guides/sizing/#split-light-and-heavy-jobs)).
+
+## Slice and budget
+
+Every runner container runs in one systemd slice, `runnerd.slice` as `runnerd init` writes it. Its `MemoryMax` is the budget: a runner starts only when it fits beside what already runs, and what [the host's memory](../admission/#the-hosts-memory) leaves the slice. By default a runner reserves its profile's `memory`; under [measured admission](../admission/#measured-admission) it reserves its job's predicted peak.
+
+<Budget />
+
+`runnerd check-config [file]` reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
+
+```text
+$ runnerd check-config runnerd.toml
+runnerd.toml: valid, memory caps sum to 32.5G
+$ runnerd check-config runnerd.toml --memory-max 24G
+error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G; lower `slots` or `memory`, or raise the slice's MemoryMax (`runnerd doctor` prints its unit)
+```
+
+A slice without a unit file has no `MemoryMax`; the check then warns. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile with the mirror to `MemoryMax` instead, refusing a slice without one.
+
+## Warm runner
+
+A warm runner is registered before GitHub queues the job and takes it within a second or two, where a job that finds no runner waits for a new one to start ([how long](../../guides/waiting/#how-long-it-waited)).
+
+- Each pool keeps [`warm`](../../reference/configuration/#repositories) runners (1 by default) while its repository is active: one of its jobs was waiting, taken or finished in the last 10 minutes. Otherwise they go after 5 idle minutes.
+- When a job is seen, the other jobs of its run get runners too: per pool, the median number that workflow's runs had there over 14 days, a run with none there counting as 0, less those seen. A pool needs 3 runs with jobs there first, and one that most runs skip gets none.
+- Warm runners start last, once every queued job that fits has a runner, and reserve their profile's `memory` (and `cpus` under CPU admission). A queued job of another repository takes their room. After a job in slot 1, the profile measures what slot 1 changed without stopping anything, at most every 10 minutes. Only a reseed due by that measure (slot 1 reached [`reseed_at`](../../reference/configuration-more/#caches)) or asked for removes them, once its other runners are idle.
+
+## Record
+
+With `record_failures = true` on a profile, a failed job's stopped runner is kept as an image, and `runnerctl shell <job>` opens a shell in it at the failing step. [Records of failed jobs](../../guides/records/) says what it keeps and who can read it.
+
+## Attention
+
+What needs you now, most urgent first, each with what clears it: queued jobs runnerd cannot start with the config it runs with (a paused repository, or labels no pool serves), a job that waited 30 minutes or more for the host's memory, the doctor's warnings and failures (or that its checks are not current), warning [insights](../../guides/insights/), a repository GitHub will not list, a token GitHub refuses, and a spent rate limit. The dashboard's overview and the TUI's open on it; `GET /v1/attention` serves it.
+
+## Job history
+
+runnerd records every job its runners may run in SQLite; [`[history]`](../../reference/configuration-more/#history) sets its path and retention. For each job:
+
+| What | Kept |
+|---|---|
+| its timeline (queued, container started, job started, finished) and steps, as GitHub shows them | with the job |
+| the container's CPU, memory and network every 2 s, its CPU throttling and the bytes the Docker Hub mirror served it | samples for `history.samples`; totals and peaks with the job |
+| its log, secrets still masked, up to `history.log_max` | for `history.logs` |
+
+A job's wait runs from queued to started; the part that passed while runnerd was not running is kept as `unseen` and left out of the waits [sizing](../../guides/sizing/#how-a-wait-is-counted) reads.
+
+A job that leaves GitHub's queue without one of this machine's runners is recorded as `elsewhere` (the dashboard's "Not run here"), as `cancelled in queue` when its run was cancelled first, or as its conclusion, such as `skipped`. No wait, median or cost counts it. A finished job goes after `history.jobs`.
+
+A failed job reads `runner fault` when Sysbox, not its code, failed it; [Why did this job fail?](../../guides/logs/#everything-else-on-its-page) says how runnerd tells.

@@ -1065,33 +1065,11 @@ fn sysbox_fix(os_release: &str, platform: &str) -> String {
     }
 }
 
-/// Warns when the records near `[records] max_total` (`api::records_near_full`), past which new ones evict the oldest.
+/// Warns when the records near `[records] max_total` (`api::records_check`), past which new ones evict the oldest.
 fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
-    let max_total = config.records.max_total;
     match records {
         Err(error) => skip("records", &format!("cannot list them: {error}")),
-        Ok(bytes) if api::records_near_full(*bytes, max_total.0) => Check {
-            name: "records".to_owned(),
-            status: Status::Warn,
-            detail: format!(
-                "the records of failed jobs take {} of [records] max_total = {max_total}; \
-                 new ones remove the oldest to fit",
-                ByteSize(*bytes)
-            ),
-            fix: Some(
-                "runnerctl records rm --older-than 2d, or raise max_total under [records]"
-                    .to_owned(),
-            ),
-        },
-        Ok(bytes) => Check {
-            name: "records".to_owned(),
-            status: Status::Info,
-            detail: format!(
-                "the records of failed jobs take {} of [records] max_total = {max_total}",
-                ByteSize(*bytes)
-            ),
-            fix: None,
-        },
+        Ok(bytes) => api::records_check(*bytes, config.records.max_total.0),
     }
 }
 

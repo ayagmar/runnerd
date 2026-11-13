@@ -1,6 +1,6 @@
 ---
 // A dashboard screenshot in the page's theme: one <picture> per theme, AVIF then WebP, and a phone crop below
-// 600px when there is one. The picture of the other theme is display: none, so its lazy image never loads. Each
+// 600px when there is one, or with `phone` the phone shot at every width. The picture of the other theme is display: none, so its lazy image never loads. Each
 // links to its full-size file, which scripts/zoom.ts opens in an overlay; on a phone, the phone crop's file.
 import type { ImageMetadata } from 'astro';
 import { getImage } from 'astro:assets';
@@ -10,9 +10,10 @@ interface Props {
   alt: string;
   sizes: string;
   eager?: boolean;
+  phone?: boolean;
 }
 
-const { name, alt, sizes, eager = false } = Astro.props;
+const { name, alt, sizes, eager = false, phone: phoneOnly = false } = Astro.props;
 const files = import.meta.glob<{ default: ImageMetadata }>('../assets/dashboard/*.webp', { eager: true });
 const find = (file: string) => files[`../assets/dashboard/${file}.webp`]?.default;
 
@@ -26,10 +27,11 @@ const srcset = async (src: ImageMetadata, widths: number[], format: string) => {
 
 const themes = await Promise.all(
   (['light', 'dark'] as const).map(async (theme) => {
-    const desktop = find(`${name}-${theme}`);
-    if (!desktop) throw new Error(`no dashboard shot ${name}-${theme}`);
-    const phone = find(`${name}-phone-${theme}`);
-    const fallback = await getImage({ src: desktop, width: 1280, format: 'webp', quality: 70 });
+    const file = phoneOnly ? `${name}-phone-${theme}` : `${name}-${theme}`;
+    const desktop = find(file);
+    if (!desktop) throw new Error(`no dashboard shot ${file}`);
+    const phone = phoneOnly ? undefined : find(`${name}-phone-${theme}`);
+    const fallback = await getImage({ src: desktop, width: Math.min(1280, desktop.width), format: 'webp', quality: 70 });
     return {
       theme,
       desktop,
@@ -39,7 +41,7 @@ const themes = await Promise.all(
         sources: await Promise.all(formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(phone, [390, 640, 780], f) }))),
       },
       sources: await Promise.all(
-        formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(desktop, [640, 960, 1280, 1920], f) })),
+        formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(desktop, phoneOnly ? [390, 640, 780] : [640, 960, 1280, 1920], f) })),
       ),
     };
   }),

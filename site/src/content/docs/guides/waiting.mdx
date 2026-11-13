@@ -1,0 +1,57 @@
+---
+title: Why is my job waiting?
+description: Every reason a queued job gives, what it means, and what to do about it.
+---
+
+import Shot from '../../../components/Shot.astro';
+import Printed from '../../../components/Printed.astro';
+
+Every queued job says what holds it, in `runnerctl status`, the dashboard's overview and the TUI. Jobs are served oldest first; each gives the first reason that holds for it.
+
+<Printed command="runnerctl status" name="status" from="JOB " />
+
+## It will start by itself
+
+| It says | Meaning |
+|---|---|
+| A runner is starting for it | A runner was registered and its container starts. GitHub gives a runner any job its labels match, so another job of the pool may take it. |
+| All 2 node slots are busy | Every slot of the profile holds a runner. It starts when one ends. More slots: [Sizing](../sizing/). |
+| Needs 6G of memory; 2G of the budget is free | What its runner would reserve does not fit the slice's `MemoryMax` beside what runs. [Admission](../../concepts/admission/) says what a runner reserves. |
+| The slice is past 90% of its MemoryMax, so nothing starts | Under [measured admission](../../concepts/admission/#measured-admission), the slice uses 90% of its budget; nothing starts until it falls. |
+| Needs 4 CPUs; 1.5 are free | The [CPU budget](../../concepts/cpu/) is spoken for. |
+| Behind CI / build, which waits for memory | An older job [goes first](../../concepts/growth-and-priority/#a-starved-job-goes-first); younger ones wait behind it. The same for CPU. |
+| Next after an older job, whose runner starts first | An older job's runner is about to take the slot, memory or CPU this one would start with. |
+| node is rebuilding its snapshot | Slot 1 is becoming the profile's [snapshot](../caches/#warm-caches); none of the profile's slots starts until it is done. |
+| Pulling node's image | A new runner image is pulling; the profile's slots wait for it. |
+
+## It needs you
+
+| It says | What to do |
+|---|---|
+| No profile serves the label storefornt-small | No pool of the repository has every label the job asks for, so no runner here can take it. Fix the workflow's `runs-on`, or add the label to a pool's `labels`. The overview lists it as needing attention. |
+| halyard/storefront is paused | `runnerctl resume halyard/storefront`, or **Resume** on the overview. |
+| Runners cannot register with GitHub; retrying in 2m | Runners of the repository failed, so none starts for a while. Also: runners cannot start, failed to take a job, or ended without a job. `journalctl --user -u runnerd` has the error; `runnerctl doctor` checks the token and Docker. |
+
+## The host is short of memory
+
+A runner also has to fit what the host's memory leaves the slice: a desktop or local builds take RAM the budget assumed was free. The job then names up to three programs outside the slice holding 512M or more:
+
+```text
+The host is short of memory: needs 6G; the host has 2G to spare; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
+```
+
+Close them, or wait: runnerd starts the job once the host has room. The figure also counts the kernel and compressed swap, so closing them frees only part of it. When the host has memory but what runs may still grow into it, the job says so and names no programs. [The host's memory](../../concepts/admission/#the-hosts-memory) has the rules.
+
+A job that has waited 30 minutes or more for the host's memory, while the host lacks room for one that waits now, is also listed as needing attention, an [insight](../insights/) and a notification, with the same programs named.
+
+## How long it waited
+
+A job's page splits its wait at when runnerd first saw it queued (*Seen by runnerd*) and when its runner started: time before runnerd knew of it, time to start a runner, and the runner's boot. A job that finds no runner waits 15 to 25 seconds for the next poll, a registration and a container start; a [warm runner](../../concepts/terms/#warm-runner) takes it within a second or two.
+
+The Jobs page's **Timeline** lens draws what each slot ran over a day or a week, with each job's wait before its bar, so a run of waits shows where the slots were full.
+
+<Shot
+  name="timeline"
+  alt="The Jobs page's timeline: a lane per slot over the last 24 hours, each job a bar coloured by outcome with its wait drawn before it, and a lane for jobs no runner here took."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>

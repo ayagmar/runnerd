@@ -1,6 +1,7 @@
 [files]
 # Vendored and minified: its short identifiers read as typos.
-extend-exclude = ["crates/web/assets/datastar.js"]
+# Captured TUI frames: the terminal's right edge cuts words, such as "thi…".
+extend-exclude = ["crates/web/assets/datastar.js", "site/src/assets/tui/*.json"]
 
 [default.extend-words]
 # The terminal UI crate (ADR 0022), not a misspelt ratatouille.

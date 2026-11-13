@@ -1,8 +1,9 @@
 //! What every client says of caches, the build cache and records.
 
+use crate::api::CheckStatus;
 use crate::api::{
     BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Record, RecordLimits, RecordMark,
-    RecordNote, RecordRemoval, RecordState, Records, Tone, records_near_full,
+    RecordNote, RecordRemoval, RecordState, Records, Tone, records_check, records_near_full,
 };
 
 const G: u64 = 1 << 30;
@@ -191,4 +192,26 @@ fn the_short_line_keeps_the_refused_uploads_beside_the_hit_rate() {
         ..BuildCacheCounts::default()
     };
     assert_eq!(only_wrote.activity().unwrap().short_line(), "1G stored");
+}
+
+#[test]
+fn the_doctor_warns_with_what_to_run_once_the_records_near_max_total() {
+    let near = records_check(8 * G, 10 * G);
+    assert_eq!(near.name, "records");
+    assert_eq!(near.status, CheckStatus::Warn);
+    assert_eq!(
+        near.detail,
+        "the records of failed jobs take 8G of [records] max_total = 10G; new ones remove the oldest to fit"
+    );
+    assert_eq!(
+        near.fix.as_deref(),
+        Some("runnerctl records rm --older-than 2d, or raise max_total under [records]")
+    );
+    let room = records_check(3 * G, 10 * G);
+    assert_eq!(room.status, CheckStatus::Info);
+    assert_eq!(
+        room.detail,
+        "the records of failed jobs take 3G of [records] max_total = 10G"
+    );
+    assert_eq!(room.fix, None, "a check with room has nothing to run");
 }
