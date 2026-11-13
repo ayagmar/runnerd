@@ -14,6 +14,7 @@ const CONFIG: &str = r#"
 [host]
 slice = "runnerd.slice"
 isolation = "sysbox"
+admission = "caps"
 
 [caches]
 mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
@@ -532,10 +533,7 @@ fn a_start_in_the_future_reads_from_now() {
 /// 40.5G, over the 33G slice, which measured admission allows.
 fn measured() -> String {
     CONFIG
-        .replace(
-            "isolation = \"sysbox\"",
-            "isolation = \"sysbox\"\nadmission = \"measured\"",
-        )
+        .replace("admission = \"caps\"", "admission = \"measured\"")
         .replace("memory = \"7G\"\nslots = 2", "memory = \"5.5G\"\nslots = 4")
 }
 

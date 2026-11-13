@@ -169,9 +169,10 @@ impl Shape {
 
     fn toml(&self) -> String {
         let mut host = String::new();
-        if self.admission == Admission::Measured {
-            host.push_str("admission = \"measured\"\n");
-        }
+        host.push_str(match self.admission {
+            Admission::Caps => "admission = \"caps\"\n",
+            Admission::Measured => "admission = \"measured\"\n",
+        });
         if self.cpu_overcommit {
             host.push_str("cpu_overcommit = 1.0\n");
         }

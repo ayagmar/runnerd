@@ -755,7 +755,12 @@ impl Fixtures {
             caches,
             cache_history,
             records,
-            config: include_str!("../../../../examples/runnerd.toml").to_owned(),
+            // The demo's budget and sizing are drawn under caps; its `measured` scenario shows the default.
+            config: include_str!("../../../../examples/runnerd.toml").replacen(
+                "admission = \"measured\"",
+                "admission = \"caps\"",
+                1,
+            ),
             after_put: None,
             controls: Vec::new(),
             unrecorded: false,

@@ -804,7 +804,14 @@ fn a_slice_without_limits_and_a_token_without_repo_fail() {
         kind: TokenKind::Classic,
     });
     let checks = checks(&host, Some(&config));
+    // Measured admission, the default, has no MemoryMax to admit against either: one failure, the slice's.
     assert_eq!(failed(&checks), ["slice", "gh"]);
+    let config = checks.iter().find(|check| check.name == "config").unwrap();
+    assert_eq!(config.status, Status::Skip, "{config}");
+    assert!(
+        config.detail.contains("admission = \"caps\""),
+        "names the way back: {config}"
+    );
     let slice = checks.iter().find(|check| check.name == "slice").unwrap();
     assert!(
         slice.fix.as_deref().unwrap().contains("MemoryMax=32.5G"),

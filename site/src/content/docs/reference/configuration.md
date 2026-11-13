@@ -54,7 +54,7 @@ A key marked required must be set. Sizes take `K`, `M`, `G` or `T`, durations a 
 | `isolation` | required | `"sysbox"`, or `"unsafe-dind"` with `allow_unsafe = true` ([Isolation](../../security/#isolation)) |
 | `allow_unsafe` | `false` | lets `isolation = "unsafe-dind"` pass the check |
 | `poll_interval` | `"15s"` | how often GitHub is asked for an idle repository's queued jobs ([How often GitHub is asked](../../concepts/how-it-runs/#how-often-github-is-asked)) |
-| `admission` | `"caps"` | a runner reserves its profile's `memory`, or with `"measured"` its job's predicted peak ([Admission](../../concepts/admission/#measured-admission)) |
+| `admission` | `"measured"` | a runner reserves its job's predicted peak, its profile's `memory` until the job has a history; `"caps"` always reserves `memory`. `"measured"` needs the slice's `MemoryMax` ([Admission](../../concepts/admission/#measured-admission)) |
 | `pooled_count` | `true` | under `measured`, `MemoryMax` and the host's limit count what runners use and keep room for their largest growths, not every reservation ([The growth count](../../concepts/growth-and-priority/#the-growth-count)) |
 | `cpu_overcommit` | unset | a factor above 0, at most 16; a runner must also fit the slice's CPUs times it ([CPU admission](../../concepts/cpu/)) |
 | `memory_ceiling` | unset | for a VM whose memory grows on demand, the most it grows to ([A host whose memory grows](../../concepts/admission/#a-host-whose-memory-grows)) |

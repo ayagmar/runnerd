@@ -1928,6 +1928,17 @@ labels = ["self-hosted", "app"]
 warm = 0
 "#;
 
+/// `text`, which sets no `admission`, under `admission = "caps"`.
+fn under_caps(text: &str) -> String {
+    let caps = text.replacen(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nadmission = \"caps\"",
+        1,
+    );
+    assert_ne!(caps, text, "the config names its isolation");
+    caps
+}
+
 /// A pause or resume of one repository.
 fn one(repository: &str) -> Target {
     Target::Repository(repository.to_owned())

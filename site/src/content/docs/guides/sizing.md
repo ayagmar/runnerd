@@ -13,6 +13,8 @@ description: The sizing advice runnerd gives from your jobs' peaks, auto sizing 
 
 [`[sizing]`](../../reference/configuration-more/#sizing) sets `margin` and `min_jobs`. Advice is written only when applied: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button. It goes through the same check as any config and keeps to the profile's `min_memory`, `max_memory`, `max_slots` and [`memory_ceiling`](../../concepts/admission/#a-host-whose-memory-grows). `runnerd doctor` warns when a profile's jobs need more than its `memory`.
 
+A profile under `admission = "caps"`:
+
 ```console wrap=false
 $ runnerctl sizing
 [...]
@@ -52,12 +54,9 @@ When a bound or the budget blocks a change, `runnerctl sizing` says `No slot rai
 
 A runner may take any queued job of its repository whose labels it has, so it is sized for the heaviest: a 300M linter beside a 6G build waits like the build.
 
-Serve the repository in a smaller second profile with another `[[repositories]]` entry: same `name`, its own `profile` and label. Added to [the example](../../reference/configuration/#an-example):
+Serve the repository in a smaller second profile with another `[[repositories]]` entry: same `name`, its own `profile` and label. Added to [the example](../../reference/configuration/#an-example), where the check holds the largest runner and the mirror (9.5G) to `MemoryMax` under measured admission, the default:
 
 ```toml
-[host]
-admission = "measured"   # the check then holds the largest runner and the mirror (9.5G) to MemoryMax
-
 [profiles.small]
 image = "ghcr.io/ayagmar/runnerd-runner:node-0.1.0"
 cpus = 2

@@ -871,7 +871,15 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             ),
         )
     };
-    let config_check = config.check_against(slice.memory_max).doctor_check();
+    // Measured admission, the default, refuses a slice without a MemoryMax: that is the slice's failure, said once.
+    let config_check = match (slice.memory_max, config.host.admission) {
+        (None, config::Admission::Measured) => skip(
+            "config",
+            "needs the slice's MemoryMax, which measured admission admits against: run the slice's fix, or set \
+             [host] admission = \"caps\"",
+        ),
+        _ => config.check_against(slice.memory_max).doctor_check(),
+    };
     vec![slice_check, config_check]
 }
 

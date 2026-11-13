@@ -40,7 +40,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core | Accepted |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets | Amended by 0091 |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check | Amended by 0037, 0039, 0050, 0055, 0070 |
-| [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag | Amended by 0036, 0037, 0055, 0056, 0058, 0070, 0096, 0099, 0130 |
+| [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag | Amended by 0036, 0037, 0055, 0056, 0058, 0070, 0096, 0099, 0130, 0138 |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit | Accepted |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage | Amended by 0077 |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time | Amended by 0070 |
@@ -144,3 +144,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0135](0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md) | The job history is searched, sorted and laid out by core | Accepted |
 | [0136](0136-the-dashboard-is-laid-out-by-task.md) | The dashboard is laid out by task | Accepted |
 | [0137](0137-the-tui-follows-core-s-views.md) | The TUI follows core's views, one row per slot, and reads what an older daemon lacks as not supported | Accepted |
+| [0138](0138-measured-admission-is-the-default.md) | Measured admission is the default | Accepted |

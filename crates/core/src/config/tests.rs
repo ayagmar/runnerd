@@ -35,6 +35,26 @@ fn example() -> Config {
     Config::load(&path).unwrap()
 }
 
+/// `text`, which sets no `admission`, under `admission = "caps"`.
+fn caps(text: &str) -> String {
+    let caps = text.replacen(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nadmission = \"caps\"",
+        1,
+    );
+    assert_ne!(caps, text, "the config names its isolation");
+    caps
+}
+
+/// `examples/runnerd.toml` under `admission = "caps"`.
+fn example_under_caps() -> Config {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/runnerd.toml");
+    let text = std::fs::read_to_string(path).unwrap();
+    let caps = text.replace("admission = \"measured\"", "admission = \"caps\"");
+    assert_ne!(caps, text, "the example names its admission");
+    Config::parse(&caps).unwrap()
+}
+
 fn size(s: &str) -> ByteSize {
     s.parse().unwrap()
 }
@@ -48,7 +68,7 @@ fn example_config_fits_its_slice() {
 
 #[test]
 fn example_config_over_a_smaller_slice_names_both_numbers() {
-    let error = example()
+    let error = example_under_caps()
         .validate(Some(size("30G")))
         .unwrap_err()
         .to_string();
@@ -86,9 +106,9 @@ fn config_with_unsafe_dind_requires_allow_unsafe() {
 }
 
 #[test]
-fn config_with_unlimited_slice_validates_with_a_warning() {
+fn under_caps_a_config_with_an_unlimited_slice_validates_with_a_warning() {
     let memory_max = parse_memory_max("infinity").unwrap();
-    let warnings = example().validate(memory_max).unwrap();
+    let warnings = example_under_caps().validate(memory_max).unwrap();
     assert!(
         matches!(warnings.as_slice(), [Warning::UnlimitedSlice { slice, .. }] if slice == "runnerd.slice"),
         "{warnings:?}"
@@ -264,7 +284,7 @@ fn the_dashboard_opens_on_one_of_its_origins_or_the_config_is_refused() {
     let web = |lines: &str| {
         Config::parse(&format!("{MINIMAL}\n[web]\n{lines}\n"))
             .unwrap()
-            .validate(None)
+            .validate(Some(size("33G")))
             .map_err(|error| error.to_string())
     };
     assert_eq!(
@@ -617,7 +637,7 @@ fn measured_admission_lets_the_caps_add_up_past_memory_max() {
         "one runner fits: {check:?}"
     );
     // The same caps admitted by caps do not fit, and there the caps are what must fit.
-    let caps = MINIMAL.replace("slots = 1", "slots = 8");
+    let caps = caps(MINIMAL).replace("slots = 1", "slots = 8");
     let refused = Config::check(&caps, |_| Ok(Some(size("10G")))).1;
     assert!(!refused.valid, "8 × 4G of caps do not fit 10G");
     assert_eq!(refused.memory_needed, refused.memory_caps);
@@ -669,6 +689,29 @@ fn measured_admission_needs_a_memory_max_to_admit_against() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("has none"), "{error}");
+}
+
+#[test]
+fn without_the_key_admission_is_measured_and_a_slice_without_memory_max_names_caps() {
+    // MINIMAL sets no `admission`: 4 × 4G of caps on a 10G slice fit one runner, which is all measured asks.
+    let (config, check) = Config::check(&MINIMAL.replace("slots = 1", "slots = 4"), |_| {
+        Ok(Some(size("10G")))
+    });
+    assert_eq!(config.unwrap().host.admission, super::Admission::Measured);
+    assert!(check.valid, "{}", check.message);
+    assert_eq!(check.admission, crate::api::AdmissionPolicy::Measured);
+
+    let (_, check) = Config::check(MINIMAL, |_| Ok(None));
+    assert!(!check.valid, "no MemoryMax to admit against");
+    for named in ["ci.slice", "runnerd doctor", "admission = \"caps\""] {
+        assert!(
+            check.message.contains(named),
+            "lacks {named:?}: {}",
+            check.message
+        );
+    }
+    let (_, under_caps) = Config::check(&caps(MINIMAL), |_| Ok(None));
+    assert!(under_caps.valid, "caps only warns: {}", under_caps.message);
 }
 
 #[test]
@@ -865,7 +908,7 @@ fn notify_targets_get_failures_lost_jobs_runners_and_insights_by_default() {
 
     let config = Config::parse(&format!("{MINIMAL}{NOTIFY}")).unwrap();
 
-    assert!(config.validate(None).is_ok());
+    assert!(config.validate(Some(size("33G"))).is_ok());
     assert_eq!(config.notify.digest_at.to_string(), "07:30");
     let events: Vec<_> = config
         .notify

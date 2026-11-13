@@ -201,8 +201,11 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
     let sizing = size(&machine)?;
     let config = config_text(request, &machine, &sizing);
     // A ceiling under what one runner and the mirror take, as on a large host given a small one, is refused here as
-    // the daemon would refuse it.
-    let (_, check) = Config::check(&config, |_| Ok(machine.slice_memory_max));
+    // the daemon would refuse it. A slice without a MemoryMax is checked at the budget the doctor's fix gives it:
+    // measured admission refuses a slice without one, and the config is written before the slice is.
+    let (_, check) = Config::check(&config, |_| {
+        Ok(Some(machine.slice_memory_max.unwrap_or(sizing.budget)))
+    });
     if !check.valid {
         return Err(check.message);
     }
@@ -456,6 +459,9 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          [host]\n\
          slice = \"{slice}\"\n\
          isolation = \"sysbox\"\n\
+         # A runner reserves what its jobs are predicted to use, from their history; \"caps\" reserves every\n\
+         # runner's memory cap instead: https://ayagmar.github.io/runnerd/concepts/admission/\n\
+         admission = \"measured\"\n\
          {ceiling}\
          \n\
          [caches]\n\

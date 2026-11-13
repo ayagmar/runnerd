@@ -46,10 +46,7 @@ fn measured_at(cpus: u32) -> Config {
     on(
         &CONFIG
             .replacen("cpus = 8", &format!("cpus = {cpus}"), 1)
-            .replace(
-                "isolation = \"sysbox\"",
-                "isolation = \"sysbox\"\nadmission = \"measured\"",
-            ),
+            .replace("admission = \"caps\"", "admission = \"measured\""),
         "",
     )
 }
@@ -608,10 +605,7 @@ fn under_measured_admission_a_cap_the_bursts_meet_goes_back_up_until_they_fit() 
     // bounds no slot, so runs at it raise it a step a look, to the first cap over the gate's 23.5-CPU bursts. Under
     // caps nothing moves: neither the bursts nor the averages raise it there, and they hold the lowering.
     let caps = CONFIG.replacen("cpus = 8", "cpus = 9", 1);
-    let measured = caps.replace(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"measured\"",
-    );
+    let measured = caps.replace("admission = \"caps\"", "admission = \"measured\"");
     for (start, end) in [(measured, 28), (caps, 9)] {
         let mut text = start;
         let mut jobs = Vec::new();
@@ -659,8 +653,8 @@ fn climb(admission: &str, start: u32, runs: fn(u32, u64) -> Vec<Ran>) -> Vec<u32
     let mut text = CONFIG
         .replacen("cpus = 8", &format!("cpus = {start}"), 1)
         .replace(
-            "isolation = \"sysbox\"",
-            &format!("isolation = \"sysbox\"\nadmission = \"{admission}\""),
+            "admission = \"caps\"",
+            &format!("admission = \"{admission}\""),
         );
     let mut jobs = Vec::new();
     let mut last = BTreeMap::new();
@@ -1655,11 +1649,11 @@ mod invariants {
                 }
             };
             let text = CONFIG.replace(
-                "isolation = \"sysbox\"",
+                "isolation = \"sysbox\"\nadmission = \"caps\"",
                 &format!(
-                    "isolation = \"sysbox\"{}{}",
+                    "isolation = \"sysbox\"{}\nadmission = \"{}\"",
                     host(budget, "cpu_overcommit = 1.0"),
-                    host(measured, "admission = \"measured\"")
+                    if measured { "measured" } else { "caps" }
                 ),
             );
             let mut world = World {

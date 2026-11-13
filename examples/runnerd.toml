@@ -4,6 +4,10 @@
 [host]
 slice = "runnerd.slice"
 isolation = "sysbox"
+# What a runner must fit in before it starts. "measured", the default, reserves what its jobs are predicted to use
+# from their history, and one runner of each profile with the mirror must fit MemoryMax; "caps" reserves every
+# runner's memory cap, and then slots × memory over all profiles with the mirror must fit.
+admission = "measured"
 
 [caches]
 mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h", max_size = "10G" }

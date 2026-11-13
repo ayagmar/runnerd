@@ -13,6 +13,7 @@ const CONFIG: &str = r#"
 [host]
 slice = "runnerd.slice"
 isolation = "sysbox"
+admission = "caps"
 
 [caches]
 mirror = { enabled = false, memory = "512M", cpus = 1, ttl = "168h" }
@@ -485,10 +486,7 @@ fn throttled_runs(shares: &[Option<u64>]) -> Vec<Run> {
 fn measured(auto: bool) -> Config {
     Config::parse(&format!(
         "{}\n[sizing]\nauto = {auto}\n",
-        CONFIG.replace(
-            "isolation = \"sysbox\"",
-            "isolation = \"sysbox\"\nadmission = \"measured\""
-        )
+        CONFIG.replace("admission = \"caps\"", "admission = \"measured\"")
     ))
     .unwrap()
 }

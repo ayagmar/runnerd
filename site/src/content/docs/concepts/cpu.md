@@ -7,7 +7,6 @@ description: A CPU budget beside the memory one, what a runner reserves of it, a
 
 ```toml
 [host]
-admission = "measured"
 cpu_overcommit = 1.0
 ```
 

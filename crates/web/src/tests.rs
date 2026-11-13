@@ -2237,11 +2237,7 @@ async fn checked(dashboard: &Dashboard, toml: &str) -> String {
 
 /// `toml` under `admission = "measured"`.
 fn measured(toml: &str) -> String {
-    let measured = toml.replacen(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"measured\"",
-        1,
-    );
+    let measured = toml.replacen("admission = \"caps\"", "admission = \"measured\"", 1);
     assert_ne!(measured, toml);
     measured
 }

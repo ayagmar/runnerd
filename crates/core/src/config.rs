@@ -65,7 +65,7 @@ pub struct Host {
     /// How often GitHub is asked for queued jobs.
     #[serde(default = "default_poll_interval", deserialize_with = "duration")]
     pub poll_interval: Duration,
-    /// What a runner must fit in before it starts. Default `caps`.
+    /// What a runner must fit in before it starts. Default `measured` (ADR 0138).
     #[serde(default)]
     pub admission: Admission,
     /// Set, a runner also starts only when its predicted CPU fits the slice's CPUs times this; absent, CPU is not
@@ -103,11 +103,13 @@ pub const MAX_CPU_OVERCOMMIT: f64 = 16.0;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Admission {
-    /// Every runner's memory cap: `slots × memory` over all profiles, with the mirror, must fit `MemoryMax`.
-    #[default]
+    /// Every runner's memory cap: `slots × memory` over all profiles, with the mirror, must fit `MemoryMax`. The
+    /// opt-out from measured admission.
     Caps,
-    /// Every runner's predicted peak, from the job history; `slots` only bounds how many run at once, and one
-    /// runner of each profile with the mirror must fit `MemoryMax`. Nothing starts while the slice is at 90% of it.
+    /// The default: every runner's predicted peak, from the job history; `slots` only bounds how many run at once,
+    /// and one runner of each profile with the mirror must fit `MemoryMax`. Nothing starts while the slice is at 90%
+    /// of it.
+    #[default]
     Measured,
 }
 
@@ -1052,10 +1054,10 @@ pub enum ConfigError {
     /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
     BudgetOverflow,
-    /// `admission = "measured"` with a slice that has no `MemoryMax` to admit against.
+    /// Measured admission, the default, with a slice that has no `MemoryMax` to admit against.
     #[error(
-        "admission = \"measured\" admits runners against the slice {slice}'s MemoryMax, and it has none; install \
-         a unit file for it (`runnerd doctor` prints one)"
+        "measured admission, the default, admits runners against the slice {slice}'s MemoryMax, and it has none; \
+         install a unit file for it (`runnerd doctor` prints one), or set [host] admission = \"caps\""
     )]
     MeasuredWithoutMemoryMax {
         /// The slice runners run in.

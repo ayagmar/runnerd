@@ -198,8 +198,9 @@ queued → slot → container → removed
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget, in the profile of
    the repository's pool whose labels match the job (each `[[repositories]]` entry is a pool;
    [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each
-   runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
-   [ADR 0033](docs/adr/0033-measured-admission.md)), within what the host's memory leaves the slice
+   runner reserves is its predicted peak under `admission = "measured"`, the default, or its cap under `"caps"`
+   (`engine/admission`, [ADR 0033](docs/adr/0033-measured-admission.md),
+   [ADR 0138](docs/adr/0138-measured-admission-is-the-default.md)), within what the host's memory leaves the slice
    ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md); with `[host] memory_ceiling` counting what an
    elastic VM can still grow by, [ADR 0084](docs/adr/0084-a-host-whose-memory-grows-to-a-ceiling.md)), and under
    `cpu_overcommit` within the CPU
@@ -505,13 +506,14 @@ always returns, so the daemon closes and flushes the history.
   while the file on disk is not that revision's text, so an editor opened before a change cannot save over it.
 - The engine refuses a new config that changes `host.slice` before its file is written: the sampler, admission's
   slice and the running containers stay in the slice runnerd started in, so the slice changes only at a restart.
-- What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
+- What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`.
+  `admission` defaults to `"measured"` ([ADR 0138](docs/adr/0138-measured-admission-is-the-default.md)). Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
   `admission = "measured"` a runner reserves its predicted peak, at most its cap, and counts at the larger of that
   and its last sampled memory, or at its cap when its own or the slice's sample is older than three intervals; the
   reservation follows its pool's queue until its job is known, then that job's prediction, and a waiting
-  runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
+  runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`, and refuses a slice without one; nothing
   starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
   after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it without a
   record of what it reserved ([ADR 0033](docs/adr/0033-measured-admission.md),

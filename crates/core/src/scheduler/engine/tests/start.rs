@@ -237,6 +237,7 @@ async fn a_start_in_flight_counts_its_reservation_under_measured_admission_and_i
         "isolation = \"sysbox\"",
         "isolation = \"sysbox\"\nadmission = \"measured\"",
     );
+    let caps = under_caps(CONFIG);
     for (policy, sampled) in [
         (api::AdmissionPolicy::Caps, Sampled::Fresh),
         (api::AdmissionPolicy::Measured, Sampled::Fresh),
@@ -248,7 +249,7 @@ async fn a_start_in_flight_counts_its_reservation_under_measured_admission_and_i
             TestDir::new("start"),
         );
         let config = match policy {
-            api::AdmissionPolicy::Caps => CONFIG,
+            api::AdmissionPolicy::Caps => &caps,
             api::AdmissionPolicy::Measured => &measured,
         };
         let (mut engine, handle) = engine_with(&github, &docker, &dir, config);
