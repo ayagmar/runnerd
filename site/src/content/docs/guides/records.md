@@ -20,6 +20,6 @@ runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 
 A record keeps the workspace with build output and test reports, the runner's `_diag` logs (secrets masked), and what the job wrote outside volumes. It never keeps logins and tools in the runner's home (`.gitconfig`, `.aws`, `~/.local`, `~/.nvm`), `/tmp`, the JIT config, `_work/_temp` or the token `actions/checkout` puts in `.git/config`; runnerd refuses to keep a container that still holds any. runnerd does not read file contents, so a secret saved in the workspace stays.
 
-Anyone who can use Docker on this host can read a record (`docker run runnerd-record:<job>`), so turn `record_failures` on only for profiles whose jobs they may see. A record takes about twice what the job wrote outside volumes. `runnerctl records` lists them; `runnerctl records rm <job>`, `--all` or `--older-than 2d` removes them.
+Anyone who can use Docker on this host can read a record: [Security model](../../security/#records) says what one keeps. A record takes about twice what the job wrote outside volumes. `runnerctl records` lists them; `runnerctl records rm <job>`, `--all` or `--older-than 2d` removes them.
 
 [`[records]`](../../reference/configuration-more/#records) bounds how many records are kept, how much disk they take and for how long.

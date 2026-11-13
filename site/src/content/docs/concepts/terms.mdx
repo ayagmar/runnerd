@@ -15,7 +15,7 @@ A profile is a runner size and image: `cpus`, `memory`, `slots` and `image` unde
 
 ## Slice and budget
 
-Every runner container runs in one systemd slice, `runnerd.slice` by default. Its `MemoryMax` is the budget: a runner starts only when it fits beside what already runs, and what [the host's memory](../admission/#the-hosts-memory) leaves the slice. By default a runner reserves its profile's `memory`; under [measured admission](../admission/#measured-admission) it reserves its job's predicted peak.
+Every runner container runs in one systemd slice, `runnerd.slice` as `runnerd init` writes it. Its `MemoryMax` is the budget: a runner starts only when it fits beside what already runs, and what [the host's memory](../admission/#the-hosts-memory) leaves the slice. By default a runner reserves its profile's `memory`; under [measured admission](../admission/#measured-admission) it reserves its job's predicted peak.
 
 <Budget />
 
@@ -32,7 +32,7 @@ A slice without a unit file has no `MemoryMax`; the check then warns. Under [mea
 
 ## Warm runner
 
-A job that finds no runner waits 15 to 25 seconds for the next poll, a registration and a container start. A warm runner is registered before GitHub queues the job and takes it within a second or two.
+A warm runner is registered before GitHub queues the job and takes it within a second or two, where a job that finds no runner waits for a new one to start ([how long](../../guides/waiting/#how-long-it-waited)).
 
 - Each pool keeps [`warm`](../../reference/configuration/#repositories) runners (1 by default) while its repository is active: one of its jobs was waiting, taken or finished in the last 10 minutes. Otherwise they go after 5 idle minutes.
 - When a job is seen, the other jobs of its run get runners too: per pool, the median number that workflow's runs had there over 14 days, a run with none there counting as 0, less those seen. A pool needs 3 runs with jobs there first, and one that most runs skip gets none.
@@ -60,4 +60,4 @@ A job's wait runs from queued to started; the part that passed while runnerd was
 
 A job that leaves GitHub's queue without one of this machine's runners is recorded as `elsewhere` (the dashboard's "Not run here"), as `cancelled in queue` when its run was cancelled first, or as its conclusion, such as `skipped`. No wait, median or cost counts it. A finished job goes after `history.jobs`.
 
-A job that failed reads `runner fault`, not `failure`, when its failed step's log shows Sysbox losing the runner's seccomp listener: `function not implemented` on a mount, umount or openat2, or `unsafe procfs detected … invalid argument`. Its code did not fail, and a re-run on a new runner is the answer. It still counts as a failure in the stats and notifications.
+A failed job reads `runner fault` when Sysbox, not its code, failed it; [Why did this job fail?](../../guides/logs/#everything-else-on-its-page) says how runnerd tells.

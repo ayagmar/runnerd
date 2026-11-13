@@ -46,4 +46,3 @@ Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pres
 | `?`, `q` or `ctrl-c` | all keys; quit |
 | `ctrl-z` | suspend; `fg` brings it back |
 
-A daemon too old for a view's read says so in the view, `not supported by this runnerd`, rather than showing it empty.

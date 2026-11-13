@@ -214,6 +214,11 @@ html:not(.js) .theme {
   max-width: 34ch;
 }
 
+/* A setting reads as one word. */
+.lead code {
+  white-space: nowrap;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -474,6 +479,15 @@ html:not(.js) .theme {
   background: var(--pink);
 }
 
+/* On the light page the pale profile colours fade into it; these keep the blocks above 3:1. */
+:root[data-theme='light'] .jvm .block {
+  background: #2f8a4e;
+}
+
+:root[data-theme='light'] .node .block {
+  background: #c4505a;
+}
+
 .mirror .block {
   background: var(--ink);
 }
@@ -531,6 +545,13 @@ html:not(.js) .theme {
   min-width: 0;
 }
 
+/* A line that says what the block under it is, set close to it. */
+.stack .aside {
+  margin: 0.5rem 0 -0.5rem;
+  font-size: var(--step-small);
+  color: var(--muted);
+}
+
 .pair {
   grid-template-columns: minmax(0, 1fr);
   margin-top: 2rem;
@@ -540,11 +561,11 @@ html:not(.js) .theme {
   max-width: 48rem;
 }
 
-/* Clients: the TUI and the phone, the same height. The TUI's frame sets the row; the phone's shot fills it from its
-   top. */
+/* Clients: the TUI and the phone, the same height. The TUI's frame sets the row; the phone's column is about the
+   width that makes a whole phone screen as tall as it, and the screen is shown whole, never cut. */
 .clients {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(12rem, 18rem);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.32fr);
   gap: clamp(1rem, 2vw, 1.5rem);
   margin-top: 2rem;
 }
@@ -571,9 +592,9 @@ html:not(.js) .theme {
 }
 
 .phone .shot img {
+  width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: top;
+  object-fit: contain;
 }
 
 /* The comparison: a table of plain facts, runnerd's column marked by its colour only. */
@@ -683,7 +704,7 @@ html:not(.js) .theme {
   }
 
   /* At a phone's width the TUI's frame would be too small to read; the phone's own shot stands for the clients. */
-  .clients .tui {
+  .clients .tui-frame {
     display: none;
   }
 

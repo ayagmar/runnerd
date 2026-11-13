@@ -17,7 +17,7 @@ origins = ["https://forge.tail0b5e.ts.net:8443"]
 open = "https://forge.tail0b5e.ts.net:8443"   # optional: runnerctl web opens this, not 127.0.0.1
 ```
 
-`runnerctl web` now prints a link for each origin too. To sign a phone in, scan a QR code: **Show a QR code** under **Add a device** on the Config page, or `runnerctl web --qr`. A QR code works once, within 5 minutes; a link works once. `--base <origin>` prints a read-only link for a proxy not in `origins`, `--local` opens the loopback address once. Behind a proxy that sends `X-Forwarded-Proto` the session cookie is `Secure`. runnerd ignores Tailscale's identity headers, since any local user could send them to the port.
+`runnerctl web` now prints a link for each origin too. To sign a phone in, scan a QR code: **Show a QR code** under **Add a device** on the Config page, or `runnerctl web --qr`. A QR code works once, within 5 minutes; a link works once. `--base <origin>` prints a read-only link for a proxy not in `origins`, `--local` opens the loopback address once. [Security model](../../security/#the-dashboard) says what a proxy may write and which headers runnerd trusts.
 
 ## Install it as an app
 

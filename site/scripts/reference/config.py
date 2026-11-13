@@ -5,8 +5,8 @@
 For every table of runnerd.toml, `runnerd check-config` is given the table with a key it does not know; serde's error
 lists the keys the type accepts, and the reference's table for it (configuration.md and configuration-more.md) must list exactly those. Then every default the
 reference gives as a TOML value is written into a small config, which must pass the check: a misspelt key or a value
-of the wrong kind fails. check-docs-commands.sh runs it in CI. It does not prove a default is the one the code uses:
-the type's `Default` does not print.
+of the wrong kind fails. check-docs-commands.sh runs it in CI. That each default is the one the code uses is
+runnerd-core's test `every_default_the_configuration_reference_gives_is_the_one_the_config_uses`.
 """
 import re
 import subprocess

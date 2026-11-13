@@ -39,7 +39,7 @@ use runnerd_core::api::{
 use runnerd_core::api::{
     Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
 };
-use runnerd_core::api::{Attention, DoctorState, attention_items};
+use runnerd_core::api::{Attention, DoctorState, attention_items, records_near_full};
 use runnerd_core::api::{
     AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
     WaitSpread, WeekWaits,
@@ -1567,12 +1567,7 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
         checks: vec![
             Check { name: "Docker".to_owned(), status: CheckStatus::Pass, detail: "29.1.3, reachable".to_owned(), fix: None },
             Check { name: "sysbox".to_owned(), status: CheckStatus::Pass, detail: "sysbox-runc registered".to_owned(), fix: None },
-            Check {
-                name: "slice".to_owned(),
-                status: CheckStatus::Warn,
-                detail: "runnerd.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
-                fix: Some("systemctl edit runnerd.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
-            },
+            records_check(&fixtures.records),
             Check {
                 name: "repository".to_owned(),
                 status: CheckStatus::Warn,
@@ -1587,6 +1582,34 @@ fn doctor(fixtures: &Fixtures) -> Doctor {
             },
         ],
         state: Some(DoctorState::Ready { at: fixtures.now - 180 }),
+    }
+}
+
+/// The doctor's records check over the fake's records, in the daemon's words (`doctor::records_check`).
+fn records_check(records: &Records) -> Check {
+    let bytes: u64 = records.records.iter().map(|record| record.bytes).sum();
+    let max_total = runnerd_core::config::ByteSize(records.limits.max_total);
+    let taken = format!(
+        "the records of failed jobs take {} of [records] max_total = {max_total}",
+        runnerd_core::config::ByteSize(bytes)
+    );
+    if records_near_full(bytes, records.limits.max_total) {
+        Check {
+            name: "records".to_owned(),
+            status: CheckStatus::Warn,
+            detail: format!("{taken}; new ones remove the oldest to fit"),
+            fix: Some(
+                "runnerctl records rm --older-than 2d, or raise max_total under [records]"
+                    .to_owned(),
+            ),
+        }
+    } else {
+        Check {
+            name: "records".to_owned(),
+            status: CheckStatus::Info,
+            detail: taken,
+            fix: None,
+        }
     }
 }
 

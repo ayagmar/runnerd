@@ -42,7 +42,7 @@ The host is short of memory: needs 6G; the host has 2G to spare; programs outsid
 
 Close them, or wait: runnerd starts the job once the host has room. The figure also counts the kernel and compressed swap, so closing them frees only part of it. When the host has memory but what runs may still grow into it, the job says so and names no programs. [The host's memory](../../concepts/admission/#the-hosts-memory) has the rules.
 
-A job that has waited 30 minutes or more for the host's memory is also listed as needing attention, an [insight](../insights/) and a notification.
+A job that has waited 30 minutes or more for the host's memory, while the host lacks room for one that waits now, is also listed as needing attention, an [insight](../insights/) and a notification, with the same programs named.
 
 ## How long it waited
 

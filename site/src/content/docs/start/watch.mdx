@@ -6,7 +6,7 @@ description: The web dashboard, the terminal dashboard and runnerctl, and how ea
 import Shot from '../../../components/Shot.astro';
 import Tui from '../../../components/Tui.astro';
 
-Three clients read the same daemon: the dashboard in a browser, `runnerctl tui` in a terminal, and `runnerctl` for scripts. They show the same figures in the same words. Shots and output here come from a demo daemon running the [example config](../../reference/configuration/#an-example).
+Three clients read the same daemon: the dashboard in a browser, `runnerctl tui` in a terminal, and `runnerctl` for scripts. They show the same figures in the same words. Shots and output here come from a demo daemon running the [example config](../../reference/configuration/#an-example) with a third profile, `small`, and measured and CPU admission on.
 
 ## The dashboard
 
@@ -30,7 +30,7 @@ The overview opens on what needs attention, when anything does. Below it, a lane
 
 ## The terminal dashboard
 
-`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views and keys follow the dashboard's.
+`runnerctl tui` is for a host you reach over SSH. Its views and keys follow the dashboard's.
 
 <Tui
   name="overview-96"

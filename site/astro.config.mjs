@@ -4,7 +4,7 @@ import starlight from '@astrojs/starlight';
 const site = 'https://ayagmar.github.io';
 const base = '/runnerd';
 
-// The social card: a screenshot of the landing page in a 1200x630 viewport at 1x, dark theme, 9s into the replay.
+// The social card: the landing page's first 1200x630 at 1x, dark theme (scripts/capture/card.mjs).
 const card = [
   { tag: 'meta', attrs: { property: 'og:image', content: `${site}${base}/og.png` } },
   { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
@@ -16,6 +16,16 @@ export default defineConfig({
   site,
   base,
   trailingSlash: 'always',
+  // Pages that moved, for links written before they did, such as those in a runnerd.toml that `runnerd init` wrote.
+  redirects: {
+    '/install/': `${base}/start/install/`,
+    '/configuration/': `${base}/reference/configuration/`,
+    '/admission/': `${base}/concepts/admission/`,
+    '/running/': `${base}/start/first-job/`,
+    '/insights/': `${base}/guides/insights/`,
+    '/clients/': `${base}/start/watch/`,
+    '/architecture/': `${base}/concepts/architecture/`,
+  },
   // Source Serif 4 and Libre Franklin (OFL, public/fonts), Fontsource's latin files cut to ASCII and the punctuation the
   // site uses: pyftsubset --unicodes=U+20-7E,U+A0,U+B7,U+D7,U+2013,U+2014,U+2018,U+2019,U+201C,U+201D,U+2026,U+2212
   // --layout-features='*' --flavor=woff2. The serif's cut is renamed runnerd serif in its name table, since 'Source' is

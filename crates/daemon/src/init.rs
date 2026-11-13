@@ -441,7 +441,7 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
             format!(
                 "# The most memory this host can grow to, as MemTotal reads at the VM's maximum: admission counts what\n\
                  # it can still grow by. It is the hypervisor's promise, not memory the host has:\n\
-                 # https://ayagmar.github.io/runnerd/admission/#a-host-whose-memory-grows\n\
+                 # https://ayagmar.github.io/runnerd/concepts/admission/#a-host-whose-memory-grows\n\
                  memory_ceiling = \"{given}\"\n"
             ),
             "the memory the host\n# can grow to",
@@ -464,7 +464,7 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          maven = {{ max_size = \"5G\" }}\n\
          \n\
          # runnerd changes each profile's memory, slots and cpus from what its jobs use and how long they wait,\n\
-         # a step at a time: https://ayagmar.github.io/runnerd/admission/#auto-sizing\n\
+         # a step at a time: https://ayagmar.github.io/runnerd/guides/sizing/#auto-sizing\n\
          [sizing]\n\
          auto = true\n\
          \n\

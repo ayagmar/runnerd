@@ -14,7 +14,9 @@ const browser = await chromium.launch({ executablePath });
 // 1280 wide at 1.5x, phone 390 at 2x; a page taller than its shot is cut, since a whole history is a wall of rows.
 const pages = [
   { name: 'overview', path: '/', heights: { desktop: 1720, phone: 1200 } },
-  { name: 'jobs', path: '/history', heights: { desktop: 900 } },
+  // One phone screen of the overview, tab bar included, for the landing page beside the TUI's frame: its 390 by 731
+  // is the phone box's inside where the TUI's 96 by 26 frame is 526 px tall.
+  { name: 'screen', path: '/', heights: { phone: 731 } },
   { name: 'timeline', path: '/history?lens=timeline', heights: { desktop: 520 } },
   { name: 'insights', path: '/insights', heights: { desktop: 760 } },
   { name: 'job-failed', path: '/jobs/9401', heights: { desktop: 1840 } },
