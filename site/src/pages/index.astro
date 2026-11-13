@@ -6,22 +6,25 @@ import mark from '../assets/mark.svg?raw';
 import Shot from '../components/Shot.astro';
 import Tui from '../components/Tui.astro';
 import replay from '../assets/admission/replay.json';
-import { size } from '../scripts/overview';
+import { printed } from '../lib/printed';
+import { size } from '../lib/units';
 
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
-const docs = `${base}install/`;
+const docs = `${base}start/install/`;
 const repo = 'https://github.com/ayagmar/runnerd';
 const version = '0.1.0';
 const title = 'runnerd: GitHub Actions runners on your own Linux machine';
 const description =
-  'runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, as many at once as its memory holds.';
+  'runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, each reserving what it really uses, so twice the jobs fit in the same memory.';
 const url = new URL(base, Astro.site).href;
 const card = new URL(`${base}og.png`, Astro.site).href;
 
 // The same 33G under both admission policies, from one fictional 28-day history (assets/admission/replay.json):
 // `runnerd simulate`'s rows, and each job's runs, p95 peak and what measured admission reserves for it once it has
-// `min_jobs` runs, its p95 plus the default 15% margin rounded up to 256M. The bars are one burst of that history
-// at its busiest: 3 jvm and 5 node jobs queued together, of which caps start the first 2 of each profile.
+// `min_jobs` runs, its p95 plus the default 15% margin rounded up to 256M. The lanes are one burst of that history at
+// its busiest: 3 jvm and 5 node jobs queued together, of which caps start the first 2 of each profile and the rest
+// wait for memory. A lane per job, in the order they queued; each lane's block is its share of the 33G, as on the
+// dashboard's overview.
 const GIB = 1024 ** 3;
 const max = 33;
 const mirror = 0.5;
@@ -34,8 +37,11 @@ const integration = job('halyard/ledger integration tests');
 const ledger = job('halyard/ledger build');
 const storefront = job('halyard/storefront build');
 const e2e = job('halyard/storefront e2e');
+const queued = [integration, ledger, ledger, storefront, storefront, storefront, storefront, e2e];
+// Which of them caps start: the first two of each profile.
+const started = queued.map((j, i) => queued.slice(0, i).filter((k) => k.kind === j.kind).length < 2);
 
-// simulate's numbers are right-aligned under their headings; the two each row leads with come from its own row.
+// simulate's numbers are right-aligned under their headings; the two each lane's figure quotes come from its own row.
 const [simulateHead, ...simulateRows] = replay.table;
 const cell = (policy: string, column: string) => {
   const row = simulateRows.find((r) => r.startsWith(`${policy} `));
@@ -44,51 +50,21 @@ const cell = (policy: string, column: string) => {
   if (!value) throw new Error(`no ${column} for ${policy} in replay.json`);
   return value;
 };
-const packs = [
-  { policy: 'caps', runners: [integration, ledger, storefront, storefront].map((j) => ({ ...j, size: caps[j.kind] })) },
-  {
-    policy: 'measured',
-    runners: [integration, ledger, ledger, storefront, storefront, storefront, storefront, e2e].map((j) => ({
-      ...j,
-      size: j.reserve / GIB,
-    })),
-  },
-].map((pack) => {
-  const reserved = pack.runners.reduce((sum, r) => sum + r.size, 0) + mirror;
-  const atOnce = Number(cell(pack.policy, 'AT ONCE'));
-  if (atOnce !== pack.runners.length) throw new Error(`${pack.policy}: ${pack.runners.length} blocks, simulate says ${atOnce}`);
-  return { ...pack, free: max - reserved, atOnce, p95: cell(pack.policy, 'WAIT P95'), longest: cell(pack.policy, 'WAIT MAX') };
+const policies = (['caps', 'measured'] as const).map((policy) => {
+  const sizes = queued.map((j, i) => (policy === 'caps' ? (started[i] ? caps[j.kind] : 0) : j.reserve / GIB));
+  const offsets = sizes.map((_, i) => sizes.slice(0, i).reduce((sum, s) => sum + s, 0));
+  const reserved = sizes.reduce((sum, s) => sum + s, 0);
+  const atOnce = sizes.filter((s) => s > 0).length;
+  if (atOnce !== Number(cell(policy, 'AT ONCE'))) throw new Error(`${policy}: ${atOnce} lanes run, simulate says otherwise`);
+  return { policy, sizes, offsets, reserved, atOnce, p95: cell(policy, 'WAIT P95'), free: max - reserved - mirror };
 });
-
-// What runnerctl printed against the dashboard's demo daemon (crates/web/examples/demo), kept whole in
-// assets/terminal; each block below cuts out the lines it shows and changes none.
-const printed = (name: string, ...heads: string[]) => {
-  const files = import.meta.glob<string>('../assets/terminal/*.txt', { eager: true, query: '?raw', import: 'default' });
-  const text = files[`../assets/terminal/${name}.txt`];
-  if (text === undefined) throw new Error(`no capture ${name}`);
-  const lines = text.trimEnd().split('\n');
-  const from = (head: string) => {
-    const at = lines.findIndex((line) => line.startsWith(head));
-    if (at < 0) throw new Error(`no "${head}" in ${name}`);
-    return at;
-  };
-  return lines.slice(from(heads[0]!), heads[1] === undefined ? undefined : from(heads[1])).join('\n').trimEnd();
-};
-
-// The queue of `runnerctl status`: storefront's jobs, and why each waits.
-const waits = `$ runnerctl status\n${printed('status', 'JOB ')}`;
-
-// The cache volumes' last two lines.
-const caches = `$ runnerctl caches\n${printed('caches', 'build cache for')}`;
-
-const shell = `$ runnerctl shell 120055991489
-runnerd: the record of job 120055991489 of halyard/ledger, CI / build
-It failed at step 5: Unit tests (exit code 1)
-Its log shows it ran:
-    ./gradlew test --no-daemon
-    shell: /usr/bin/bash -e {0}
-You are in /home/runner/_work/ledger/ledger, as the job left it. Exit to remove this container.
-runner@4be1c0d2a7e9:~/_work/ledger/ledger$`;
+const [byCaps, byPeaks] = policies;
+const pct = (gib: number) => `${((gib / max) * 100).toFixed(3)}%`;
+// A lane's style: where its block starts and how wide it is under each policy.
+const lane = (at: number, width: (p: (typeof policies)[number]) => number) =>
+  policies.map((p) => `--at-${p.policy}: ${pct(at === -1 ? p.reserved : p.offsets[at]!)}; --w-${p.policy}: ${pct(width(p))}`).join('; ');
+// A waiting job's reason, in the words runnerd uses for it (api::Waiting::Memory).
+const waits = (j: (typeof queued)[number]) => `Needs ${size(caps[j.kind] * GIB)} of memory; ${size(byCaps!.free * GIB)} of the budget is free`;
 
 // The quick start, from the install page.
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
@@ -96,6 +72,29 @@ const init = `runnerd init halyard/ledger halyard/storefront
 systemctl --user daemon-reload
 systemctl --user enable --now runnerd`;
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
+
+// What runnerctl printed against the dashboard's demo daemon; each block cuts out the lines it shows and changes none.
+const status = `$ runnerctl status\n${printed('status', 'JOB ')}`;
+const caches = `$ runnerctl caches\n${printed('caches', 'build cache for')}`;
+const savings = printed('insights', 'This month', '  ');
+const shell = `$ runnerctl shell 120055991489
+runnerd: the record of job 120055991489 of halyard/ledger, CI / build
+It failed at step 6: Unit tests (exit code 1)
+Its log shows it ran:
+    ./gradlew test --no-daemon
+    shell: /usr/bin/bash -e {0}
+You are in /home/runner/_work/ledger/ledger, as the job left it. Exit to remove this container.
+runner@4be1c0d2a7e9:~/_work/ledger/ledger$`;
+
+const compared = [
+  ['Runs on', 'a Linux machine you run', "GitHub's machines", 'your Kubernetes cluster', 'a machine you run'],
+  ['Each job gets', 'a new container; its slot keeps the caches', 'a new VM', 'a new pod', 'what the last job left, unless the runner is ephemeral'],
+  ['Memory per job', 'what the job peaks at, measured', 'the runner size you pay for', "the pod's requests and limits", 'the whole machine, one job at a time'],
+  ['You run', 'one daemon, Docker and Sysbox', 'nothing', 'Kubernetes and the controller', 'one runner service per concurrent job'],
+  ['Minutes cost', 'your machine', 'billed past your plan on private repositories', 'your cluster', 'your machine'],
+];
+// runnerd's column first, so a phone shows it before the table scrolls.
+const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-hosted runner'];
 ---
 <!doctype html>
 <html lang="en" data-theme="dark">
@@ -134,135 +133,180 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
         <a href={docs}>Docs</a>
         <a href={repo}>GitHub</a>
         <button class="theme" type="button" aria-label="Switch to light theme" data-theme-toggle>Light</button>
-        <a class="button small" href="#install">Install</a>
       </nav>
     </header>
 
     <main id="main">
       <section class="hero wrap" aria-labelledby="title">
         <div class="hero-text">
-          <h1 id="title">CI runners on your own&nbsp;box</h1>
-          <p class="lead">
-            runnerd runs your GitHub Actions jobs on one Linux machine, each in a fresh container, as many at once as
-            its memory holds.
-          </p>
-          <div class="command">
-            <pre class="terminal" tabindex="0" data-ui><code>{install}</code></pre>
-            <button class="copy" type="button" data-copy={install} hidden>Copy</button>
-          </div>
+          <h1 id="title">Twice the runners in the same&nbsp;33G</h1>
+          <p class="lead">runnerd runs your GitHub Actions jobs on a Linux machine you already have, each in a fresh container that reserves what the job really peaks at, not a fixed cap.</p>
           <div class="actions">
             <a class="button" href="#install">Set it up</a>
             <a class="text-link" href={docs}>Read the docs</a>
           </div>
         </div>
-        <div class="hero-shot">
+
+        <figure class="lanes" data-ui>
+          <div class="switch" role="radiogroup" aria-label="How runners reserve memory">
+            {policies.map((p) => (
+              <label>
+                <input type="radio" name="policy" value={p.policy} checked={p.policy === 'measured'} />
+                <span>{p.policy === 'caps' ? 'Fixed caps' : 'Measured peaks'}</span>
+              </label>
+            ))}
+          </div>
+          {policies.map((p) => (
+            <p class={`lanes-figure only-${p.policy}`}><strong>{p.atOnce} jobs</strong> at once, p95 wait {p.p95}</p>
+          ))}
+          <ol class="lane-list" aria-label="The 33G slice, a lane per job">
+            {queued.map((j, i) => (
+              <li class={`lane ${j.kind}`} style={lane(i, (p) => p.sizes[i]!)}>
+                <span class="track" aria-hidden="true"><span class="block" /></span>
+                <span class="lane-name">{j.name}<span class="repo">{j.repository}</span></span>
+                <span class="lane-size only-measured">{size(j.reserve)}</span>
+                {started[i] ? (
+                  <span class="lane-size only-caps">{size(caps[j.kind] * GIB)}</span>
+                ) : (
+                  <span class="lane-wait only-caps">{waits(j)}</span>
+                )}
+              </li>
+            ))}
+            <li class="lane mirror" style={lane(-1, () => mirror)}>
+              <span class="track" aria-hidden="true"><span class="block" /></span>
+              <span class="lane-name">mirror</span>
+              <span class="lane-size">{size(mirror * GIB)}</span>
+            </li>
+            <li class="lane free" style={policies.map((p) => `--at-${p.policy}: ${pct(p.reserved + mirror)}; --w-${p.policy}: ${pct(p.free)}`).join('; ')}>
+              <span class="track" aria-hidden="true"><span class="block" /></span>
+              <span class="lane-name">free</span>
+              {policies.map((p) => <span class={`lane-size only-${p.policy}`}>{size(p.free * GIB)}</span>)}
+            </li>
+          </ol>
+          <figcaption>
+            The busiest moment of a replayed 28-day history: 3 jvm and 5 node jobs queued together.
+            <a class="text-link" href={`${base}concepts/admission/#measured-admission`}>How a job is measured</a>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="part wrap split" aria-labelledby="attention-title">
+        <div class="part-text">
+          <h2 id="attention-title">What needs you comes&nbsp;first</h2>
+          <p>A job no runner here can take, a doctor warning, a token GitHub refuses: the dashboard and the TUI open on them, each with what clears it.</p>
+        </div>
+        <Shot
+          name="part-attention"
+          alt="Four things that need attention on the overview: a config file other users can read, a public repository, a slice with no MemoryHigh, and a job no profile serves, each with its fix."
+          sizes="(min-width: 960px) 40rem, calc(100vw - 2.5rem)"
+        />
+      </section>
+
+      <section class="part wrap split" aria-labelledby="failure-title">
+        <div class="part-text">
+          <h2 id="failure-title">A failed job opens on&nbsp;why</h2>
+          <p>The failing step, its exit code and its last lines, then the log folded by step. With <code>record_failures</code> on, <code>runnerctl shell</code> opens the job's container as it failed.</p>
+          <a class="text-link" href={`${base}guides/logs/`}>Why did this job fail?</a>
+        </div>
+        <div class="stack">
           <Shot
-            name="overview"
-            eager
-            alt="The runnerd dashboard: 2 of 6 slots running, 5 jobs waiting with why each waits, the memory and CPU reserved, the memory budget as blocks per slot, the slots with their jobs' memory and CPU, and the latest jobs."
-            sizes="(min-width: 1100px) 60vw, calc(100vw - 2rem)"
+            name="part-failure"
+            alt="A failed job's summary: step 5, Run ./gradlew test, failed with exit code 1, with the log lines that failed it."
+            sizes="(min-width: 960px) 40rem, calc(100vw - 2.5rem)"
+          />
+          <pre class="terminal" tabindex="0" aria-label="runnerctl shell into a failed job"><code>{shell}</code></pre>
+        </div>
+      </section>
+
+      <section class="part wrap" aria-labelledby="waits-title">
+        <div class="part-text">
+          <h2 id="waits-title">Every wait says why</h2>
+          <p>A queued job names what holds it. The timeline shows what each slot ran all day, the wait before each job.</p>
+        </div>
+        <div class="pair">
+          <div><pre class="terminal wide" tabindex="0" aria-label="runnerctl status: the queue"><code>{status}</code></pre></div>
+          <Shot
+            name="part-timeline"
+            alt="The slots' timeline over 24 hours: a lane per slot, each job a mark coloured by outcome, waits for a runner drawn before them."
+            sizes="(min-width: 960px) 30rem, calc(100vw - 2.5rem)"
           />
         </div>
       </section>
 
-      <section class="part wrap" id="clients" aria-labelledby="clients-title">
-        <div class="part-text narrow">
-          <h2 id="clients-title">One daemon, three ways to watch it</h2>
-          <p>
-            The dashboard installs as an app on a phone, <code>runnerctl tui</code> works over SSH, and
-            <code>runnerctl</code> is for scripts.
-          </p>
-          <a class="text-link" href={`${base}clients/`}>The clients</a>
+      <section class="part wrap split" aria-labelledby="actions-title">
+        <div class="part-text">
+          <h2 id="actions-title">Cancel and re-run, shown before&nbsp;sent</h2>
+          <p>GitHub cancels runs, not jobs. runnerd shows what a cancel or a re-run would touch, and sends nothing until you confirm.</p>
+          <a class="text-link" href={`${base}guides/cancel-rerun/`}>Cancel and re-run</a>
+        </div>
+        <Shot
+          name="part-cancel"
+          alt="Cancel run 40018663900 (attempt 1) of halyard/ledger? GitHub cancels the whole run, here and on any other runner. Buttons: Cancel run, Keep it."
+          sizes="(min-width: 960px) 40rem, calc(100vw - 2.5rem)"
+        />
+      </section>
+
+      <section class="part wrap" aria-labelledby="clients-title">
+        <div class="part-text">
+          <h2 id="clients-title">On a phone, over SSH, in a script</h2>
+          <p>The dashboard installs as an app on a phone, <code>runnerctl tui</code> works over SSH, and <code>runnerctl</code> prints the same figures for scripts.</p>
         </div>
         <div class="clients">
           <Tui
             name="overview-96"
-            label="runnerctl tui's overview: 2 of 6 slots running, 5 jobs waiting with why each waits, the budget bar, one line per slot, the repositories and the latest jobs."
+            label="runnerctl tui's overview: the health line, what needs attention, a row per slot with its job, waiting jobs with why each waits, the repositories and the latest jobs."
           />
-          <Shot
-            name="job"
-            alt="A running job in the dashboard: its steps on one time axis, memory and CPU against what it reserved, and its latest runs."
-            sizes="(min-width: 1100px) 45vw, calc(100vw - 2rem)"
-          />
-        </div>
-      </section>
-
-      <section class="part wrap split" id="admission" aria-labelledby="pack-title">
-        <div class="part-text">
-          <h2 id="pack-title">Twice the runners in the same&nbsp;33G</h2>
-          <p>
-            A runner reserves what its job really peaks at, measured over its last 20 runs, not a fixed cap. A job that
-            runs out of memory gets its full cap back.
-          </p>
-          <a class="text-link" href={`${base}admission/`}>How admission works</a>
-        </div>
-        <div class="packs">
-          {packs.map((pack) => (
-            <figure class={`pack pack-${pack.policy}`} data-ui>
-              <p class="pack-figure">
-                <strong>{pack.atOnce} jobs</strong> at once, longest wait {pack.longest}
-              </p>
-              <ul class="pack-bar" style={`--total: ${max}`} aria-label={`${pack.atOnce} runners in 33G`}>
-                {pack.runners.map((runner) => (
-                  <li class={`block ${runner.kind}`} style={`--size: ${runner.size}`}>
-                    <span class="visually-hidden">{runner.repository} {runner.job}: </span>
-                    {size(runner.size * GIB)}
-                  </li>
-                ))}
-                <li class="block mirror" style={`--size: ${mirror}`}><span class="visually-hidden">mirror, 512M</span></li>
-                <li class="free" style={`--size: ${pack.free}`}><span class="visually-hidden">{size(pack.free * GIB)} free</span></li>
-              </ul>
-              <figcaption>
-                <span class="swatch jvm" />jvm <span class="swatch node" />node. The busiest moment of a replayed 28-day
-                history: 3 jvm and 5 node jobs queued together.
-              </figcaption>
-            </figure>
-          ))}
-          <div class="switch" role="radiogroup" aria-label="How runners reserve memory">
-            {packs.map((pack, i) => (
-              <label>
-                <input type="radio" name="policy" value={pack.policy} checked={i === 1} />
-                <span>{pack.policy === 'caps' ? 'Fixed caps' : 'Measured peaks'}</span>
-              </label>
-            ))}
+          <div class="phone">
+            <Shot
+              name="overview"
+              phone
+              alt="The dashboard's overview on a phone: what needs attention, then running and waiting figures and the slots."
+              sizes="20rem"
+            />
           </div>
         </div>
       </section>
 
-      <section class="part wrap split stacked" id="waits" aria-labelledby="waits-title">
-        <div class="part-text">
-          <h2 id="waits-title">Every wait says why</h2>
-          <p>A queued job names what holds it: busy slots, a runner still starting, a label nothing serves.</p>
-        </div>
-        <div class="proof"><pre class="terminal wide" tabindex="0" data-ui aria-label="runnerctl status: the queue"><code>{waits}</code></pre></div>
-      </section>
-
-      <section class="part wrap split stacked" id="cache" aria-labelledby="cache-title">
+      <section class="part wrap split" aria-labelledby="cache-title">
         <div class="part-text">
           <h2 id="cache-title">GitHub's cache, on your own&nbsp;disk</h2>
-          <p>
-            <code>actions/cache</code>, the <code>cache:</code> input of <code>setup-node</code> and <code>setup-java</code>,
-            and Docker's <code>type=gha</code> restore from and save to this machine, with no change to a workflow.
-          </p>
-          <a class="text-link" href={`${base}running/#build-cache`}>The build cache</a>
+          <p><code>actions/cache</code>, the <code>cache:</code> input of <code>setup-node</code> and <code>setup-java</code>, and Docker's <code>type=gha</code> restore from and save to this machine, with no change to a workflow.</p>
+          <a class="text-link" href={`${base}guides/caches/`}>The caches</a>
         </div>
-        <div class="proof"><pre class="terminal" tabindex="0" data-ui aria-label="runnerctl caches: the build cache's hits and what serves GitHub's cache"><code>{caches}</code></pre></div>
+        <pre class="terminal" tabindex="0" aria-label="runnerctl caches: the build cache's hits and what serves GitHub's cache"><code>{caches}</code></pre>
       </section>
 
-      <section class="part wrap split" id="records" aria-labelledby="shell-title">
+      <section class="part wrap" aria-labelledby="compare-title">
         <div class="part-text">
-          <h2 id="shell-title">A shell in the job that failed</h2>
-          <p>
-            With <code>record_failures = true</code> a failed job's container is kept; <code>runnerctl shell</code> opens
-            it at the failing step, files as the job left them.
-          </p>
-          <a class="text-link" href={`${base}running/`}>Records of failed jobs</a>
+          <h2 id="compare-title">Beside the other ways to run a&nbsp;job</h2>
         </div>
-        <div class="proof"><pre class="terminal" tabindex="0" data-ui aria-label="runnerctl shell into a failed job"><code>{shell}</code></pre></div>
+        <div class="compare-scroll" tabindex="0" role="region" aria-labelledby="compare-title">
+          <table class="compare">
+            <thead>
+              <tr>
+                <td></td>
+                {sides.map((side) => <th scope="col">{side}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {compared.map(([row, ...cells]) => (
+                <tr>
+                  <th scope="row">{row}</th>
+                  {cells.map((c, i) => <td data-side={sides[i]}>{c}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="savings">The dashboard prices what ran here at GitHub's rates. Its demo says: <code>{savings}</code></p>
       </section>
 
       <section class="part wrap" id="install" aria-labelledby="install-title">
         <h2 id="install-title">Running in three steps</h2>
+        <div class="needs">
+          <p>It needs Linux with systemd and cgroup v2, Docker with the systemd cgroup driver, <a href="https://github.com/nestybox/sysbox">Sysbox</a>, and the GitHub CLI logged in. Each job runs in a new container under Sysbox, with its own unprivileged Docker Engine, and the container is removed when the job ends. Serve private repositories only.</p>
+          <a class="text-link" href={`${base}security/`}>Security model</a>
+        </div>
         <ol class="steps">
           <li>
             <div>
@@ -270,7 +314,7 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
               <p>A static binary for Linux, into <code>~/.local/bin</code>.</p>
             </div>
             <div class="command">
-              <pre class="terminal" tabindex="0" data-ui><code>{install}</code></pre>
+              <pre class="terminal" tabindex="0"><code>{install}</code></pre>
               <button class="copy" type="button" data-copy={install} hidden>Copy</button>
             </div>
           </li>
@@ -280,7 +324,7 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
               <p><code>init</code> sizes the slots, writes the config and the service, and prints any root commands.</p>
             </div>
             <div class="command">
-              <pre class="terminal" tabindex="0" data-ui><code>{init}</code></pre>
+              <pre class="terminal" tabindex="0"><code>{init}</code></pre>
               <button class="copy" type="button" data-copy={init} hidden>Copy</button>
             </div>
           </li>
@@ -290,7 +334,7 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
               <p>In each workflow that should run here.</p>
             </div>
             <div class="command">
-              <pre class="terminal" tabindex="0" data-ui><code>{runsOn}</code></pre>
+              <pre class="terminal" tabindex="0"><code>{runsOn}</code></pre>
               <button class="copy" type="button" data-copy={runsOn} hidden>Copy</button>
             </div>
           </li>
@@ -310,7 +354,6 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
 
     <script>
       import { setup } from '../scripts/landing';
-      import '../scripts/zoom';
       setup();
     </script>
   </body>

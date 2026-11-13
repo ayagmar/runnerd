@@ -65,6 +65,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.github/scripts/check-docs-commands.sh'
+              - 'site/scripts/reference/**'
               - '.github/workflows/ci.yml'
             deny:
               - '**/Cargo.toml'

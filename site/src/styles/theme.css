@@ -80,6 +80,18 @@
   line-height: 1.6;
 }
 
+/* Tables are looked up, not read: the display face, a step smaller and tighter than prose. */
+.sl-markdown-content table {
+  font-family: var(--font-display);
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.sl-markdown-content :is(th, td) {
+  padding-block: 0.45rem;
+}
+
 .sl-markdown-content :is(h1, h2, h3, h4, h5, h6),
 h1#_top {
   font-family: var(--font-display);

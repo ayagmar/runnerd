@@ -1,0 +1,18 @@
+---
+title: How do I cancel or re-run a job?
+description: Cancel a job's run or re-run it on GitHub from the dashboard, the TUI or runnerctl, previewed before anything is sent.
+---
+
+import Shot from '../../../components/Shot.astro';
+
+On a job's page in the dashboard, **Cancel run**, **Re-run job** and **Re-run failed jobs**; in the TUI's job view, `x`, `a` and `A`; from a shell, `runnerctl cancel` and `runnerctl rerun`. Each shows what GitHub would do and sends nothing until you confirm it.
+
+GitHub cancels runs, not jobs, and a re-run takes the jobs that depend on the one re-run with it. So `runnerctl cancel` and `runnerctl rerun` first read the run from GitHub, print what GitHub would do to its current attempt and the other jobs of the run runnerd knows (GitHub may have more, on other runners), and send nothing. They end with a command such as `runnerctl cancel 9001 --confirm 3f9a…`, which sends what they showed, once, within 5 minutes. If the run has moved to another attempt by then, or runnerd's config changed, nothing is sent: you get a new preview. If GitHub would not show the run, there is nothing to confirm until it does. `--force` skips the preview and sends at once, for scripts. The answer is one of four: GitHub took it, the run had already finished, GitHub refused (with its HTTP status and what to check), or the outcome is unknown, as after a timeout; then check the run on GitHub before asking again. runnerd's own record of the job stays as it was; the cancelled job and the new attempt arrive as GitHub lists them. [`[github] job_actions = false`](../../reference/configuration-more/#github) turns both off.
+
+<Shot
+  name="cancel"
+  alt="The cancel preview on a job's page: the run it cancels at its current attempt, what GitHub stops, that runnerd knows no other job of the run, and the buttons Cancel run and Keep it."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
+
+A classic token needs the `repo` scope, a fine-grained one Actions: write; `runnerd doctor` says what it can tell without trying. [Security model](../../security/#job-actions) says what these actions can do on GitHub.

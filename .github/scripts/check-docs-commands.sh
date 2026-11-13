@@ -6,18 +6,20 @@
 # and the `$ ` lines of `console` blocks; output and prose are not commands.
 # A word that is not an option counts against the arguments the usage line takes, so a subcommand the command lacks
 # (`runnerctl caches clean`) fails.
+# Then the reference pages: the CLI's are what `--help` prints (site/scripts/reference/cli.py), and the configuration
+# page lists every key the config types accept, with defaults that parse (site/scripts/reference/config.py).
 # Usage: check-docs-commands.sh <directory with runnerd and runnerctl>, such as target/debug.
 set -eu
 
 bin=${1:?usage: check-docs-commands.sh <directory with runnerd and runnerctl>}
 lines=$(
-  awk '
+  find README.md site/src/content/docs \( -name '*.md' -o -name '*.mdx' \) -exec awk '
     /^```/ { if (fence) { fence = "" } else { fence = substr($1, 4); if (fence == "") fence = "text" } next }
     fence == "sh" || fence == "shell" || fence == "bash" { print; next }
     fence == "console" { if (sub(/^\$ /, "")) print; next }
     fence { next }
     { while (match($0, /`[^`]+`/)) { print substr($0, RSTART + 1, RLENGTH - 2); $0 = substr($0, RSTART + RLENGTH) } }
-  ' README.md site/src/content/docs/*.md site/src/content/docs/*.mdx |
+  ' {} + |
     grep -v 'cargo ' |
     grep -oE '(^|[;&|(]) *runner(d|ctl)( [^ |;&#]+)+' |
     sed -E 's/^[^r]*//; s/[][]//g' | sort -u
@@ -141,3 +143,6 @@ echo "$lines" | {
   done
   exit "$status"
 }
+
+python3 site/scripts/reference/cli.py "$bin" --check
+python3 site/scripts/reference/config.py "$bin"

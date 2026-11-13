@@ -1,0 +1,65 @@
+---
+title: Watch it
+description: The web dashboard, the terminal dashboard and runnerctl, and how each signs in.
+---
+
+import Shot from '../../../components/Shot.astro';
+import Tui from '../../../components/Tui.astro';
+
+Three clients read the same daemon: the dashboard in a browser, `runnerctl tui` in a terminal, and `runnerctl` for scripts. They show the same figures in the same words. Shots and output here come from a demo daemon running the [example config](../../reference/configuration/#an-example).
+
+## The dashboard
+
+`runnerd serve` serves it on `127.0.0.1:7477`; `--web <address>` picks another loopback address, `--web off` serves none. A browser signs in once through a one-time link the daemon keeps in `$XDG_RUNTIME_DIR/runnerd.web`:
+
+```sh
+runnerctl web
+# without runnerctl
+xdg-open "$(head -n 1 "$XDG_RUNTIME_DIR/runnerd.web")"
+```
+
+The browser stays signed in for 30 days after its last visit. Memory and CPU are sampled every 2 s, so a shorter peak does not show. [Security model](../../security/#the-dashboard) says how sessions end; [On another device](../../guides/remote-dashboard/) puts it on a phone.
+
+<Shot
+  name="overview"
+  alt="The overview: four things that need attention, the health figures, a lane per slot laid over the memory budget with the running jobs' memory and CPU, and jobs waiting with their reasons."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
+
+The overview opens on what needs attention, when anything does. Below it, a lane per slot shows its share of the memory budget and the job it runs. Five views, `1` to `5` on the keyboard: Overview, Jobs, Insights, Capacity and Settings. [Pages and keys](../../reference/pages-and-keys/) lists what each shows.
+
+## The terminal dashboard
+
+`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views and keys follow the dashboard's.
+
+<Tui
+  name="overview-96"
+  label="runnerctl tui's overview at 96 by 26: the health line, what needs attention, a row per slot, waiting jobs with their reasons, the repositories and the latest jobs."
+/>
+
+When the daemon goes away the header says `reconnecting` and the event stream resumes where it stopped. `cargo build -p runnerd-cli --no-default-features` builds `runnerctl` without the TUI.
+
+## runnerctl
+
+Every command prints text, or with `--json` the API's response unchanged; `--socket` picks another socket. [runnerctl](../../reference/runnerctl/) lists them all.
+
+```console wrap=false
+$ runnerctl job 120055991526
+Usage
+  Memory peak      6.61G
+  Average memory   5.13G
+  CPU peak         7.57 cores
+  Average CPU      3.33 cores
+  CPU time         37m 43s
+  Received         506.45M
+  Sent             56.27M
+  From the mirror  168.82M
+  CPU held back    held at its CPU cap in 5% of its busy time, waited for a CPU 25% of its run
+  Build cache      30 of 36 lookups hit (83%), 101.29M served, 12.66M stored
+  Log              54 lines, 2.15K  runnerctl logs 120055991526
+  memory peaks are sampled every 2 s; spikes shorter than that do not show
+```
+
+The job tables have the columns Outcome, Job, Repository, Branch, Queued, Waited, Ran, Memory peak and CPU. `CPU held back` gives a share of the job's busy time, which reads higher than the share of the whole run that [auto sizing](../../guides/sizing/#auto-sizing) counts.
+
+Frames set in JetBrains Mono ([OFL](../../fonts/JetBrainsMono-OFL.txt)).

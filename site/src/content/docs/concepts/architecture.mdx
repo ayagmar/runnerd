@@ -1,0 +1,22 @@
+---
+title: Where each part lives
+description: The daemon, the engine, the stores and the clients, and where each lives in the repository.
+---
+
+import Architecture from '../../../components/diagrams/Architecture.astro';
+
+<Architecture />
+
+| Part | Where | What it owns |
+|---|---|---|
+| Daemon, socket API | `crates/daemon` | `runnerd` commands; the routes clients call; `[notify]` deliveries |
+| Engine | `crates/core/src/scheduler` | slot state, the tick, planning, starting and removing runners |
+| GitHub, Docker | `crates/core/src/github.rs`, `docker.rs` | the only code that talks to them, behind traits the engine's tests fake |
+| History store | `crates/core/src/store.rs` | SQLite; one writer |
+| Admission, sizing | `crates/core/src/admission`, `sizing` | predicted peaks, slot and memory advice |
+| API types, wording | `crates/core/src/api` | what every client shows of a fact: outcomes, waits, budgets, view and column names |
+| Dashboard | `crates/web` | server-rendered pages, charts, live updates |
+| CLI and TUI | `crates/cli` | `runnerctl`; the TUI is `src/tui`, one module per view |
+| Runner image | `image/` | the images the containers start from |
+
+Contributors: [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) has the crate rules, the request path and state, and every design decision links to its [ADR](https://github.com/ayagmar/runnerd/blob/main/docs/adr/README.md).

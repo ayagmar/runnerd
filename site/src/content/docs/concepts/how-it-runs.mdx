@@ -1,0 +1,40 @@
+---
+title: How a job runs
+description: What runs where inside runnerd, how a job moves through it, and where each part lives in the repository.
+---
+
+import Lifecycle from '../../../components/diagrams/Lifecycle.astro';
+import Overview from '../../../components/diagrams/Overview.astro';
+
+<Overview />
+
+One daemon, `runnerd serve`, owns every slot. Clients never talk to GitHub or Docker: they read the daemon's status and history and send it commands over its Unix socket (`$XDG_RUNTIME_DIR/runnerd.sock`). The dashboard runs inside the daemon's process but uses the same socket.
+
+## Life of a job
+
+1. **Queued.** The job waits on GitHub, asking for labels that one of the repository's profiles serves.
+2. **Listed.** Every `poll_interval` the engine lists each repository's queued jobs, and three times as often while the repository is active: a job in the last 10 minutes, or a runner running one. It lists this machine's runners of a repository first, every third time and after one of them starts or goes, so a job whose runner just took it does not get a second one. A command lists every repository at once.
+3. **Admitted.** The planner picks a free slot in the repository's profile whose labels match the job. A job starts only if its runner's memory fits the budget: its cap, or under `admission = "measured"` its predicted peak, within what the host leaves the slice. A job that does not fit stays queued, and `runnerctl status` says why.
+4. **Runner started.** The engine registers an ephemeral runner with the pool's labels and starts a container for it in the slot, under sysbox, over the profile's snapshot. Up to four runners start at once, and their registrations go to GitHub one after another. The runner takes one job that matches those labels, not necessarily the one that prompted the start, and exits after it.
+5. **Job.** While it runs, the engine records the job's steps, its log and, every 2 seconds, its container's CPU and memory in the history store. Clients stream this through `GET /v1/events`.
+6. **Recorded.** When the runner exits, its credentials are scrubbed. Docker's event wakes the engine, which inspects the container, removes it, frees the slot and starts a runner for the next listed job there without waiting for the next poll. GitHub drops the runner's registration with its job; runnerd deletes one it kept without holding the slot. If Docker's events are not coming through, the next poll finds the exit. The job's record is final once GitHub reports it completed. A failed job of a profile with `record_failures` leaves a record first, which `runnerctl shell` opens.
+
+<Lifecycle />
+
+## Scheduling in detail
+
+- It reads the `gh` CLI's token at start, and again when GitHub rejects it. Every [`poll_interval`](../../reference/configuration/#host) it asks GitHub for each repository's queued jobs, and three times as often for a repository with jobs lately.
+- The pool whose `labels` include every label in a job's `runs-on` serves it: one `[[repositories]]` entry, or one of [several](../../guides/sizing/#split-light-and-heavy-jobs).
+- It registers a just-in-time runner and starts it in a free slot of the pool's profile if the slice's `MemoryMax` has room for the profile's `memory` (under [measured admission](../admission/#measured-admission), the job's predicted peak) and, under [CPU admission](../cpu/), the CPU budget has room too.
+- A job that does not fit lets younger ones past, until it has waited 10 minutes for memory or CPU, or 2 if its pool already went first and still has jobs queued. Then [it goes first](../growth-and-priority/#a-starved-job-goes-first). What it wins is the next runner of its pool: GitHub gives a runner any job its labels match, so another job of that pool may take it.
+- A runner takes one job, then runnerd removes it. A runner with no job after 5 minutes is removed unless it is [warm](../terms/#warm-runner).
+- Each tick removes the idle runners it no longer needs first, all at once, then starts runners for queued jobs. A runner that no longer fits what runs by then waits; the others start, then the tick plans again from the same listings (at most three times) instead of waiting for the next poll.
+- When a runner's container stops, Docker's event wakes runnerd between polls: it removes the runner and starts one for the next job the last poll listed in its slot within seconds. A job cancelled or taken elsewhere since that poll can still get a runner, which then waits like any idle one. A job that went first holds these starts back too.
+- A job's page shows when runnerd first saw it queued (*Seen by runnerd*; a job a waiting runner took before any listing showed it has none, nor do jobs recorded by older versions), so its wait splits into the time before runnerd knew of it, the time it took to start a runner, and the runner's boot.
+- A restarted runnerd adopts running runner containers.
+
+## How often GitHub is asked
+
+A repository with a job in the last 10 minutes, or a runner running one, is asked three times as often as `poll_interval` (every 5 s by default); this machine's runners are listed every third time, and after a runner of it starts or goes. A slot whose runner ended takes the next listed job when Docker says so, not at the next poll. When the hour's rate limit runs short, runnerd reads running jobs less often first, then lists active repositories at the idle pace, then every repository two or four times less often, one step at a time, and logs each change; no registration or delete waits for this, but what a tick decides, such as stopping an idle runner or topping up a warm one, comes with the slower ticks.
+
+[Where each part lives](../architecture/) maps these parts to the code.

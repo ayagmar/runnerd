@@ -36,7 +36,7 @@ Binaries ship for x86_64 and aarch64; the runner images are linux/amd64 only, so
 
 ## Documentation
 
-Full docs: <https://ayagmar.github.io/runnerd/>. [Install](https://ayagmar.github.io/runnerd/install/) covers pinned versions and attestation checks, [Configuration](https://ayagmar.github.io/runnerd/configuration/) every key, and [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/) what you can watch and do.
+Full docs: <https://ayagmar.github.io/runnerd/>. [Install](https://ayagmar.github.io/runnerd/start/install/) covers pinned versions and attestation checks, [Configuration](https://ayagmar.github.io/runnerd/reference/configuration/) every key, [Why is my job waiting?](https://ayagmar.github.io/runnerd/guides/waiting/) every reason a job gives, and [Security model](https://ayagmar.github.io/runnerd/security/) what jobs, the token and the dashboard can reach.
 [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) says where the code lives, [docs/adr](https://github.com/ayagmar/runnerd/blob/main/docs/adr/README.md) why, and [CONTRIBUTING.md](https://github.com/ayagmar/runnerd/blob/main/CONTRIBUTING.md) how to send a change.
 
 ## Building

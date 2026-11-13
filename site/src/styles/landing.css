@@ -1,5 +1,5 @@
 /* The landing page: one column of sections on one pair of margins, each a claim beside the real output that proves
-   it. One typeface; monospace only inside terminals. Mint is the jvm profile's colour and pink the node profile's, as
+   it. One typeface; monospace only inside terminals and tables of figures. Mint is the jvm profile's colour and pink the node profile's, as
    on the dashboard. Shared pieces (screenshots, the TUI frame, the zoom overlay) are styled in theme.css; the page's
    behaviour is in scripts/landing.ts. */
 *,
@@ -192,7 +192,7 @@ html:not(.js) .theme {
   color: var(--accent);
 }
 
-/* The first screen: what runnerd is beside the dashboard. */
+/* The first screen: the claim beside the lanes that show it. */
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
@@ -222,10 +222,6 @@ html:not(.js) .theme {
   margin-top: 2rem;
 }
 
-.hero-shot .shot {
-  display: block;
-}
-
 /* A section: its claim, then its proof. */
 .part {
   padding-bottom: var(--gap-section);
@@ -248,21 +244,11 @@ html:not(.js) .theme {
   max-width: 44ch;
 }
 
-.part-text.narrow {
-  margin-bottom: 3rem;
-}
-
 .split {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
   gap: clamp(2rem, 5vw, 5rem);
   align-items: start;
-}
-
-/* Output wider than the proof column: the text above it, the output across the page. */
-.split.stacked {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 2rem;
 }
 
 /* Terminals: real output, on the darkest surface in both themes. */
@@ -293,171 +279,6 @@ html:not(.js) .theme {
   margin-bottom: 0.5rem;
   font-size: var(--step-small);
   color: var(--muted);
-}
-
-/* Admission: the same 33G under each policy, switched by two radios that work without a script. */
-.packs {
-  display: grid;
-  gap: 1.5rem;
-}
-
-.proof {
-  min-width: 0;
-}
-
-.switch {
-  display: inline-flex;
-  justify-self: start;
-  background: var(--surface);
-  padding: 0.25rem;
-}
-
-.switch label {
-  cursor: pointer;
-}
-
-.switch input {
-  position: absolute;
-  opacity: 0;
-}
-
-.switch span {
-  display: block;
-  padding: 0.6rem 1.1rem;
-  font-weight: 600;
-  transition: background 160ms;
-}
-
-.switch input:checked + span {
-  background: var(--ink);
-  color: var(--bg);
-}
-
-.switch input:focus-visible + span {
-  outline: 3px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.pack {
-  margin: 0;
-  display: grid;
-  gap: 1rem;
-}
-
-.packs:has(input[value='caps']:checked) .pack-measured,
-.packs:has(input[value='measured']:checked) .pack-caps {
-  display: none;
-}
-
-.pack-figure {
-  font-size: var(--step-lead);
-}
-
-.pack-figure strong {
-  font-size: var(--step-head);
-  letter-spacing: -0.02em;
-  margin-right: 0.25rem;
-}
-
-.pack-bar {
-  display: flex;
-  gap: 3px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  height: clamp(7rem, 12vw, 10rem);
-}
-
-.pack-bar li {
-  flex: var(--size) 1 0;
-  min-width: 0;
-  display: flex;
-  align-items: flex-end;
-  padding: 0.5rem;
-  color: var(--block-ink);
-  font-weight: 700;
-  font-size: var(--step-small);
-  overflow: hidden;
-  transition: flex-grow 400ms var(--ease);
-}
-
-.pack-bar .jvm {
-  background: var(--mint);
-}
-
-.pack-bar .node {
-  background: var(--pink);
-}
-
-.pack-bar .mirror {
-  background: var(--ink);
-  padding: 0;
-}
-
-.pack-bar .free {
-  background: var(--surface);
-}
-
-.pack figcaption {
-  font-size: var(--step-small);
-  color: var(--muted);
-}
-
-.swatch {
-  display: inline-block;
-  width: 0.8em;
-  height: 0.8em;
-  margin-right: 0.6em;
-  vertical-align: -0.05em;
-}
-
-.swatch.jvm {
-  background: var(--mint);
-}
-
-.swatch.node {
-  background: var(--pink);
-}
-
-/* Cost: the figure large, then how it is reached. */
-.cost h2 {
-  margin-bottom: 2.5rem;
-}
-
-.cost-body {
-  display: grid;
-  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-  gap: clamp(2rem, 5vw, 5rem);
-  align-items: start;
-}
-
-.cost-figure {
-  font-size: var(--step-lead);
-}
-
-.cost-figure strong {
-  display: block;
-  font-size: var(--step-display);
-  line-height: 1;
-  letter-spacing: -0.03em;
-  color: var(--accent);
-}
-
-.cost-body > div {
-  display: grid;
-  gap: 1.5rem;
-}
-
-.cost-body > div p {
-  max-width: 52ch;
-}
-
-/* Clients: the TUI beside the dashboard. */
-.clients {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: clamp(1rem, 2vw, 1.5rem);
-  align-items: start;
 }
 
 /* Install: three steps, each with its command. */
@@ -495,18 +316,19 @@ html:not(.js) .theme {
 }
 
 .copy {
-  min-width: 5rem;
+  min-width: 4.5rem;
+  min-height: 2.75rem;
   border: 0;
-  background: var(--accent);
-  color: var(--accent-ink);
+  background: #1c201e;
+  color: #c9cec9;
   font-family: inherit;
-  font-weight: 700;
+  font-weight: 600;
   font-size: var(--step-small);
   cursor: pointer;
 }
 
 .copy:hover {
-  filter: brightness(1.08);
+  color: #ffffff;
 }
 
 /* The close: the name again, and where to go. */
@@ -540,28 +362,280 @@ html:not(.js) .theme {
   color: var(--accent);
 }
 
-/* Entrances: added by the script, so without it nothing is hidden. */
-.reveal {
-  opacity: 0;
-  transform: translateY(24px);
-  transition:
-    opacity 600ms var(--ease) var(--d, 0ms),
-    transform 600ms var(--ease) var(--d, 0ms);
+/* The hero's figure: the dashboard's lanes, one per job, each block its share of the 33G at its place in the slice.
+   Two radios pick the policy without a script; every lane is in the page under both, so switching moves blocks and
+   swaps words but never the layout. */
+.lanes {
+  margin: 0;
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
 }
 
-.reveal.in {
-  opacity: 1;
-  transform: none;
+.switch {
+  display: inline-flex;
+  justify-self: start;
+  background: var(--surface);
+  padding: 0.25rem;
+}
+
+.switch label {
+  cursor: pointer;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+}
+
+.switch span {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 1.1rem;
+  font-weight: 600;
+  transition: background 160ms;
+}
+
+.switch input:checked + span {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.switch input:focus-visible + span {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.lanes:has(input[value='caps']:checked) .only-measured,
+.lanes:has(input[value='measured']:checked) .only-caps {
+  display: none;
+}
+
+.lanes:has(input[value='caps']:checked) .lane {
+  --at: var(--at-caps);
+  --w: var(--w-caps);
+}
+
+
+.lanes-figure {
+  font-size: var(--step-lead);
+}
+
+.lanes-figure strong {
+  font-size: var(--step-head);
+  letter-spacing: -0.02em;
+  margin-right: 0.25rem;
+}
+
+.lane-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--step-small);
+}
+
+.lane {
+  --at: var(--at-measured);
+  --w: var(--w-measured);
+  display: grid;
+  grid-template-columns: minmax(5rem, 34%) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.9rem;
+  min-height: 2.5rem;
+  padding-right: 0.75rem;
+  background: var(--surface);
+}
+
+.track {
+  position: relative;
+  align-self: stretch;
+  background: var(--bg);
+  border-right: 1px solid var(--surface-2);
+}
+
+.block {
+  position: absolute;
+  inset-block: 0;
+  left: var(--at);
+  width: var(--w);
+  transition:
+    left 420ms var(--ease),
+    width 420ms var(--ease);
+}
+
+.jvm .block {
+  background: var(--mint);
+}
+
+.node .block {
+  background: var(--pink);
+}
+
+.mirror .block {
+  background: var(--ink);
+}
+
+.free .block {
+  box-shadow: inset 0 0 0 1px var(--muted);
+}
+
+.lane-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.repo {
+  margin-left: 0.5rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.lane-size {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.lane-wait {
+  color: var(--muted);
+  text-align: right;
+}
+
+.lanes figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  font-size: var(--step-small);
+  color: var(--muted);
+}
+
+.lanes figcaption .text-link {
+  color: var(--ink);
+}
+
+/* Parts of the dashboard, as captured: on the darkest surface, framed like a slot. */
+.part .shot {
+  padding: 0;
+  background: none;
+}
+
+.stack,
+.pair {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.pair {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 2rem;
+}
+
+.pair .shot {
+  max-width: 48rem;
+}
+
+/* Clients: the TUI and the phone, the same height. The TUI's frame sets the row; the phone's shot fills it from its
+   top. */
+.clients {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 18rem);
+  gap: clamp(1rem, 2vw, 1.5rem);
+  margin-top: 2rem;
+}
+
+.clients .tui {
+  font-size: clamp(0.25rem, ((100cqi - 1.5rem) / var(--cols) - 0.5px) / 0.6, 1rem);
+  overflow-x: hidden;
+}
+
+.clients .tui-cue {
+  display: none;
+}
+
+.phone {
+  position: relative;
+  min-height: 20rem;
+  background: var(--surface);
+}
+
+.phone .shot {
+  position: absolute;
+  inset: 8px;
+  overflow: hidden;
+}
+
+.phone .shot img {
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+}
+
+/* The comparison: a table of plain facts, runnerd's column marked by its colour only. */
+.compare-scroll {
+  margin-top: 2rem;
+  overflow-x: auto;
+}
+
+.compare {
+  width: 100%;
+  min-width: 44rem;
+  border-collapse: collapse;
+  font-size: var(--step-small);
+}
+
+.compare :is(th, td) {
+  padding: 0.85rem 1rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--surface-2);
+}
+
+.compare thead th {
+  font-size: var(--step-body);
+}
+
+.compare tbody th {
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.compare :is(th, td):nth-child(2) {
+  background: var(--surface);
+}
+
+.compare thead th:nth-child(2) {
+  box-shadow: inset 0 4px 0 var(--mint);
+}
+
+.savings {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+  font-size: var(--step-small);
+  color: var(--muted);
+}
+
+.savings code {
+  color: var(--ink);
+  white-space: normal;
+}
+
+.needs {
+  display: grid;
+  gap: 1rem;
+  max-width: 62ch;
+  margin-bottom: 3rem;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reveal {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
-
-  .pack-bar li {
+  .block {
     transition: none;
   }
 }
@@ -570,13 +644,27 @@ html:not(.js) .theme {
 @media (max-width: 960px) {
   .hero,
   .split,
-  .cost-body,
   .clients {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .steps li {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .phone {
+    min-height: 0;
+    justify-self: center;
+    width: min(100%, 22rem);
+  }
+
+  .phone .shot {
+    position: static;
+    padding: 8px;
+  }
+
+  .phone .shot img {
+    height: auto;
   }
 }
 
@@ -585,9 +673,58 @@ html:not(.js) .theme {
     display: none;
   }
 
-  .pack-bar li {
-    padding: 0.35rem;
-    font-size: 0.75rem;
-    writing-mode: vertical-rl;
+  .lane {
+    grid-template-columns: 30% minmax(0, 1fr) auto;
+    gap: 0.6rem;
+  }
+
+  .repo {
+    display: none;
+  }
+
+  /* At a phone's width the TUI's frame would be too small to read; the phone's own shot stands for the clients. */
+  .clients .tui {
+    display: none;
+  }
+
+  /* The comparison stacks: a block per row, each side named beside its fact, so nothing scrolls. */
+  .compare {
+    min-width: 0;
+  }
+
+  .compare thead {
+    display: none;
+  }
+
+  .compare :is(tbody, tr, th) {
+    display: block;
+  }
+
+  .compare tr {
+    padding-block: 0.75rem;
+    border-bottom: 1px solid var(--surface-2);
+  }
+
+  .compare tbody th {
+    padding: 0 0 0.4rem;
+    border: 0;
+    color: var(--ink);
+  }
+
+  .compare td {
+    display: grid;
+    grid-template-columns: 9rem minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.35rem 0.5rem;
+    border: 0;
+  }
+
+  .compare td::before {
+    content: attr(data-side);
+    color: var(--muted);
+  }
+
+  .compare :is(th, td):nth-child(2) {
+    box-shadow: inset 3px 0 0 var(--mint);
   }
 }

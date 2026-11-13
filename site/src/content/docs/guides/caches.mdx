@@ -1,0 +1,58 @@
+---
+title: Will my build reuse the last one's work?
+description: What each cache keeps between jobs, the build cache shared by every slot, and GitHub Actions' cache served from this machine.
+---
+
+import Caches from '../../../components/diagrams/Caches.astro';
+import Printed from '../../../components/Printed.astro';
+
+Yes, in three layers: the slot a job runs in keeps what the last job there left, a build cache per repository serves every slot, and `actions/cache` restores from this machine. `runnerctl caches` shows each volume, its size and the build cache's hits:
+
+<Printed command="runnerctl caches" name="caches" />
+
+## Warm caches
+
+Each job gets a new container, but its [slot](../../concepts/terms/#slot) keeps a volume over the profile's read-only snapshot, and a job goes to the slot that last ran it when that slot is free.
+
+<Caches />
+
+| Cache | Kept |
+|---|---|
+| the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs, for every repository and branch |
+| the slot's Docker build cache | per slot. Build contexts go first, then layers, least recently used first, to about half the slot's share; cache mounts (`RUN --mount=type=cache`) stay up to three quarters. Slots together get a quarter of the free disk plus what their volumes hold, 1 GB to 20 GB each |
+| cargo credentials, Gradle's `gradle.properties` and init scripts, Maven's `settings*.xml`, Hugging Face tokens | never kept. Anything else a job leaves, jobs of other repositories see ([trust boundary](../../security/#what-jobs-share)) |
+| the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../../reference/configuration-more/#caches) and the profile is idle, which drops every slot's own changes. One that would pass `snapshot_max` starts over from the image instead |
+| pnpm store, Maven repository, Docker Hub mirror | shared by all slots; emptied above their [`max_size`](../../reference/configuration-more/#caches) when no runner runs |
+| [build cache](#build-cache) | per repository; least recently used entries go above [`build.max_size`](../../reference/configuration-more/#caches) |
+
+`docker/setup-buildx-action` starts a new BuildKit container per job, which keeps none of this; set `driver: docker` to build on the slot's Docker Engine, as `docker build` does.
+
+## Build cache
+
+One store per repository, kept in `~/.cache/runnerd/build-cache`, that every runner reaches: a task built in slot 2 is a hit in slot 3, and a pull request's build gets what `main` built.
+
+| Tool | Uses the cache when |
+|---|---|
+| Gradle | the build enables caching (`org.gradle.caching=true` or `--build-cache`) and sets no remote cache |
+| sccache | the workflow runs it (`RUSTC_WRAPPER=sccache`) with no other backend |
+| Bazel | `.bazelrc` sets no `--remote_cache` |
+| Turborepo | always; a `TURBO_API`, `TURBO_TOKEN` or `TURBO_TEAM` the workflow sets wins |
+| Nx | the workflow opts in (below) and uses no Nx Cloud |
+
+Nx fails the run when its cache does not answer, so a step before Nx opts in:
+
+```yaml
+- run: '[ -z "$RUNNERD_BUILD_CACHE_URL" ] || echo "NX_SELF_HOSTED_REMOTE_CACHE_SERVER=$RUNNERD_BUILD_CACHE_URL/nx" >> "$GITHUB_ENV"'
+```
+
+A job writes only when GitHub says it runs a push, schedule or manual run (`workflow_dispatch`) of the default branch or of one of [`build.branches`](../../reference/configuration-more/#caches). With `build_cache_writers = "pull-requests"` ([Configuration](../../reference/configuration/#repositories)), a `pull_request` event from the repository's own branch that a person, not a bot, opened, reopened or pushed to also writes. Anyone who can push a branch can then change what `main` builds load, so enable it only where that is you. runnerd asks GitHub about each job's runner, trigger and commit; nothing a job writes to its log or environment counts. Every other job, fork and bot pull requests included, reads only; its uploads are answered as stored and dropped.
+
+sccache uses the shared cache instead of its disk cache in the slot, not as well as it: a pull request's own compilations are not kept, so a second push compiles again what the first did. A Rust repository with many pull requests may do better with its own backend or `build_cache = false`.
+
+Containers a job starts itself, such as `container:` jobs, do not reach the cache. `build_cache = false` under a repository keeps it out; a workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` and Turborepo's with `TURBO_CACHE: local:rw`. `runnerctl caches --clean runnerd-build-cache` empties it.
+
+### GitHub Actions' cache
+
+The build cache also serves `actions/cache`, the `cache:` input of `setup-node`, `setup-java`, `setup-python` and `setup-gradle`, and Docker's `type=gha` cache, with no workflow change, in place of GitHub's. Entries count within `build.max_size`. `build.actions_cache = false` under [`[caches]`](../../reference/configuration-more/#caches), or a repository's `build_cache = false`, leaves jobs on GitHub's cache; `runnerd doctor` and `runnerctl caches` say which.
+
+Entries are scoped as on GitHub, and only [the jobs that may write](#build-cache) save. A default-branch or `build.branches` job saves into its branch and restores from it, then the default branch. An opted-in pull request saves into its own scope and restores from it, then its base branch, then the default branch. Every other job restores from the default branch, and its saves report success and are dropped. Artifacts (`upload-artifact`, `download-artifact`) still go to GitHub through runnerd and fail while it restarts; the actions retry for about 25 seconds. `container:` jobs, `docker://` actions and containers a job starts use GitHub's cache.

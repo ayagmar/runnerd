@@ -1,0 +1,17 @@
+---
+// A cut of a terminal capture (lib/printed.ts) as a code block, under the command that printed it.
+import { Code } from '@astrojs/starlight/components';
+import { printed } from '../lib/printed';
+
+interface Props {
+  command: string;
+  name: string;
+  from?: string;
+  to?: string;
+}
+
+const { command, name, from, to } = Astro.props;
+const cut = from === undefined ? '' : '[...]\n';
+---
+
+<Code code={`$ ${command}\n${cut}${printed(name, from, to)}`} lang="text" wrap={false} />
