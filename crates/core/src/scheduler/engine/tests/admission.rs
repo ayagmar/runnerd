@@ -16,10 +16,9 @@ const M: u64 = 1 << 20;
 
 /// `app` 4 slots of 4G under measured admission: 16G of caps for a 10G slice.
 pub(super) fn measured() -> String {
-    CONFIG.replace("slots = 2", "slots = 4").replace(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"measured\"",
-    )
+    CONFIG
+        .replace("slots = 2", "slots = 4")
+        .replace("admission = \"caps\"", "admission = \"measured\"")
 }
 
 /// Ten finished `build` jobs of o/r that peaked at `peak`, the last one with `oom_kills` kills for memory.
@@ -173,7 +172,9 @@ async fn on_a_fresh_host_the_default_admission_reserves_caps_until_jobs_have_a_h
         FakeDocker::default(),
         TestDir::new("engine"),
     );
-    let text = CONFIG.replace("slots = 2", "slots = 4");
+    let text = CONFIG
+        .replace("admission = \"caps\"\n", "")
+        .replace("slots = 2", "slots = 4");
     assert!(!text.contains("admission"), "the config leaves it out");
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &text);
     engine.memory_max = Some(10 * G);
@@ -508,7 +509,7 @@ async fn back_under_caps_every_runner_counts_at_its_cap_whatever_it_reserved() {
     for runner in &mut github.0.lock().unwrap().runners {
         runner.busy = true;
     }
-    let caps = under_caps(CONFIG)
+    let caps = CONFIG
         .replace("slots = 2", "slots = 3")
         .replace("memory = \"4G\"", "memory = \"3G\"");
     engine.reload(Config::parse(&caps).unwrap(), Some(10 * G), None);
@@ -2531,7 +2532,7 @@ async fn a_reload_back_to_caps_stops_no_runner_measured_admission_raised() {
         .map(|(_, occupant)| occupant.runner_name.clone())
         .unwrap();
     engine.raise(waiting);
-    let caps = under_caps(CONFIG).replace("slots = 2", "slots = 4");
+    let caps = CONFIG.replace("slots = 2", "slots = 4");
     engine.reload(Config::parse(&caps).unwrap(), Some(8 * G), None);
     engine.rereserve().await;
     // The host's reading is old: the plain count is past the 8G budget, where a raised runner is stopped.

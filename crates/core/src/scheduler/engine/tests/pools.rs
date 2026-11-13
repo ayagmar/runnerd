@@ -169,10 +169,7 @@ async fn the_light_pool_reserves_only_what_its_own_queued_jobs_predict() {
         FakeDocker::default(),
         TestDir::new("engine"),
     );
-    let config = pools().replace(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"measured\"",
-    );
+    let config = pools().replace("admission = \"caps\"", "admission = \"measured\"");
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
     engine.memory_max = Some(10 * G);
     ran_in(

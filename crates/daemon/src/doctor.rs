@@ -843,6 +843,7 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             ];
         }
     };
+    let fix_budget = fix_budget(config, host.memory.as_ref());
     let slice_check = if let (Some(unit_file), Some(memory_max)) =
         (&slice.unit_file, slice.memory_max)
     {
@@ -854,9 +855,9 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             ),
         )
     } else {
-        let caps = config.memory_caps().map_or_else(
-            |_| "<total of your caps>".to_owned(),
-            |caps| caps.to_string(),
+        let budget = fix_budget.map_or_else(
+            || "<total of your caps>".to_owned(),
+            |budget| budget.to_string(),
         );
         fail(
             "slice",
@@ -866,21 +867,49 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             &format!(
                 "create /etc/systemd/system/{name} with\n\
                      [Slice]\n\
-                     MemoryMax={caps}\n\
+                     MemoryMax={budget}\n\
                      then: sudo systemctl daemon-reload"
             ),
         )
     };
     // Measured admission, the default, refuses a slice without a MemoryMax: that is the slice's failure, said once.
+    // The rest of the config is checked against the MemoryMax the slice's fix sets, so its own errors show now.
     let config_check = match (slice.memory_max, config.host.admission) {
-        (None, config::Admission::Measured) => skip(
-            "config",
-            "needs the slice's MemoryMax, which measured admission admits against: run the slice's fix, or set \
-             [host] admission = \"caps\"",
-        ),
+        (None, config::Admission::Measured) => {
+            let check = config.check_against(fix_budget);
+            if check.valid {
+                skip(
+                    "config",
+                    "needs the slice's MemoryMax, which measured admission admits against: run the slice's fix, \
+                     or set [host] admission = \"caps\"",
+                )
+            } else {
+                check.doctor_check()
+            }
+        }
         _ => config.check_against(slice.memory_max).doctor_check(),
     };
     vec![slice_check, config_check]
+}
+
+/// The `MemoryMax` the slice's fix sets: every slot at its cap at once, and under measured admission, where the caps
+/// may add up past the host, no more than the budget `runnerd init` gives this host (`init::budget`, with `[host]
+/// memory_ceiling`). `None` when neither is known.
+fn fix_budget(config: &Config, memory: Option<&api::HostMemory>) -> Option<ByteSize> {
+    let caps = config.memory_caps().ok();
+    let host = memory
+        .filter(|_| config.host.admission == config::Admission::Measured)
+        .map(|memory| {
+            let memory = api::HostMemory {
+                ceiling: config.host.memory_ceiling.map(|ceiling| ceiling.0),
+                ..memory.clone()
+            };
+            crate::init::budget(&memory, None)
+        });
+    match (caps, host) {
+        (Some(caps), Some(host)) => Some(caps.min(host)),
+        (caps, host) => caps.or(host),
+    }
 }
 
 /// Warns about a public repository: whoever opens a pull request on it may get a job run here, if the repository's

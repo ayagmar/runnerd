@@ -82,18 +82,21 @@ pub(crate) struct Sizing {
     pub memory: ByteSize,
 }
 
+/// The budget for runners on a host with `memory`: three quarters of the memory it has, or can grow to with a
+/// ceiling, or the slice's `MemoryMax` when that is smaller. `init` sizes its profile in it and its slice fix sets it
+/// as `MemoryMax`; `runnerd doctor`'s slice fix sets no more under measured admission.
+pub(crate) fn budget(memory: &HostMemory, slice_memory_max: Option<ByteSize>) -> ByteSize {
+    // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
+    let host = memory.grown() / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
+    ByteSize(slice_memory_max.map_or(host, |memory_max| memory_max.0.min(host)))
+}
+
 /// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
 /// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), less
 /// `STARTUP_HEADROOM`, so the first job can start once runnerd runs. A reading with a ceiling, `--memory-ceiling`'s,
 /// is the memory the host can grow to, as admission counts it (ADR 0084).
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
-    // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
-    let host = machine.memory.grown() / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
-    let budget = ByteSize(
-        machine
-            .slice_memory_max
-            .map_or(host, |memory_max| memory_max.0.min(host)),
-    );
+    let budget = budget(&machine.memory, machine.slice_memory_max);
     let room = budget.0.saturating_sub(MIRROR_MEMORY.0);
     // The engine reserves for the mirror before it starts.
     let first =

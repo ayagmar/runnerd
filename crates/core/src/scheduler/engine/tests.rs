@@ -1909,6 +1909,7 @@ const CONFIG: &str = r#"
 [host]
 slice = "ci.slice"
 isolation = "sysbox"
+admission = "caps"
 
 [caches]
 mirror = { enabled = false, memory = "512M", cpus = 1, ttl = "168h" }
@@ -1927,17 +1928,6 @@ profile = "app"
 labels = ["self-hosted", "app"]
 warm = 0
 "#;
-
-/// `text`, which sets no `admission`, under `admission = "caps"`.
-fn under_caps(text: &str) -> String {
-    let caps = text.replacen(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"caps\"",
-        1,
-    );
-    assert_ne!(caps, text, "the config names its isolation");
-    caps
-}
 
 /// A pause or resume of one repository.
 fn one(repository: &str) -> Target {

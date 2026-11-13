@@ -819,6 +819,76 @@ fn a_slice_without_limits_and_a_token_without_repo_fail() {
     );
 }
 
+/// `config("sysbox")` with `from` replaced by `to` in its text.
+fn config_with(from: &str, to: &str) -> Config {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/runnerd.toml"
+    ))
+    .unwrap();
+    let changed = text.replacen(from, to, 1);
+    assert_ne!(changed, text, "the example has {from:?}");
+    Config::parse(&changed).unwrap()
+}
+
+/// `ready_host` with a slice that has no unit file and no `MemoryMax`, on its 64G of memory.
+fn host_without_slice_limits() -> Host {
+    let mut host = ready_host(ARCH);
+    host.slice = Some(Ok(Slice {
+        unit_file: None,
+        memory_max: None,
+        cpu_quota: "infinity".to_owned(),
+    }));
+    host
+}
+
+#[test]
+fn a_config_error_shows_while_the_slice_has_no_memory_max() {
+    // A typo in a pool's profile: the daemon would refuse it once the slice is fixed, so doctor says so now.
+    let config = config_with("profile = \"jvm\"", "profile = \"jmv\"");
+    let checks = checks(&host_without_slice_limits(), Some(&config));
+    assert_eq!(failed(&checks), ["slice", "config"]);
+    let check = checks.iter().find(|check| check.name == "config").unwrap();
+    assert!(check.detail.contains("jmv"), "{check}");
+}
+
+#[test]
+fn under_measured_admission_the_slice_fix_sets_no_more_than_init_would_give_the_host() {
+    // 2 × 9G + 8 × 7G + 512M = 74.5G of caps, which measured admission lets add up past the 64G host.
+    let measured = config_with(
+        "slots = 2\n\n[[repositories]]",
+        "slots = 8\n\n[[repositories]]",
+    );
+    let fix = |config: &Config| {
+        let checks = checks(&host_without_slice_limits(), Some(config));
+        let slice = checks.iter().find(|check| check.name == "slice").unwrap();
+        slice.fix.clone().unwrap()
+    };
+    assert!(
+        fix(&measured).contains("MemoryMax=48G"),
+        "three quarters of 64G, as init sizes: {}",
+        fix(&measured)
+    );
+    let caps = Config::parse(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/runnerd.toml"
+        ))
+        .unwrap()
+        .replace("admission = \"measured\"", "admission = \"caps\"")
+        .replace(
+            "slots = 2\n\n[[repositories]]",
+            "slots = 8\n\n[[repositories]]",
+        ),
+    )
+    .unwrap();
+    assert!(
+        fix(&caps).contains("MemoryMax=74.5G"),
+        "under caps every cap must fit: {}",
+        fix(&caps)
+    );
+}
+
 #[test]
 fn unreachable_docker_skips_what_depends_on_it() {
     let mut host = ready_host(ARCH);

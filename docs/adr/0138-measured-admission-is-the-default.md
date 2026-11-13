@@ -23,8 +23,11 @@ ones never touch. Features ship on by default, with an opt-out, and the end-to-e
   both ways out: the slice's unit file, which `runnerd doctor` prints, or `admission = "caps"`.
 - `runnerd init` writes `admission = "measured"` with a comment naming `"caps"`, so the file says what runs. It writes
   the config before the slice exists, so it checks it against the `MemoryMax` its slice fix gives the slice.
-- `runnerd doctor` on a slice without a `MemoryMax` under measured admission fails the slice and skips the config
-  check, saying it needs that `MemoryMax`: one cause, one failure, one fix. Under caps it checks the config as before.
+- `runnerd doctor` on a slice without a `MemoryMax` under measured admission fails the slice and checks the config
+  against the `MemoryMax` the slice's fix sets: a config error shows now, and a config that passes is skipped as
+  needing that `MemoryMax`, so one cause gives one failure. Under measured admission that fix sets every cap at once
+  but no more than `runnerd init` gives the host (`init::budget`), since the caps may add up past it. Under caps the
+  doctor is unchanged.
 - On a host with no history a job reserves its cap until its profile has `min_jobs` runs (0033), so the first jobs
   start no more than caps would have started, and none past `MemoryMax`.
 - A reload that removes `admission = "measured"` changes nothing: every runner keeps what it reserved. One that sets
