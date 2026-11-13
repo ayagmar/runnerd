@@ -11,8 +11,8 @@ use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
 use runnerd_core::api::{ActionQuery, JobAction, JobActions};
 use runnerd_core::api::{
-    Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RemoveRecordsQuery, RemovedRecords,
-    Status, force_pause_consequence, reseed_requested,
+    Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RemoveRecordsQuery, RemovedRecords, Status,
+    force_pause_consequence, reseed_requested,
 };
 use runnerd_core::client::{Body, ClientError, JobActionAnswer, Reply};
 use serde::Deserialize;
@@ -247,7 +247,15 @@ async fn remove_records(app: &App, path: &str) -> Response {
     let removed: RemovedRecords = serde_json::from_slice(&reply.body).unwrap_or_default();
     let notice = views::notice(&crate::format::sentence(&removed.line()), Tone::Done);
     match records::RecordsView::load(&app.daemon, crate::now()).await {
-        Ok(view) => html(&[records::section(&view.status, &view.records, view.in_history.as_ref(), view.now), notice]),
+        Ok(view) => html(&[
+            records::section(
+                &view.status,
+                &view.records,
+                view.in_history.as_ref(),
+                view.now,
+            ),
+            notice,
+        ]),
         Err(_) => html(&[notice]),
     }
 }
@@ -339,7 +347,7 @@ pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) 
     }
 }
 
-/// `POST /jobs/{id}/cancel?confirm=` and `POST /jobs/{id}/rerun?failed=&confirm=`: the query of a job action.
+/// `POST /jobs/{id}/rerun?failed=true`: the query of a re-run. The confirmation goes in the body, never in the URL.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct JobActionQuery {
     #[serde(default)]

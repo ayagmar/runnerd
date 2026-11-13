@@ -24,7 +24,7 @@ The navigation has five views: Overview, Jobs (History and Records), Insights, C
 
 | Page | Shows |
 |---|---|
-| Overview | what needs attention, when anything does; slots running, jobs waiting, the p95 wait over 24 hours and failures in one row; the machine: the memory budget as a bar, hatched where the host or [measured admission](../admission/#measured-admission) closes it, the host's figures, a lane per slot with its running job's step, memory and CPU, and the slice's memory and CPU; each waiting job with why it waits; the latest jobs; pause and resume per repository, which lasts across restarts |
+| Overview | what needs attention, when anything does; slots running, jobs waiting, the p95 wait over 24 hours and failures in one row; the machine: the host's figures, then the memory budget as lanes, a lane per slot with its running job's step, memory and CPU and a row each for the mirror, what is free and what is hatched where the host or [measured admission](../admission/#measured-admission) closes it, and the slice's memory and CPU; each waiting job with why it waits; the latest jobs; pause and resume per repository, which lasts across restarts |
 | Jobs | every job, searched by job name, workflow or branch and filtered by repository, workflow, branch, outcome, time and record; a column header sorts, showing the first page of that order; the **Timeline** lens draws what each slot ran over a day or a week, the **Trends** lens charts the last 30 days. Every filter is in the link, so a view can be bookmarked |
 | Records | the [records of failed jobs](../running/#records-of-failed-jobs) with size and age, including records whose job has left the history; remove one or all |
 | Sizing | per profile, memory, jobs, waits, warm starts and CPU in one table with the [advice](../admission/#sizing), which a button opens in the config editor, unsaved; what [auto sizing](../admission/#auto-sizing) changes next and has changed, with a link that opens the last change undone |
@@ -36,7 +36,7 @@ Keys: `1` to `5` open the views, `j` and `k` move between rows and `Enter` opens
 
 <Shot
   name="overview"
-  alt="The overview: slots running, jobs waiting with their reasons, the budget bar and a card per slot."
+  alt="The overview: what needs attention, the health figures, a lane per slot laid over the memory budget, and jobs waiting with their reasons."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 

@@ -1,7 +1,8 @@
 //! What every client says a slot does, and how it counts whether CI keeps up.
 
 use crate::api::{
-    Activity, Budget, HealthKind, ProfileStatus, QueuedJob, RunnerStatus, SlotStatus, Started, Status, Tone,
+    Activity, Budget, HealthKind, ProfileStatus, QueuedJob, RunnerStatus, SlotStatus, Started,
+    Status, Tone,
 };
 
 fn runner(busy: bool, warm: bool) -> RunnerStatus {

@@ -5,9 +5,9 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    BarEnd, Bucket, Column, Feature, GapKind, JOBS_HEADING, JobList, JobOrder, JobQuery, JobRange, JobSort, JobState,
-    JobSummary, Lane, RecordFilter, Section, SlotTimeline, SortOrder, Stats, StatsQuery,
-    StatsSummary, Status, TimelineBar,
+    BarEnd, Bucket, Column, Feature, GapKind, JOBS_HEADING, JobList, JobOrder, JobQuery, JobRange,
+    JobSort, JobState, JobSummary, Lane, RecordFilter, Section, SlotTimeline, SortOrder, Stats,
+    StatsQuery, StatsSummary, Status, TimelineBar,
 };
 use runnerd_core::client::{Client, ClientError};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -36,8 +36,6 @@ const OUTCOMES: [(&str, &str); 8] = [
     ("lost", "Lost"),
     ("elsewhere", "Not run here"),
 ];
-
-/// What the records filter offers, as `JobQuery::record` takes it.
 
 /// Which lens of the page shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,11 +206,11 @@ fn empty_none_of<'de, D: serde::Deserializer<'de>, T: DeserializeOwned>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
     Ok(empty_none(deserializer)?.and_then(|value| {
-        T::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(
-            value.as_str(),
-        ))
+        T::deserialize(
+            IntoDeserializer::<serde::de::value::Error>::into_deserializer(value.as_str()),
+        )
         .ok()
-            .or_else(|| serde_json::from_str(&value).ok())
+        .or_else(|| serde_json::from_str(&value).ok())
     }))
 }
 
@@ -512,7 +510,12 @@ fn filters(history: &History) -> Markup {
         .collect();
     let ranges: Vec<(String, String)> = JobRange::ALL
         .iter()
-        .filter_map(|range| Some((Range::slug(*range)?.to_owned(), format::sentence(range.words()))))
+        .filter_map(|range| {
+            Some((
+                Range::slug(*range)?.to_owned(),
+                format::sentence(range.words()),
+            ))
+        })
         .collect();
     let records: Vec<(String, String)> = RecordFilter::ALL
         .iter()
@@ -526,7 +529,10 @@ fn filters(history: &History) -> Markup {
         .filter(|order| !order.pages())
         .map(|order| (Order::slug(*order), format::sentence(order.words())))
         .collect();
-    let order = filter.order.filter(|order| !order.0.pages()).map(|order| Order::slug(order.0));
+    let order = filter
+        .order
+        .filter(|order| !order.0.pages())
+        .map(|order| Order::slug(order.0));
     html! {
         form.filters method="get" action="/history" role="search" {
             label.field.search {
@@ -552,7 +558,6 @@ fn filters(history: &History) -> Markup {
         }
     }
 }
-
 
 /// A value as the query string writes it: `kept`, `wait`, `asc`.
 fn value_of<T: Serialize>(value: &T) -> Option<String> {
@@ -923,7 +928,8 @@ fn timeline_bar(timeline: &SlotTimeline, bar: &TimelineBar, index: usize) -> Mar
             style=(format!("--from: {from:.4}; --to: {to:.4}")) title=(label) aria-label=(label) data-row
             data-class:on=(format!("$_bar == '{key}'"))
             data-on:pointerenter=(format!("evt.pointerType == 'mouse' && ($_bar = '{key}')"))
-            data-on:focus=(format!("$_bar = '{key}'"))
+            // Keyboard focus names it; a tap's focus does not, so the tap's click names it rather than opening it.
+            data-on:focus=(format!("el.matches(':focus-visible') && ($_bar = '{key}')"))
             data-on:click=(format!("$_bar != '{key}' && (evt.preventDefault(), $_bar = '{key}')")) {}
     }
 }
@@ -992,7 +998,7 @@ fn timeline(history: &History) -> Markup {
                 li { span.tl-swatch.wait {} "waiting for a runner" }
             }
             @if timeline.lanes.is_empty() && timeline.unassigned.is_empty() {
-                p.muted { "No job ran or waited in this time." }
+                p.muted { (format::sentence(SlotTimeline::NONE)) "." }
             }
             ol.tl-lanes {
                 @for (lane, start) in timeline.lanes.iter().zip(&starts) {
@@ -1008,7 +1014,7 @@ fn timeline(history: &History) -> Markup {
                 }
                 @if !timeline.unassigned.is_empty() {
                     li.tl-lane.p-none {
-                        span.tl-name { "No runner here" }
+                        span.tl-name { (format::sentence(SlotTimeline::UNASSIGNED)) }
                         div.tl-track {
                             @for (bar, index) in timeline.unassigned.iter().zip(assigned..) { (timeline_bar(timeline, bar, index)) }
                         }

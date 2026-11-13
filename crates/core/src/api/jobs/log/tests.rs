@@ -878,6 +878,13 @@ fn a_search_says_how_many_lines_hold_the_query_and_whether_lines_remain_unread()
 }
 
 #[test]
+fn a_fold_counts_its_lines_in_the_singular_for_one() {
+    assert_eq!(LogOutline::count_words(1), "1 line");
+    assert_eq!(LogOutline::count_words(0), "0 lines");
+    assert_eq!(LogOutline::count_words(5), "5 lines");
+}
+
+#[test]
 fn an_outline_of_the_last_lines_says_how_many_the_full_log_has_before_them() {
     assert_eq!(LogOutline::tail_words(0, 40), None, "every line shown");
     assert_eq!(

@@ -1201,7 +1201,7 @@ fn outlined(view: &JobView, outline: &LogOutline, lines: &[StyledLine]) -> Marku
                             }
                             Owner::Unattributed => { span.step-number { "–" } "Lines no step claims" }
                         }
-                        span.muted.step-lines { (part.len()) " lines" }
+                        span.muted.step-lines { (LogOutline::count_words(part.len())) }
                     }
                     ol.log-lines { (lines_of(part, view.line)) }
                 }

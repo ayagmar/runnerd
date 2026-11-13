@@ -20,9 +20,12 @@ page with a visible `h1` and its sections as tabs. The look stays: flat blocks, 
 Libre Franklin.
 
 **The overview says each fact once.** Attention first, and nothing when it is empty. Health is one row of figures.
-The machine is one region: the budget's bar, the host as figures (`Budget::host_figures`), one lane per slot whose
-block is its share of the budget, a running lane with its job, step, memory and CPU, a warm or idle lane one row,
-and the slice's two charts. Then waiting jobs, the latest finished jobs and the repositories.
+The machine is one region: what is reserved and the host as figures (`Budget::host_figures`), then the lanes, which
+are the budget bar. Each lane's strip is the whole slice and its block sits where its memory does, so the blocks read
+down the rows as a bar reads across; a running lane carries its job, step, memory and CPU and a fill to its last
+sample, a warm or idle lane is one row, and the mirror, seeds, shells, what is free and what is closed are rows of
+their own. A slot is drawn once: a bar beside the lanes said it twice and cut its labels on a phone. Then the slice's
+two charts. Then waiting jobs, the latest finished jobs and the repositories.
 
 **Jobs is one page with lenses.** The list, the timeline and the trends are `?lens=` of one page whose filters are a
 plain GET form, so a filtered view is a link. Column headers sort; a sort is one page that says how many the filters
@@ -31,7 +34,7 @@ history, without a link to a page that would 404.
 
 **A job page opens on what failed.** Core's failure headline, exit code, last lines and the shell command come first.
 The log is folded by step and group with the failed step open and scrolled to inside its box, lines coloured from
-core's runs, each line linkable, searched by message only. A running job's tail follows its end until scrolled.
+core's runs, each line linkable, searched by message only. A running job's tail follows its end while it is at its end: scrolled up it stays, and scrolled back it follows again.
 
 **Writes are previewed.** Cancel and re-run are offered only while `Status::job_actions` offers them. The first post
 returns the daemon's preview; its button carries that preview's confirmation token, and only a post with it sends.

@@ -1642,9 +1642,23 @@ fn router(fake: Fake) -> Router {
         )
         .route(
             "/v1/jobs",
-            get(|State(fake): State<Fake>, Query(query): Query<JobQuery>| async move {
-                match fake.fixtures.lock().unwrap().page(&query) {
-                    Ok(list) => Json(list).into_response(),
+            get(|State(fake): State<Fake>, Query(mut query): Query<JobQuery>| async move {
+                let fixtures = fake.fixtures.lock().unwrap();
+                // A runnerd older than search and sorting ignores them and does not say how it read the query.
+                if fixtures.older {
+                    query.q = None;
+                    query.sort = None;
+                    query.order = None;
+                    query.record = None;
+                }
+                match fixtures.page(&query) {
+                    Ok(mut list) => {
+                        if fixtures.older {
+                            list.applied = None;
+                            list.total = None;
+                        }
+                        Json(list).into_response()
+                    }
                     Err(message) => (StatusCode::BAD_REQUEST, Json(ErrorResponse { message })).into_response(),
                 }
             }),

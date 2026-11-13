@@ -420,10 +420,20 @@ struct Segment {
 }
 
 impl LogOutline {
+    /// How many lines a part of the log holds, as a fold says it: `1 line`, `5 lines`.
+    pub fn count_words(lines: usize) -> String {
+        if lines == 1 {
+            "1 line".to_owned()
+        } else {
+            format!("{lines} lines")
+        }
+    }
+
     /// What a client says when it outlines only the log's last `shown` lines, `first` lines in: `The last 5000 lines;
     /// the full log has the 1200 before them`. `None` when it shows them all.
     pub fn tail_words(first: u64, shown: usize) -> Option<String> {
-        (first > 0).then(|| format!("the last {shown} lines; the full log has the {first} before them"))
+        (first > 0)
+            .then(|| format!("the last {shown} lines; the full log has the {first} before them"))
     }
 
     /// Assembles a job's outline from what the store keeps, all read at one time. `read` returns the stored lines

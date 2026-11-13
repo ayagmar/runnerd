@@ -149,7 +149,11 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         .join(" ");
         assert!(shown.contains(&line), "{line}: {shown}");
         // The oldest wait follows the clock the dashboard reads, not the fixtures'.
-        for note in figure.notes.iter().filter(|_| figure.kind != runnerd_core::api::HealthKind::Waiting) {
+        for note in figure
+            .notes
+            .iter()
+            .filter(|_| figure.kind != runnerd_core::api::HealthKind::Waiting)
+        {
             assert!(shown.contains(note), "{note}: {shown}");
         }
     }

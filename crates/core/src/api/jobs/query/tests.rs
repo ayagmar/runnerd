@@ -458,8 +458,7 @@ fn a_list_says_what_it_is_when_cut_or_when_an_older_daemon_ignored_the_search() 
     assert_eq!(
         list.unread_words().as_deref(),
         Some(
-            "this runnerd does not search, sort or filter jobs by their records: it is older than this client; \
-             this is every job, newest first"
+            "search, sort and record filter: not supported by this runnerd; this is every job, newest first"
         ),
         "an older daemon's list never reads as a result"
     );

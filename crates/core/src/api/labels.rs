@@ -106,17 +106,18 @@ pub enum Feature {
 }
 
 impl Feature {
-    /// What a client says in its place: `this runnerd does not outline logs: it is older than this client`.
+    /// What a client says in its place: `log search: not supported by this runnerd`, [`NOT_SUPPORTED`] named for
+    /// what is missing.
     pub fn unsupported(self) -> String {
         let what = match self {
-            Feature::Attention => "list what needs attention",
-            Feature::LogOutline => "outline logs",
-            Feature::LogSearch => "search logs",
-            Feature::JobSearch => "search, sort or filter jobs by their records",
-            Feature::Timeline => "draw its slots over time",
-            Feature::Comparison => "compare a job with an earlier run",
+            Feature::Attention => "attention",
+            Feature::LogOutline => "log outline",
+            Feature::LogSearch => "log search",
+            Feature::JobSearch => "search, sort and record filter",
+            Feature::Timeline => "timeline",
+            Feature::Comparison => "comparison",
         };
-        format!("this runnerd does not {what}: it is older than this client")
+        format!("{what}: {NOT_SUPPORTED}")
     }
 }
 

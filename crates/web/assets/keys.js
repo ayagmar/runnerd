@@ -62,7 +62,8 @@ function palette() {
   const draw = () => {
     const query = input.value.trim().toLowerCase();
     matches = all.filter((item) => item.label.toLowerCase().includes(query));
-    if (/^\d+$/.test(query)) {
+    // A job's number fits a u64: at most 19 digits are always one.
+    if (/^\d{1,19}$/.test(query)) {
       const id = query;
       matches.unshift({ label: id, hint: 'Open job', run: () => location.assign(`/jobs/${id}`) });
     }

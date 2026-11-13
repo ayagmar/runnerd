@@ -148,7 +148,7 @@ fn from_first_bar(timeline: &SlotTimeline) -> SlotTimeline {
 }
 
 /// The lane of waits no runner took.
-pub(super) const UNASSIGNED: &str = "no slot";
+pub(super) const UNASSIGNED: &str = SlotTimeline::UNASSIGNED;
 
 /// A lane's label: `jvm 1`.
 pub(super) fn lane_label(profile: &str, slot: usize) -> String {

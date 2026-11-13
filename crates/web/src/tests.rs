@@ -1103,7 +1103,7 @@ async fn the_budget_names_the_mirror_and_each_seed_container() {
     for expected in [
         r#"aria-label="512M held by the mirror""#,
         r#"aria-label="9G held by jvm's seed container""#,
-        r#"<span class="name">jvm seed</span>"#,
+        r#"<span class="lane-what">jvm seed</span>"#,
     ] {
         assert!(
             overview.body.contains(expected),
@@ -1136,53 +1136,55 @@ async fn the_budget_names_a_shell_open_in_a_record() {
     );
 }
 
-/// The HTML from the start of the element whose `data-on:pointerenter` selects `key` to that attribute.
-fn selector_of<'page>(page: &'page str, key: &str, tag: &str) -> &'page str {
-    let at = page
-        .find(&format!("data-on:pointerenter=\"$_slot = '{key}'\""))
-        .unwrap_or_else(|| panic!("nothing selects {key}"));
-    let start = page[..at].rfind(tag).unwrap();
-    &page[start..at]
-}
-
 #[tokio::test]
-async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card() {
+async fn each_slot_is_drawn_once_as_a_lane_that_is_its_share_of_the_budget() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await.body;
-    let jvm_1 = slot_id("jvm", 1);
-    let jvm_2 = slot_id("jvm", 2);
     assert!(
-        selector_of(&overview, &jvm_1, "<a ")
-            .contains(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#)),
-        "jvm 1's block opens the ledger build it runs"
+        !overview.contains(r#"class="bar""#) && !overview.contains("bar-key"),
+        "no second drawing of the slots beside the lanes"
     );
-    assert!(
-        selector_of(&overview, &jvm_2, "<a ").contains(&format!(r##"href="#{jvm_2}""##)),
-        "the idle jvm 2's block points at its card"
-    );
+    let lane = |key: &str| {
+        let start = overview
+            .find(&format!(r#"<li id="{key}""#))
+            .unwrap_or_else(|| panic!("{key} has a lane"));
+        let end = overview[start..].find("</li>").unwrap();
+        &overview[start..start + end]
+    };
     for (profile, slot) in [("jvm", 1), ("jvm", 2), ("node", 1), ("node", 2)] {
-        let card = slot_id(profile, slot);
+        let key = slot_id(profile, slot);
+        assert_eq!(
+            overview.matches(&format!(r#"id="{key}""#)).count(),
+            1,
+            "{profile} {slot} is drawn once"
+        );
         assert!(
-            overview.contains(&format!(r#"<li id="{card}""#))
-                && overview.contains(&format!("data-class:linked=\"$_slot == '{card}'")),
-            "{profile} {slot}'s card exists and lights up with its block"
+            lane(&key).contains(&format!("data-class:linked=\"$_slot == '{key}'")),
+            "{profile} {slot}'s lane lights up with its repository's"
         );
     }
-    // A block names what it holds to a screen reader, as core words its slot's state.
-    for (key, line) in [
-        (&jvm_1, "of 9G in jvm 1, CI / build on halyard/ledger"),
-        (&jvm_2, "9G jvm 2, idle"),
-    ] {
-        let block = selector_of(&overview, key, "<a ");
-        assert!(
-            block.contains(line),
-            "{key}'s block reads {line:?}: {block}"
-        );
-    }
+    assert!(
+        lane(&slot_id("jvm", 1)).contains(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#)),
+        "jvm 1's lane opens the ledger build it runs"
+    );
+    // The blocks lie end to end over the slice: the first at its start, the next where the first ends.
+    let at = |key: &str| {
+        let lane = lane(key);
+        let from = &lane[lane.find("--from: ").unwrap() + 8..];
+        from[..from.find(';').unwrap()].parse::<f64>().unwrap()
+    };
+    assert!(
+        at(&slot_id("jvm", 1)).abs() < f64::EPSILON,
+        "jvm 1 starts the slice"
+    );
+    assert!(
+        at(&slot_id("jvm", 2)) > at(&slot_id("jvm", 1)),
+        "jvm 2 sits after jvm 1"
+    );
     assert!(
         overview.contains("of 33G free past every slot's cap; "),
-        "the free remainder is named for screen readers, apart from the room free slots leave"
+        "the free remainder is a row of its own, named for screen readers"
     );
 }
 
@@ -1204,10 +1206,6 @@ async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() 
             overview.matches(&format!(r#"id="{id}""#)).count(),
             1,
             "one card has the id {id}"
-        );
-        assert!(
-            selector_of(&overview, id, "<a ").contains(&format!(r##"href="#{id}""##)),
-            "the block for {id} points at its own card"
         );
     }
 }
@@ -1318,9 +1316,9 @@ async fn a_slots_block_follows_its_jobs_new_sample() {
             },
         })
         .unwrap();
-    // The block's line comes in the patch, rendered from the new sample.
-    let line = r#"aria-label="5G of 9G in jvm 1"#;
-    read_until(&mut stream, |text| text.contains(line)).await;
+    // The lane's fill comes in the patch, rendered from the new sample: 5G of its 9G block.
+    let fill = format!(r#"id="fill-{}" style="--fill: 0.556""#, slot_id("jvm", 1));
+    read_until(&mut stream, |text| text.contains(&fill)).await;
 }
 
 #[tokio::test]
@@ -3104,8 +3102,26 @@ async fn the_history_form_keeps_the_filters_in_force_and_its_sorts_keep_them_too
         "a workflow is offered: {filters}"
     );
     assert!(
-        page.contains(r#"href="/history?outcome=success&amp;sort=wait""#),
+        page.contains(r#"href="/history?outcome=success&amp;order=wait-desc""#),
         "a column's sort keeps the outcome: {page}"
+    );
+    // The select reads the order the list is in, each way, and a filter change keeps no order of its own beside it.
+    let oldest = dashboard
+        .page(&cookie, "/history?order=queued-asc")
+        .await
+        .body;
+    assert!(
+        oldest.contains(r#"<option value="queued-asc" selected>Oldest first</option>"#)
+            && !oldest.contains(r#"type="hidden" name="order""#),
+        "the sort select says oldest first: {oldest}"
+    );
+    let shortest = dashboard
+        .page(&cookie, "/history?order=wait-asc")
+        .await
+        .body;
+    assert!(
+        shortest.contains(r#"<option value="wait-asc" selected>Shortest wait first</option>"#),
+        "a header's ascending sort reads back in the select: {shortest}"
     );
     let e2e = dashboard.page(&cookie, "/history?workflow=E2E").await.body;
     let rows = &e2e[e2e.find("<tbody>").unwrap()..];
@@ -3472,10 +3488,6 @@ async fn a_running_job_without_a_name_is_named_by_its_id_on_the_overview() {
         )),
         "its slot card names it as its page does: {card}"
     );
-    assert!(
-        overview.contains(&format!("job {LEDGER_RUNNING} on halyard/ledger")),
-        "its budget readout names it too"
-    );
 }
 
 #[tokio::test]
@@ -3573,7 +3585,12 @@ async fn a_cancel_is_sent_only_with_the_confirmation_of_the_preview_the_user_saw
     let sent = || dashboard.fake.fixtures.lock().unwrap().controls.clone();
     // The daemon's 409: a preview, and nothing sent.
     let preview = dashboard
-        .write(&cookie, "POST", &path, &serde_json::json!({ "confirm": "" }))
+        .write(
+            &cookie,
+            "POST",
+            &path,
+            &serde_json::json!({ "confirm": "" }),
+        )
         .await;
     assert_eq!(preview.status, StatusCode::OK);
     assert!(preview.body.contains("action-preview"), "{}", preview.body);
@@ -3586,18 +3603,33 @@ async fn a_cancel_is_sent_only_with_the_confirmation_of_the_preview_the_user_saw
     );
     // A confirmation in the URL is not read: only the body's is.
     let in_url = dashboard
-        .write(&cookie, "POST", &format!("{path}?confirm={token}"), &serde_json::json!({}))
+        .write(
+            &cookie,
+            "POST",
+            &format!("{path}?confirm={token}"),
+            &serde_json::json!({}),
+        )
         .await;
     assert!(in_url.body.contains("action-preview"), "{}", in_url.body);
     assert!(sent().is_empty(), "a token in the URL sends nothing");
     // A confirmation the daemon did not issue gets a preview again.
     let stale = dashboard
-        .write(&cookie, "POST", &path, &serde_json::json!({ "confirm": "demo-cancel-1" }))
+        .write(
+            &cookie,
+            "POST",
+            &path,
+            &serde_json::json!({ "confirm": "demo-cancel-1" }),
+        )
         .await;
     assert!(stale.body.contains("action-preview"), "{}", stale.body);
     assert!(sent().is_empty(), "a stale confirmation sends nothing");
     let done = dashboard
-        .write(&cookie, "POST", &path, &serde_json::json!({ "confirm": token }))
+        .write(
+            &cookie,
+            "POST",
+            &path,
+            &serde_json::json!({ "confirm": token }),
+        )
         .await;
     assert_eq!(done.status, StatusCode::OK);
     assert!(
@@ -3677,6 +3709,24 @@ async fn an_older_runnerd_s_missing_routes_read_as_not_supported_never_as_empty(
         "{}",
         timeline.body
     );
+    let searched = dashboard
+        .page(&cookie, "/history?q=build&order=wait-desc")
+        .await;
+    assert_eq!(searched.status, StatusCode::OK);
+    assert!(
+        searched.body.contains(&said(Feature::JobSearch)) && searched.body.contains("data-row"),
+        "an older daemon's list says it is every job, and lists them: {}",
+        searched.body
+    );
+    // The records still list, each a link, since an older daemon cannot say which jobs left the history.
+    let records = dashboard.page(&cookie, "/records").await;
+    assert_eq!(records.status, StatusCode::OK);
+    let gone = crate::format::sentence(runnerd_core::api::Records::history_gone());
+    assert!(
+        records.body.contains(r#"href="/jobs/"#) && !records.body.contains(&gone),
+        "no record is said to have left the history: {}",
+        records.body
+    );
     let failed = runnerd_fixtures::log_facts()[0].job;
     let job = dashboard
         .page(&cookie, &format!("/jobs/{failed}?q=error"))
@@ -3745,7 +3795,10 @@ async fn a_job_that_fails_while_its_page_is_open_gets_its_failure_log_comparison
     let update = read_until(&mut stream, |text| text.contains(r#"id="compare""#)).await;
     let finished = &update[update.rfind(r#"id="failure""#).unwrap()..];
     for id in [r#"id="log""#, r#"id="compare""#, r#"id="record""#] {
-        assert!(finished.contains(id), "{id} is patched as the job ends: {finished}");
+        assert!(
+            finished.contains(id),
+            "{id} is patched as the job ends: {finished}"
+        );
     }
     assert!(
         finished.contains("log-view") && !finished.contains("data-follow"),
@@ -3836,7 +3889,9 @@ async fn removing_a_record_keeps_the_others_whose_job_left_the_history_unlinked(
         .records
         .iter()
         .map(|record| record.job)
-        .find(|job| *job != LENS_ORPHAN && records.contains(&format!("@delete('/v1/records/{job}')")))
+        .find(|job| {
+            *job != LENS_ORPHAN && records.contains(&format!("@delete('/v1/records/{job}')"))
+        })
         .unwrap();
     let removed = dashboard
         .write(
@@ -3849,7 +3904,9 @@ async fn removing_a_record_keeps_the_others_whose_job_left_the_history_unlinked(
     let gone = crate::format::sentence(runnerd_core::api::Records::history_gone());
     assert!(
         removed.body.contains(&gone)
-            && !removed.body.contains(&format!(r#"href="/jobs/{LENS_ORPHAN}""#)),
+            && !removed
+                .body
+                .contains(&format!(r#"href="/jobs/{LENS_ORPHAN}""#)),
         "the record whose job left the history still says so: {}",
         removed.body
     );
@@ -3860,7 +3917,10 @@ async fn the_timeline_lens_link_keeps_only_the_range_it_draws() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let page = dashboard
-        .page(&cookie, "/history?repository=halyard%2Fledger&q=zzz&range=7d")
+        .page(
+            &cookie,
+            "/history?repository=halyard%2Fledger&q=zzz&range=7d",
+        )
         .await
         .body;
     assert!(
@@ -3872,5 +3932,39 @@ async fn the_timeline_lens_link_keeps_only_the_range_it_draws() {
         page.contains(r#"href="/history?repository=halyard%2Fledger&amp;lens=trends""#)
             || page.contains(r#"href="/history?lens=trends&amp;repository=halyard%2Fledger""#),
         "the trends chart the repository: {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_mistyped_address_reads_as_a_page_never_as_a_plain_text_error() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    for path in [
+        "/history?lens=foo",
+        "/history?range=1y",
+        "/history?before=abc",
+        "/history?order=sideways",
+        "/config?resize=",
+    ] {
+        let page = dashboard.page(&cookie, path).await;
+        assert_eq!(page.status, StatusCode::OK, "{path}: {}", page.body);
+        assert!(
+            page.body.contains("<h1>"),
+            "{path} is a page: {}",
+            page.body
+        );
+    }
+    let line = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}?line=abc"))
+        .await;
+    assert_eq!(line.status, StatusCode::OK, "{}", line.body);
+    let past_u64 = dashboard
+        .page(&cookie, "/jobs/12345678901234567890123")
+        .await;
+    assert_eq!(past_u64.status, StatusCode::NOT_FOUND);
+    assert!(
+        past_u64.body.contains("There is no page at this address"),
+        "{}",
+        past_u64.body
     );
 }
