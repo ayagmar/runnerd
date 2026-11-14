@@ -532,6 +532,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         let mut described = before.details;
         described.extend(self.describe(reads).await.details);
+        // Jobs recorded under GitHub's name for their run, as their workflow's could not be read then.
+        for named in self.github.named_runs().await {
+            self.store.workflow_named(named);
+        }
         let undecided = self.undecided(&described);
         self.decide_writes(undecided).await;
         self.detach_ended();

@@ -18,7 +18,7 @@ use tracing::warn;
 use crate::admission::trace::Trace;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
-use crate::github::{JobDetails, QueuedJob};
+use crate::github::{JobDetails, NamedRun, QueuedJob};
 use crate::observe::metrics::{CpuHeld, Events};
 use crate::scheduler::warm;
 use crate::sizing;
@@ -332,6 +332,7 @@ enum Write {
     Details {
         details: JobDetails,
     },
+    WorkflowNamed(NamedRun),
     Elsewhere {
         details: JobDetails,
     },
@@ -607,6 +608,12 @@ impl Store {
     /// Records a running job's progress and steps as GitHub reports them; announces changed steps.
     pub fn details(&self, details: JobDetails) {
         self.send(Write::Details { details });
+    }
+
+    /// Names the workflow of a run's jobs, which were recorded under GitHub's name for the run because the workflow's
+    /// could not be read then (ADR 0140).
+    pub fn workflow_named(&self, named: NamedRun) {
+        self.send(Write::WorkflowNamed(named));
     }
 
     /// Closes a queued job that left the queue without a runner of this daemon: another machine's runner took it, or

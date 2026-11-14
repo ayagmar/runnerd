@@ -83,6 +83,8 @@ struct GithubState {
     missed_listings: BTreeSet<String>,
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
+    /// What `named_runs` gives, once.
+    named_runs: Vec<github::NamedRun>,
     /// What started each workflow run, by run ID.
     triggers: HashMap<u64, github::RunTrigger>,
     /// What `GET /pulls/{number}` answers; a number not here fails.
@@ -786,6 +788,10 @@ impl GithubApi for FakeGithub {
             attempt: 1,
             completed: false,
         })
+    }
+
+    async fn named_runs(&self) -> Vec<github::NamedRun> {
+        std::mem::take(&mut self.0.lock().unwrap().named_runs)
     }
 
     fn spend(&self) -> github::Spend {
@@ -7730,4 +7736,31 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Logged {
     fn make_writer(&'writer self) -> Logged {
         self.clone()
     }
+}
+
+/// The bug it catches: a run's workflow name learnt after its jobs were recorded under GitHub's name for the run never
+/// reaching the history, so they stay under the run's name (ADR 0140).
+#[tokio::test]
+async fn a_runs_workflow_named_late_corrects_its_jobs_in_the_history() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("named-late");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![QueuedJob {
+        workflow: Some("deploy 1".to_owned()),
+        ..job(5)
+    }];
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let store = handle.store.clone();
+    let workflow = async || store.job(5).await.unwrap().unwrap().summary.workflow;
+    assert_eq!(workflow().await.as_deref(), Some("deploy 1"));
+    github.0.lock().unwrap().named_runs = vec![github::NamedRun {
+        repository: "o/r".to_owned(),
+        run_id: 1,
+        workflow: "CI".to_owned(),
+    }];
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    assert_eq!(workflow().await.as_deref(), Some("CI"));
 }

@@ -14,9 +14,10 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt as _;
 use futures_util::future::BoxFuture;
 
+use super::workflows::{NAMES_FRESH, Workflows};
 use super::{
     ActionFailure, Class, Conditional, Deleted, Error, Github, GithubApi, JobActionRequest,
-    QueuedJob, RunNow, Token,
+    NamedRun, QueuedJob, RunNow, Token,
 };
 use crate::sync::lock;
 
@@ -31,6 +32,10 @@ struct Seen {
 }
 
 type Handler = dyn Fn(&Seen) -> Response + Send + Sync;
+
+/// Where the client reads the repository's workflows. A fake GitHub whose handler does not answer it answers one
+/// workflow, 7, `CI`.
+const WORKFLOWS: &str = "/repos/o/r/actions/workflows?per_page=100";
 
 /// Serves `handler` on a loopback port in place of api.github.com; returns its URL and what it received.
 async fn fake_github(
@@ -47,6 +52,11 @@ async fn fake_github(
         };
         log.lock().unwrap().push(request.clone());
         let response = handler(&request);
+        let response = if request.uri == WORKFLOWS && response.status() == StatusCode::NOT_FOUND {
+            json(r#"{"total_count":1,"workflows":[{"id":7,"name":"CI","path":".github/workflows/ci.yml"}]}"#)
+        } else {
+            response
+        };
         async move { response }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -170,11 +180,11 @@ fn uris(seen: &Mutex<Vec<Seen>>) -> Vec<String> {
 async fn a_queued_job_on_a_later_page_of_runs_and_jobs_is_found() {
     let (url, seen) = fake_github(|request| match request.uri.as_str() {
         "/repos/o/r/actions/runs?status=queued&per_page=100" => {
-            page(request, r#"{"workflow_runs":[{"id":10}]}"#, true)
+            page(request, r#"{"workflow_runs":[{"id":10,"workflow_id":7}]}"#, true)
         }
         // Run 10 moved down a page while the first was read.
         "/repos/o/r/actions/runs?status=queued&per_page=100&page=2" => {
-            page(request, r#"{"workflow_runs":[{"id":10},{"id":20}]}"#, false)
+            page(request, r#"{"workflow_runs":[{"id":10,"workflow_id":7},{"id":20,"workflow_id":7}]}"#, false)
         }
         "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
             page(request, r#"{"workflow_runs":[]}"#, false)
@@ -263,7 +273,7 @@ fn runs_page(request: &Seen, ids: &[u64], number: usize) -> Response {
         .get(number - 1)
         .map_or(&[][..], |page| *page)
         .iter()
-        .map(|id| format!(r#"{{"id":{id}}}"#))
+        .map(|id| format!(r#"{{"id":{id},"workflow_id":7}}"#))
         .collect();
     page(
         request,
@@ -310,8 +320,8 @@ async fn a_busy_repository_is_polled_queued_runs_first_then_the_oldest_within_th
         (1..=50).chain(301..=450).collect::<Vec<_>>(),
         "every queued run, then the oldest runs in progress up to 200 runs, the last read to its end"
     );
-    // Five pages of runs, 200 runs' jobs, and run 50's second page.
-    assert_eq!(seen.lock().unwrap().len(), 206);
+    // Five pages of runs, 200 runs' jobs, run 50's second page, and the workflows' names once.
+    assert_eq!(seen.lock().unwrap().len(), 207);
 }
 
 /// Serves job `id` as completed when `id` is in `completed`, otherwise in progress with a name `pad` long.
@@ -320,6 +330,9 @@ async fn fake_jobs(
     pad: usize,
 ) -> (String, Arc<Mutex<Vec<Seen>>>) {
     fake_github(move |request| {
+        if request.uri == "/repos/o/r/actions/runs/1" {
+            return json(r#"{"id":1,"workflow_id":7}"#);
+        }
         let id: u64 = request
             .uri
             .trim_start_matches("/repos/o/r/actions/jobs/")
@@ -1284,7 +1297,7 @@ fn counting_fake() -> impl Fn(&Seen) -> Response + Send + Sync + 'static {
         };
         let mut response = match (request.method.as_str(), request.uri.as_str()) {
             ("GET", "/repos/o/r/actions/runs?status=queued&per_page=100") => {
-                page(request, r#"{"total_count":1,"workflow_runs":[{"id":10}]}"#, false)
+                page(request, r#"{"total_count":1,"workflow_runs":[{"id":10,"workflow_id":7}]}"#, false)
             }
             ("GET", "/repos/o/r/actions/runs?status=in_progress&per_page=100") => {
                 page(request, r#"{"total_count":0,"workflow_runs":[]}"#, false)
@@ -1365,7 +1378,7 @@ async fn requests_are_counted_by_class_and_by_what_github_answered() {
             [1, 1, 0], // job reads
             [1, 0, 0], // registrations
             [2, 0, 0], // deletes
-            [1, 0, 1], // other: the repository, the refused cancel
+            [2, 0, 1], // other: the workflows' names, the repository, the refused cancel
         ]
     );
     // What the pace is read by counts the registration and both deletes, whatever GitHub answered.
@@ -1642,4 +1655,274 @@ async fn a_refused_token_does_not_change_the_rate_limit_reading() {
         "both sends of the refused request count"
     );
     assert_eq!(report.rate_limit().unwrap().limit, 5000);
+}
+
+/// Job `id` of run `run`, named by GitHub after the run's `run-name` ("deploy {run}"), on `main`, completed with
+/// `conclusion` by runner `r{id}`.
+fn run_named_job(id: u64, run: u64, conclusion: &str) -> String {
+    format!(
+        r#"{{"id":{id},"run_id":{run},"run_attempt":1,"name":"test","workflow_name":"deploy {run}",
+        "head_branch":"main","labels":["self-hosted"],"created_at":"2026-11-14T10:0{id}:00Z","status":"completed",
+        "conclusion":"{conclusion}","started_at":"2026-11-14T10:0{id}:10Z","completed_at":"2026-11-14T10:0{id}:50Z",
+        "runner_name":"r{id}","steps":[]}}"#
+    )
+}
+
+/// Two runs of workflow 7 under different `run-name`s, and a run of workflow 8, which the repository's workflows no
+/// longer list.
+async fn run_named_github() -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/jobs/1" => json(&run_named_job(1, 100, "success")),
+        "/repos/o/r/actions/jobs/2" => json(&run_named_job(2, 200, "failure")),
+        "/repos/o/r/actions/jobs/3" => json(&run_named_job(3, 200, "success")),
+        "/repos/o/r/actions/jobs/4" => json(&run_named_job(4, 300, "success")),
+        "/repos/o/r/actions/runs/100" | "/repos/o/r/actions/runs/200" => {
+            json(r#"{"workflow_id":7,"name":"deploy","display_title":"deploy"}"#)
+        }
+        "/repos/o/r/actions/runs/300" => json(r#"{"workflow_id":8}"#),
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => {
+            json(r#"{"workflow_runs":[{"id":200,"workflow_id":7}]}"#)
+        }
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+            json(r#"{"workflow_runs":[]}"#)
+        }
+        "/repos/o/r/actions/runs/200/jobs?filter=latest&per_page=100" => json(
+            r#"{"jobs":[{"id":5,"run_id":200,"name":"lint","status":"queued","labels":[],"workflow_name":"deploy 200"}]}"#,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await
+}
+
+/// The bug it catches: GitHub's `workflow_name` taken for the job's workflow, which is the run's name, so a workflow
+/// with a `run-name` is a new workflow on every run and compare finds no earlier success of the same job.
+#[tokio::test]
+async fn two_runs_of_one_workflow_under_different_run_names_are_one_job_and_compare_finds_the_baseline()
+ {
+    let (url, _) = run_named_github().await;
+    let github = client(&url);
+    let passed = github.job("o/r", 1).await.unwrap();
+    let failed = github.job("o/r", 2).await.unwrap();
+
+    let dir = crate::testdir::TestDir::new("github");
+    let store = crate::store::Store::open(&dir.0.join("runnerd.db")).unwrap();
+    for (details, at) in [(passed, 1_000_000), (failed, 2_000_000)] {
+        let runner = details.runner_name.clone().unwrap();
+        store.runner_started(crate::store::RunnerRecord {
+            purpose: None,
+            admission: None,
+            name: runner.clone(),
+            repository: "o/r".to_owned(),
+            profile: "app".to_owned(),
+            slot: 1,
+            container: format!("{runner}-container"),
+            started_at: at,
+            memory_cap: None,
+            cpu_cap: None,
+        });
+        store.claimed(details.id, details.run_id, &runner, at + 100);
+        store.details(details);
+        store.runner_removed(&runner, at + 60_000);
+    }
+    store.flush().await;
+    let compared = store.compare(2, None).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            compared.baseline,
+            crate::api::Baseline::Chosen { job: 1, .. }
+        ),
+        "job 1, the earlier success of `CI / test` on main, is the baseline: {:?}",
+        compared.baseline
+    );
+    let job = store.job(2).await.unwrap().unwrap();
+    assert_eq!(
+        job.summary.workflow.as_deref(),
+        Some("CI"),
+        "the workflow's own name, not the run's"
+    );
+}
+
+/// The bugs it catches: a request for the run or the workflows on every job read, a client that does not learn them
+/// again after a restart, a queued job keeping the run's name, and a workflow the listing lacks named wrongly.
+#[tokio::test]
+async fn a_jobs_workflow_is_asked_once_per_run_learnt_again_after_a_restart_and_unknown_keeps_githubs_name()
+ {
+    let (url, seen) = run_named_github().await;
+    let asked = |uri: &str| uris(&seen).iter().filter(|seen| *seen == uri).count();
+    let github = client(&url);
+    let queued = github.queued_jobs("o/r").await.unwrap();
+    assert_eq!(queued[0].workflow.as_deref(), Some("CI"));
+    for id in [2, 3] {
+        assert_eq!(
+            github
+                .job("o/r", id)
+                .await
+                .unwrap()
+                .workflow_name
+                .as_deref(),
+            Some("CI")
+        );
+    }
+    assert_eq!(
+        asked("/repos/o/r/actions/runs/200"),
+        0,
+        "the listing gave run 200's workflow"
+    );
+    assert_eq!(asked(WORKFLOWS), 1);
+    github.job("o/r", 1).await.unwrap();
+    assert_eq!(asked("/repos/o/r/actions/runs/100"), 1);
+    assert_eq!(asked(WORKFLOWS), 1, "workflow 7's name is known");
+
+    // A restart: nothing kept, everything learnt again.
+    let restarted = client(&url);
+    assert_eq!(
+        restarted
+            .job("o/r", 3)
+            .await
+            .unwrap()
+            .workflow_name
+            .as_deref(),
+        Some("CI")
+    );
+    assert_eq!(asked("/repos/o/r/actions/runs/200"), 1);
+    assert_eq!(asked(WORKFLOWS), 2);
+
+    // Workflow 8 is not listed, even read again: GitHub's own name stays, as before.
+    assert_eq!(
+        restarted
+            .job("o/r", 4)
+            .await
+            .unwrap()
+            .workflow_name
+            .as_deref(),
+        Some("deploy 300")
+    );
+    assert_eq!(
+        asked(WORKFLOWS),
+        3,
+        "a workflow missing from the list reads it again"
+    );
+    restarted.job("o/r", 4).await.unwrap();
+    assert_eq!(asked(WORKFLOWS), 3, "once per workflow it does not list");
+}
+
+/// Run 100's job 1, whose workflow's name GitHub answers only while `listing` holds, and run 404's job 2, a run GitHub
+/// no longer has.
+async fn flaky_workflows(listing: Arc<AtomicBool>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_github(move |request| match request.uri.as_str() {
+        "/repos/o/r/actions/jobs/1" => json(&run_named_job(1, 100, "success")),
+        "/repos/o/r/actions/jobs/2" => json(&run_named_job(2, 404, "success")),
+        "/repos/o/r/actions/jobs/3" => json(&run_named_job(3, 300, "success")),
+        "/repos/o/r/actions/runs/100" | "/repos/o/r/actions/runs/300" => {
+            json(r#"{"workflow_id":7}"#)
+        }
+        WORKFLOWS if !listing.load(Ordering::SeqCst) => {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await
+}
+
+/// The bugs it catches: a job read failing because its workflow's name could not be read, which the history then
+/// records as lost or gone though GitHub answered for the job, and a run whose name came late never named.
+#[tokio::test]
+async fn a_job_whose_workflow_cannot_be_read_keeps_githubs_name_and_its_run_is_named_once_it_can() {
+    let listing = Arc::new(AtomicBool::new(false));
+    let (url, _) = flaky_workflows(listing.clone()).await;
+    let mut github = client(&url);
+    *github.workflows.get_mut().unwrap() = Workflows::new(NAMES_FRESH, Duration::ZERO);
+    let job = github.job("o/r", 1).await.unwrap();
+    assert_eq!(
+        job.workflow_name.as_deref(),
+        Some("deploy 100"),
+        "GitHub's name, for now"
+    );
+    assert_eq!(job.conclusion.as_deref(), Some("success"));
+    assert_eq!(github.named_runs().await, [], "the workflows still fail");
+
+    listing.store(true, Ordering::SeqCst);
+    assert_eq!(
+        github.named_runs().await,
+        [NamedRun {
+            repository: "o/r".to_owned(),
+            run_id: 100,
+            workflow: "CI".to_owned(),
+        }]
+    );
+    assert_eq!(github.named_runs().await, [], "given once");
+
+    // A run GitHub no longer has: the job is still read, under GitHub's name, and nothing is owed.
+    let job = github.job("o/r", 2).await.unwrap();
+    assert_eq!(job.workflow_name.as_deref(), Some("deploy 404"));
+    assert_eq!(github.named_runs().await, []);
+}
+
+/// The bug it catches: a failing read of the workflows asked again by every job read of every tick.
+#[tokio::test]
+async fn after_a_failed_read_of_the_workflows_job_reads_ask_nothing_more_for_a_while() {
+    let (url, seen) = flaky_workflows(Arc::new(AtomicBool::new(false))).await;
+    let github = client(&url);
+    for id in [1, 3, 1] {
+        assert!(github.job("o/r", id).await.is_ok(), "job {id} is read");
+    }
+    assert_eq!(github.named_runs().await, []);
+    let asked = |uri: &str| uris(&seen).iter().filter(|seen| *seen == uri).count();
+    assert_eq!(asked(WORKFLOWS), 1);
+    assert_eq!(
+        asked("/repos/o/r/actions/runs/300"),
+        0,
+        "nothing read for a minute"
+    );
+}
+
+/// The bug it catches: job reads at once, as the history makes them, each reading the run and the workflows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn job_reads_at_once_read_their_run_and_the_workflows_once() {
+    let (url, seen) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs/100" => {
+            std::thread::sleep(Duration::from_millis(100));
+            json(r#"{"workflow_id":7}"#)
+        }
+        uri => match uri.strip_prefix("/repos/o/r/actions/jobs/") {
+            Some(id) => json(&run_named_job(id.parse().unwrap(), 100, "success")),
+            None => StatusCode::NOT_FOUND.into_response(),
+        },
+    })
+    .await;
+    let github = client(&url);
+    let reads = futures_util::future::join_all((1..=4).map(|id| github.job("o/r", id))).await;
+    for read in reads {
+        assert_eq!(read.unwrap().workflow_name.as_deref(), Some("CI"));
+    }
+    let asked = |uri: &str| uris(&seen).iter().filter(|seen| *seen == uri).count();
+    assert_eq!(asked("/repos/o/r/actions/runs/100"), 1);
+    assert_eq!(asked(WORKFLOWS), 1);
+}
+
+/// The bug it catches: a workflow's name read once for the daemon's life, so a rename shows only at a restart and
+/// splits the history there.
+#[tokio::test]
+async fn a_renamed_workflow_takes_its_new_name_once_the_names_are_old() {
+    let name = Arc::new(Mutex::new("CI"));
+    let listed = name.clone();
+    let (url, _) = fake_github(move |request| match request.uri.as_str() {
+        "/repos/o/r/actions/jobs/1" => json(&run_named_job(1, 100, "success")),
+        "/repos/o/r/actions/jobs/3" => json(&run_named_job(3, 300, "success")),
+        "/repos/o/r/actions/runs/100" | "/repos/o/r/actions/runs/300" => {
+            json(r#"{"workflow_id":7}"#)
+        }
+        WORKFLOWS => json(&format!(
+            r#"{{"workflows":[{{"id":7,"name":"{}"}}]}}"#,
+            listed.lock().unwrap()
+        )),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let mut github = client(&url);
+    *github.workflows.get_mut().unwrap() = Workflows::new(Duration::ZERO, Duration::ZERO);
+    let workflow = async |id| github.job("o/r", id).await.unwrap().workflow_name;
+    assert_eq!(workflow(1).await.as_deref(), Some("CI"));
+    *name.lock().unwrap() = "Build";
+    assert_eq!(workflow(3).await.as_deref(), Some("Build"));
 }
