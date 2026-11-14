@@ -26,7 +26,7 @@ BASE = {
     "caches.pnpm": {"max_size": '"5G"'},
     "caches.maven": {"max_size": '"5G"'},
     "caches.build": {},
-    "profiles.jvm": {"image": '"ghcr.io/ayagmar/runnerd-runner:jvm-0.1.0"', "cpus": "8", "memory": '"9G"', "slots": "2"},
+    "profiles.jvm": {"image": '"ghcr.io/ayagmar/runnerd-runner:jvm-0.1.1"', "cpus": "8", "memory": '"9G"', "slots": "2"},
     "[repositories]": {"name": '"halyard/ledger"', "profile": '"jvm"', "labels": '["self-hosted"]'},
     "history": {},
     "records": {},

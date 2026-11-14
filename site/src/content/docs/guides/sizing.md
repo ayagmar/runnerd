@@ -58,7 +58,7 @@ Serve the repository in a smaller second profile with another `[[repositories]]`
 
 ```toml
 [profiles.small]
-image = "ghcr.io/ayagmar/runnerd-runner:node-0.1.0"
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.1.1"
 cpus = 2
 memory = "1G"
 slots = 4
