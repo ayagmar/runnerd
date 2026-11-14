@@ -7,11 +7,12 @@
 //! every group and at the lines the runner opens a step with but no group (`Post job cleanup.`, `Cleaning up orphan
 //! processes`, a job hook's). GitHub stores a step's times in whole seconds, so time alone cannot split the steps
 //! that share one, such as a quick failure and the skipped steps after it. The runner opens every step but `Set up
-//! job` and the container steps with a top-level `Run …` group or one of those lines, so the log is cut there into
-//! blocks, and each step that ran printed one or more blocks, in order. A block goes to a step when every way of
-//! giving each block to a step in order, each step its times hold and each step that ran at least one block, gives it
-//! that step: a user group titled `Run …` adds a block no order settles, and it goes to no step. Where no such way
-//! exists, a segment goes to the one step, at or after the previous segment's, whose stored times hold the times of
+//! job` and the few it adds without a header (`HEADERLESS`, `HEADERLESS_GROUPS`) with a top-level `Run …` group
+//! or one of those lines, so the log is cut there into blocks, and each step that ran printed one or more blocks, in
+//! order. A block goes to a step when every way of giving each block to a step in order, each step its times hold and
+//! each step that ran at least one block, gives it that step: a user group titled `Run …` adds a block no order
+//! settles, and it goes to no step. Where a headerless step ran, the outline was capped, or no such way exists, a
+//! segment goes to the one step, at or after the previous segment's, whose stored times hold the times of
 //! its first and its last line that has one. A block or segment no time places goes to no step, unless it lies
 //! between two of one step. Never by position, and never by a title alone: a step can print any title.
 
@@ -67,9 +68,19 @@ const SECTIONS: [&str; 4] = [
 /// How the runner titles the top-level group that opens a script or action step: `Run cargo test`.
 const HEADER: &str = "Run ";
 
-/// The steps the runner opens with no header: their lines join the block before them, so a log with one is not cut
-/// into blocks.
-const HEADERLESS: [&str; 2] = ["Initialize containers", "Stop containers"];
+/// The steps the runner opens with no header: their lines join the block before them, or they print none, so a log
+/// with one is not cut into blocks.
+const HEADERLESS: [&str; 4] = [
+    "Initialize containers",
+    "Stop containers",
+    "Wait for all background steps",
+    "Create custom image",
+];
+
+/// How the runner titles the groups of the steps it adds for a Docker action, `Pull …` and `Build …`, which have no
+/// header: a log with one is not cut into blocks. Their step names are not matched, since a user's step can be named
+/// `Build the app`.
+const HEADERLESS_GROUPS: [&str; 2] = ["Pull down action image", "Build container for action use"];
 
 /// How the runner says a script step failed: `##[error]Process completed with exit code 101.`.
 const EXIT: &str = "Process completed with exit code ";
@@ -473,12 +484,12 @@ impl LogOutline {
         } else {
             Vec::new()
         };
-        let starts = block_starts(from, stored.lines, &parts.groups, &parts.sections);
         let ends = Ends {
             leading: from > 0,
             trailing: stored.truncated || !job.summary.state.is_final(),
         };
-        let ranges = by_blocks(&job.steps, &segments, &starts, ends)
+        let ranges = block_starts(from, stored.lines, &parts.groups, &parts.sections, &saved)
+            .and_then(|starts| by_blocks(&job.steps, &segments, &starts, ends))
             .unwrap_or_else(|| attribute(&job.steps, &segments));
         let steps: Vec<StepLines> = job
             .steps
@@ -700,8 +711,24 @@ struct Ends {
 }
 
 /// Where the log's blocks start: the first outlined line, each line the runner opens a step with but no group, and
-/// each top-level `Run …` group but one that follows such a line.
-fn block_starts(from: u64, lines: u64, groups: &[LogGroup], sections: &[u64]) -> Vec<u64> {
+/// each top-level `Run …` group but one that follows such a line. `None` when a step's start may be missing: the
+/// outline only counted some groups or section lines, or a Docker action's step printed no header.
+fn block_starts(
+    from: u64,
+    lines: u64,
+    groups: &[LogGroup],
+    sections: &[u64],
+    saved: &SavedOutline,
+) -> Option<Vec<u64>> {
+    let headerless = groups.iter().any(|group| {
+        group.depth == 0
+            && HEADERLESS_GROUPS
+                .iter()
+                .any(|title| group.title.starts_with(title))
+    });
+    if saved.dropped > 0 || saved.sections >= SECTION_MAX || headerless {
+        return None;
+    }
     let headers = groups
         .iter()
         .filter(|group| group.depth == 0 && group.title.starts_with(HEADER))
@@ -714,7 +741,7 @@ fn block_starts(from: u64, lines: u64, groups: &[LogGroup], sections: &[u64]) ->
         .collect();
     starts.sort_unstable();
     starts.dedup();
-    starts
+    Some(starts)
 }
 
 /// A block of the log: the segments from one block start to the next.
@@ -726,8 +753,8 @@ struct Block {
     times: Option<(u64, u64)>,
 }
 
-/// Each step's lines, by index into `steps`, from the blocks only one order gives it; `None` when no order fits,
-/// such as when a step prints no header, and the segments are attributed by time alone.
+/// Each step's lines, by index into `steps`, from the blocks only one order gives it; `None` when no order fits, or a
+/// step prints no header, and the segments are attributed by time alone.
 fn by_blocks(
     steps: &[Step],
     segments: &[Segment],

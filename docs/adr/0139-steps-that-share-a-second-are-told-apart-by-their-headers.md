@@ -19,8 +19,10 @@ the next step taking that step's exit code.
 The log is cut into blocks where the runner opens a step: the first outlined line, each top-level `##[group]Run …`,
 and each line the runner prints to open a step without a group (`Post job cleanup.`, `Cleaning up orphan
 processes`, and now a job hook's `A job started hook has been configured …` and `A job completed hook …`). A `Run …`
-group right after such a line is the same step's. Every step that ran but `Set up job` and the container steps opens
-with one of these, so each step that ran printed one or more blocks, in order.
+group right after such a line is the same step's. Every step that ran opens with one of these but `Set up job` and the
+steps the runner adds without a header: the container steps, a Docker action's `Pull …` and `Build …` steps,
+`Wait for all background steps` and `Create custom image`. So each other step that ran printed one or more blocks, in
+order.
 
 A block goes to a step when every way of giving each block to a step in order gives it that step, where each way:
 
@@ -31,8 +33,14 @@ A block goes to a step when every way of giving each block to a step in order gi
 
 A block that several ways give to different steps goes to no step: a user's top-level `Run …` group adds a block, and
 which step printed it stays open. A block with no time constrains the order but goes to no step; its lines are a
-step's only between two of that step's blocks, as before. A job with an `Initialize containers` or `Stop containers`
-step, whose lines join the block before them, or a log no way fits, keeps 0133's segment rule.
+step's only between two of that step's blocks, as before. 0133's segment rule stays where a step's start may be
+missing from the blocks:
+
+- a step named `Initialize containers`, `Stop containers`, `Wait for all background steps` or `Create custom image`;
+- a top-level group titled `Pull down action image` or `Build container for action use`, which a Docker action's
+  steps print (their names are not matched: a user's step can be named `Build the app`);
+- an outline that only counted some groups or section lines, past its caps, so a later step's header may not be kept;
+- a log no way fits.
 
 A failed step with no lines still has no exit code or last lines, even when the log has an exit-code mark: a step that
 continued on error, or a step's own output, can print the same line, and naming the wrong exit code is worse than none.
@@ -43,7 +51,9 @@ continued on error, or a step's own output, can print the same line, and naming 
   code and last lines. `crates/fixtures` has that shape as job 9407, which both clients draw.
 - Outlines are assembled when read, so stored logs get the new attribution at once. The hook lines are section lines
   only for logs stored from now on; in older ones the hook's first line stays with the step before it.
-- A log with a container step, or a composite action whose inner steps print `Run …` headers in one second with the
-  steps around them, may still leave steps unattributed.
-- Wrong attribution needs a step that prints no header, which the runner does not do outside the container steps, and a
-  user's top-level `Run …` group in the same second that makes up for it.
+- A job with `container:` or `services:`, a Docker action, or a capped outline keeps the segment rule, so its steps
+  that share a second stay unattributed. So may a composite action whose inner steps print `Run …` headers in one
+  second with the steps around them.
+- Wrong attribution needs a headerless step the guards above do not name, and a spare block in the same second to make
+  up for it: a composite action's inner header or a user's top-level `Run …` group. When in doubt the rule leaves
+  lines unattributed.

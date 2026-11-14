@@ -283,6 +283,89 @@ fn a_step_whose_lines_cannot_be_told_apart_is_unattributed_not_guessed() {
 }
 
 #[test]
+fn a_step_with_no_header_moves_no_line_to_the_next_step() {
+    // A step that opens with no header in the second set-up ended: a Docker action's image pull, whose lines join
+    // set-up's block, or a step the runner adds with no lines of its own. A composite action's inner `Run …` header
+    // makes up the count, so one order fits, and it would give the failed step's header to that step.
+    for (name, pull) in [
+        ("Pull docker://halyard/lint", true),
+        ("Wait for all background steps", false),
+    ] {
+        let steps = vec![
+            step(1, "Set up job", Some((0, 10)), "success"),
+            step(2, name, Some((10, 10)), "success"),
+            step(3, "test", Some((10, 10)), "failure"),
+            step(4, "report", Some((10, 10)), "success"),
+            step(5, "Complete job", Some((10, 10)), "success"),
+        ];
+        let mut log = vec![at("00:00.5", "Current runner version: '2.338.1'")];
+        if pull {
+            log.push(at(
+                "00:09.0",
+                "##[group]Pull down action image 'halyard/lint'",
+            ));
+            log.push(at("00:10.0", "##[endgroup]"));
+        }
+        log.extend([
+            at("00:10.1", "##[group]Run test"),
+            at("00:10.1", "##[endgroup]"),
+            at("00:10.2", "##[error]Process completed with exit code 1."),
+            at("00:10.3", "##[group]Run ./.github/actions/report"),
+            at("00:10.3", "##[endgroup]"),
+            at("00:10.4", "##[group]Run echo report"),
+            at("00:10.4", "##[endgroup]"),
+            at("00:10.5", "Cleaning up orphan processes"),
+        ]);
+        let outline = LogOutline::of(&job(JobState::Completed, "failure", steps), &log);
+        for number in [2, 3, 4] {
+            assert_eq!(
+                outline.step_lines(number),
+                None,
+                "{name}: step {number}'s lines cannot be told"
+            );
+        }
+        assert_eq!(outline.failure.unwrap().exit_code, None, "{name}");
+    }
+}
+
+#[test]
+fn a_header_past_the_group_cap_moves_no_line_to_the_next_step() {
+    // `test` prints a top-level `Run case …` group per case, past the groups an outline keeps; `upload` starts in the
+    // second the last kept one was printed, its header not kept.
+    let steps = vec![
+        step(1, "Set up job", Some((0, 1)), "success"),
+        step(2, "test", Some((1, 20)), "failure"),
+        step(3, "upload", Some((20, 20)), "success"),
+        step(4, "Complete job", Some((20, 20)), "success"),
+    ];
+    let mut log = vec![
+        at("00:00.5", "Current runner version: '2.338.1'"),
+        at("00:01.0", "##[group]Run make test"),
+        at("00:01.0", "##[endgroup]"),
+    ];
+    let cases = GROUP_MAX - 1;
+    for case in 1..=cases {
+        let time = if case == cases { "00:20.1" } else { "00:05.0" };
+        log.push(at(time, &format!("##[group]Run case {case}")));
+        log.push(at(time, "##[endgroup]"));
+    }
+    log.extend([
+        at("00:20.1", "##[error]Process completed with exit code 1."),
+        at("00:20.2", "##[group]Run upload"),
+        at("00:20.2", "uploaded"),
+        at("00:20.2", "##[endgroup]"),
+        at("00:20.5", "Cleaning up orphan processes"),
+    ]);
+    let outline = LogOutline::of(&job(JobState::Completed, "failure", steps), &log);
+    assert!(outline.capped, "the upload's header is past the cap");
+    assert_eq!(
+        outline.step_lines(3),
+        None,
+        "test's exit code is not the upload's"
+    );
+}
+
+#[test]
 fn groups_stay_balanced_past_their_bounds_and_unclosed_ones_stay_open() {
     let mut log: Vec<String> = (0..DEPTH_MAX + 2)
         .map(|depth| format!("##[group]level {depth}"))
