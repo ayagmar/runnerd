@@ -16,7 +16,7 @@ use super::{
     SampleRecord, Write, logged,
 };
 use crate::api::{self, Event, EventEnvelope};
-use crate::github::{JobDetails, JobStep, QueuedJob};
+use crate::github::{JobDetails, JobStep, NamedRun, QueuedJob};
 use crate::record;
 use crate::sync::lock;
 use crate::time;
@@ -131,6 +131,9 @@ impl Writer<'_> {
                 self.change("record a job's progress", |announced| {
                     self.details(&details, announced)
                 });
+            }
+            Write::WorkflowNamed(named) => {
+                self.change("name a run's workflow", |_| self.workflow_named(&named));
             }
             Write::Elsewhere { details } => {
                 self.change("close a job that ran elsewhere", |announced| {
@@ -588,6 +591,14 @@ impl Writer<'_> {
         {
             announced.push(Event::JobStarted { job });
         }
+        Ok(())
+    }
+
+    fn workflow_named(&self, named: &NamedRun) -> rusqlite::Result<()> {
+        self.db.execute(
+            "UPDATE jobs SET workflow = ?3 WHERE repository = ?1 AND run_id = ?2",
+            params![named.repository, named.run_id, named.workflow],
+        )?;
         Ok(())
     }
 

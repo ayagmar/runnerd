@@ -1,5 +1,6 @@
 //! The GitHub REST API as the scheduler and the history need it: queued jobs, a job's steps, just-in-time runner
 //! configs, repository runners, cancelling a run, and the owner's job actions (ADR 0134). Owns the token (`token`),
+//! which workflow each run is of and what it is named (`workflows`, ADR 0140),
 //! the pages of a listing, conditional requests and the answers kept for them, rate-limit backoff, and the count of
 //! what it asks and the limit it last read. It must never put the token in a log line, a `Debug` output or an error,
 //! nor send it anywhere but its base URL, and it decides nothing about scheduling. A job action's request is read for
@@ -18,6 +19,7 @@ use serde::de::DeserializeOwned;
 use tracing::info;
 
 use self::token::Tokens;
+use self::workflows::{Next, Workflows};
 use crate::api;
 use crate::command;
 use crate::docker::JitConfig;
@@ -26,6 +28,7 @@ use crate::time;
 
 mod requests;
 mod token;
+mod workflows;
 
 use requests::Counter;
 pub use requests::{Class, RateLimit, Report, Spend, Tally};
@@ -186,7 +189,7 @@ pub struct QueuedJob {
     pub created_at: u64,
     /// 1 for the run's first attempt.
     pub run_attempt: u32,
-    /// The workflow's name.
+    /// The workflow's name, as its file names it: the same for every run, whatever the run's `run-name`.
     pub workflow: Option<String>,
     /// The branch the run is for.
     pub branch: Option<String>,
@@ -206,7 +209,8 @@ pub struct JobDetails {
     pub run_attempt: u32,
     /// The job's name in the workflow.
     pub name: String,
-    /// The workflow's name.
+    /// The workflow's name, as its file names it: the same for every run, whatever the run's `run-name`. GitHub's
+    /// answer gives the run's name here; [`Github::job`] puts the workflow's in its place.
     pub workflow_name: Option<String>,
     /// The branch the run is for.
     pub head_branch: Option<String>,
@@ -230,6 +234,17 @@ pub struct JobDetails {
     /// Its steps so far.
     #[serde(default)]
     pub steps: Vec<JobStep>,
+}
+
+/// A run's workflow name, learnt after its jobs were read under GitHub's name for the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedRun {
+    /// The repository, `owner/name`.
+    pub repository: String,
+    /// The run.
+    pub run_id: u64,
+    /// Its workflow's name.
+    pub workflow: String,
 }
 
 /// What started a workflow run, as `GET /repos/{owner}/{repo}/actions/runs/{id}` says.
@@ -497,6 +512,10 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         run: u64,
     ) -> impl Future<Output = Result<RunNow, ActionFailure>> + Send;
+    /// The workflows' names of the runs whose job reads kept GitHub's name because the workflow's could not be read
+    /// then, as far as they can be read now (ADR 0140). Each run is given once; one whose workflow GitHub does not
+    /// give is dropped, and keeps GitHub's name.
+    fn named_runs(&self) -> impl Future<Output = Vec<NamedRun>> + Send;
     /// What the reads are paced by (ADR 0127): the rate limit as last read, and the registrations and deletes sent.
     fn spend(&self) -> Spend;
 }
@@ -510,6 +529,9 @@ pub struct Github {
     tokens: Tokens,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
     etags: Mutex<Conditional>,
+    workflows: Mutex<Workflows>,
+    /// Held while a run or the workflows are read for a workflow's name, so concurrent job reads ask once.
+    resolving: tokio::sync::Mutex<()>,
     blocked_until: Mutex<Option<SystemTime>>,
     /// What was asked of GitHub: logged hourly and when the client goes.
     requests: Mutex<Counter>,
@@ -541,7 +563,28 @@ struct Runs {
 #[derive(Deserialize)]
 struct Run {
     id: u64,
+    workflow_id: Option<u64>,
 }
+
+/// A run as far as its workflow: `GET /repos/{owner}/{repo}/actions/runs/{id}`.
+#[derive(Deserialize)]
+struct RunWorkflow {
+    workflow_id: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct WorkflowList {
+    workflows: Vec<WorkflowBody>,
+}
+
+#[derive(Deserialize)]
+struct WorkflowBody {
+    id: u64,
+    name: Option<String>,
+}
+
+/// A workflow's name that could not be read: a read failed, now or within a minute.
+struct Unresolved;
 
 /// Which listing of runs a run is in; queued ones order first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -571,6 +614,7 @@ struct Job {
 
 #[derive(Deserialize)]
 struct RunBody {
+    workflow_id: Option<u64>,
     event: String,
     head_branch: Option<String>,
     head_repository: Option<RepositoryName>,
@@ -724,6 +768,8 @@ impl Github {
             base: base.trim_end_matches('/').to_owned(),
             tokens: Tokens::new(Arc::from(token_source)),
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
+            workflows: Mutex::new(Workflows::default()),
+            resolving: tokio::sync::Mutex::new(()),
             blocked_until: Mutex::new(None),
             requests: Mutex::new(Counter::new(Instant::now(), requests::WINDOW)),
         })
@@ -750,6 +796,72 @@ impl Github {
     pub fn blocked_until(&self) -> Option<SystemTime> {
         let blocked = *lock(&self.blocked_until);
         blocked.filter(|until| *until > SystemTime::now())
+    }
+
+    /// The name of the workflow `repository`'s run `run` is of, as its file names it, which GitHub's `workflow_name`
+    /// is not: that is the run's name, which a `run-name` changes on every run (ADR 0140). Reads the run once, unless a
+    /// listing gave its workflow, and the repository's workflows once an hour, and once more for a workflow the last
+    /// read lacked; one such read at a time, and none for a repository within a minute of one failing. `Ok(None)` when
+    /// GitHub gives the run no workflow, no longer has the run, or does not list its workflow; `Err` when a read
+    /// failed, or failed lately.
+    async fn workflow_name(
+        &self,
+        repository: &str,
+        run: u64,
+    ) -> Result<Option<String>, Unresolved> {
+        // A name already learnt waits for no read in flight.
+        match lock(&self.workflows).next(repository, run, Instant::now()) {
+            Next::Named(name) => return Ok(Some(name)),
+            Next::Unnamed => return Ok(None),
+            Next::Waiting => return Err(Unresolved),
+            Next::ReadRun | Next::ReadList(_) => {}
+        }
+        let _reading = self.resolving.lock().await;
+        // Each pass reads at most once: the run, then the workflows, whose read answers.
+        for _ in 0..3 {
+            let next = lock(&self.workflows).next(repository, run, Instant::now());
+            match next {
+                Next::Named(name) => return Ok(Some(name)),
+                Next::Unnamed => return Ok(None),
+                Next::Waiting => return Err(Unresolved),
+                Next::ReadRun => {
+                    let path = format!("/repos/{repository}/actions/runs/{run}");
+                    let body: Result<RunWorkflow, Error> = self.get(&path).await;
+                    // Its workflow never changes: nothing asks for the run again.
+                    lock(&self.etags).remove(&path);
+                    let mut workflows = lock(&self.workflows);
+                    match body {
+                        Ok(body) => workflows.run(repository, run, body.workflow_id),
+                        Err(error) if error.is_gone() => workflows.run(repository, run, None),
+                        Err(_) => workflows.failed(repository, Instant::now()),
+                    }
+                }
+                Next::ReadList(workflow) => {
+                    // Kept for a conditional request: the hourly read of an unchanged list is a 304.
+                    let path = format!("/repos/{repository}/actions/workflows?per_page={PER_PAGE}");
+                    let pages: Result<Vec<WorkflowList>, Error> = self.get_pages(&path).await;
+                    let mut workflows = lock(&self.workflows);
+                    match pages {
+                        Ok(pages) => {
+                            let names = pages
+                                .into_iter()
+                                .flat_map(|page| page.workflows)
+                                .filter_map(|listed| Some((listed.id, listed.name?)))
+                                .collect();
+                            // This read answers, however old a list of names may be.
+                            return Ok(workflows.listed(
+                                repository,
+                                names,
+                                workflow,
+                                Instant::now(),
+                            ));
+                        }
+                        Err(_) => workflows.failed(repository, Instant::now()),
+                    }
+                }
+            }
+        }
+        Err(Unresolved)
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
@@ -930,12 +1042,14 @@ impl GithubApi for Github {
                     "/repos/{repository}/actions/runs?status={status}&per_page={PER_PAGE}"
                 ))
                 .await?;
-            runs.extend(
-                pages
-                    .into_iter()
-                    .flat_map(|page| page.workflow_runs)
-                    .map(|run| (state, run.id)),
-            );
+            let listed = pages.into_iter().flat_map(|page| page.workflow_runs);
+            let mut workflows = lock(&self.workflows);
+            runs.extend(listed.map(|run| {
+                if let Some(workflow) = run.workflow_id {
+                    workflows.run(repository, run.id, Some(workflow));
+                }
+                (state, run.id)
+            }));
         }
         // A run listed under both, which moved while they were read, counts as queued.
         runs.sort_unstable_by_key(|&(state, id)| (id, state));
@@ -952,27 +1066,37 @@ impl GithubApi for Github {
             }
             let pages: Vec<Jobs> = self.get_pages(&jobs_path(repository, run)).await?;
             requests += pages.len();
-            jobs.extend(
-                pages
-                    .into_iter()
-                    .flat_map(|page| page.jobs)
-                    .filter(|job| job.status == "queued")
-                    .map(|job| QueuedJob {
-                        id: job.id,
-                        run_id: job.run_id,
-                        name: job.name,
-                        labels: job.labels,
-                        created_at: job
-                            .created_at
-                            .as_deref()
-                            .and_then(time::parse_ms)
-                            .unwrap_or(0),
-                        run_attempt: job.run_attempt.unwrap_or(1),
-                        workflow: job.workflow_name,
-                        branch: job.head_branch,
-                        url: job.html_url,
-                    }),
-            );
+            let queued: Vec<Job> = pages
+                .into_iter()
+                .flat_map(|page| page.jobs)
+                .filter(|job| job.status == "queued")
+                .collect();
+            let Some(first) = queued.first() else {
+                continue;
+            };
+            // GitHub's name for a listing that cannot read the workflow's: the job is listed all the same, and its
+            // details name it once they are read.
+            let workflow = match self.workflow_name(repository, first.run_id).await {
+                Ok(Some(name)) => Some(name),
+                Ok(None) | Err(Unresolved) => first.workflow_name.clone(),
+            };
+            jobs.extend(queued.into_iter().map(|job| {
+                QueuedJob {
+                    id: job.id,
+                    run_id: job.run_id,
+                    name: job.name,
+                    labels: job.labels,
+                    created_at: job
+                        .created_at
+                        .as_deref()
+                        .and_then(time::parse_ms)
+                        .unwrap_or(0),
+                    run_attempt: job.run_attempt.unwrap_or(1),
+                    workflow: workflow.clone(),
+                    branch: job.head_branch,
+                    url: job.html_url,
+                }
+            }));
         }
         // The cached pages of runs that ended: nothing asks for them again.
         let runs_prefix = format!("/repos/{repository}/actions/runs/");
@@ -1036,20 +1160,31 @@ impl GithubApi for Github {
 
     async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, Error> {
         let path = format!("/repos/{repository}/actions/jobs/{id}");
-        let job: JobDetails = self.get(&path).await?;
+        let mut job: JobDetails = self.get(&path).await?;
         // A completed job does not change again, and the history stops asking for it.
         if job.status == "completed" {
             lock(&self.etags).remove(&path);
+        }
+        // A job read never fails for its workflow's name: one that cannot be read keeps GitHub's, and the run is owed
+        // the workflow's, which `named_runs` gives once it can be read. A completed job's details are written once.
+        match self.workflow_name(repository, job.run_id).await {
+            Ok(Some(name)) => job.workflow_name = Some(name),
+            Ok(None) => {}
+            Err(Unresolved) => lock(&self.workflows).owe(repository, job.run_id),
         }
         Ok(job)
     }
 
     async fn run_trigger(&self, repository: &str, run: u64) -> Result<RunTrigger, Error> {
+        let run_id = run;
         let path = format!("/repos/{repository}/actions/runs/{run}");
         let run: Result<RunBody, Error> = self.get(&path).await;
         // Asked once per job: its large answer is not worth keeping for a conditional request.
         lock(&self.etags).remove(&path);
         let run = run?;
+        if let Some(workflow) = run.workflow_id {
+            lock(&self.workflows).run(repository, run_id, Some(workflow));
+        }
         Ok(RunTrigger {
             event: run.event,
             head_branch: run.head_branch,
@@ -1184,6 +1319,27 @@ impl GithubApi for Github {
             attempt: body.run_attempt,
             completed: body.status.as_deref() == Some("completed"),
         })
+    }
+
+    async fn named_runs(&self) -> Vec<NamedRun> {
+        let owed = lock(&self.workflows).owed();
+        let mut named = Vec::new();
+        for (repository, runs) in owed {
+            for run in runs {
+                match self.workflow_name(&repository, run).await {
+                    Ok(Some(workflow)) => named.push(NamedRun {
+                        repository: repository.clone(),
+                        run_id: run,
+                        workflow,
+                    }),
+                    Ok(None) => {}
+                    // The repository's reads wait a minute: its other runs too.
+                    Err(Unresolved) => break,
+                }
+                lock(&self.workflows).paid(&repository, run);
+            }
+        }
+        named
     }
 
     fn spend(&self) -> Spend {

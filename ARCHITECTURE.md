@@ -71,7 +71,8 @@ flowchart TB
   ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)); `api::actions` words its
   previews and answers. `command` runs an external command in a process group of its own and kills it past its
   deadline or at a stop, for the doctor and for `github`'s `gh auth token`; `github::token` holds the client's token
-  and the one read of it in flight, on a thread of its own. `admission` predicts a job's memory peak and average CPU,
+  and the one read of it in flight, on a thread of its own. `github::workflows` holds which workflow each run is of, each workflow's name and the
+  runs still owed one, so a job's workflow is its run's and not the run's name ([ADR 0140](docs/adr/0140-a-jobs-workflow-is-its-runs-workflow-not-the-runs-name.md)). `admission` predicts a job's memory peak and average CPU,
   replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
