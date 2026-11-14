@@ -1,0 +1,80 @@
+{
+  "full": {
+    "action": "cancel",
+    "attempt": 2,
+    "confirm": "0f3a9c5e7b2d4f6a8c1e3b5d7f9a2c4e",
+    "confirm_label": "Cancel run",
+    "job": 42,
+    "message": "Cancel run 900 (attempt 2) of tidewater/halyard? GitHub cancels the whole run.",
+    "notes": [
+      "This job has finished."
+    ],
+    "repository": "tidewater/halyard",
+    "run": 900,
+    "scope": "GitHub cancels the whole run.",
+    "siblings": [
+      {
+        "branch": "main",
+        "conclusion": "success",
+        "id": 42,
+        "labels": [
+          "self-hosted"
+        ],
+        "log": {
+          "bytes": 90000,
+          "lines": 1200,
+          "truncated": false
+        },
+        "metrics": {
+          "build_cache": {
+            "hits": 80,
+            "misses": 20,
+            "read_bytes": 314572800,
+            "refused": 1,
+            "writer": true,
+            "written_bytes": 41943040
+          },
+          "cpu_average": 2000,
+          "cpu_peak": 3900,
+          "cpu_periods": 5800,
+          "cpu_stalled": 140000,
+          "cpu_throttled": 900,
+          "cpu_time": 1200000,
+          "memory_average": 3221225472,
+          "memory_peak": 5368709120,
+          "mirror_bytes": 157286400,
+          "network_received": 209715200,
+          "network_sent": 10485760,
+          "sock_throttled": 2
+        },
+        "name": "build",
+        "record_mark": "kept",
+        "repository": "tidewater/halyard",
+        "run_attempt": 1,
+        "run_id": 900,
+        "runner": {
+          "cpu_cap": 4000,
+          "memory_cap": 8589934592,
+          "name": "runnerd-halyard-0",
+          "profile": "halyard",
+          "slot": 0
+        },
+        "runner_fault": true,
+        "state": "completed",
+        "timeline": {
+          "cleaned_at": 1761400610,
+          "container_started_at": 1761400010,
+          "finished_at": 1761400600,
+          "queued_at": 1761400000,
+          "seen_at": 1761400004,
+          "started_at": 1761400020,
+          "unseen": 15
+        },
+        "url": "https://github.com/tidewater/halyard/actions/runs/900",
+        "workflow": "ci"
+      }
+    ],
+    "siblings_note": "runnerd knows 1 other job of this run; GitHub may have more, on other runners.",
+    "title": "Cancel run 900 (attempt 2) of tidewater/halyard?"
+  }
+}

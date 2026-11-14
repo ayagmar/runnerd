@@ -1,0 +1,25 @@
+{
+  "empty": {
+    "kind": "output",
+    "line": 0,
+    "runs": [
+      {
+        "text": "plain"
+      }
+    ]
+  },
+  "full": {
+    "at": 1792717245,
+    "kind": "error",
+    "line": 42,
+    "omitted": 1024,
+    "runs": [
+      {
+        "bold": true,
+        "color": "red",
+        "mark": true,
+        "text": "error: missing target"
+      }
+    ]
+  }
+}

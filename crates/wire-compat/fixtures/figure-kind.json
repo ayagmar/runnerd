@@ -1,0 +1,11 @@
+{
+  "cpu-average": "cpu-average",
+  "cpu-time": "cpu-time",
+  "memory-peak": "memory-peak",
+  "received": "received",
+  "run": "run",
+  "step-cpu": "step-cpu",
+  "step-memory": "step-memory",
+  "step-time": "step-time",
+  "wait": "wait"
+}

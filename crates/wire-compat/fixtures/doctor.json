@@ -1,5 +1,5 @@
 {
-  "full": {
+  "empty": {
     "checks": [
       {
         "detail": "Docker 29.1",
@@ -32,5 +32,43 @@
         "status": "info"
       }
     ]
+  },
+  "full": {
+    "checks": [
+      {
+        "detail": "Docker 29.1",
+        "fix": "start Docker",
+        "name": "docker",
+        "status": "pass"
+      },
+      {
+        "detail": "Docker 29.1",
+        "fix": "start Docker",
+        "name": "docker",
+        "status": "fail"
+      },
+      {
+        "detail": "Docker 29.1",
+        "fix": "start Docker",
+        "name": "docker",
+        "status": "warn"
+      },
+      {
+        "detail": "Docker 29.1",
+        "fix": "start Docker",
+        "name": "docker",
+        "status": "skip"
+      },
+      {
+        "detail": "Docker 29.1",
+        "fix": "start Docker",
+        "name": "docker",
+        "status": "info"
+      }
+    ],
+    "state": {
+      "at": 1761400000,
+      "kind": "ready"
+    }
   }
 }

@@ -1,0 +1,48 @@
+{
+  "empty": {
+    "instance": "4f1c-18a2b3c4d5e6f708-0",
+    "items": [
+      {
+        "key": "doctor-unavailable",
+        "kind": "doctor-unavailable",
+        "subject": {
+          "kind": "host"
+        },
+        "title": "Host checks have not finished yet",
+        "tone": "quiet"
+      }
+    ],
+    "revision": 12
+  },
+  "full": {
+    "instance": "4f1c-18a2b3c4d5e6f708-0",
+    "items": [
+      {
+        "fix": {
+          "command": "runnerctl resume tidewater/halyard",
+          "kind": "command"
+        },
+        "key": "cannot-start:paused:tidewater/halyard",
+        "kind": "cannot-start",
+        "since": 1761400000,
+        "subject": {
+          "kind": "repository",
+          "name": "tidewater/halyard"
+        },
+        "title": "runnerd cannot start 1 queued job of tidewater/halyard with the current configuration: tidewater/halyard is paused",
+        "tone": "bad"
+      },
+      {
+        "key": "doctor-unavailable",
+        "kind": "doctor-unavailable",
+        "subject": {
+          "kind": "host"
+        },
+        "title": "Host checks have not finished yet",
+        "tone": "quiet"
+      }
+    ],
+    "omitted": 3,
+    "revision": 12
+  }
+}

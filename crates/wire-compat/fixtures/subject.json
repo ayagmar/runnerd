@@ -1,0 +1,26 @@
+{
+  "check": {
+    "kind": "check",
+    "name": "slice"
+  },
+  "github": {
+    "kind": "github"
+  },
+  "host": {
+    "kind": "host"
+  },
+  "insight": {
+    "key": "long-waits:halyard",
+    "kind": "insight"
+  },
+  "job": {
+    "id": 42,
+    "kind": "job",
+    "name": "build",
+    "repository": "tidewater/halyard"
+  },
+  "repository": {
+    "kind": "repository",
+    "name": "tidewater/halyard"
+  }
+}

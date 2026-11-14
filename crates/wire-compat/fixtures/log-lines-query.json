@@ -1,0 +1,7 @@
+{
+  "full": {
+    "follow": true,
+    "from": 10,
+    "limit": 500
+  }
+}

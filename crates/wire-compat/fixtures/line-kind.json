@@ -1,0 +1,10 @@
+{
+  "command": "command",
+  "debug": "debug",
+  "end-group": "end-group",
+  "error": "error",
+  "group": "group",
+  "notice": "notice",
+  "output": "output",
+  "warning": "warning"
+}

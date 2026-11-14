@@ -1,11 +1,17 @@
 {
   "full": {
     "before": 42,
+    "branch": "main",
     "conclusion": "failure",
+    "cursor": "j1.wait.asc.30.41",
     "limit": 50,
     "name": "build",
+    "order": "asc",
+    "q": "b_uild%",
+    "record": "kept",
     "repository": "tidewater/halyard",
     "since": 1760800000,
+    "sort": "wait",
     "state": "completed",
     "until": 1761400000,
     "workflow": "ci"

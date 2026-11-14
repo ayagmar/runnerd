@@ -1,0 +1,11 @@
+{
+  "empty": {
+    "failed": false,
+    "force": false
+  },
+  "full": {
+    "confirm": "rerun-failed:tidewater/halyard:900:42",
+    "failed": true,
+    "force": true
+  }
+}

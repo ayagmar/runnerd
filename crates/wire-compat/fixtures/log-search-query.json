@@ -1,0 +1,9 @@
+{
+  "full": {
+    "context": 2,
+    "follow": true,
+    "from": 10,
+    "limit": 20,
+    "q": "error"
+  }
+}

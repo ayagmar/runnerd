@@ -36,6 +36,7 @@
           "sock_throttled": 2
         },
         "name": "build",
+        "record_mark": "kept",
         "repository": "tidewater/halyard",
         "run_attempt": 1,
         "run_id": 900,

@@ -1,0 +1,22 @@
+{
+  "failed": {
+    "kind": "failed",
+    "status": 502
+  },
+  "no-token": {
+    "kind": "no-token"
+  },
+  "refused": {
+    "kind": "refused",
+    "status": 403
+  },
+  "unauthorized": {
+    "kind": "unauthorized"
+  },
+  "unexpected": {
+    "kind": "unexpected"
+  },
+  "unreachable": {
+    "kind": "unreachable"
+  }
+}

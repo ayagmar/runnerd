@@ -1,0 +1,12 @@
+{
+  "conflict": "conflict",
+  "failed": "failed",
+  "forbidden": "forbidden",
+  "no-token": "no-token",
+  "not-found": "not-found",
+  "rate-limited": "rate-limited",
+  "unauthorized": "unauthorized",
+  "unprocessable": "unprocessable",
+  "unreachable": "unreachable",
+  "withdrawn": "withdrawn"
+}

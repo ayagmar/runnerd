@@ -1,0 +1,21 @@
+{
+  "empty": {
+    "action": "rerun",
+    "job": 42,
+    "message": "GitHub's rate limit is used up.",
+    "outcome": "unknown",
+    "repository": "tidewater/halyard",
+    "run": 900
+  },
+  "full": {
+    "action": "rerun",
+    "job": 42,
+    "message": "GitHub's rate limit is used up.",
+    "outcome": "refused",
+    "refusal": "rate-limited",
+    "repository": "tidewater/halyard",
+    "run": 900,
+    "status": 403,
+    "until": 1790000000
+  }
+}

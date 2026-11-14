@@ -1,4 +1,11 @@
 {
+  "attention.changed": {
+    "at": 1761400000,
+    "id": 7,
+    "instance": "4f1c-18a2b3c4d5e6f708-0",
+    "revision": 13,
+    "type": "attention.changed"
+  },
   "budget.changed": {
     "at": 1761400000,
     "budget": {
@@ -137,6 +144,7 @@
         "sock_throttled": 2
       },
       "name": "build",
+      "record_mark": "kept",
       "repository": "tidewater/halyard",
       "run_attempt": 1,
       "run_id": 900,
@@ -201,6 +209,7 @@
         "sock_throttled": 2
       },
       "name": "build",
+      "record_mark": "kept",
       "repository": "tidewater/halyard",
       "run_attempt": 1,
       "run_id": 900,
@@ -278,6 +287,7 @@
         "sock_throttled": 2
       },
       "name": "build",
+      "record_mark": "kept",
       "repository": "tidewater/halyard",
       "run_attempt": 1,
       "run_id": 900,
@@ -381,10 +391,29 @@
     "removed_by": "age",
     "type": "record.deleted"
   },
+  "record.gone": {
+    "at": 1761400000,
+    "id": 7,
+    "job": 44,
+    "type": "record.gone"
+  },
+  "record.skipped": {
+    "at": 1761400000,
+    "id": 7,
+    "job": 43,
+    "type": "record.skipped"
+  },
   "repository.changed": {
     "at": 1761400000,
     "id": 7,
     "repository": {
+      "listing": {
+        "problem": {
+          "kind": "refused",
+          "status": 404
+        },
+        "since": 1761399000
+      },
       "name": "tidewater/halyard",
       "paused": false,
       "pools": [
