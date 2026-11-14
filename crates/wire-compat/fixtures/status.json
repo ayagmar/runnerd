@@ -53,6 +53,7 @@
       "slice": "runnerd.slice"
     },
     "github_limited_until": 1790000000,
+    "job_actions": "on",
     "profiles": [
       {
         "cpus": 4,
@@ -188,6 +189,7 @@
       "slice_cpus": 16000
     },
     "github_limited_until": 1790000000,
+    "job_actions": "on",
     "profiles": [
       {
         "cpus": 4,
@@ -233,6 +235,13 @@
     ],
     "repositories": [
       {
+        "listing": {
+          "problem": {
+            "kind": "refused",
+            "status": 404
+          },
+          "since": 1761399000
+        },
         "name": "tidewater/halyard",
         "paused": false,
         "pools": [

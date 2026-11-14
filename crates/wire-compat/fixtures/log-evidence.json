@@ -1,0 +1,9 @@
+{
+  "complete": "complete",
+  "expired": "expired",
+  "missing": "missing",
+  "not-outlined": "not-outlined",
+  "partial": "partial",
+  "running": "running",
+  "truncated": "truncated"
+}

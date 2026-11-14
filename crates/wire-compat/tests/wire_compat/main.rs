@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.1.0";
+const PREVIOUS: &str = "v0.1.1";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,8 +271,6 @@ documents! {
     "stopping": Stopping => variants(samples::stopping()),
     "shutdown-answer": ShutdownAnswer => full(samples::shutdown_answer(), None),
     "count-brake": CountBrake => variants(samples::count_brake()),
-    // Documents the previous release does not have; the release after this one reads their fixtures.
-    new:
     "log-outline": LogOutline => full(samples::log_outline(), Some(json(samples::log_outline_empty()))),
     "styled-line": StyledLine => full(samples::styled_line(), Some(json(samples::styled_line_empty()))),
     "line-kind": LineKind => variants(samples::line_kind()),
@@ -312,6 +310,8 @@ documents! {
     "action-outcome": ActionOutcome => variants(samples::action_outcome()),
     "action-refusal": ActionRefusal => variants(samples::action_refusal()),
     "job-actions": JobActions => variants(samples::job_actions()),
+    // Documents the previous release does not have; the release after this one reads their fixtures.
+    new:
 }
 
 /// The previous release's samples, one file per document.

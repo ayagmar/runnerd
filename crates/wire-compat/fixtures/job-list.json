@@ -1,0 +1,104 @@
+{
+  "empty": {
+    "applied": {
+      "before": null,
+      "conclusion": null,
+      "limit": 50,
+      "name": null,
+      "order": "desc",
+      "repository": null,
+      "since": null,
+      "state": null,
+      "until": null,
+      "workflow": null
+    },
+    "jobs": [],
+    "next": null
+  },
+  "full": {
+    "applied": {
+      "before": 42,
+      "branch": "main",
+      "conclusion": "failure",
+      "cursor": "j1.wait.asc.30.41",
+      "limit": 50,
+      "name": "build",
+      "order": "asc",
+      "q": "b_uild%",
+      "record": "kept",
+      "repository": "tidewater/halyard",
+      "since": 1760800000,
+      "sort": "wait",
+      "state": "completed",
+      "until": 1761400000,
+      "workflow": "ci"
+    },
+    "jobs": [
+      {
+        "branch": "main",
+        "conclusion": "success",
+        "id": 42,
+        "labels": [
+          "self-hosted"
+        ],
+        "log": {
+          "bytes": 90000,
+          "lines": 1200,
+          "truncated": false
+        },
+        "metrics": {
+          "build_cache": {
+            "hits": 80,
+            "misses": 20,
+            "read_bytes": 314572800,
+            "refused": 1,
+            "writer": true,
+            "written_bytes": 41943040
+          },
+          "cpu_average": 2000,
+          "cpu_peak": 3900,
+          "cpu_periods": 5800,
+          "cpu_stalled": 140000,
+          "cpu_throttled": 900,
+          "cpu_time": 1200000,
+          "memory_average": 3221225472,
+          "memory_peak": 5368709120,
+          "mirror_bytes": 157286400,
+          "network_received": 209715200,
+          "network_sent": 10485760,
+          "sock_throttled": 2
+        },
+        "name": "build",
+        "record_mark": "kept",
+        "repository": "tidewater/halyard",
+        "run_attempt": 1,
+        "run_id": 900,
+        "runner": {
+          "cpu_cap": 4000,
+          "memory_cap": 8589934592,
+          "name": "runnerd-halyard-0",
+          "profile": "halyard",
+          "slot": 0
+        },
+        "runner_fault": true,
+        "state": "completed",
+        "timeline": {
+          "cleaned_at": 1761400610,
+          "container_started_at": 1761400010,
+          "finished_at": 1761400600,
+          "queued_at": 1761400000,
+          "seen_at": 1761400004,
+          "started_at": 1761400020,
+          "unseen": 15
+        },
+        "url": "https://github.com/tidewater/halyard/actions/runs/900",
+        "workflow": "ci"
+      }
+    ],
+    "next": null,
+    "shortened": [
+      42
+    ],
+    "total": 120
+  }
+}

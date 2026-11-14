@@ -1,0 +1,47 @@
+{
+  "full": {
+    "baseline": {
+      "asked": true,
+      "branch": "main",
+      "job": 41,
+      "kind": "chosen",
+      "queued_at": 1761300000
+    },
+    "figures": [
+      {
+        "baseline": 100,
+        "figure": "run",
+        "sampled": false,
+        "this": 120
+      }
+    ],
+    "job": 42,
+    "steps": [
+      {
+        "baseline": 4,
+        "cpu": {
+          "baseline": 100,
+          "figure": "step-cpu",
+          "sampled": true,
+          "this": 120
+        },
+        "matched": "matched",
+        "memory": {
+          "baseline": 100,
+          "figure": "step-memory",
+          "sampled": true,
+          "this": 120
+        },
+        "name": "Run tests",
+        "this": 3,
+        "time": {
+          "baseline": 100,
+          "figure": "step-time",
+          "sampled": false,
+          "this": 120
+        }
+      }
+    ],
+    "steps_cut": true
+  }
+}

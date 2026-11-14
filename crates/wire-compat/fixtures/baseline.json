@@ -1,0 +1,17 @@
+{
+  "chosen": {
+    "asked": true,
+    "branch": "main",
+    "job": 41,
+    "kind": "chosen",
+    "queued_at": 1761300000
+  },
+  "incompatible": {
+    "job": 7,
+    "kind": "incompatible"
+  },
+  "unavailable": {
+    "kind": "unavailable",
+    "reason": "unknown-branch"
+  }
+}

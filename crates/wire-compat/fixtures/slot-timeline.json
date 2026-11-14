@@ -1,0 +1,72 @@
+{
+  "empty": {
+    "history_from": 0,
+    "lanes": [],
+    "observed": [],
+    "since": 0,
+    "unassigned": [],
+    "until": 0
+  },
+  "full": {
+    "cut_before": 1761399500,
+    "history_from": 1760000000,
+    "lanes": [
+      {
+        "bars": [
+          {
+            "conclusion": "success",
+            "end": {
+              "at": 1761400600,
+              "kind": "at"
+            },
+            "job": 42,
+            "name": "build",
+            "queued_at": 1761400000,
+            "repository": "tidewater/halyard",
+            "runner": "jvm-1-1761400000",
+            "runner_fault": true,
+            "started_at": 1761400010,
+            "state": "completed",
+            "workflow": "ci"
+          }
+        ],
+        "profile": "jvm",
+        "runners": [
+          {
+            "end": {
+              "kind": "open"
+            },
+            "name": "jvm-1-1761400000",
+            "started_at": 1761400000
+          }
+        ],
+        "slot": 2
+      }
+    ],
+    "observed": [
+      {
+        "from": 1761399000,
+        "to": 1761402000
+      }
+    ],
+    "since": 1761399000,
+    "unassigned": [
+      {
+        "conclusion": "success",
+        "end": {
+          "kind": "unknown"
+        },
+        "job": 43,
+        "name": "build",
+        "queued_at": 1761400000,
+        "repository": "tidewater/halyard",
+        "runner": null,
+        "runner_fault": true,
+        "started_at": null,
+        "state": "completed",
+        "workflow": "ci"
+      }
+    ],
+    "until": 1761402600
+  }
+}

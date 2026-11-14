@@ -1,0 +1,10 @@
+{
+  "cannot-start": "cannot-start",
+  "doctor": "doctor",
+  "doctor-unavailable": "doctor-unavailable",
+  "github-auth": "github-auth",
+  "github-listing": "github-listing",
+  "host-memory": "host-memory",
+  "insight": "insight",
+  "rate-limited": "rate-limited"
+}

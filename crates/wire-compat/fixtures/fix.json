@@ -1,0 +1,18 @@
+{
+  "command": {
+    "command": "runnerctl resume tidewater/halyard",
+    "kind": "command"
+  },
+  "config": {
+    "key": "repositories.labels",
+    "kind": "config"
+  },
+  "open": {
+    "kind": "open",
+    "view": "capacity"
+  },
+  "text": {
+    "kind": "text",
+    "text": "start Docker"
+  }
+}

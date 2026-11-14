@@ -1,0 +1,100 @@
+{
+  "empty": {
+    "capped": true,
+    "errors": 1,
+    "evidence": "truncated",
+    "from": 0,
+    "groups": [
+      {
+        "depth": 0,
+        "start": 4,
+        "title": "Run make"
+      }
+    ],
+    "job": 42,
+    "lines": 40,
+    "marks": [
+      {
+        "kind": "error",
+        "line": 14
+      }
+    ],
+    "steps": [
+      {
+        "lines": {
+          "from": 4,
+          "kind": "lines",
+          "to": 15
+        },
+        "number": 2
+      }
+    ],
+    "unattributed": [
+      {
+        "from": 15,
+        "to": 40
+      }
+    ],
+    "warnings": 2
+  },
+  "full": {
+    "capped": true,
+    "errors": 1,
+    "evidence": "truncated",
+    "failure": {
+      "excerpt": [
+        {
+          "at": 1792717245,
+          "kind": "error",
+          "line": 42,
+          "omitted": 1024,
+          "runs": [
+            {
+              "bold": true,
+              "color": "red",
+              "mark": true,
+              "text": "error: missing target"
+            }
+          ]
+        }
+      ],
+      "exit_code": 2,
+      "shell": "runnerctl shell 42",
+      "step": 2
+    },
+    "from": 0,
+    "groups": [
+      {
+        "depth": 0,
+        "end": 6,
+        "start": 4,
+        "title": "Run make"
+      }
+    ],
+    "job": 42,
+    "lines": 40,
+    "marks": [
+      {
+        "kind": "error",
+        "line": 14
+      }
+    ],
+    "steps": [
+      {
+        "lines": {
+          "from": 4,
+          "kind": "lines",
+          "to": 15
+        },
+        "number": 2
+      }
+    ],
+    "unattributed": [
+      {
+        "from": 15,
+        "to": 40
+      }
+    ],
+    "warnings": 2
+  }
+}

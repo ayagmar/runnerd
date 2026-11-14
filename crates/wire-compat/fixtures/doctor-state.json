@@ -1,0 +1,18 @@
+{
+  "failed": {
+    "at": 1761400000,
+    "error": "it took longer than 2m",
+    "kind": "failed"
+  },
+  "not-run": {
+    "kind": "not-run"
+  },
+  "ready": {
+    "at": 1761400000,
+    "kind": "ready"
+  },
+  "stale": {
+    "at": 1761390000,
+    "kind": "stale"
+  }
+}
