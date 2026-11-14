@@ -241,7 +241,7 @@ impl Config {
             Ok((warnings, total, needed)) => {
                 let message = match (self.host.admission, memory_max) {
                     (super::Admission::Measured, Some(max)) => format!(
-                        "valid under admission = \"measured\": the largest runner with the mirror needs {needed} \
+                        "valid under measured admission: the largest runner with the mirror needs {needed} \
                          of the {max} MemoryMax; every slot at its cap at once would take {total}"
                     ),
                     _ => format!("valid, memory caps sum to {total}"),

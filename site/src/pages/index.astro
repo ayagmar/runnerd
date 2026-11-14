@@ -15,7 +15,7 @@ const repo = 'https://github.com/ayagmar/runnerd';
 const version = '0.1.0';
 const title = 'runnerd: GitHub Actions runners on your own Linux machine';
 const description =
-  'runnerd runs GitHub Actions jobs on a Linux machine you already have, a fresh container per job. With measured admission each runner reserves what its job really peaks at, so more jobs fit in the same memory.';
+  'runnerd runs GitHub Actions jobs on a Linux machine you already have, a fresh container per job. Each runner reserves what its job really peaks at, not a fixed cap, so more jobs fit in the same memory.';
 const url = new URL(base, Astro.site).href;
 const card = new URL(`${base}og.png`, Astro.site).href;
 
@@ -93,7 +93,7 @@ runner@4be1c0d2a7e9:~/_work/ledger/ledger$`;
 const compared = [
   ['Runs on', 'a Linux machine you run', "GitHub's machines", 'your Kubernetes cluster', 'a machine you run'],
   ['Each job gets', 'a new container; its slot keeps the caches', 'a new VM', 'a new pod', 'what the last job left, unless the runner is ephemeral'],
-  ['Memory per job', "its profile's cap, or with measured admission what the job peaks at", 'the runner size you pay for', "the pod's requests and limits", 'the whole machine, one job at a time'],
+  ['Memory per job', "what the job peaks at, or its profile's cap with admission = \"caps\"", 'the runner size you pay for', "the pod's requests and limits", 'the whole machine, one job at a time'],
   ['You run', 'one daemon, Docker and Sysbox', 'nothing', 'Kubernetes and the controller', 'one runner service per concurrent job'],
   ['Minutes cost', 'your machine', 'billed past your plan on private repositories', 'your cluster', 'your machine'],
 ];
@@ -144,7 +144,7 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
       <section class="hero wrap" aria-labelledby="title">
         <div class="hero-text">
           <h1 id="title">Twice the runners in the same&nbsp;33G</h1>
-          <p class="lead">runnerd runs your GitHub Actions jobs on a Linux machine you already have, each in a fresh container. With <code>admission = "measured"</code>, each runner reserves what its job really peaks at, not a fixed cap.</p>
+          <p class="lead">runnerd runs your GitHub Actions jobs on a Linux machine you already have, each in a fresh container. Each runner reserves what its job really peaks at, not a fixed cap; <code>admission = "caps"</code> turns that off.</p>
           <div class="actions">
             <a class="button" href="#install">Set it up</a>
             <a class="text-link" href={docs}>Read the docs</a>

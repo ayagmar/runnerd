@@ -257,7 +257,7 @@ async fn a_reload_rests_the_count_only_when_it_changes_what_the_count_reads() {
         "turned on, it has no looks of its own"
     );
 
-    let caps = ceiling.replace("admission = \"measured\"\n", "");
+    let caps = ceiling.replace("admission = \"measured\"", "admission = \"caps\"");
     engine.reload(Config::parse(&caps).unwrap(), Some(30 * G), None);
     engine.publish();
     let budget = handle.status.borrow().budget.clone();

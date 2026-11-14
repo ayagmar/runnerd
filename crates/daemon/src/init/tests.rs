@@ -53,18 +53,36 @@ fn check(text: &str, memory_max: Option<ByteSize>) -> runnerd_core::api::ConfigC
 }
 
 #[test]
-fn the_starter_config_passes_check_config_before_and_after_the_slice_exists() {
+fn the_starter_config_admits_by_measured_peaks_and_passes_check_config_once_the_slice_has_its_memory_max()
+ {
     let dir = Dir::new();
     let request = request(&dir.0, Overwrite::Refuse);
+    // Written before the slice exists, as on a fresh host.
     let sizing = init(&request, &machine(64, 16, None)).unwrap();
     assert_eq!(sizing.budget, ByteSize(48 * GIB), "three quarters of 64G");
     let text = std::fs::read_to_string(&request.config).unwrap();
+    assert!(
+        text.contains("admission = \"measured\"") && text.contains("\"caps\" reserves"),
+        "the file says what runs and names the opt-out: {text}"
+    );
     let before = check(&text, None);
-    assert!(before.valid, "{}", before.message);
+    assert!(
+        !before.valid,
+        "measured admission needs the slice's MemoryMax"
+    );
+    assert!(
+        before.message.contains("runnerd doctor"),
+        "{}",
+        before.message
+    );
     let after = check(&text, Some(sizing.budget));
     assert!(after.valid, "{}", after.message);
     assert!(after.warnings.is_empty(), "{:?}", after.warnings);
     let config = Config::parse(&text).unwrap();
+    assert_eq!(
+        config.host.admission,
+        runnerd_core::config::Admission::Measured
+    );
     let names: Vec<&str> = config
         .repositories
         .iter()
@@ -272,7 +290,7 @@ fn init_given_a_memory_ceiling_writes_it_and_sizes_the_first_runner_for_the_host
             && text.contains("memory_ceiling = \"24G\""),
         "{text}"
     );
-    let checked = check(&text, None);
+    let checked = check(&text, Some(sizing.budget));
     assert!(checked.valid, "{}", checked.message);
     let config = Config::parse(&text).unwrap();
     assert_eq!(config.host.memory_ceiling, Some(ByteSize(24 * GIB)));

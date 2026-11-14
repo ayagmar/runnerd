@@ -44,11 +44,15 @@ impl Daemon {
 
 /// `text` with `line` added under `[host]`.
 pub(super) fn host(text: &str, line: &str) -> String {
-    text.replacen(
-        "isolation = \"sysbox\"\n",
-        &format!("isolation = \"sysbox\"\n{line}\n"),
-        1,
-    )
+    // The base config sets `admission = "caps"`; a line that sets `admission` takes its place.
+    let base = "isolation = \"sysbox\"\nadmission = \"caps\"\n";
+    let kept = if line.starts_with("admission") {
+        "isolation = \"sysbox\"\n"
+    } else {
+        base
+    };
+    assert!(text.contains(base), "the base config sets admission");
+    text.replacen(base, &format!("{kept}{line}\n"), 1)
 }
 
 /// `text` with the mirror off.

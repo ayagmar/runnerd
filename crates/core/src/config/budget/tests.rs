@@ -7,6 +7,7 @@ const CONFIG: &str = r#"
 [host]
 slice = "ci.slice"
 isolation = "sysbox"
+admission = "caps"
 
 [caches]
 mirror = { enabled = false, memory = "512M", cpus = 1, ttl = "168h" }

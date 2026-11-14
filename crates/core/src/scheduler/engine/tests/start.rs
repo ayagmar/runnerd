@@ -233,10 +233,7 @@ async fn a_start_in_flight_counts_its_reservation_under_measured_admission_and_i
 {
     // Catches a start in flight read as a stale runner at its cap while its registration waits (ADR 0130), and one
     // that counts other than the runner it becomes while the slice's sample is recent.
-    let measured = CONFIG.replace(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"measured\"",
-    );
+    let measured = CONFIG.replace("admission = \"caps\"", "admission = \"measured\"");
     for (policy, sampled) in [
         (api::AdmissionPolicy::Caps, Sampled::Fresh),
         (api::AdmissionPolicy::Measured, Sampled::Fresh),

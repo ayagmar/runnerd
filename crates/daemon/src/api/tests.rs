@@ -36,6 +36,13 @@ mod log;
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
 
+/// `EXAMPLE` under `admission = "caps"`.
+fn example_under_caps() -> String {
+    let caps = EXAMPLE.replacen("admission = \"measured\"", "admission = \"caps\"", 1);
+    assert_ne!(caps, EXAMPLE, "the example names its admission");
+    caps
+}
+
 /// The notifier at a test's pace, in UTC.
 const NOTIFY: Setup = Setup {
     timing: Timing {
@@ -488,7 +495,9 @@ fn rising_memory_max(_slice: &str) -> std::io::Result<Option<ByteSize>> {
 #[tokio::test]
 async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
     let dir = Dir::new();
-    let daemon = start_with(&dir.0, None, true, sync_dir, rising_memory_max).await;
+    // Under caps, where every slot's cap must fit beside the others.
+    let caps = example_under_caps();
+    let daemon = start_serving(&dir.0, None, true, sync_dir, rising_memory_max, &caps).await;
     let now = u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1524,8 +1533,8 @@ async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_u
     let dir = Dir::new();
     let mut daemon = start(&dir.0, None).await;
     let before = std::fs::read(&daemon.config).unwrap();
-    // A third jvm slot: 3 × 9G + 2 × 7G + 512M = 41.5G.
-    let over = EXAMPLE.replacen("slots = 2", "slots = 3", 1);
+    // Under caps, a third jvm slot: 3 × 9G + 2 × 7G + 512M = 41.5G.
+    let over = example_under_caps().replacen("slots = 2", "slots = 3", 1);
     let checked: ConfigCheck = serde_json::from_slice(
         &body(
             daemon

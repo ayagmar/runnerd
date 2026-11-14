@@ -16,10 +16,9 @@ const M: u64 = 1 << 20;
 
 /// `app` 4 slots of 4G under measured admission: 16G of caps for a 10G slice.
 pub(super) fn measured() -> String {
-    CONFIG.replace("slots = 2", "slots = 4").replace(
-        "isolation = \"sysbox\"",
-        "isolation = \"sysbox\"\nadmission = \"measured\"",
-    )
+    CONFIG
+        .replace("slots = 2", "slots = 4")
+        .replace("admission = \"caps\"", "admission = \"measured\"")
 }
 
 /// Ten finished `build` jobs of o/r that peaked at `peak`, the last one with `oom_kills` kills for memory.
@@ -161,6 +160,66 @@ async fn small_predicted_peaks_start_more_runners_than_the_caps_fit() {
     assert_eq!(
         handle.status.borrow().budget.admission,
         AdmissionPolicy::Measured
+    );
+}
+
+#[tokio::test]
+async fn on_a_fresh_host_the_default_admission_reserves_caps_until_jobs_have_a_history() {
+    // A config without `admission` on a host with no job history: what measured admission, the default, reserves for
+    // jobs it has never seen is their cap, so the first runs start no more than caps would (ADR 0033, 0036, 0138).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let text = CONFIG
+        .replace("admission = \"caps\"\n", "")
+        .replace("slots = 2", "slots = 4");
+    assert!(!text.contains("admission"), "the config leaves it out");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &text);
+    engine.memory_max = Some(10 * G);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "two 4G caps fit the 10G slice"
+    );
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert_eq!(budget.admission, AdmissionPolicy::Measured);
+    assert_eq!(budget.memory_in_use, 8 * G, "each at its cap");
+    assert!(
+        budget.memory_in_use <= 10 * G,
+        "nothing starts over MemoryMax"
+    );
+}
+
+#[tokio::test]
+async fn a_reload_that_drops_the_admission_key_keeps_the_running_runners_reservations() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "1.25G each");
+    engine.publish();
+    let before = handle.status.borrow().budget.memory_in_use;
+
+    let unset = measured().replace("admission = \"measured\"\n", "");
+    assert!(!unset.contains("admission"), "the key is gone");
+    engine.reload(Config::parse(&unset).unwrap(), Some(10 * G), None);
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert_eq!(budget.admission, AdmissionPolicy::Measured, "the default");
+    assert_eq!(
+        budget.memory_in_use, before,
+        "each runner keeps what it reserved, not its cap"
     );
 }
 
@@ -979,7 +1038,7 @@ async fn after_a_reload_to_caps_running_runners_count_at_their_cpu_limits() {
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4, "4 × 0.5 CPU fit 4");
 
-    let caps = cpu_measured().replace("admission = \"measured\"\n", "");
+    let caps = cpu_measured().replace("admission = \"measured\"", "admission = \"caps\"");
     engine.reload(Config::parse(&caps).unwrap(), None, Some(4000));
     engine.publish();
     // Each container's limit is the profile's 2 CPUs: 8 of the 4 the budget has.

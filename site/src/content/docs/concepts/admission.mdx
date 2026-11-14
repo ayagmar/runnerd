@@ -3,13 +3,12 @@ title: Admission
 description: What a runner must fit before it starts, how runnerd counts a job's memory and the host's, measured admission and the CPU budget.
 ---
 
-A runner starts only when it fits the slice's `MemoryMax` beside what already runs, and what [the host's memory](#the-hosts-memory) leaves the slice. By default it reserves its profile's `memory`; [the budget check](../terms/#slice-and-budget) holds `slots × memory` to `MemoryMax`. From the jobs' sampled peaks runnerd also gives:
+A runner starts only when it fits the slice's `MemoryMax` beside what already runs, and what [the host's memory](#the-hosts-memory) leaves the slice. By default it reserves its job's predicted peak, from the job's sampled peaks ([measured admission](#measured-admission)); a job with too little history reserves its profile's `memory`. From the same peaks runnerd also gives:
 
 - [Sizing](../../guides/sizing/) advice for each profile's `memory` and `slots`, always on. [Auto sizing](../../guides/sizing/#auto-sizing) applies it (`[sizing] auto`, off by default; `runnerd init` turns it on).
-- [Measured admission](#measured-admission): runners reserve their job's predicted peak, not their cap (`[host] admission = "measured"`, off by default).
 - [CPU admission](../cpu/): a job waits when the CPUs are spoken for (`[host] cpu_overcommit`, off by default).
 
-[`runnerd simulate`](../../guides/simulate/) replays your history through the last two first. Keys: [Configuration](../../reference/configuration/).
+`[host] admission = "caps"` turns measured admission off: every runner reserves its profile's `memory`, and [the budget check](../terms/#slice-and-budget) holds `slots × memory` to `MemoryMax`. [`runnerd simulate`](../../guides/simulate/) replays your history through both policies and through a CPU budget. Keys: [Configuration](../../reference/configuration/).
 
 ## What a job's memory is
 
@@ -49,11 +48,11 @@ The slice may then also hold `memory_ceiling` less `MemTotal`, less the margin o
 
 ## Measured admission
 
-`admission = "measured"` has each runner reserve its job's predicted peak instead of its cap:
+Measured admission, the default, has each runner reserve its job's predicted peak instead of its cap. It needs the slice to have a `MemoryMax`: `runnerd doctor` prints the unit file, and the config check refuses a slice without one. [The budget check](../terms/#slice-and-budget) then holds one runner of each profile with the mirror to it:
 
 ```toml
 [host]
-admission = "measured"
+admission = "measured"   # the default; "caps" reserves every runner's cap
 
 [profiles.node]
 memory = "7G"   # still the container's hard limit
@@ -61,7 +60,7 @@ slots = 8       # 8 × 7G may exceed MemoryMax
 ```
 
 - A job (repository, workflow and job name) is predicted from its last 20 runs, or `min_jobs` when that is more, counting any that failed among them: their p95 peak plus `margin`, rounded up to 256M. A run that met its cap counts at least its cap.
-- With fewer runs: the larger of its profile's p95 and its own largest peak, plus the margin; with none, its profile's largest peak plus the margin. Once 2 of its runs succeeded, one copy of the job at a time reserves its own largest peak plus the margin instead; a copy queued or running beside another takes the larger. Without `min_jobs` runs of the profile, the cap.
+- With fewer runs: the larger of its profile's p95 and its own largest peak, plus the margin; with none, its profile's largest peak plus the margin. Once 2 of its runs succeeded, one copy of the job at a time reserves its own largest peak plus the margin instead; a copy queued or running beside another takes the larger. Without `min_jobs` runs of the profile, as on a new host, the cap: the first jobs start no more than caps would.
 - A job whose run met its cap or was killed for memory goes back on its cap until 3 runs in a row succeed clear of it, 7 days at most.
 - A runner reserves the largest prediction among the queued jobs its labels match ([split light and heavy jobs](../../guides/sizing/#split-light-and-heavy-jobs)), then its own job's once known.
 - A running runner counts at the larger of what it reserved and what it last used, or its cap without a recent sample, and at nothing once its container is gone.

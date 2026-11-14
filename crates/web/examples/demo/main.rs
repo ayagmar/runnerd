@@ -323,6 +323,10 @@ fn measured(fake: &fake::Fake) {
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
     let mut fixtures = fake.fixtures.lock().unwrap();
+    fixtures.config =
+        fixtures
+            .config
+            .replacen("admission = \"caps\"", "admission = \"measured\"", 1);
     let ledger = 7 * GIB + 768 * MIB;
     let status = &mut fixtures.status;
     for profile in &mut status.profiles {

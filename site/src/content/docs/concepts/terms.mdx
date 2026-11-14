@@ -15,20 +15,20 @@ A profile is a runner size and image: `cpus`, `memory`, `slots` and `image` unde
 
 ## Slice and budget
 
-Every runner container runs in one systemd slice, `runnerd.slice` as `runnerd init` writes it. Its `MemoryMax` is the budget: a runner starts only when it fits beside what already runs, and what [the host's memory](../admission/#the-hosts-memory) leaves the slice. By default a runner reserves its profile's `memory`; under [measured admission](../admission/#measured-admission) it reserves its job's predicted peak.
+Every runner container runs in one systemd slice, `runnerd.slice` as `runnerd init` writes it. Its `MemoryMax` is the budget: a runner starts only when it fits beside what already runs, and what [the host's memory](../admission/#the-hosts-memory) leaves the slice. A runner reserves its job's predicted peak ([measured admission](../admission/#measured-admission), the default), or its profile's `memory` while the job has too little history and always under `admission = "caps"`. Below, every runner is at its cap:
 
 <Budget />
 
-`runnerd check-config [file]` reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
+`runnerd check-config [file]` reads the slice's `MemoryMax` from systemd, or takes `--memory-max`. Under measured admission it fails when one runner of a profile with the mirror does not fit, and refuses a slice without a `MemoryMax`. Under caps it fails when `slots × memory` over all profiles plus the mirror does not fit, and only warns about a slice without one:
 
 ```text
 $ runnerd check-config runnerd.toml
-runnerd.toml: valid, memory caps sum to 32.5G
-$ runnerd check-config runnerd.toml --memory-max 24G
+runnerd.toml: valid under measured admission: the largest runner with the mirror needs 9.5G of the 33G MemoryMax; every slot at its cap at once would take 32.5G
+$ runnerd check-config runnerd.toml --memory-max 9G
+error: one runner of jvm and the mirror take 9.5G, the slice runnerd.slice's MemoryMax is 9G; lower its `memory` or raise the slice's MemoryMax
+$ runnerd check-config caps.toml --memory-max 24G
 error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G; lower `slots` or `memory`, or raise the slice's MemoryMax (`runnerd doctor` prints its unit)
 ```
-
-A slice without a unit file has no `MemoryMax`; the check then warns. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile with the mirror to `MemoryMax` instead, refusing a slice without one.
 
 ## Warm runner
 
