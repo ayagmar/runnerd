@@ -83,6 +83,19 @@ pub enum BarEnd {
 }
 
 impl BarEnd {
+    /// How a job's bar ends: when it finished, or when its runner was removed if that came first, as when
+    /// `stop --force` removes a container before GitHub says the job ended; open while the job is, and unknown once
+    /// it is final without a time.
+    pub fn of_job(finished_at: Option<u64>, cleaned_at: Option<u64>, open: bool) -> BarEnd {
+        match (finished_at, open) {
+            (Some(at), _) => BarEnd::At {
+                at: cleaned_at.map_or(at, |cleaned| cleaned.min(at)),
+            },
+            (None, true) => BarEnd::Open,
+            (None, false) => BarEnd::Unknown,
+        }
+    }
+
     /// The end's time; `None` unless it is known.
     pub fn at(self) -> Option<u64> {
         match self {
@@ -122,11 +135,11 @@ pub struct TimelineBar {
 impl TimelineBar {
     /// A job's bar as the history holds it; its names are made safe in [`SlotTimeline::assemble`].
     pub fn of(job: &JobSummary) -> TimelineBar {
-        let end = match (job.timeline.finished_at, job.state.is_final()) {
-            (Some(at), _) => BarEnd::At { at },
-            (None, false) => BarEnd::Open,
-            (None, true) => BarEnd::Unknown,
-        };
+        let end = BarEnd::of_job(
+            job.timeline.finished_at,
+            job.timeline.cleaned_at,
+            !job.state.is_final(),
+        );
         TimelineBar {
             job: job.id,
             repository: job.repository.clone(),

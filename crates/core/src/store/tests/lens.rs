@@ -542,6 +542,52 @@ fn slots_history(store: &Store, path: &Path) {
 }
 
 #[tokio::test]
+async fn a_job_whose_container_was_removed_before_github_ended_it_ends_at_the_removal() {
+    let dir = TestDir::new("lens-killed");
+    let path = dir.0.join("runnerd.db");
+    drop(Store::open(&path).unwrap());
+    let db = Connection::open(&path).unwrap();
+    // `stop --force` removed job 1's container at T0 + 30; GitHub said it was cancelled at T0 + 316, two seconds
+    // after job 2 started in the same slot.
+    let mut killed = slot_job(1, "jvm", 1, T0 + 10, Some(T0 + 316));
+    killed.runner = Some(("jvm", 1, (T0 + 9) * 1000, Some((T0 + 30) * 1000)));
+    insert(&db, &killed);
+    insert(&db, &slot_job(2, "jvm", 1, T0 + 314, Some(T0 + 400)));
+    keep_since(&path, 0);
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let jobs = every_job(&store).await;
+    for window in [
+        Span {
+            from: T0,
+            to: T0 + 500,
+        },
+        // After the removal, before GitHub's end: the killed job is no longer in it.
+        Span {
+            from: T0 + 100,
+            to: T0 + 500,
+        },
+    ] {
+        let read = store.timeline(window).await.unwrap();
+        let laid = SlotTimeline::of(&jobs, window, read.observed.clone(), read.history_from);
+        let ends = |timeline: &SlotTimeline| {
+            timeline
+                .lanes
+                .iter()
+                .flat_map(|lane| lane.bars.iter().map(|bar| (bar.job, bar.end)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ends(&read), ends(&laid), "{window:?}");
+        let killed = ends(&read).into_iter().find(|(job, _)| *job == 1);
+        assert_eq!(
+            killed.map(|(_, end)| end),
+            (window.from < T0 + 30).then_some(BarEnd::At { at: T0 + 30 }),
+            "{window:?}: the killed job's bar ends at its removal, before the next job starts"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_timeline_keeps_old_slots_real_ends_restarts_and_unknown_time_apart() {
     let dir = TestDir::new("lens-slots");
     let path = dir.0.join("runnerd.db");
