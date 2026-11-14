@@ -69,8 +69,8 @@ pub use lens::{
     lens_records_at, lens_timeline,
 };
 pub use logs::{
-    LOG_EXPIRED, LOG_FAILED, LOG_MISSING, LOG_NOT_OUTLINED, LOG_RUNNING, LOG_TRUNCATED, LogFacts,
-    LoggedJob, log_facts, logged_jobs,
+    LOG_EXPIRED, LOG_FAILED, LOG_MISSING, LOG_NOT_OUTLINED, LOG_RUNNING, LOG_SAME_SECOND,
+    LOG_TRUNCATED, LogFacts, LoggedJob, log_facts, logged_jobs,
 };
 
 const LEDGER: &str = "halyard/ledger";

@@ -50,7 +50,11 @@ fn bar(row: &Row<'_>) -> rusqlite::Result<SlottedBar> {
             runner_fault: row.get(6)?,
             queued_at: secs(row.get(7)?),
             started_at: row.get::<_, Option<u64>>(8)?.map(secs),
-            end: end(row.get(9)?, !state.is_final()),
+            end: BarEnd::of_job(
+                row.get::<_, Option<u64>>(9)?.map(secs),
+                row.get::<_, Option<u64>>(13)?.map(secs),
+                !state.is_final(),
+            ),
             runner: runner.clone().filter(|_| profile.is_some()),
         },
         slot: profile
@@ -70,14 +74,16 @@ pub(super) fn timeline(
     read::snapshot(db, |db| {
         let (from, to) = (ms(window.from), ms(window.to));
         let cap = api::TIMELINE_BARS_MAX + 1;
-        // Mirrors `TimelineBar::overlaps`: an end in the window or after it, an open job, or one whose end is unknown
-        // while its runner may have been up in the window, or without a runner here, that began in it.
+        // Mirrors `TimelineBar::overlaps` and `BarEnd::of_job`: an end, the earlier of the job's and its runner's
+        // removal, in the window or after it, an open job, or one whose end is unknown while its runner may have been
+        // up in the window, or without a runner here, that began in it.
         let jobs = db
             .prepare_cached(&format!(
                 "SELECT j.id, j.repository, {}, {}, j.state, \
                  j.conclusion, j.runner_fault, j.queued_at, j.started_at, j.finished_at, j.runner, r.profile, \
-                 r.slot FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
-                 WHERE j.queued_at < ?2 AND (j.finished_at / 1000 > ?4 OR (j.finished_at IS NULL \
+                 r.slot, r.removed_at FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+                 WHERE j.queued_at < ?2 AND (min(j.finished_at, coalesce(r.removed_at, j.finished_at)) / 1000 > ?4 \
+                 OR (j.finished_at IS NULL \
                  AND (j.state IN {OPEN} OR (r.name IS NOT NULL AND (r.removed_at IS NULL OR r.removed_at / 1000 > ?4)) \
                  OR (r.name IS NULL AND coalesce(j.started_at, j.queued_at) >= ?1)))) \
                  ORDER BY j.queued_at / 1000 DESC, j.id DESC LIMIT ?3",

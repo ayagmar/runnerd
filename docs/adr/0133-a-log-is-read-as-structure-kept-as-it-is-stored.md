@@ -1,7 +1,9 @@
 # 0133. A log is read as structure, kept as it is stored
 
-Status: **Accepted** (2026-11-12). Adds `GET /v1/jobs/{id}/log/outline`, `.../log/lines` and `.../log/search`, the
-types in `api::jobs::log`, and schema 22. `GET /v1/jobs/{id}/logs` and the `log.line` event are unchanged.
+Status: **Accepted** (2026-11-12), amended by
+[0139](0139-steps-that-share-a-second-are-told-apart-by-their-headers.md). Adds `GET /v1/jobs/{id}/log/outline`,
+`.../log/lines` and `.../log/search`, the types in `api::jobs::log`, and schema 22. `GET /v1/jobs/{id}/logs` and the
+`log.line` event are unchanged.
 
 ## Context
 

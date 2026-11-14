@@ -549,6 +549,44 @@ async fn a_jobs_log_states_its_failure_evidence_and_colours_as_core_does() {
 }
 
 #[tokio::test]
+async fn a_failed_job_s_page_opens_its_failed_step_and_shows_its_last_lines_as_core_does() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    // The second shares its failing step's second with the steps around it.
+    for id in [
+        runnerd_fixtures::LOG_FAILED,
+        runnerd_fixtures::LOG_SAME_SECOND,
+    ] {
+        let logged = runnerd_fixtures::logged_jobs()
+            .into_iter()
+            .find(|logged| logged.job.summary.id == id)
+            .unwrap();
+        let failure = logged.outline.failure.clone().unwrap();
+        let excerpt = failure.excerpt.clone().unwrap_or_default();
+        assert!(
+            failure.exit_code.is_some() && !excerpt.is_empty(),
+            "job {id}: core knows the failed step's exit code and last lines"
+        );
+        let html = dashboard.page(&cookie, &format!("/jobs/{id}")).await.body;
+        let summary =
+            &html[html.find(r#"id="failure""#).unwrap()..html.find(r#"id="log-title""#).unwrap()];
+        let shown = text(summary);
+        for run in excerpt
+            .iter()
+            .flat_map(|line| &line.runs)
+            .filter(|run| !run.text.trim().is_empty())
+        {
+            let words = run.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(shown.contains(&words), "job {id}: {words}: {shown}");
+        }
+        assert!(
+            html.contains(r#"<details class="log-step failed" open"#),
+            "job {id}: the failed step's fold opens: {html}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_jobs_lenses_state_marks_gaps_ends_and_comparisons_as_core_does() {
     use runnerd_fixtures::{LENS_COMPARED, LENS_FIRST_RUN, LENS_ORPHAN};
     // The lenses' jobs at the dashboard's clock, so a week back from it reaches them.

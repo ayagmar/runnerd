@@ -774,6 +774,20 @@ fn a_job_s_log_states_its_evidence_and_its_failure_first_as_core_does() {
                 at.is_some() && at < log,
                 "job {id}: {headline}, above the log: {all}"
             );
+            // The failed step's last line, as core cut it, under the headline.
+            let last = logged
+                .outline
+                .failure
+                .as_ref()
+                .and_then(|failure| failure.excerpt.as_ref()?.last())
+                .map(runnerd_core::api::StyledLine::text);
+            if let Some(last) = last {
+                let shown = rows.iter().position(|row| row.contains(last.trim()));
+                assert!(
+                    shown > at && shown < log,
+                    "job {id}: {last}, under the headline: {all}"
+                );
+            }
         }
     }
 }
@@ -1503,9 +1517,19 @@ fn a_page_of_the_log_that_failed_to_read_is_asked_for_again() {
 
 #[test]
 fn a_failed_job_s_log_opens_at_its_failed_step_and_enter_folds_it() {
+    // The second shares its failing step's second with the steps around it.
+    for id in [
+        runnerd_fixtures::LOG_FAILED,
+        runnerd_fixtures::LOG_SAME_SECOND,
+    ] {
+        opens_at_its_failed_step(id);
+    }
+}
+
+fn opens_at_its_failed_step(id: u64) {
     let logged = runnerd_fixtures::logged_jobs()
         .into_iter()
-        .find(|logged| logged.job.summary.id == runnerd_fixtures::LOG_FAILED)
+        .find(|logged| logged.job.summary.id == id)
         .unwrap();
     let failure = logged.outline.failure.clone().unwrap();
     let step = logged
@@ -1518,11 +1542,10 @@ fn a_failed_job_s_log_opens_at_its_failed_step_and_enter_folds_it() {
     let failed = format!("{:>2} {}", step.number, step.name);
     let fact = runnerd_fixtures::log_facts()
         .into_iter()
-        .find(|fact| fact.job == runnerd_fixtures::LOG_FAILED)
+        .find(|fact| fact.job == id)
         .unwrap();
     let mut app = app(&daemon());
     open(&mut app, &logged.job);
-    let id = logged.job.summary.id;
     app.update(Msg::Outline {
         job: id,
         outline: Ok(logged.outline.clone()),
