@@ -4,10 +4,16 @@
 //! reads them back with the job's stored steps, which stay the authority on a step's times and outcome.
 //!
 //! Which lines a step printed is best effort: the log does not say. A segment starts at the first outlined line, at
-//! every group and at the runner's `Post job cleanup.` and `Cleaning up orphan processes` lines. It goes to the one
-//! step, at or after the previous segment's, whose stored times hold the times of its first and its last line that
-//! has one. A segment no time places, or that several steps' times hold, goes to no step, unless it lies between
-//! two segments of one step. Never by position, and never by a group's title: a step can print any title.
+//! every group and at the lines the runner opens a step with but no group (`Post job cleanup.`, `Cleaning up orphan
+//! processes`, a job hook's). GitHub stores a step's times in whole seconds, so time alone cannot split the steps
+//! that share one, such as a quick failure and the skipped steps after it. The runner opens every step but `Set up
+//! job` and the container steps with a top-level `Run …` group or one of those lines, so the log is cut there into
+//! blocks, and each step that ran printed one or more blocks, in order. A block goes to a step when every way of
+//! giving each block to a step in order, each step its times hold and each step that ran at least one block, gives it
+//! that step: a user group titled `Run …` adds a block no order settles, and it goes to no step. Where no such way
+//! exists, a segment goes to the one step, at or after the previous segment's, whose stored times hold the times of
+//! its first and its last line that has one. A block or segment no time places goes to no step, unless it lies
+//! between two of one step. Never by position, and never by a title alone: a step can print any title.
 
 use std::fmt::Write as _;
 
@@ -49,8 +55,21 @@ const EXIT_SCAN: u64 = 200;
 /// The last lines of a failed step a failure summary shows.
 const EXCERPT: u64 = 10;
 
-/// Lines the runner prints when a step begins without a group: each post step, and `Complete job`.
-const SECTIONS: [&str; 2] = ["Post job cleanup.", "Cleaning up orphan processes"];
+/// Lines the runner prints when a step begins without a group: each post step, `Complete job`, and the steps of a
+/// self-hosted runner's job hooks, whose `Run …` group follows.
+const SECTIONS: [&str; 4] = [
+    "Post job cleanup.",
+    "Cleaning up orphan processes",
+    "A job started hook has been configured by the self-hosted runner administrator",
+    "A job completed hook has been configured by the self-hosted runner administrator",
+];
+
+/// How the runner titles the top-level group that opens a script or action step: `Run cargo test`.
+const HEADER: &str = "Run ";
+
+/// The steps the runner opens with no header: their lines join the block before them, so a log with one is not cut
+/// into blocks.
+const HEADERLESS: [&str; 2] = ["Initialize containers", "Stop containers"];
 
 /// How the runner says a script step failed: `##[error]Process completed with exit code 101.`.
 const EXIT: &str = "Process completed with exit code ";
@@ -454,7 +473,13 @@ impl LogOutline {
         } else {
             Vec::new()
         };
-        let ranges = attribute(&job.steps, &segments);
+        let starts = block_starts(from, stored.lines, &parts.groups, &parts.sections);
+        let ends = Ends {
+            leading: from > 0,
+            trailing: stored.truncated || !job.summary.state.is_final(),
+        };
+        let ranges = by_blocks(&job.steps, &segments, &starts, ends)
+            .unwrap_or_else(|| attribute(&job.steps, &segments));
         let steps: Vec<StepLines> = job
             .steps
             .iter()
@@ -664,6 +689,201 @@ fn attribute(steps: &[Step], segments: &[Segment]) -> Vec<Option<LineRange>> {
         }
     }
     ranges
+}
+
+/// Which ends of the log may hold no line of a step that ran: the start of a log outlined from a later line, and the
+/// end of one cut at its cap or still growing.
+#[derive(Debug, Clone, Copy)]
+struct Ends {
+    leading: bool,
+    trailing: bool,
+}
+
+/// Where the log's blocks start: the first outlined line, each line the runner opens a step with but no group, and
+/// each top-level `Run …` group but one that follows such a line.
+fn block_starts(from: u64, lines: u64, groups: &[LogGroup], sections: &[u64]) -> Vec<u64> {
+    let headers = groups
+        .iter()
+        .filter(|group| group.depth == 0 && group.title.starts_with(HEADER))
+        .map(|group| group.start)
+        .filter(|&start| start == 0 || !sections.contains(&(start - 1)));
+    let mut starts: Vec<u64> = std::iter::once(from)
+        .chain(sections.iter().copied())
+        .chain(headers)
+        .filter(|start| (from..lines).contains(start))
+        .collect();
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+/// A block of the log: the segments from one block start to the next.
+#[derive(Debug)]
+struct Block {
+    /// Its first line, and the line after the last segment with a time: lines after that no time places.
+    range: LineRange,
+    /// The earliest and latest time of its lines, when any has one.
+    times: Option<(u64, u64)>,
+}
+
+/// Each step's lines, by index into `steps`, from the blocks only one order gives it; `None` when no order fits,
+/// such as when a step prints no header, and the segments are attributed by time alone.
+fn by_blocks(
+    steps: &[Step],
+    segments: &[Segment],
+    starts: &[u64],
+    ends: Ends,
+) -> Option<Vec<Option<LineRange>>> {
+    if steps
+        .iter()
+        .any(|step| HEADERLESS.contains(&step.name.as_str()))
+    {
+        return None;
+    }
+    let mut blocks: Vec<Block> = Vec::new();
+    for segment in segments {
+        let opens = starts.binary_search(&segment.range.from).is_ok();
+        if opens || blocks.is_empty() {
+            blocks.push(Block {
+                range: LineRange {
+                    from: segment.range.from,
+                    to: segment.range.from,
+                },
+                times: None,
+            });
+        }
+        let block = blocks.last_mut()?;
+        for at in [segment.first, segment.last].into_iter().flatten() {
+            let (low, high) = block.times.get_or_insert((at, at));
+            *low = (*low).min(at);
+            *high = (*high).max(at);
+            block.range.to = segment.range.to;
+        }
+    }
+    // The steps that printed lines, if they ran: a skipped step prints none.
+    let ran: Vec<usize> = (0..steps.len())
+        .filter(|&index| {
+            steps[index].started_at.is_some()
+                && steps[index].conclusion.as_deref() != Some("skipped")
+        })
+        .collect();
+    let owners = Orders::new(&blocks, steps, &ran, ends)?.owners();
+    let mut ranges: Vec<Option<LineRange>> = vec![None; steps.len()];
+    for (block, owner) in blocks.iter().zip(owners) {
+        if let (Some(index), Some(_), false) = (owner, block.times, block.range.is_empty()) {
+            let range = ranges[index].get_or_insert(block.range);
+            range.to = block.range.to;
+        }
+    }
+    Some(ranges)
+}
+
+/// The ways of giving each block to a step in order: block `i` and step `k` index `blocks` and `ran`. A step that
+/// ended in success or failure printed at least one block; any other, or one before the outlined lines or after the
+/// stored ones, may have printed none here.
+struct Orders<'log> {
+    blocks: &'log [Block],
+    steps: &'log [Step],
+    ran: &'log [usize],
+    ends: Ends,
+    /// Whether blocks `..i` can go to steps `..k`, step `k` given none of them yet, by `i * (ran + 1) + k`.
+    fresh: Vec<bool>,
+    /// The same, block `i - 1` given to step `k`.
+    open: Vec<bool>,
+}
+
+impl<'log> Orders<'log> {
+    /// The ways, or `None` when there are none.
+    fn new(
+        blocks: &'log [Block],
+        steps: &'log [Step],
+        ran: &'log [usize],
+        ends: Ends,
+    ) -> Option<Orders<'log>> {
+        let cells = (blocks.len() + 1) * (ran.len() + 1);
+        let mut orders = Orders {
+            blocks,
+            steps,
+            ran,
+            ends,
+            fresh: vec![false; cells],
+            open: vec![false; cells],
+        };
+        orders.fresh[0] = true;
+        for i in 0..=blocks.len() {
+            for k in 0..ran.len() {
+                let at = orders.cell(i, k);
+                if orders.fresh[at] && orders.may_skip(i, k) {
+                    let next = orders.cell(i, k + 1);
+                    orders.fresh[next] = true;
+                }
+                if orders.open[at] {
+                    let next = orders.cell(i, k + 1);
+                    orders.fresh[next] = true;
+                }
+                if i < blocks.len() && (orders.fresh[at] || orders.open[at]) && orders.fits(i, k) {
+                    let next = orders.cell(i + 1, k);
+                    orders.open[next] = true;
+                }
+            }
+        }
+        let done = orders.cell(blocks.len(), ran.len());
+        orders.fresh[done].then_some(orders)
+    }
+
+    fn cell(&self, i: usize, k: usize) -> usize {
+        i * (self.ran.len() + 1) + k
+    }
+
+    /// Whether step `k` may have printed no block, when blocks `..i` went to the steps before it.
+    fn may_skip(&self, i: usize, k: usize) -> bool {
+        let ended = matches!(
+            self.steps[self.ran[k]].conclusion.as_deref(),
+            Some("success" | "failure")
+        );
+        !ended || (i == 0 && self.ends.leading) || (i == self.blocks.len() && self.ends.trailing)
+    }
+
+    /// Whether step `k`'s stored times hold block `i`'s; a block with no time fits any step.
+    fn fits(&self, i: usize, k: usize) -> bool {
+        let step = &self.steps[self.ran[k]];
+        self.blocks[i]
+            .times
+            .is_none_or(|(low, high)| holds(step, low) && holds(step, high))
+    }
+
+    /// The step, by index into the job's steps, that every way gives each block, if one does.
+    fn owners(&self) -> Vec<Option<usize>> {
+        let (blocks, ran) = (self.blocks.len(), self.ran.len());
+        // Whether blocks `i..` can go to steps `k..` from each state, as `fresh` and `open` are read forward.
+        let mut fresh = vec![false; self.fresh.len()];
+        let mut open = vec![false; self.open.len()];
+        let done = self.cell(blocks, ran);
+        fresh[done] = true;
+        for i in (0..=blocks).rev() {
+            for k in (0..ran).rev() {
+                let at = self.cell(i, k);
+                let next_step = fresh[self.cell(i, k + 1)];
+                let takes = i < blocks && self.fits(i, k) && open[self.cell(i + 1, k)];
+                fresh[at] = (self.may_skip(i, k) && next_step) || takes;
+                open[at] = next_step || takes;
+            }
+        }
+        (0..blocks)
+            .map(|i| {
+                let mut owners = (0..ran).filter(|&k| {
+                    let at = self.cell(i, k);
+                    (self.fresh[at] || self.open[at])
+                        && self.fits(i, k)
+                        && open[self.cell(i + 1, k)]
+                });
+                match (owners.next(), owners.next()) {
+                    (Some(only), None) => Some(self.ran[only]),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
 }
 
 /// The lines below `lines` that no range holds.

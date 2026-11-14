@@ -139,9 +139,10 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0130](0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md) | The budgets count what runs uses and keep room for its largest growths | Accepted |
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |
 | [0132](0132-one-attention-list-core-words.md) | One attention list that core words, with a cached doctor and five views | Accepted |
-| [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Accepted |
+| [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Amended by 0139 |
 | [0134](0134-a-job-action-is-previewed-then-sent-to-github-once.md) | A job action is previewed, then sent to GitHub once | Accepted |
 | [0135](0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md) | The job history is searched, sorted and laid out by core | Accepted |
 | [0136](0136-the-dashboard-is-laid-out-by-task.md) | The dashboard is laid out by task | Accepted |
 | [0137](0137-the-tui-follows-core-s-views.md) | The TUI follows core's views, one row per slot, and reads what an older daemon lacks as not supported | Accepted |
 | [0138](0138-measured-admission-is-the-default.md) | Measured admission is the default | Accepted |
+| [0139](0139-steps-that-share-a-second-are-told-apart-by-their-headers.md) | Steps that share a second are told apart by their headers, in order | Accepted |

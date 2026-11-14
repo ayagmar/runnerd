@@ -49,8 +49,9 @@ flowchart TB
   needs attention from the status, the doctor's run and the insights
   ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)). `api::jobs::log` reads a job's log as
   structure: it styles each stored line, builds the outline a line at a time (`Outliner`), tells each step's lines by
-  their times and the steps' and words a failure from what is stored, and searches a page at a time
-  ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md)). `api::jobs::query`,
+  the runner's step headers in order and the steps' times, words a failure from what is stored, and searches a page
+  at a time ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md),
+  [0139](docs/adr/0139-steps-that-share-a-second-are-told-apart-by-their-headers.md)). `api::jobs::query`,
   `api::jobs::timeline` and `api::jobs::compare` define the job list's search, sorts and pages, the slots' timeline and
   a job beside its baseline as pure functions over a history in memory, which the store answers in SQL and the demo
   calls ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)). `api::savings` prices this machine's job minutes

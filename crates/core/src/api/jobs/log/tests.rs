@@ -188,23 +188,22 @@ fn steps_get_their_lines_by_time_never_by_title_or_position() {
         [
             (1, lines(0, 7)),
             (2, lines(7, 12)),
-            // Its header shares a second with the checkout and has no title to tell them apart; the group without
-            // timestamps between its own groups is its, and so is the user group titled `Run make`, by time.
-            (3, lines(15, 26)),
-            // Its header shares a second with step 3: its title, step 4's name, could be any step's output.
-            (4, lines(28, 31)),
+            // Its header shares a second with the checkout's end, but the checkout's own header came before it;
+            // the group without timestamps between its own groups is its, and so is the user group titled
+            // `Run make`, by time.
+            (3, lines(12, 26)),
+            // Its header shares a second with step 3, which already has the block it opened.
+            (4, lines(26, 31)),
             (5, lines(31, 35)),
             (6, StepLog::Empty),
             (7, lines(35, 37)),
             (8, lines(37, 38)),
         ]
     );
-    assert_eq!(
-        outline.unattributed,
-        [
-            LineRange { from: 12, to: 15 },
-            LineRange { from: 26, to: 28 }
-        ]
+    assert!(
+        outline.unattributed.is_empty(),
+        "{:?}",
+        outline.unattributed
     );
     let groups: Vec<(u64, Option<u64>, u32, &str)> = outline
         .groups
@@ -662,17 +661,52 @@ fn a_title_or_an_untimed_group_never_gives_a_step_lines() {
         at("00:10.5", "##[endgroup]"),
         at("00:10.9", "##[error]Process completed with exit code 1."),
     ];
-    let failed = job(JobState::Completed, "failure", steps);
+    let failed = job(JobState::Completed, "failure", steps.clone());
     let outline = LogOutline::of(&failed, &log);
-    assert_eq!(outline.step_lines(1), Some(LineRange { from: 0, to: 2 }));
-    assert_eq!(outline.steps[1].lines, StepLog::Unattributed);
+    assert_eq!(
+        outline.step_lines(1),
+        Some(LineRange { from: 0, to: 6 }),
+        "a nested group opens no step"
+    );
+    assert_eq!(outline.step_lines(2), Some(LineRange { from: 6, to: 9 }));
     let failure = outline.failure.unwrap();
     assert_eq!(
-        (failure.exit_code, failure.excerpt.as_ref()),
-        (None, None),
-        "neither exit code in that second is known to be the failed step's"
+        failure.headline(&failed.steps),
+        "Step 2, Run tests, failed with exit code 1"
     );
-    assert_eq!(failure.headline(&failed.steps), "Step 2, Run tests, failed");
+
+    // The same group printed at the top level: Build or the failed step may have printed it, so it is neither's,
+    // and its exit code is not the failure's.
+    let log = vec![
+        at("00:00.5", "##[group]Run make"),
+        at("00:00.5", "##[endgroup]"),
+        at("00:05.0", "compiling"),
+        at("00:10.1", "##[group]Run tests"),
+        at("00:10.1", "##[error]Process completed with exit code 99."),
+        at("00:10.2", "##[endgroup]"),
+        at("00:10.5", "##[group]Run tests"),
+        at("00:10.5", "##[endgroup]"),
+        at("00:10.9", "##[error]Process completed with exit code 1."),
+    ];
+    let outline = LogOutline::of(&failed, &log);
+    assert_eq!(outline.step_lines(1), Some(LineRange { from: 0, to: 3 }));
+    assert_eq!(outline.step_lines(2), Some(LineRange { from: 6, to: 9 }));
+    assert_eq!(outline.unattributed, [LineRange { from: 3, to: 6 }]);
+    assert_eq!(outline.failure.unwrap().exit_code, Some(1));
+
+    // A container step prints no header, so its lines would join the failed step's block: the log is not cut into
+    // blocks, and the steps sharing a second keep no lines.
+    let mut contained = steps;
+    contained.push(step(3, "Stop containers", Some((10, 10)), "success"));
+    let mut log = log;
+    log.push(at(
+        "00:10.9",
+        "##[group]Stop and remove container: halyard-db",
+    ));
+    log.push(at("00:10.9", "##[endgroup]"));
+    let outline = LogOutline::of(&job(JobState::Completed, "failure", contained), &log);
+    assert_eq!(outline.steps[1].lines, StepLog::Unattributed);
+    assert_eq!(outline.failure.unwrap().exit_code, None);
 
     // A group with no timestamps, titled as the next step, before that step's own lines.
     let steps = vec![
