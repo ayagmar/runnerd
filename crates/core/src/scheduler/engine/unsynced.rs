@@ -90,8 +90,9 @@ pub(crate) enum Recovered {
 pub(crate) enum AfterRefusal {
     /// The caches stay torn, and the next tick tries again: `tries` of `REFUSALS` were refused.
     Again { tries: u32 },
-    /// That was the last try: nothing is owed, and runners start on what the caches hold.
-    GaveUp,
+    /// That was the last try: the engine may give up (`gave_up`) once no slot's layers it could not empty are left
+    /// as they are. Until then the caches stay torn, on disk too, so a restart tries again.
+    GiveUp,
 }
 
 /// What a file that is not one this module writes reads as: what it held cannot be told, so it is kept as torn.
@@ -178,19 +179,28 @@ impl Unsynced {
         self.settle()
     }
 
-    /// A container left on a torn cache kept it from being emptied. After `REFUSALS` of them nothing is owed, and runners start on what the
-    /// caches hold: a cache that may be torn costs less than no runner at all.
-    pub(crate) fn refused(&mut self) -> io::Result<AfterRefusal> {
+    /// A container left on a torn cache kept it from being emptied. After `REFUSALS` of them the engine may give up
+    /// and start runners on what the caches hold, as a cache that may be torn costs less than no runner at all; it
+    /// stays torn until it does (`gave_up`).
+    pub(crate) fn refused(&mut self) -> AfterRefusal {
         let Owed::Torn { refusals } = &mut self.state else {
-            return Ok(AfterRefusal::GaveUp);
+            return AfterRefusal::GiveUp;
         };
         *refusals = refusals.saturating_add(1);
         let tries = *refusals;
         if tries < REFUSALS {
-            return Ok(AfterRefusal::Again { tries });
+            return AfterRefusal::Again { tries };
         }
-        self.settle()?;
-        Ok(AfterRefusal::GaveUp)
+        AfterRefusal::GiveUp
+    }
+
+    /// The engine gave up on the caches it could not empty, once no slot's layers among them are left as they are:
+    /// once that is on disk, nothing is owed.
+    pub(crate) fn gave_up(&mut self) -> io::Result<()> {
+        if !self.is_torn() {
+            return Ok(());
+        }
+        self.settle()
     }
 
     /// A stop that leaves no runner running: once what runners wrote is on disk, nothing is owed. Torn caches stay

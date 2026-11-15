@@ -828,3 +828,64 @@ async fn a_slots_layers_skip_their_unmount_sync_and_mount_again_after_any_ending
         removed.unwrap();
     }
 }
+
+async fn start_over_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (code, output) = job(
+        docker,
+        names,
+        &[docker::SKIP_SYNCS],
+        "echo cached > /home/runner/.cache/runnerd-test-left && docker volume create store-kept > /dev/null \
+         && ls -A /state",
+    )
+    .await?;
+    if code != 0 || !output.contains("cache") || !output.contains("docker") {
+        return Err(format!(
+            "the job left no layers or store to start over (exit {code}):\n{output}"
+        ));
+    }
+    let volume = names.slot(PROFILE, 1);
+    cache::start_layers_over(
+        docker,
+        &cache::StartOver {
+            names,
+            volume: &volume,
+            image: &image(),
+            slice: "runnerdtest.slice",
+            isolation: &Sysbox,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let (code, output) = job(
+        docker,
+        names,
+        &[docker::SKIP_SYNCS],
+        "echo \"LEFT: $(cat /home/runner/.cache/runnerd-test-left 2> /dev/null || echo none)\"; \
+         docker volume inspect store-kept > /dev/null && echo STORE-KEPT",
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || !output.contains("LEFT: none") || !output.contains("STORE-KEPT") {
+        return Err(format!(
+            "after starting the layers over, the next job still found them, or lost its Docker store \
+             (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_slots_layers_started_over_leave_its_docker_store_and_nothing_else() {
+    let names = Names::new(&format!("runnerd-test-over-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = start_over_scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}

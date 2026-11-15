@@ -921,3 +921,95 @@ async fn a_docker_error_on_a_torn_volume_counts_no_refusal() {
         "and no runner or seed starts on the torn slot"
     );
 }
+
+#[tokio::test]
+async fn a_slot_volume_held_past_the_last_try_has_its_layers_started_over_before_any_runner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-held-slot");
+    boot(&dir, "boot-1");
+    std::fs::write(dir.0.join("unsynced"), "since boot-0\n").unwrap();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.holders.insert(
+            "runnerd-app-slot-1".to_owned(),
+            vec![Container {
+                id: "someones-own".to_owned(),
+                name: "someones-own".to_owned(),
+                running: true,
+                labels: HashMap::new(),
+            }],
+        );
+        // Starting the layers over fails until the test lets it.
+        state.start_over_exit = 1;
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let runner_started = |docker: &FakeDocker| {
+        docker
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("start ") && !call.ends_with("-start-over"))
+    };
+    let started_over = |docker: &FakeDocker| {
+        docker
+            .calls()
+            .iter()
+            .any(|call| call == "start runnerd-start-over")
+    };
+    for _ in 0..super::super::unsynced::REFUSALS + 2 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(
+        started_over(&docker) && !runner_started(&docker),
+        "past the last try, no runner starts while the held slot's layers cannot be started over"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+        "torn\n",
+        "and the caches stay torn on disk"
+    );
+
+    // A restart keeps them torn: it tries the volume again, then the layers.
+    drop(handle);
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    docker.0.lock().unwrap().start_over_exit = 0;
+    for tick in 1..super::super::unsynced::REFUSALS {
+        engine.tick(Shutdown::No).await;
+        assert!(
+            !runner_started(&docker),
+            "after a restart, no runner starts at refused tick {tick}"
+        );
+    }
+    let from = docker.calls().len();
+    engine.tick(Shutdown::No).await;
+    let calls = docker.calls()[from..].to_vec();
+    let over = calls
+        .iter()
+        .position(|call| call == "start runnerd-start-over")
+        .expect("the held slot's layers are started over at the last try");
+    let runner = calls
+        .iter()
+        .position(|call| call.starts_with("start ") && !call.ends_with("-start-over"))
+        .expect("then runners start");
+    assert!(over < runner, "before any runner: {calls:?}");
+    let mounts = docker.0.lock().unwrap().mounts["runnerd-start-over"].clone();
+    assert_eq!(
+        mounts
+            .iter()
+            .map(|mount| (mount.source.clone(), mount.target.clone()))
+            .collect::<Vec<_>>(),
+        [(
+            Some("runnerd-app-slot-1".to_owned()),
+            Some("/state".to_owned())
+        )],
+        "on the held volume"
+    );
+}

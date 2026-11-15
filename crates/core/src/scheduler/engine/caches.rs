@@ -520,8 +520,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs. It waits for the records
     /// being committed, whose containers mount the slots' volumes and go once committed. A volume Docker does not
     /// remove keeps them owed, and no runner starts, until a later tick removes it, or `unsynced::REFUSALS` ticks
-    /// found a container it leaves on one: then runners start on what the caches hold. Docker's own errors, an
-    /// outage, a 5xx or a timeout, count nothing and are retried until it removes them.
+    /// found a container it leaves on one: then runners start on what the caches hold, once the layers of each slot's
+    /// volume left are started over (`cache::start_layers_over`), which a slot's next runner would otherwise mount, and
+    /// a reseed copy, as they are. Docker's own errors, an outage, a 5xx or a timeout, count nothing and are retried
+    /// until it removes them.
     pub(super) async fn empty_torn_caches(&mut self) {
         if self.records.is_recording() {
             return;
@@ -572,23 +574,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
             match self.unsynced.refused() {
-                Ok(AfterRefusal::Again { tries }) => warn!(
+                AfterRefusal::Again { tries } => warn!(
                     "cannot empty what a host crash may have torn, so no runner starts until it is (try {tries} of \
                      {REFUSALS}): {why}"
                 ),
-                Ok(AfterRefusal::GaveUp) => warn!(
-                    "gave up emptying what a host crash may have torn after {REFUSALS} tries: runners start on what \
-                     {} hold; remove them once nothing mounts them, with docker volume rm: {why}",
-                    refused
-                        .iter()
-                        .map(|refusal| refusal.volume.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                Err(error) => warn!(
-                    "gave up emptying what a host crash may have torn, but cannot note it, so no runner starts: \
-                     {error}; {why}"
-                ),
+                AfterRefusal::GiveUp => self.give_up(&refused, &why).await,
             }
             return;
         }
@@ -604,6 +594,72 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 removed.join(", ")
             }
         );
+    }
+
+    /// Gives up on the torn volumes Docker would not remove, as `refused` says and `why` words it, once the layers of
+    /// each slot's volume among them are started over: until then the caches stay torn.
+    async fn give_up(&mut self, refused: &[cache::Refusal], why: &str) {
+        let slots: Vec<&str> = refused
+            .iter()
+            .map(|refusal| refusal.volume.as_str())
+            .filter(|volume| self.names.is_slot(volume))
+            .collect();
+        if let Err(error) = self.start_layers_over(&slots).await {
+            warn!(
+                "gave up emptying what a host crash may have torn, but cannot start the layers of {} over, so no \
+                 runner starts: {error}; {why}",
+                slots.join(", ")
+            );
+            return;
+        }
+        match self.unsynced.gave_up() {
+            Ok(()) => warn!(
+                "gave up emptying what a host crash may have torn after {REFUSALS} tries: runners start on what {} \
+                 hold{}; remove them once nothing mounts them, with docker volume rm: {why}",
+                refused
+                    .iter()
+                    .map(|refusal| refusal.volume.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if slots.is_empty() {
+                    String::new()
+                } else {
+                    format!(", the layers of {} started over", slots.join(", "))
+                }
+            ),
+            Err(error) => warn!(
+                "gave up emptying what a host crash may have torn, but cannot note it, so no runner starts: {error}; \
+                 {why}"
+            ),
+        }
+    }
+
+    /// Starts the layers in each of the slots' `volumes` over (`cache::start_layers_over`), in a container of the
+    /// image of the volume's profile, or any configured one's for a profile the config no longer has.
+    async fn start_layers_over(&self, volumes: &[&str]) -> Result<(), String> {
+        for volume in volumes {
+            let profile = self
+                .config
+                .profiles
+                .iter()
+                .find(|(name, _)| self.names.slot_of(name, volume).is_some())
+                .or_else(|| self.config.profiles.iter().next())
+                .map(|(_, profile)| profile)
+                .ok_or_else(|| "no profile's runner image to run it with".to_owned())?;
+            cache::start_layers_over(
+                &*self.docker,
+                &cache::StartOver {
+                    names: &self.names,
+                    volume,
+                    image: &profile.image.reference(),
+                    slice: &self.config.host.slice,
+                    isolation: self.isolation,
+                },
+            )
+            .await
+            .map_err(|error| format!("{volume}: {error}"))?;
+        }
+        Ok(())
     }
 
     /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.
