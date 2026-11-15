@@ -131,7 +131,8 @@ pub struct WriteTop {
 }
 
 /// What the disks under Docker's root wrote while the daemon read them in a window: from `/sys/class/block`, the
-/// runner slice's `io.stat`, which keeps what its containers wrote after they are gone, and btrfs's commit count.
+/// runner slice's `io.stat`, which keeps what its containers wrote after they are gone, the daemon's own
+/// `/proc/self/io`, and btrfs's commit count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriveWrites {
     /// The disks: `nvme2n1`.
@@ -140,14 +141,38 @@ pub struct DriveWrites {
     pub watched: u64,
     /// Bytes they wrote then.
     pub written: u64,
+    /// Whose those bytes were.
+    pub shares: DriveShares,
+    /// btrfs transaction commits; `None` on another file system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<Commits>,
+}
+
+/// Whose the drive's bytes were, over the stretches the daemon read the runner slice, or over all it read the drive
+/// when it never read the slice: a stretch that missed one figure leaves the others' shares be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriveShares {
+    /// Seconds these were read over.
+    pub watched: u64,
+    /// Bytes the drive wrote then.
+    pub written: u64,
+    /// Of those, the figures of the jobs that ended then.
+    pub jobs: u64,
     /// Of those, the runner slice's; `None` without its `io.stat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice: Option<u64>,
-    /// Of those, the figures of the jobs that ended while the daemon read them.
-    pub jobs: u64,
-    /// btrfs transaction commits; `None` on another file system.
+    /// What the daemon itself wrote then, to any disk; `None` where it could not read its own counters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commits: Option<u64>,
+    pub daemon: Option<u64>,
+}
+
+/// btrfs's transaction commits over the stretches the daemon read them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Commits {
+    /// Commits.
+    pub count: u64,
+    /// Seconds they were read over.
+    pub watched: u64,
 }
 
 /// `part` of `whole` in whole percent, rounded, at most 100.
@@ -215,7 +240,7 @@ impl DriveWrites {
     }
 
     /// Them in lines: what the drive wrote and its daily rate; whose it was, runner jobs', the rest of the runner
-    /// slice's and the share no one in runnerd owns; and btrfs's commits a second.
+    /// slice's, runnerd's own and the share no one in runnerd owns; and btrfs's commits a second.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "{} wrote {} over the {} runnerd read it: {} a day at this rate",
@@ -224,26 +249,9 @@ impl DriveWrites {
             duration(self.watched),
             ByteSize(self.per_day())
         )];
-        // Jobs that ended in the window may count what they wrote before it: never past the whole.
-        let counted = self.jobs.min(self.written);
-        let jobs = percent(counted, self.written);
-        match self.slice {
-            Some(slice) => {
-                let slice = slice.clamp(counted, self.written);
-                lines.push(format!(
-                    "Runner jobs {jobs}%; the rest of the runner slice {}% (seeds, the mirror, runners before and \
-                     after their jobs, write-back after a container ended); no owner runnerd knows {}%",
-                    percent(slice - counted, self.written),
-                    percent(self.written - slice, self.written)
-                ));
-            }
-            None => lines.push(format!(
-                "Runner jobs {jobs}%; no owner runnerd knows {}%, the runner slice's share unread",
-                percent(self.written - counted, self.written)
-            )),
-        }
+        lines.push(self.shares.line(self.watched));
         if let Some(commits) = self.commits {
-            let tenths = u128::from(commits) * 10 / u128::from(self.watched.max(1));
+            let tenths = u128::from(commits.count) * 10 / u128::from(commits.watched.max(1));
             lines.push(format!(
                 "btrfs committed {}.{} times a second",
                 tenths / 10,
@@ -251,6 +259,52 @@ impl DriveWrites {
             ));
         }
         lines
+    }
+}
+
+impl DriveShares {
+    /// Them in a line, saying the stretch they cover when it is shorter than the `watched` seconds the drive was
+    /// read: `Runner jobs 25%; the rest of the runner slice 8% (...); runnerd itself 1%; no owner runnerd knows 66%`.
+    /// No share passes the whole.
+    pub fn line(&self, watched: u64) -> String {
+        let whole = self.written;
+        // Jobs that ended in the stretch may count what they wrote before it: never past the whole.
+        let counted = self.jobs.min(whole);
+        let mut line = if self.watched < watched {
+            format!(
+                "Over the {} runnerd read the runner slice: runner jobs",
+                duration(self.watched)
+            )
+        } else {
+            "Runner jobs".to_owned()
+        };
+        let _ = write!(line, " {}%", percent(counted, whole));
+        let owned = match self.slice {
+            Some(slice) => {
+                let slice = slice.clamp(counted, whole);
+                let _ = write!(
+                    line,
+                    "; the rest of the runner slice {}% (seeds, the mirror, runners before and after their jobs, \
+                     write-back after a container ended)",
+                    percent(slice - counted, whole)
+                );
+                slice
+            }
+            None => counted,
+        };
+        let daemon = self.daemon.map(|daemon| daemon.min(whole - owned));
+        if let Some(daemon) = daemon {
+            let _ = write!(line, "; runnerd itself {}%", percent(daemon, whole));
+        }
+        let _ = write!(
+            line,
+            "; no owner runnerd knows {}%",
+            percent(whole - owned - daemon.unwrap_or(0), whole)
+        );
+        if self.slice.is_none() {
+            line.push_str(", the runner slice's share unread");
+        }
+        line
     }
 }
 
@@ -328,35 +382,64 @@ mod tests {
 
     #[test]
     fn the_drive_s_lines_share_its_bytes_out_without_passing_the_whole() {
+        let shares = DriveShares {
+            watched: 6 * 3600,
+            written: 600 * G,
+            jobs: 150 * G,
+            slice: Some(200 * G),
+            daemon: Some(6 * G),
+        };
         let drive = DriveWrites {
             device: "nvme0n1".to_owned(),
             watched: 6 * 3600,
             written: 600 * G,
-            slice: Some(200 * G),
-            jobs: 150 * G,
-            commits: Some(43_200),
+            shares,
+            commits: Some(Commits {
+                count: 43_200,
+                watched: 6 * 3600,
+            }),
         };
         assert_eq!(
             drive.lines(),
             [
                 "nvme0n1 wrote 600G over the 6h 00m runnerd read it: 2.34T a day at this rate",
                 "Runner jobs 25%; the rest of the runner slice 8% (seeds, the mirror, runners before and after \
-                 their jobs, write-back after a container ended); no owner runnerd knows 67%",
+                 their jobs, write-back after a container ended); runnerd itself 1%; no owner runnerd knows 66%",
                 "btrfs committed 2.0 times a second",
             ]
         );
         // Jobs that ended in the window may count bytes written before it: never past the whole.
         let over = DriveWrites {
-            slice: Some(100 * G),
-            jobs: 700 * G,
+            shares: DriveShares {
+                slice: Some(100 * G),
+                jobs: 700 * G,
+                ..shares
+            },
             commits: None,
-            ..drive
+            ..drive.clone()
         };
         assert_eq!(
             over.lines()[1],
             "Runner jobs 100%; the rest of the runner slice 0% (seeds, the mirror, runners before and after their \
-             jobs, write-back after a container ended); no owner runnerd knows 0%"
+             jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0%"
         );
         assert_eq!(over.lines().len(), 2, "no commits line off btrfs");
+        // The slice read over only part of the time: its shares say over which.
+        let part = DriveWrites {
+            shares: DriveShares {
+                watched: 3600,
+                written: 100 * G,
+                jobs: 50 * G,
+                slice: Some(60 * G),
+                daemon: None,
+            },
+            ..drive
+        };
+        assert_eq!(
+            part.lines()[1],
+            "Over the 1h 00m runnerd read the runner slice: runner jobs 50%; the rest of the runner slice 10% (seeds, \
+             the mirror, runners before and after their jobs, write-back after a container ended); no owner runnerd \
+             knows 40%"
+        );
     }
 }

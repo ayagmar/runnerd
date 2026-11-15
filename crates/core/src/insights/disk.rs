@@ -3,7 +3,7 @@
 //! them. Pure.
 
 use super::Run;
-use crate::api::{DiskWrites, DriveWrites, JobWrites, Measure, WriteTop};
+use crate::api::{Commits, DiskWrites, DriveShares, DriveWrites, JobWrites, Measure, WriteTop};
 use crate::observe::disk::Window;
 
 /// The workflows, and the jobs, the section names at most.
@@ -80,8 +80,8 @@ pub(super) fn writes(
     })
 }
 
-/// The drive's windows that end within `since` to `now` and read it, added up, with the figures of the jobs that
-/// ended inside one of them.
+/// The drive's windows that end within `since` to `now` and read it, added up, with whose its bytes were over the
+/// windows that also read the runner slice, or over all of them when none did.
 fn drive(
     measured: &[(&Run, u64)],
     windows: &[Window],
@@ -93,29 +93,62 @@ fn drive(
         .filter(|window| (since..=now).contains(&window.end) && window.drive.is_some())
         .collect();
     let last = read.last()?;
-    let all = |figure: fn(&Window) -> Option<u64>| -> Option<u64> {
-        read.iter().map(|window| figure(window)).sum()
+    let read_slice: Vec<&Window> = read
+        .iter()
+        .copied()
+        .filter(|window| window.slice.is_some())
+        .collect();
+    let shared = if read_slice.is_empty() {
+        &read
+    } else {
+        &read_slice
     };
     let jobs = measured
         .iter()
         .filter(|(run, _)| {
             run.finished_at.is_some_and(|at| {
-                read.iter()
+                shared
+                    .iter()
                     .any(|window| (window.start..=window.end).contains(&at))
             })
         })
         .map(|(_, bytes)| bytes)
         .sum();
+    let read_commits: Vec<&Window> = read
+        .iter()
+        .copied()
+        .filter(|window| window.commits.is_some())
+        .collect();
     Some(DriveWrites {
         device: last.device.clone(),
-        watched: read
-            .iter()
-            .map(|window| window.end.saturating_sub(window.start))
-            .sum::<u64>()
-            / 1000,
-        written: all(|window| window.drive)?,
-        slice: all(|window| window.slice),
-        jobs,
-        commits: all(|window| window.commits),
+        watched: seconds(&read),
+        written: sum(&read, |window| window.drive)?,
+        shares: DriveShares {
+            watched: seconds(shared),
+            written: sum(shared, |window| window.drive)?,
+            jobs,
+            slice: sum(&read_slice, |window| window.slice).filter(|_| !read_slice.is_empty()),
+            daemon: sum(shared, |window| window.daemon),
+        },
+        commits: sum(&read_commits, |window| window.commits)
+            .filter(|_| !read_commits.is_empty())
+            .map(|count| Commits {
+                count,
+                watched: seconds(&read_commits),
+            }),
     })
+}
+
+/// The seconds `windows` span.
+fn seconds(windows: &[&Window]) -> u64 {
+    windows
+        .iter()
+        .map(|window| window.end.saturating_sub(window.start))
+        .sum::<u64>()
+        / 1000
+}
+
+/// One figure of `windows` added up; `None` when one of them lacks it.
+fn sum(windows: &[&Window], figure: fn(&Window) -> Option<u64>) -> Option<u64> {
+    windows.iter().map(|window| figure(window)).sum()
 }

@@ -263,6 +263,7 @@ async fn insights_read_the_drive_s_windows_and_pruning_drops_them_with_job_recor
         device: "nvme0n1".to_owned(),
         drive,
         slice: Some(MIB),
+        daemon: Some(MIB),
         commits: None,
     };
     store.disk_window(window(1_000_000, Some(4 * MIB)));

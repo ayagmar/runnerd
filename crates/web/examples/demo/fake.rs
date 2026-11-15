@@ -45,9 +45,11 @@ use runnerd_core::api::{
     WaitSpread, WeekWaits,
 };
 use runnerd_core::api::{
+    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
+};
+use runnerd_core::api::{
     CompareQuery, JobComparison, JobList, RecordMark, SlotTimeline, StepUsage, TimelineQuery,
 };
-use runnerd_core::api::{DiskWrites, DiskWritten, DriveWrites, JobWrites, Measure, WriteTop};
 use runnerd_core::api::{LogLinesQuery, LogOutline, LogSearchQuery, Search, StyledLine};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -1101,9 +1103,17 @@ fn disk_writes() -> DiskWrites {
             device: "nvme0n1".to_owned(),
             watched: 13 * 86_400 + 20 * 3600,
             written: 1_310 * G,
-            slice: Some(470 * G),
-            jobs: 398 * G,
-            commits: Some(3_110_000),
+            shares: DriveShares {
+                watched: 13 * 86_400 + 20 * 3600,
+                written: 1_310 * G,
+                jobs: 398 * G,
+                slice: Some(470 * G),
+                daemon: Some(7 * G),
+            },
+            commits: Some(Commits {
+                count: 3_110_000,
+                watched: 13 * 86_400 + 20 * 3600,
+            }),
         }),
     }
 }

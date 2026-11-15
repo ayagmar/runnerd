@@ -1351,27 +1351,29 @@ fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_e
     const M: u64 = 1 << 20;
     let complete = api::Measure::Complete;
     let runs = [
-        writing(1, 1, "images", "image-api", 3 * G, complete),
+        writing(1, 0, "images", "image-api", 3 * G, complete),
         writing(2, 1, "CI", "test", 100 * M, complete),
         writing(3, 2, "CI", "test", 300 * M, api::Measure::Partial),
         writing(4, 30, "CI", "lint", 10 * M, complete),
         // Not measured: no figure, and not counted as 0.
         test_run(5, 1, 60),
     ];
-    // The drive was read for the last three hours only, an hour of it before a restart.
-    let window = |hours_ago: u64, drive: u64, slice: u64| crate::observe::disk::Window {
+    // The drive was read for the last three hours only, an hour of it before a restart; the last hour's slice was
+    // not read.
+    let window = |hours_ago: u64, drive: u64, slice: Option<u64>| crate::observe::disk::Window {
         start: NOW - hours_ago * HOUR,
         end: NOW - (hours_ago - 1) * HOUR,
         device: "nvme0n1".to_owned(),
         drive: Some(drive),
-        slice: Some(slice),
+        slice,
+        daemon: Some(100 * M),
         commits: Some(7200),
     };
     let history = History {
         disk: vec![
-            window(3, 2 * G, G),
-            window(2, 4 * G, 2 * G),
-            window(1, 4 * G, 3 * G + 500 * M),
+            window(3, 2 * G, Some(G)),
+            window(2, 4 * G, Some(2 * G)),
+            window(1, 4 * G, None),
         ],
         ..whole(&runs)
     };
@@ -1397,12 +1399,24 @@ fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_e
     let drive = disk.drive.unwrap();
     assert_eq!(drive.watched, 3 * 3600);
     assert_eq!(drive.written, 10 * G);
-    assert_eq!(drive.slice, Some(6 * G + 500 * M));
-    assert_eq!(drive.commits, Some(3 * 7200));
     assert_eq!(
-        drive.jobs,
-        3 * G + 400 * M,
-        "the lint run ended while no window read the drive"
+        drive.commits,
+        Some(api::Commits {
+            count: 3 * 7200,
+            watched: 3 * 3600
+        })
+    );
+    assert_eq!(
+        drive.shares,
+        api::DriveShares {
+            watched: 2 * 3600,
+            written: 6 * G,
+            // The image ended where the slice was not read; the lint run while no window read the drive.
+            jobs: 400 * M,
+            slice: Some(3 * G),
+            daemon: Some(200 * M),
+        },
+        "one window without the slice leaves the others' shares"
     );
     assert_eq!(drive.per_day(), 80 * G);
 }

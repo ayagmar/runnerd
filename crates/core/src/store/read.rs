@@ -1400,7 +1400,8 @@ fn disk_windows(
     since: u64,
 ) -> rusqlite::Result<Vec<crate::observe::disk::Window>> {
     db.prepare_cached(
-        "SELECT start, end_at, device, drive, slice, commits FROM disk_windows WHERE end_at >= ?1 ORDER BY start",
+        "SELECT start, end_at, device, drive, slice, daemon, commits FROM disk_windows WHERE end_at >= ?1 \
+         ORDER BY start",
     )?
     .query_map([since], |row| {
         Ok(crate::observe::disk::Window {
@@ -1409,7 +1410,8 @@ fn disk_windows(
             device: row.get(2)?,
             drive: row.get(3)?,
             slice: row.get(4)?,
-            commits: row.get(5)?,
+            daemon: row.get(5)?,
+            commits: row.get(6)?,
         })
     })?
     .collect()

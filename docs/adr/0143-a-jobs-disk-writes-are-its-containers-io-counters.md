@@ -43,6 +43,10 @@ Docker Engine inside it puts its containers and BuildKit's in cgroups below the 
   `io.stat` (which keeps what its ended containers wrote), and btrfs's commit count, and adds them up into windows of
   up to 10 minutes (`disk_windows`, pruned with job records). A daemon's stop stores the window it is in; the time no
   daemon ran is in none. A figure a reading lacks leaves the window's absent.
+- The daemon's own writes are a line of the drive's shares, so "no owner runnerd knows" leaves runnerd out. They are
+  what it sent to any disk, its history, logs and build cache among them; on a host whose history is on another
+  disk than Docker's root they are shown against a drive they did not reach, capped at what the drive's other shares
+  leave.
 - `runnerctl insights`, the TUI and the dashboard show what the window's jobs wrote (median, p90, total), the
   workflows and jobs that wrote most, and the drive: what it wrote, a day at that rate, runner jobs' share, the rest
   of the runner slice's, the share with no owner runnerd knows, and commits a second. Core words all of it

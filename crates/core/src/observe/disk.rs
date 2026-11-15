@@ -151,10 +151,18 @@ impl Disks {
                 .lines()
                 .find_map(|line| line.strip_prefix("commits ")?.trim().parse().ok())
         });
+        // The daemon's own: what it sent to any block device, its history among it.
+        let daemon = std::fs::read_to_string(paths.proc.join("self/io"))
+            .ok()
+            .and_then(|io| {
+                io.lines()
+                    .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
+            });
         Reading {
             at,
             drive,
             slice: self.written(slice).map(|written| written.bytes),
+            daemon,
             commits,
             device: self.name(),
         }
@@ -242,6 +250,7 @@ pub struct Reading {
     at: u64,
     drive: Option<u64>,
     slice: Option<u64>,
+    daemon: Option<u64>,
     commits: Option<u64>,
     device: String,
 }
@@ -260,6 +269,9 @@ pub struct Window {
     /// Bytes the runners' slice wrote to them, its containers' and those it had that are gone; `None` when a
     /// reading lacked them.
     pub slice: Option<u64>,
+    /// Bytes the daemon itself wrote (`/proc/self/io`'s `write_bytes`), to any disk; `None` when a reading lacked
+    /// them.
+    pub daemon: Option<u64>,
     /// btrfs transaction commits; `None` on another file system or when a reading lacked them.
     pub commits: Option<u64>,
 }
@@ -271,6 +283,7 @@ struct Open {
     last: Reading,
     drive: Option<u64>,
     slice: Option<u64>,
+    daemon: Option<u64>,
     commits: Option<u64>,
 }
 
@@ -280,6 +293,7 @@ impl Open {
             first: reading.at,
             drive: Some(0),
             slice: Some(0),
+            daemon: Some(0),
             commits: reading.commits.map(|_| 0),
             last: reading,
         }
@@ -294,6 +308,7 @@ impl Open {
         };
         self.drive = rose(self.drive, self.last.drive, reading.drive);
         self.slice = rose(self.slice, self.last.slice, reading.slice);
+        self.daemon = rose(self.daemon, self.last.daemon, reading.daemon);
         self.commits = rose(self.commits, self.last.commits, reading.commits);
         self.last = reading;
     }
@@ -305,14 +320,14 @@ impl Open {
             device: self.last.device.clone(),
             drive: self.drive,
             slice: self.slice,
+            daemon: self.daemon,
             commits: self.commits,
         }
     }
 }
 
-/// Adds up the readings of the drive into windows of `WINDOW`, each starting where the last ended. Survives neither
-/// a restart nor a reload: a restart starts a new window at its first reading, so the time no daemon ran is in
-/// none.
+/// Adds up the readings of the drive into windows of `WINDOW`, each starting where the last ended. A reload leaves
+/// it be; a restart starts a new window at its first reading, so the time no daemon ran is in none.
 #[derive(Debug, Default)]
 pub struct Windows {
     open: Option<Open>,

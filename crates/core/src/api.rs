@@ -84,7 +84,10 @@ pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
     ReplaceQuery, RunningJob,
 };
-pub use disk::{DiskWrites, DiskWritten, DriveWrites, JobWrites, Measure, WriteSection, WriteTop};
+pub use disk::{
+    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteSection,
+    WriteTop,
+};
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use insights::{
     AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,

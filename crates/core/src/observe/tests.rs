@@ -941,6 +941,7 @@ fn docker_s_root_on_a_btrfs_partition_reads_as_its_whole_disk_and_its_file_syste
             device: "nvme9n1".to_owned(),
             drive: Some(2000 * 512),
             slice: Some(4096),
+            daemon: None,
             commits: Some(15),
         }
     );

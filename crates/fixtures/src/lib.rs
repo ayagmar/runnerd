@@ -970,9 +970,17 @@ fn disk_writes() -> api::DiskWrites {
             device: "nvme0n1".to_owned(),
             watched: 6 * 3600 + 36 * 60,
             written: 574 * GIB,
-            slice: Some(183 * GIB),
-            jobs: 140 * GIB,
-            commits: Some(49_500),
+            shares: api::DriveShares {
+                watched: 6 * 3600 + 36 * 60,
+                written: 574 * GIB,
+                jobs: 140 * GIB,
+                slice: Some(183 * GIB),
+                daemon: Some(3 * GIB),
+            },
+            commits: Some(api::Commits {
+                count: 49_500,
+                watched: 6 * 3600 + 36 * 60,
+            }),
         }),
     }
 }

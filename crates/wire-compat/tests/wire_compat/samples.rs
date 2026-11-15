@@ -35,7 +35,9 @@ use runnerd_core::api::{
     StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View,
     WaitSpread, Waiting, WeekWaits,
 };
-use runnerd_core::api::{DiskWrites, DiskWritten, DriveWrites, JobWrites, Measure, WriteTop};
+use runnerd_core::api::{
+    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
+};
 
 pub(crate) fn status() -> Status {
     Status {
@@ -1403,9 +1405,17 @@ fn disk_writes() -> DiskWrites {
             device: "nvme0n1".to_owned(),
             watched: 23_760,
             written: 574 << 30,
-            slice: Some(183 << 30),
-            jobs: 140 << 30,
-            commits: Some(49_500),
+            shares: DriveShares {
+                watched: 23_000,
+                written: 570 << 30,
+                jobs: 140 << 30,
+                slice: Some(183 << 30),
+                daemon: Some(3 << 30),
+            },
+            commits: Some(Commits {
+                count: 49_500,
+                watched: 23_760,
+            }),
         }),
     }
 }
