@@ -1,7 +1,7 @@
-//! The commands runnerd runs (the doctor's `systemctl` and `gh`, and `gh auth token` for the GitHub client), each in
-//! a process group of its own, so none outlives its deadline or the daemon: past its deadline, its whole group is
-//! killed, whatever its processes did with the pipes, and once the daemon stops, every group still running is killed
-//! and no command starts (ADRs 0132 and 0134).
+//! The commands runnerd runs (the doctor's `systemctl` and `gh`, `gh auth token` for the GitHub client, and
+//! `journalctl` for how a past boot ended, `boots`), each in a process group of its own, so none outlives its deadline
+//! or the daemon: past its deadline, its whole group is killed, whatever its processes did with the pipes, and once
+//! the daemon stops, every group still running is killed and no command starts (ADRs 0132 and 0134).
 //!
 //! It must not run anything its caller did not ask for, or signal a process it did not start.
 

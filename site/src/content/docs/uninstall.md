@@ -40,7 +40,7 @@ The mirror runs the `registry` image, which other programs may use too; remove i
 |---|---|
 | `runnerd`, `runnerctl` | `~/.local/bin`, or the installer's `--prefix` |
 | the config | `~/.config/runnerd/runnerd.toml` |
-| the job history and the dashboard's session secret | `~/.local/state/runnerd/` (`runnerd.db` and its `-wal` and `-shm` files, `dashboard-session`), or `[history] database`'s directory |
+| the job history, the dashboard's session secret, and the note of runners that skipped their syncs | `~/.local/state/runnerd/` (`runnerd.db` and its `-wal` and `-shm` files, `dashboard-session`, `unsynced`), or `[history] database`'s directory |
 | the build cache | `~/.cache/runnerd/build-cache`, or `[caches.build] directory` |
 
 ```sh

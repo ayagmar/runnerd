@@ -338,6 +338,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_trim().await;
         self.collect_disk().await;
         self.collect_recordings().await;
+        if self.unsynced.is_torn() {
+            self.empty_torn_caches().await;
+        }
         // Before the finished runners go: one Docker never inspected while it ran is still recorded with its job.
         self.observe_again().await;
         self.recapture().await;

@@ -1,12 +1,17 @@
 //! A slot's Docker Engine keeps its images and build cache between the slot's jobs, each in a new container, within
 //! the Docker budget runnerd gives it, BuildKit's cache mounts the longest, and a store its engine does not start on
-//! is emptied. Needs Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
+//! is emptied. Told to, a runner answers its sync calls without syncing, down to its job's containers and builds,
+//! and the image's entrypoint is what tells it, as its label says; a runner image from before the filter says
+//! nothing. The volumes a crash may have torn are emptied past the stopped containers of runnerd's left on them, and a
+//! volume another container holds is refused at once, never waited on.
+//! Needs Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
 //!
 //! ```sh
 //! cargo test -p runnerd-core --test slot_docker_store -- --ignored --nocapture
 //! ```
 //!
-//! `RUNNERD_TEST_IMAGE` runs another image.
+//! `RUNNERD_TEST_IMAGE` runs another image. `RUNNERD_TEST_OLD_IMAGE` names the runner image from before the filter,
+//! `ghcr.io/ayagmar/runnerd-runner:node-0.1.1` unless set, which Docker must have.
 
 #![allow(
     clippy::print_stdout,
@@ -15,8 +20,9 @@
 
 use std::collections::BTreeMap;
 
+use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType};
 use runnerd_core::cache::{self, Names, runner_mounts};
-use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
+use runnerd_core::docker::{self, Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
 const PROFILE: &str = "store";
@@ -31,8 +37,8 @@ const BUILD: &str = "mkdir -p /root/app && cd /root/app && echo app > app.txt \
     && printf 'FROM scratch\\nCOPY app.txt /app.txt\\n' > Dockerfile \
     && docker build --progress=plain -t store-app . 2>&1";
 
-/// Runs `script` as root in a new runner container of slot 1, after its layers are mounted and its Docker Engine
-/// started as the runner's entrypoint does them; returns its exit code and output. The container is removed after,
+/// Runs `script` as root in a new runner container of slot 1, under `runnerd-skip-syncs` as the image's entrypoint
+/// runs the runner, after its layers are mounted and its Docker Engine started as the runner's entrypoint does them; returns its exit code and output. The container is removed after,
 /// as a runner's is.
 async fn job(
     docker: &Docker,
@@ -53,6 +59,7 @@ async fn job(
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
             "dind".to_owned(),
+            "runnerd-skip-syncs".to_owned(),
             "bash".to_owned(),
             "-euo".to_owned(),
             "pipefail".to_owned(),
@@ -70,7 +77,7 @@ async fn job(
         Ok((code, docker.logs(&id).await?))
     }
     .await
-    .map_err(|e: runnerd_core::docker::Error| e.to_string());
+    .map_err(|e: docker::Error| e.to_string());
     let removed = docker.remove(&id).await.map_err(|e| e.to_string());
     let result = result?;
     removed?;
@@ -335,6 +342,115 @@ async fn cache_mount_scenario(docker: &Docker, names: &Names) -> Result<(), Stri
     Ok(())
 }
 
+/// Reports, for the runner as root and as its user, whether each sync call the filter answers synced: on a descriptor
+/// the kernel refuses, a real call fails with EBADF and a skipped one returns 0. `sync` cannot fail, so it is not
+/// probed; it sits between probed calls in the filter, whose last entry, `syncfs`, is probed.
+const CALL_PROBES: &str = r#"cat > /tmp/calls.py <<'PY'
+import ctypes, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.sync_file_range.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong, ctypes.c_uint]
+calls = {
+    "fsync": lambda: libc.fsync(999),
+    "fdatasync": lambda: libc.fdatasync(999),
+    "sync_file_range": lambda: libc.sync_file_range(999, 0, 0, 0),
+    "syncfs": lambda: libc.syncfs(999),
+}
+for name, call in calls.items():
+    print(f"{sys.argv[1]} {name}:", "SKIPPED" if call() == 0 else "SYNCED")
+PY
+python3 /tmp/calls.py root && setpriv --reuid=runner --regid=runner --init-groups -- python3 /tmp/calls.py user"#;
+
+/// The calls `CALL_PROBES` reports on.
+const CALLS: [&str; 4] = ["fsync", "fdatasync", "sync_file_range", "syncfs"];
+
+/// Reports, for a container of the runner's Docker Engine and a build step, whether `fsync` synced: on `/dev/null`
+/// a real one fails with EINVAL, a skipped one returns 0. The build step words its answer only as it runs, so the
+/// step's own text, which the build shows, never matches.
+const NESTED_PROBES: &str = "probe() { dd if=/dev/zero of=/dev/null count=1 conv=fsync status=none 2> /dev/null \
+        && echo \"$1: SKIPPED\" || echo \"$1: SYNCED\"; } \
+    && docker run --rm --network none store-shell bash -c \"$(declare -f probe); probe container\" \
+    && printf '%s\\n' 'FROM store-shell' 'SHELL [\"bash\", \"-c\"]' \
+        'RUN dd if=/dev/zero of=/dev/null count=1 conv=fsync status=none 2> /dev/null && r=SKIPPED || r=SYNCED; echo build: $r' \
+        | docker build --no-cache --progress=plain - 2>&1 | grep -o 'build: [A-Z]*$'";
+
+/// The image's own entrypoint, which no test container runs as it needs a just-in-time config: the wrapper must be in
+/// it, or no runner skips a sync whatever runnerd asks.
+async fn entrypoint() -> Result<Vec<String>, String> {
+    let api = bollard::Docker::connect_with_local_defaults().map_err(|e| e.to_string())?;
+    let image = api
+        .inspect_image(&image())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(image
+        .config
+        .and_then(|config| config.entrypoint)
+        .unwrap_or_default())
+}
+
+async fn skip_syncs_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entrypoint = entrypoint().await?;
+    if entrypoint != ["dind", "runnerd-skip-syncs", "runnerd-runner"] {
+        return Err(format!(
+            "the image's entrypoint does not run runnerd-skip-syncs before the runner: {entrypoint:?}"
+        ));
+    }
+    if !docker
+        .image_skips_syncs(&image())
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "{} runs runnerd-skip-syncs, and its label does not say so: runnerd would never ask its runners",
+            image()
+        ));
+    }
+    for (env, expected) in [(vec![docker::SKIP_SYNCS], "SKIPPED"), (vec![], "SYNCED")] {
+        let (code, output) = job(
+            docker,
+            names,
+            &env,
+            &format!("{CALL_PROBES}\n{SHELL_IMAGE} && {NESTED_PROBES}"),
+        )
+        .await?;
+        println!("{output}");
+        let mut wanted: Vec<String> = ["root", "user"]
+            .iter()
+            .flat_map(|who| {
+                CALLS
+                    .iter()
+                    .map(move |call| format!("{who} {call}: {expected}"))
+            })
+            .collect();
+        wanted.extend(["container", "build"].map(|place| format!("{place}: {expected}")));
+        let missing: Vec<&String> = wanted
+            .iter()
+            .filter(|line| !output.contains(line.as_str()))
+            .collect();
+        if code != 0 || !missing.is_empty() {
+            return Err(format!(
+                "with {env:?}, these do not report {expected}: {missing:?} (exit {code}):\n{output}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_runner_told_to_skip_syncs_skips_them_down_to_its_jobs_containers_and_builds() {
+    let names = Names::new(&format!("runnerd-test-syncs-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = skip_syncs_scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs Docker, sysbox and the runner image"]
 async fn a_slots_cache_mounts_outlive_its_jobs_within_its_share() {
@@ -342,6 +458,155 @@ async fn a_slots_cache_mounts_outlive_its_jobs_within_its_share() {
     let docker = Docker::connect().unwrap();
     let result = cache_mount_scenario(&docker, &names).await;
     let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and the runner image from before the filter"]
+async fn a_runner_image_from_before_the_filter_is_never_asked_to_skip_syncs() {
+    let old = std::env::var("RUNNERD_TEST_OLD_IMAGE").unwrap_or(format!(
+        "{}:node-0.1.1",
+        runnerd_core::config::PUBLISHED_RUNNER
+    ));
+    let docker = Docker::connect().unwrap();
+    assert!(
+        docker.image_present(&old).await.unwrap(),
+        "Docker has {old}: docker pull {old}"
+    );
+    assert!(
+        !docker.image_skips_syncs(&old).await.unwrap(),
+        "{old} lacks runnerd-skip-syncs, so runnerd never asks its runners and arms nothing"
+    );
+}
+
+/// A container of `image` that mounts `volume` at `/torn`, labelled `labels`, running `command`.
+fn holder(image: &str, volume: &str, labels: &[&str], command: &[&str]) -> ContainerCreateBody {
+    ContainerCreateBody {
+        image: Some(image.to_owned()),
+        entrypoint: Some(command.iter().map(|&part| part.to_owned()).collect()),
+        labels: Some(
+            labels
+                .iter()
+                .map(|&label| (label.to_owned(), String::new()))
+                .collect(),
+        ),
+        network_disabled: Some(true),
+        host_config: Some(HostConfig {
+            mounts: Some(vec![Mount {
+                target: Some("/torn".to_owned()),
+                source: Some(volume.to_owned()),
+                typ: Some(MountType::VOLUME),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+async fn torn_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    let (left, held) = (names.slot(PROFILE, 1), names.pnpm());
+    for volume in [&left, &held] {
+        docker
+            .ensure_volume(volume)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    // A runner a crash stopped: its container is left, exited, on its slot's volume.
+    let leftover = format!("{}-leftover", names.network());
+    docker
+        .run(
+            &leftover,
+            holder(
+                &image(),
+                &left,
+                &["runnerd.job", "runnerd.profile"],
+                &["true"],
+            ),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    docker.wait(&leftover).await.map_err(|e| e.to_string())?;
+    // Someone's own container, running on the pnpm volume.
+    let foreign = format!("{}-foreign", names.network());
+    docker
+        .run(&foreign, holder(&image(), &held, &[], &["sleep", "600"]))
+        .await
+        .map_err(|e| e.to_string())?;
+    match docker.remove_volume(&held).await {
+        Err(error) if !docker::is_unreachable(&error) && !docker::is_not_found(&error) => {
+            println!("Docker refuses a held volume: {error}");
+        }
+        other => {
+            return Err(format!(
+                "Docker did not refuse to remove a volume a running container mounts: {other:?}"
+            ));
+        }
+    }
+    let cache::Cleared { removed, refused } = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        cache::empty_volumes(docker, &[left.clone(), held.clone()]),
+    )
+    .await
+    .map_err(|_| "emptying the volumes waited on Docker for a minute".to_owned())?;
+    println!("removed {removed:?}; refused {refused:?}");
+    if removed != [left.clone()] {
+        return Err(format!(
+            "the volume under the leftover was not removed: {removed:?}, {refused:?}"
+        ));
+    }
+    match refused.as_slice() {
+        [refusal] if refusal.volume == held && refusal.held && refusal.why.contains(&foreign) => {}
+        _ => {
+            return Err(format!(
+                "the held volume was not refused as held: {refused:?}"
+            ));
+        }
+    }
+    match docker.inspect(&leftover).await {
+        Err(error) if docker::is_not_found(&error) => {}
+        other => return Err(format!("the leftover container was not removed: {other:?}")),
+    }
+    let api = bollard::Docker::connect_with_local_defaults().map_err(|e| e.to_string())?;
+    match api.inspect_volume(&left).await {
+        Err(error) if docker::is_not_found(&error) => {}
+        other => return Err(format!("{left} is still there: {other:?}")),
+    }
+    let foreign_state = docker.inspect(&foreign).await.map_err(|e| e.to_string())?;
+    println!("the other container is left as it was: {foreign_state:?}");
+    api.inspect_volume(&held)
+        .await
+        .map_err(|e| format!("{held}, which another container holds, is gone: {e}"))?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and the runner image"]
+async fn torn_volumes_are_emptied_past_runnerds_leftovers_and_a_held_one_is_refused_at_once() {
+    let names = Names::new(&format!("runnerd-test-torn-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = torn_scenario(&docker, &names).await;
+    let mut cleanup = Vec::new();
+    for container in ["leftover", "foreign"] {
+        match docker
+            .remove(&format!("{}-{container}", names.network()))
+            .await
+        {
+            Err(error) if !docker::is_not_found(&error) => cleanup.push(Err(error.to_string())),
+            _ => {}
+        }
+    }
+    for volume in [names.slot(PROFILE, 1), names.pnpm()] {
+        cleanup.push(
+            docker
+                .remove_volume(&volume)
+                .await
+                .map_err(|e| e.to_string()),
+        );
+    }
     result.unwrap();
     for removed in cleanup {
         removed.unwrap();

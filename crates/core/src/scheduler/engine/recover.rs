@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use super::leftovers::Unread;
 use super::records::Undecided;
+use super::unsynced::Recovered;
 use super::{Engagement, Engine, Occupant, Slot};
 use crate::api;
 use crate::cache;
@@ -388,7 +389,28 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
         self.recover_history(&running).await;
         self.measure_docker_disk();
+        self.recover_unsynced();
         Ok(())
+    }
+
+    /// Notes whether the host booted again since runners wrote without syncing, with neither a clean stop nor an
+    /// orderly shutdown between: the first tick then empties their caches before it starts any runner (ADR 0141).
+    fn recover_unsynced(&mut self) {
+        match self.unsynced.recovered() {
+            Ok(Recovered::Torn) => warn!(
+                "the host booted again since runners wrote without syncing, and the journal shows no orderly \
+                 shutdown that wrote it: their caches are emptied before any runner starts"
+            ),
+            Ok(Recovered::ShutDownInOrder) => info!(
+                "the host shut down in order since runners wrote without syncing, which wrote it all: their caches \
+                 are kept"
+            ),
+            Ok(Recovered::Unchanged) => {}
+            Err(error) => warn!(
+                "cannot keep for the next start what the host's boot since runners wrote without syncing came to: \
+                 {error}"
+            ),
+        }
     }
 
     /// Reads what the history left open: queued jobs to watch, and jobs to close. A job whose runner's container

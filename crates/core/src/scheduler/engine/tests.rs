@@ -11,8 +11,8 @@ use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
 use super::{
-    Author, Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots,
-    Setup, Shutdown, Target,
+    Author, Command, Commit, ControlError, Durability, Engine, Handle, HostIdentity, RunningJobs,
+    RunningSlots, Setup, Shutdown, Target,
 };
 use crate::api::{self, JobState};
 use crate::cache::Names;
@@ -911,6 +911,12 @@ struct DockerState {
     panic_starts: u32,
     /// Volumes a container still uses, which Docker refuses to remove.
     volumes_in_use: BTreeSet<String>,
+    /// Volumes whose removal fails with a 500, as on a mount an unclean stop left busy.
+    volumes_failing: BTreeSet<String>,
+    /// The containers that mount each volume, by its name: Docker refuses to remove it while one is left.
+    holders: BTreeMap<String, Vec<Container>>,
+    /// Runner images that lack `runnerd-skip-syncs`, as those before it do.
+    lacking_filter: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -1457,6 +1463,9 @@ impl DockerApi for FakeDocker {
         state
             .containers
             .retain(|candidate| candidate.id != container && candidate.name != container);
+        for holders in state.holders.values_mut() {
+            holders.retain(|candidate| candidate.id != container && candidate.name != container);
+        }
         // Docker gives the next container a new ID: one that takes the name gets none of this one's output.
         state.container_captures.remove(container);
         Ok(())
@@ -1644,6 +1653,19 @@ impl DockerApi for FakeDocker {
         Ok(!self.0.lock().unwrap().missing_images.contains(image))
     }
 
+    async fn image_skips_syncs(&self, image: &str) -> Result<bool, docker::Error> {
+        self.outage().await?;
+        let state = self.0.lock().unwrap();
+        Ok(!state.missing_images.contains(image) && !state.lacking_filter.contains(image))
+    }
+
+    async fn holders(&self, volume: &str) -> Result<Vec<Container>, docker::Error> {
+        self.outage().await?;
+        let mut state = self.0.lock().unwrap();
+        state.call(format!("holders {volume}"));
+        Ok(state.holders.get(volume).cloned().unwrap_or_default())
+    }
+
     async fn pull(&self, image: &str) -> Result<(), docker::Error> {
         self.outage().await?;
         self.0.lock().unwrap().call(format!("pull {image}"));
@@ -1712,7 +1734,18 @@ impl DockerApi for FakeDocker {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("remove volume {name}"));
-        if state.volumes_in_use.contains(name) {
+        if state.volumes_failing.contains(name) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: format!("remove {name}: device or resource busy"),
+            });
+        }
+        if state.volumes_in_use.contains(name)
+            || state
+                .holders
+                .get(name)
+                .is_some_and(|holders| !holders.is_empty())
+        {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 409,
                 message: format!("remove {name}: volume is in use"),
@@ -1955,6 +1988,34 @@ fn engine_with(
     dir: &TestDir,
     config: &str,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    engine_durable(
+        github,
+        docker,
+        dir,
+        config,
+        Durability::new(|| {}, |_| false),
+    )
+}
+
+/// The kernel's boot ID the engine in `dir` reads: a new one is a host that booted again.
+fn boot(dir: &TestDir, id: &str) {
+    let file = dir.0.join("proc/sys/kernel/random/boot_id");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, format!("{id}\n")).unwrap();
+}
+
+/// An engine whose writes to disk go through `durability`, in a host that booted once unless the test says
+/// otherwise.
+fn engine_durable(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+    durability: Durability,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    if !dir.0.join("proc/sys/kernel/random/boot_id").exists() {
+        boot(dir, "boot-1");
+    }
     let store = Store::open(&dir.0.join("history.db")).unwrap();
     Engine::new(
         Config::parse(config).unwrap(),
@@ -1973,6 +2034,8 @@ fn engine_with(
                 proc: dir.0.join("proc"),
             },
             build_cache: None,
+            unsynced: dir.0.join("unsynced"),
+            durability,
         },
     )
 }
@@ -4138,8 +4201,43 @@ async fn each_slots_docker_engine_keeps_its_share_of_a_quarter_of_the_disk_not_o
     assert_eq!(started, 1, "one runner started: {envs:?}");
     assert_eq!(
         envs[0].1,
-        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        &[
+            docker::SKIP_SYNCS.to_owned(),
+            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned()
+        ],
         "{envs:?}"
+    );
+}
+
+#[tokio::test]
+async fn runners_skip_syncs_unless_the_config_turns_it_off() {
+    let mut skipping = Vec::new();
+    for config in [
+        CONFIG.to_owned(),
+        CONFIG.replace(
+            "admission = \"caps\"",
+            "admission = \"caps\"\nskip_syncs = false",
+        ),
+    ] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("engine");
+        let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+        engine.recover().await.unwrap();
+        {
+            let mut state = github.0.lock().unwrap();
+            state.queued = vec![job(1)];
+            state.jobs.insert(1, details(1, "in_progress", None));
+        }
+        engine.tick(Shutdown::No).await;
+        let state = docker.0.lock().unwrap();
+        let envs: Vec<_> = state.envs.values().collect();
+        assert_eq!(envs.len(), 1, "one runner started: {envs:?}");
+        skipping.push(envs[0].iter().any(|var| var == docker::SKIP_SYNCS));
+    }
+    assert_eq!(
+        skipping,
+        [true, false],
+        "a runner skips syncs by default and keeps them under skip_syncs = false"
     );
 }
 
@@ -4173,7 +4271,10 @@ async fn a_runner_started_before_any_check_of_the_caches_gets_its_slots_docker_b
     assert_eq!(envs.len(), 1, "one runner started: {envs:?}");
     assert_eq!(
         envs[0].1,
-        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        &[
+            docker::SKIP_SYNCS.to_owned(),
+            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned()
+        ],
         "{envs:?}"
     );
 }
@@ -7346,6 +7447,7 @@ mod records;
 mod registrations;
 mod start;
 mod stop;
+mod unsynced;
 mod upkeep;
 mod warm;
 

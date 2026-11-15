@@ -60,8 +60,8 @@ flowchart TB
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `actions`, `admission`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`,
-  `scheduler`, `observe`, `sizing`, `store`: `host` only
+- `actions`, `admission`, `boots`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`, `isolation`,
+  `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
   through the engine's own `Github`, off the engine's loop: a preview that reads the run and issues a confirmation,
   then, for a request that carries one, one POST within a deadline, once a permit `Github` asks with the token in hand
@@ -154,7 +154,7 @@ client → transport → principal → handler → core
    planning, and the passes that refill a slot between polls), `exits` (following Docker's events of runner
    containers that stop, as hints), `start` (a batch of a plan's starts: each launched on the engine, its registration, container start and inspect in a task of its own, the result folded back; up to four in flight, one registration at a time, [ADR 0125](docs/adr/0125-a-start-runs-its-io-in-a-task-of-its-own.md), [ADR 0126](docs/adr/0126-up-to-four-starts-at-once-one-registration-at-a-time.md)), `runners` (a slot's runner once started, to its removal), `slot` (whether a slot is free, starting or held, one value per slot, [ADR 0123](docs/adr/0123-a-slots-state-is-one-sealed-value.md), [ADR 0125](docs/adr/0125-a-start-runs-its-io-in-a-task-of-its-own.md)), `engagement` (what a slot's runner is doing as far as the engine knows: why it is there, listed busy, the job named and its key, a forced pause's deadline, one value per runner, [ADR 0119](docs/adr/0119-a-slots-runner-is-one-engagement.md)), `runner_exit` (what a runner's end concludes), `running_reads` (when the running jobs are next read from GitHub, [ADR 0124](docs/adr/0124-running-jobs-are-read-every-poll-interval.md)), `governor` (the pace of the running jobs' reads and of the repositories' listings by what is left of GitHub's rate limit: the readings of the last ten minutes and one pace step, [ADR 0127](docs/adr/0127-reads-are-paced-by-the-rate-limit.md)), `pool_health` (what holds one pool's runners back after they failed, and the streaks behind it), `leftovers` (the containers still to read or remove once nothing occupies them), `presence` (whether each repository is listed by the config or draining after a reload removed it, one value per repository), `repository_state` (what the engine keeps of a listed repository: its listing, its pace, and per pool its health and its waits, one value per repository, [ADR 0121](docs/adr/0121-a-repository-keeps-its-pools-in-one-map.md)), `listing_pace` (when a listed repository is listed next: its last listing's start and its runners' turn, [ADR 0128](docs/adr/0128-each-repository-is-listed-on-its-own-pace.md)), `listing` (what a listed repository's last listing of queued jobs showed: unknown, the jobs listed, or those jobs gone stale once a stop ended the listings, one value per repository), `registrations` (what the engine remembers of a registration whose runner has no slot, one value per runner), `watches` (how each runner's container is watched: not yet, through a live log capture, waiting to capture again after one broke off, spent when one started again ended without breaking, or done, one value per runner), `images` (pulling the profiles' images and removing the published runner images none runs,
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
-   `caches` (reseeds, the mirror, the shared caches), `upkeep` (what each profile's measures and reseeds are doing and have due, one value per profile, [ADR 0116](docs/adr/0116-a-profiles-upkeep-is-one-state.md)), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
+   `caches` (reseeds, the mirror, the shared caches), `upkeep` (what each profile's measures and reseeds are doing and have due, one value per profile, [ADR 0116](docs/adr/0116-a-profiles-upkeep-is-one-state.md)), `unsynced` (whether what runners wrote without syncing may be lost to a host crash, kept in a file beside the job history, [ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
    whether its job may write), `records` (records of failed jobs and the shells in them),
    `history` (what the store records), `ledger` (the jobs followed on GitHub that no runner here runs, queued or closing, one stage per job, [ADR 0118](docs/adr/0118-a-followed-job-is-in-one-stage.md)), `claims` (what each repository's listings may show that this machine's runners took), `admission` (what a new runner reserves, and in `Measured` what admission keeps between plans, sealed, [ADR 0122](docs/adr/0122-what-admission-keeps-is-sealed.md)), `open_waits` (which of a slot's or the host's wait each job is in), `warm` (how many warm runners each
    repository wants, from `scheduler::warm`), `control` (`Control` and the commands), `stop` (how far the daemon's stop has got) and `status` (what it
@@ -584,6 +584,19 @@ always returns, so the daemon closes and flushes the history.
   profile's count. A store whose engine does not start is emptied
   ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md)).
+- Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner whose image
+  carries the label `runnerd.skip-syncs=1` (`docker::SKIP_SYNCS_LABEL`) `RUNNERD_SKIP_SYNCS=1`
+  (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before anything of the runner's
+  starts, that answers `fsync` and the other sync calls 0 for the runner, its Docker Engine and their containers. A
+  Docker profile cannot, since sysbox drops its rules for those calls. An image without the label is never asked.
+  Seed, mirror, measure and shell containers keep their syncs. Before such a runner starts, the engine keeps on disk
+  the boot it starts in (`engine/unsynced`), and forgets it after a `sync(2)` once a stop leaves no runner running. A
+  start in another boot with it still kept asks `boots` whether the journal shows that boot ended in an orderly
+  shutdown, whose final sync wrote everything; if not, no runner, reseed, measure, trim or shell starts until every
+  slot's volume and the pnpm and Maven volumes are emptied, past runnerd's stopped containers on them
+  (`cache::empty_volumes`), or a container left on one held it 5 ticks
+  ([ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)). `boots` runs `journalctl` and decides
+  nothing.
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.

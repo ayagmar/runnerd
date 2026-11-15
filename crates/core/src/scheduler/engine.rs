@@ -43,11 +43,13 @@ mod start;
 mod status;
 mod stop;
 mod tick;
+mod unsynced;
 mod upkeep;
 mod warm;
 mod watches;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -73,6 +75,8 @@ use self::registrations::Registrations;
 use self::repository_state::RepositoryState;
 use self::slot::Slot;
 use self::tick::Scope;
+pub use self::unsynced::Durability;
+use self::unsynced::Unsynced;
 use self::upkeep::Upkeep;
 use self::watches::Watches;
 use super::SlotRef;
@@ -216,6 +220,12 @@ pub struct Setup {
     pub paths: Paths,
     /// The shared build cache, unless the daemon could not open it.
     pub build_cache: Option<BuildCache>,
+    /// Where the engine keeps whether what runners wrote without syncing may be lost to a host crash (ADR 0141), such
+    /// as `unsynced` beside the job history.
+    pub unsynced: PathBuf,
+    /// Writes what the kernel holds in memory to disk, before the engine says nothing is owed, and tells whether a
+    /// past boot ended in an orderly shutdown: `sync(2)` and the systemd journal.
+    pub durability: Durability,
 }
 
 /// Why a runner starts, as its start's log line and its record say (ADR 0092).
@@ -470,6 +480,8 @@ pub struct Engine<G = Github, D = Docker> {
     repositories: Repositories,
     /// What each profile's measures and reseeds are doing and have due.
     upkeep: Upkeep,
+    /// Whether what runners wrote without syncing may be lost to a host crash.
+    unsynced: Unsynced,
     /// The pulled images of the config's profiles, and the removal of those no profile runs.
     images: Images,
     /// The containers still to read or remove once nothing occupies them.
@@ -595,7 +607,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             paused,
             paths,
             build_cache,
+            unsynced,
+            durability,
         } = setup;
+        let unsynced = Unsynced::open(unsynced, &paths.proc, durability);
         let slots = config
             .profiles
             .iter()
@@ -670,6 +685,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slots,
             repositories,
             upkeep: Upkeep::default(),
+            unsynced,
             images: Images::new(),
             retired: BTreeMap::new(),
             leftovers: Leftovers::default(),
@@ -837,6 +853,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         }
         self.close_shells().await;
+        // What the runners wrote without syncing is on disk once the stop leaves none running (ADR 0141).
+        if self.occupied().next().is_none()
+            && let Err(error) = self.unsynced.stopped_clean()
+        {
+            warn!(
+                "cannot note that what runners wrote is on disk; the next boot empties their caches: {error}"
+            );
+        }
         if mode == Shutdown::Detach {
             // The mirror stays up only for the busy runners left behind.
             let mirror = if self.config.caches.mirror.enabled {

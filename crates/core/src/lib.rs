@@ -12,6 +12,8 @@ pub mod actions;
 pub mod admission;
 pub mod api;
 #[cfg(feature = "host")]
+pub mod boots;
+#[cfg(feature = "host")]
 pub mod buildcache;
 #[cfg(feature = "host")]
 pub mod cache;

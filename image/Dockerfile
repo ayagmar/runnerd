@@ -18,11 +18,12 @@ RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50runnerd
 # What the workflows expect from GitHub's ubuntu-24.04 image and the base image lacks: iptables for dockerd, make,
 # xz-utils and zstd (setup-* archives, actions/cache) and zip; and socat, which forwards the build cache's socket
 # (build-cache.sh), with iptables keeping GitHub Actions' cache's port from other containers. jq writes BuildKit's
-# GC policy into daemon.json (layers.sh); the base image ships it today, but nothing promises that. libatomic1 is
-# the library Node 26's binary links against, which GitHub's ubuntu-24.04 image has and the base image lacks.
+# GC policy into daemon.json (layers.sh), and python3 runs runnerd-skip-syncs; the base image ships both today, but
+# nothing promises that. libatomic1 is the library Node 26's binary links against, which GitHub's ubuntu-24.04 image
+# has and the base image lacks.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iptables jq libatomic1 make socat xz-utils zip zstd \
+        iptables jq libatomic1 make python3 socat xz-utils zip zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker Engine, CLI, Compose and Buildx from the official image, replacing the older CLI of the base image.
@@ -112,11 +113,17 @@ COPY job-completed.sh /usr/local/bin/runnerd-job-completed.sh
 COPY seed.sh /usr/local/sbin/runnerd-seed
 COPY scrub.sh /usr/local/sbin/runnerd-scrub
 COPY entrypoint.sh /usr/local/bin/runnerd-runner
+# Answers the runner's sync calls without syncing when runnerd sets RUNNERD_SKIP_SYNCS=1 (docs/adr/0141); before the
+# entrypoint, so its Docker Engine and everything after it inherit the filter. dind's own setup keeps its syncs.
+COPY --chmod=755 skip-syncs.py /usr/local/bin/runnerd-skip-syncs
+# runnerd asks a runner to skip its syncs, and guards its caches against a crash, only when its image says it can
+# (docker::SKIP_SYNCS_LABEL): the version of RUNNERD_SKIP_SYNCS it answers.
+LABEL runnerd.skip-syncs="1"
 # The runner accepts hook scripts only by their extension.
 ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/runnerd-job-started.sh \
     ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/bin/runnerd-job-completed.sh
 
-ENTRYPOINT ["dind", "runnerd-runner"]
+ENTRYPOINT ["dind", "runnerd-skip-syncs", "runnerd-runner"]
 
 FROM base AS android
 

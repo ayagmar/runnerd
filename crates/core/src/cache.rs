@@ -350,6 +350,84 @@ const DOCKER_DISK_SHARE: u64 = 4;
 /// The most one slot's Docker Engine keeps, in GiB: the image's own default, for a daemon that sets none.
 const DOCKER_SLOT_MAX_GIB: u64 = 20;
 
+/// What `empty_volumes` came to.
+#[derive(Debug, Default)]
+pub struct Cleared {
+    /// The volumes it removed.
+    pub removed: Vec<String>,
+    /// The volumes it left, each with why.
+    pub refused: Vec<Refusal>,
+}
+
+/// A volume `empty_volumes` left.
+#[derive(Debug)]
+pub struct Refusal {
+    /// The volume's name.
+    pub volume: String,
+    /// Why, as the log says it.
+    pub why: String,
+    /// Whether a container mounts it that `empty_volumes` leaves: a running one, or one that is not runnerd's. Any
+    /// other refusal is Docker's error, such as an outage, a 5xx or a timeout.
+    pub held: bool,
+}
+
+/// Removes each of `volumes` that exists, after the containers of runnerd's that mount it and no longer run, such as
+/// a runner or a seed a crash stopped: Docker refuses to remove a volume a container mounts, even a stopped one. It
+/// leaves a volume a running container mounts, or a container that is not runnerd's, and removes no such container.
+pub async fn empty_volumes(docker: &impl DockerApi, volumes: &[String]) -> Cleared {
+    let mut emptied = Cleared::default();
+    for volume in volumes {
+        match empty_volume(docker, volume).await {
+            Ok(()) => emptied.removed.push(volume.clone()),
+            Err(refusal) => emptied.refused.push(refusal),
+        }
+    }
+    emptied
+}
+
+/// Removes `volume`, if it exists, once nothing of runnerd's mounts it.
+async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refusal> {
+    let refused = |why: String, held: bool| Refusal {
+        volume: volume.to_owned(),
+        why,
+        held,
+    };
+    let failed = |error: Error| refused(error.to_string(), false);
+    for holder in docker.holders(volume).await.map_err(failed)? {
+        let name = if holder.name.is_empty() {
+            &holder.id
+        } else {
+            &holder.name
+        };
+        if holder.running {
+            return Err(refused(
+                format!("container {name} mounts it and runs"),
+                true,
+            ));
+        }
+        if !holder
+            .labels
+            .keys()
+            .any(|label| label.starts_with("runnerd."))
+        {
+            return Err(refused(
+                format!("container {name}, which is not runnerd's, mounts it"),
+                true,
+            ));
+        }
+        match docker.remove(&holder.id).await {
+            Err(error) if !is_not_found(&error) => {
+                return Err(refused(
+                    format!("container {name}, which mounts it, cannot be removed: {error}"),
+                    false,
+                ));
+            }
+            _ => {}
+        }
+    }
+    docker.remove_volume(volume).await.map_err(failed)
+}
+
 /// Every cache volume the config's profiles use, what it holds and its limit, with size 0.
 pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> {
     let volume = |name: String, kind: api::CacheKind, limit: Option<u64>| api::CacheVolume {

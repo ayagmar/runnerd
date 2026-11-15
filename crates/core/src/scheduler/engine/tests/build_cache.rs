@@ -39,6 +39,8 @@ pub(super) fn engine_with_cache(
                 proc: dir.0.join("proc"),
             },
             build_cache: Some(cache.clone()),
+            unsynced: dir.0.join("unsynced"),
+            durability: Durability::new(|| {}, |_| false),
         },
     );
     (engine, handle, cache)

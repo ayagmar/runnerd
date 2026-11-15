@@ -51,6 +51,8 @@ pub(crate) struct Host {
     pub memory: Option<api::HostMemory>,
     /// The config's file; `None` without one, or when it cannot be read.
     pub config_file: Option<ConfigFile>,
+    /// Whether the journal tells how a past boot ended, which the runners' crash guard reads (ADR 0141).
+    pub past_boots: config::PastBoots,
 }
 
 /// What `gh auth status` says of the active account's token for github.com, never the token itself.
@@ -125,8 +127,12 @@ pub(crate) struct DockerFacts {
 
 /// A profile's image as Docker has it, or where it could come from.
 pub(crate) enum ImageFound {
-    /// Docker has it; `version` is its `runnerd.version` label, which published images carry.
-    Present { version: Option<String> },
+    /// Docker has it; `version` is its `runnerd.version` label, which published images carry, and `skips_syncs`
+    /// whether it carries `runnerd-skip-syncs` (`docker::SKIP_SYNCS_LABEL`).
+    Present {
+        version: Option<String>,
+        skips_syncs: bool,
+    },
     /// Docker lacks it and its registry has it for `platforms`, such as `linux/amd64`; none when the registry does
     /// not say. runnerd pulls it before the first runner if one is Docker's.
     Pullable { platforms: Vec<String> },
@@ -236,6 +242,7 @@ impl Host {
                 kernel: read_kernel(),
                 memory,
                 config_file,
+                past_boots: runnerd_core::boots::past_boots(),
             }
         })
     }
@@ -422,6 +429,7 @@ fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> 
             });
         };
         Ok::<_, runnerd_core::docker::Error>(ImageFound::Present {
+            skips_syncs: runnerd_core::docker::skips_syncs(&labels),
             version: labels.remove(VERSION_LABEL),
         })
     };
@@ -729,6 +737,23 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     );
     if let Some(config) = config {
         checks.push(config.caches.build.actions_cache_check());
+        let images = host
+            .images
+            .iter()
+            .map(|(reference, found)| {
+                let syncs = match found {
+                    Ok(ImageFound::Present {
+                        skips_syncs: true, ..
+                    }) => config::ImageSyncs::Skips,
+                    Ok(ImageFound::Present {
+                        skips_syncs: false, ..
+                    }) => config::ImageSyncs::Syncs,
+                    _ => config::ImageSyncs::Unread,
+                };
+                (reference.clone(), syncs)
+            })
+            .collect();
+        checks.push(config.host.syncs_check(&images, host.past_boots));
     }
     checks.push(Check {
         name: "/dev/kvm".to_owned(),
@@ -978,7 +1003,10 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFact
                 format!("cannot inspect {reference}: {error}"),
                 "check that Docker runs",
             ),
-            Some(Ok(ImageFound::Present { version: Some(built) })) if built != version => Check {
+            Some(Ok(ImageFound::Present {
+                version: Some(built),
+                ..
+            })) if built != version => Check {
                 name: "image".to_owned(),
                 status: Status::Warn,
                 detail: format!(

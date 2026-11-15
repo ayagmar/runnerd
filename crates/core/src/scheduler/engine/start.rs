@@ -18,6 +18,7 @@ use super::admission::Admitting;
 use super::control::Control;
 use super::runners::THIS_SPEC;
 use super::slot::Slot;
+use super::unsynced::Unsynced;
 use super::{Engagement, Engine, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs};
 use crate::api::{self, Basis, HoldCause};
 use crate::docker::{DockerApi, RunnerSpec, RunnerState};
@@ -151,6 +152,30 @@ impl Starting {
             image: "runnerd-runner:app".to_owned(),
         }
     }
+}
+
+/// Whether a runner's image answers `docker::SKIP_SYNCS`, as its label told Docker's answer before the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    /// It carries `runnerd-skip-syncs` (`docker::SKIP_SYNCS_LABEL`).
+    Carried,
+    /// It lacks it, as runner images before it do, or Docker did not say.
+    Lacking,
+}
+
+/// Whether a runner starts skipping its syncs: as `skip_syncs` asks, for an image that carries the filter, once
+/// `unsynced` keeps on disk that it does (ADR 0141). A runner of an image without it is never asked, and arms nothing.
+fn runner_skips(skip_syncs: bool, filter: Filter, unsynced: &mut Unsynced) -> bool {
+    if !skip_syncs || filter == Filter::Lacking {
+        return false;
+    }
+    let skips = unsynced.runner_skips();
+    if !skips {
+        warn!(
+            "a runner keeps its syncs: that it writes without them could not be kept for after a host crash"
+        );
+    }
+    skips
 }
 
 /// The labels of a runner container: what a restart adopts it by.
@@ -341,6 +366,8 @@ struct Readied {
     name: String,
     /// When its launch began.
     at: SystemTime,
+    /// Whether its image answers `docker::SKIP_SYNCS`.
+    filter: Filter,
 }
 
 /// What committing a readied start came to.
@@ -512,11 +539,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Whether a start of `repository` in `profile` must not launch, or, readied, go on: a stop was asked for, as a
-    /// runner started since could take a job a detaching stop leaves running; GitHub's rate limit is used up; or a
+    /// runner started since could take a job a detaching stop leaves running; what runners wrote unsynced may be torn
+    /// and is not emptied yet (ADR 0141); GitHub's rate limit is used up; or a
     /// failure holds back its pool, which, as the plan starts nothing in a held pool, came since. Its pool's other
     /// starts in flight go on, and so do its repository's other pools and other repositories.
     fn launch_barred(&self, repository: &str, profile: &str) -> bool {
         self.control.mode() != Shutdown::No
+            || self.unsynced.is_torn()
             || self.github_limit().is_some()
             || self.backing_off(repository, profile, SystemTime::now())
     }
@@ -615,6 +644,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !self.caches_ready(slot, now).await {
             return Launch::Failed(launched);
         }
+        let filter = self.image_filter(&slot.profile).await;
         let number = slot.index + 1;
         let secs = unix_secs(now).max(self.named + 1);
         self.named = secs;
@@ -632,7 +662,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             labels,
             name,
             at: now,
+            filter,
         })
+    }
+
+    /// Whether `profile`'s image answers `docker::SKIP_SYNCS`, as Docker says now: only then is its runner asked.
+    /// Docker is asked only under `skip_syncs`.
+    async fn image_filter(&self, profile: &str) -> Filter {
+        let Some(profile) = self.config.profiles.get(profile) else {
+            return Filter::Lacking;
+        };
+        if !self.config.host.skip_syncs {
+            return Filter::Lacking;
+        }
+        match self
+            .docker
+            .image_skips_syncs(&profile.image.reference())
+            .await
+        {
+            Ok(true) => Filter::Carried,
+            Ok(false) | Err(_) => Filter::Lacking,
+        }
     }
 
     /// Commits a readied start: opens its build cache and marks its slot `Starting`, for its task to run. It waits for
@@ -645,6 +695,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             labels,
             name,
             at: now,
+            filter,
         } = readied;
         let (slot, repository) = (&launched.slot, launched.repository.as_str());
         let number = slot.index + 1;
@@ -652,6 +703,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return Committed::Failed(launched);
         };
         let image = profile.image.reference();
+        let skips = runner_skips(self.config.host.skip_syncs, filter, &mut self.unsynced);
         // Its build cache opens here, before GitHub registers its runner: the fold closes it if no container comes.
         let spec = RunnerSpec {
             name: name.clone(),
@@ -660,7 +712,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
             memory: profile.memory,
-            env: self.runner_env(),
+            env: self.runner_env(skips),
             mounts: self.runner_mounts(&slot.profile, number, &name, repository),
             network: Some(self.names.network()),
             labels: std::collections::BTreeMap::new(),

@@ -14,7 +14,7 @@ use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
-use runnerd_core::scheduler::engine::{Control, Engine, HostIdentity, Setup, Shutdown};
+use runnerd_core::scheduler::engine::{Control, Durability, Engine, HostIdentity, Setup, Shutdown};
 use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
@@ -721,6 +721,8 @@ struct History {
     paused: Vec<String>,
     /// The dashboard's session secret, kept beside it.
     sessions: std::sync::Arc<runnerd_web::Sessions>,
+    /// Where the engine keeps whether what runners wrote without syncing may be lost to a host crash, beside it.
+    unsynced: PathBuf,
 }
 
 /// The job history, the profiles and repositories its events last announced and the ones recorded paused, and the
@@ -763,6 +765,7 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
         announced,
         paused,
         sessions,
+        unsynced: database.with_file_name("unsynced"),
     })
 }
 
@@ -858,6 +861,7 @@ async fn serve(
         announced,
         paused,
         sessions,
+        unsynced,
     } = open_history(&config)?;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
@@ -880,6 +884,8 @@ async fn serve(
             paused,
             paths: Paths::default(),
             build_cache,
+            unsynced,
+            durability: Durability::host(),
         },
     );
     tokio::spawn(shut_down_on_signals(handle.control.clone()));
