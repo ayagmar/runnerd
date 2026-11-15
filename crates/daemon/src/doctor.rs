@@ -127,11 +127,11 @@ pub(crate) struct DockerFacts {
 
 /// A profile's image as Docker has it, or where it could come from.
 pub(crate) enum ImageFound {
-    /// Docker has it; `version` is its `runnerd.version` label, which published images carry, and `skips_syncs`
-    /// whether it carries `runnerd-skip-syncs` (`docker::SKIP_SYNCS_LABEL`).
+    /// Docker has it; `version` is its `runnerd.version` label, which published images carry, and `syncs` what its
+    /// runners skip when asked, as its labels say (`docker::image_syncs`).
     Present {
         version: Option<String>,
-        skips_syncs: bool,
+        syncs: config::ImageSyncs,
     },
     /// Docker lacks it and its registry has it for `platforms`, such as `linux/amd64`; none when the registry does
     /// not say. runnerd pulls it before the first runner if one is Docker's.
@@ -429,7 +429,7 @@ fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> 
             });
         };
         Ok::<_, runnerd_core::docker::Error>(ImageFound::Present {
-            skips_syncs: runnerd_core::docker::skips_syncs(&labels),
+            syncs: runnerd_core::docker::image_syncs(&labels),
             version: labels.remove(VERSION_LABEL),
         })
     };
@@ -742,12 +742,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             .iter()
             .map(|(reference, found)| {
                 let syncs = match found {
-                    Ok(ImageFound::Present {
-                        skips_syncs: true, ..
-                    }) => config::ImageSyncs::Skips,
-                    Ok(ImageFound::Present {
-                        skips_syncs: false, ..
-                    }) => config::ImageSyncs::Syncs,
+                    Ok(ImageFound::Present { syncs, .. }) => *syncs,
                     _ => config::ImageSyncs::Unread,
                 };
                 (reference.clone(), syncs)

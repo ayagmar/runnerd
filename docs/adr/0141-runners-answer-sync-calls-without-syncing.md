@@ -1,6 +1,6 @@
 # 0141. Runners answer sync calls without syncing, and a host crash empties what they wrote
 
-Status: **Accepted** (2026-11-15). Amends [0054](0054-slot-docker-stores-share-the-disk.md).
+Status: **Accepted** (2026-11-15), amended by [0142](0142-a-runners-layers-skip-their-unmount-sync.md). Amends [0054](0054-slot-docker-stores-share-the-disk.md).
 
 ## Context
 

@@ -72,11 +72,34 @@ pub const SKIP_SYNCS: &str = "RUNNERD_SKIP_SYNCS=1";
 /// what it answers to: `1`, `SKIP_SYNCS`. Runner images before it lack it, and their runners keep their syncs.
 pub const SKIP_SYNCS_LABEL: &str = "runnerd.skip-syncs";
 
+/// The label of a runner image whose entrypoint, asked `SKIP_SYNCS`, also mounts the slot's layers `volatile`, so
+/// unmounting them syncs nothing (ADR 0142): `1`. The crash guard is the same as for the sync calls, so runnerd asks
+/// by `SKIP_SYNCS_LABEL` alone; this one tells doctor what such a runner skips.
+pub const VOLATILE_LAYERS_LABEL: &str = "runnerd.volatile-layers";
+
 /// Whether an image's labels say it answers `SKIP_SYNCS`.
 pub fn skips_syncs<S: std::hash::BuildHasher>(labels: &HashMap<String, String, S>) -> bool {
     labels
         .get(SKIP_SYNCS_LABEL)
         .is_some_and(|version| version == "1")
+}
+
+/// What an image's runners skip when runnerd asks them, as its labels say: sync calls and their layers' unmount
+/// syncs, sync calls only, or nothing.
+pub fn image_syncs<S: std::hash::BuildHasher>(
+    labels: &HashMap<String, String, S>,
+) -> crate::config::ImageSyncs {
+    use crate::config::ImageSyncs;
+    if !skips_syncs(labels) {
+        ImageSyncs::Syncs
+    } else if labels
+        .get(VOLATILE_LAYERS_LABEL)
+        .is_some_and(|version| version == "1")
+    {
+        ImageSyncs::Skips
+    } else {
+        ImageSyncs::SkipsCalls
+    }
 }
 
 /// A runner's just-in-time config from GitHub: credentials, never printed.

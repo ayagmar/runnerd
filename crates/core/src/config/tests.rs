@@ -1431,6 +1431,30 @@ fn doctor_says_which_images_skip_syncs_and_whether_a_reboot_keeps_their_caches()
         check.detail
     );
 
+    let mixed = images(&[
+        ("runner:jvm-0.2.0", ImageSyncs::Skips),
+        ("runner:node-0.1.2", ImageSyncs::SkipsCalls),
+    ]);
+    let check = host.syncs_check(&mixed, PastBoots::Read);
+    assert!(
+        check.detail.starts_with(
+            "skipped by the runners of runner:jvm-0.2.0, which carry runnerd-skip-syncs and mount their layers \
+             volatile; skipped in sync calls only by the runners of runner:node-0.1.2: they carry \
+             runnerd-skip-syncs, and their layers sync when unmounted. After a crash"
+        ),
+        "an image without volatile layers is not said to have them: {}",
+        check.detail
+    );
+    let calls = host.syncs_check(
+        &images(&[("runner:node-0.1.2", ImageSyncs::SkipsCalls)]),
+        PastBoots::Read,
+    );
+    assert!(
+        calls.detail.contains("After a crash"),
+        "runners that skip sync calls only still arm the crash guard: {}",
+        calls.detail
+    );
+
     let old = images(&[("runner:jvm-0.1.1", ImageSyncs::Syncs)]);
     let check = host.syncs_check(&old, PastBoots::NotKept);
     assert_eq!(
