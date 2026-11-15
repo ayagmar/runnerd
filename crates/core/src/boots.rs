@@ -73,16 +73,19 @@ pub fn shutdown_synced(log: &str) -> bool {
     false
 }
 
-/// Whether this host's journal keeps past boots where runnerd can read them: `/var/log/journal` holds them across a
-/// boot, and a user outside the `systemd-journal`, `adm` and `wheel` groups reads only their own entries, never
-/// `systemd`'s.
+/// Whether this host's journal keeps past boots where runnerd can read them: a line of `systemd`'s from the boot
+/// before this one. A user outside the `systemd-journal`, `adm` and `wheel` groups reads only their own entries, so
+/// none of this boot's either; a journal kept in memory (`Storage=volatile`, or no `/var/log/journal`), or vacuumed
+/// below one boot, has this boot's and not the last one's.
 pub fn past_boots() -> PastBoots {
-    if !std::path::Path::new("/var/log/journal").is_dir() {
-        return PastBoots::NotKept;
-    }
-    match journal(&["--boot=0", "_PID=1", "--lines=1"]) {
-        Some(line) if !line.is_empty() => PastBoots::Read,
-        _ => PastBoots::Unreadable,
+    let systemd_line =
+        |boot: &str| journal(&[boot, "_PID=1", "--lines=1"]).is_some_and(|line| !line.is_empty());
+    if systemd_line("--boot=-1") {
+        PastBoots::Read
+    } else if systemd_line("--boot=0") {
+        PastBoots::NotKept
+    } else {
+        PastBoots::Unreadable
     }
 }
 

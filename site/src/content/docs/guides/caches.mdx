@@ -40,7 +40,7 @@ So runnerd empties what runners write after such a crash, before any runner star
 | after a crash, or a journal that does not say | every slot's volume (layers and Docker store) and the pnpm and Maven volumes are emptied, after runnerd's stopped containers on them; jobs start cold |
 | a volume Docker does not remove | no runner starts until a later tick removes it. If a running container, or one that is not runnerd's, mounts it, runners start on it as it is after 5 ticks, and the log names it and the `docker volume rm` to run |
 
-runnerd reads the journal of the boot that ended. A host whose journal is not kept across boots (no `/var/log/journal`), or whose runnerd user cannot read it, cannot tell a reboot from a crash and empties the caches after every boot once runners skipped their syncs; `runnerd doctor` says so and how to fix it.
+runnerd reads the journal of the boot that ended. A host whose journal is not kept across boots (`Storage=volatile`, or no `/var/log/journal`), or whose runnerd user cannot read it, cannot tell a reboot from a crash and empties the caches after every boot once runners skipped their syncs; `runnerd doctor` says so and how to fix it.
 
 Snapshots, the mirror and the build cache keep their syncs and are not emptied. A [record](../records/) keeps its files as they are.
 

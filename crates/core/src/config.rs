@@ -106,7 +106,7 @@ pub enum ImageSyncs {
 pub enum PastBoots {
     /// It keeps past boots and runnerd's user reads `systemd`'s lines.
     Read,
-    /// It keeps none: `/var/log/journal` is missing, so the journal lives in memory.
+    /// It keeps no boot before this one: it lives in memory, was vacuumed below one boot, or the host booted once.
     NotKept,
     /// runnerd's user reads none of `systemd`'s lines.
     Unreadable,
@@ -198,8 +198,8 @@ impl Host {
                      Maven stores before any runner starts"
                 ),
                 Some(
-                    "keep the journal across boots: sudo mkdir -p /var/log/journal && sudo journalctl --flush; \
-                     or set [host] skip_syncs = false",
+                    "keep the journal across boots: set Storage=persistent in /etc/systemd/journald.conf, then \
+                     sudo systemctl restart systemd-journald; or set [host] skip_syncs = false",
                 ),
             ),
             PastBoots::Unreadable => check(

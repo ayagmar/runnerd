@@ -206,6 +206,6 @@ the sync, and a sync that timed out.
   profile.
 - `runnerd doctor`, and so the dashboard's config view, words what core knows in a check, `runner syncs`
   (`config::Host::syncs_check`): which profiles' images carry the filter and so skip, which lack it and sync, which
-  Docker does not have yet, and what a crash empties. It reads the journal too (`boots::past_boots`): a host whose
+  Docker does not have yet, and what a crash empties. It reads the journal too, a line of the previous boot (`boots::past_boots`): a host whose
   journal keeps no past boot, or that runnerd's user cannot read, gets a warning that every boot empties the caches,
   with the fix. It does not say whether a runner's filter is in: the wrapper says that only on the container's output.
