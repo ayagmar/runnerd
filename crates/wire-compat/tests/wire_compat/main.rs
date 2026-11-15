@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.1.2";
+const PREVIOUS: &str = "v0.1.3";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,15 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[
-    // The previous release reads a job waiting for torn caches as its `Unknown` fallback, which says it waits for a
-    // reason that client does not know yet.
-    Accepted {
-        reader: Reader::Previous,
-        item: "waiting/torn",
-        adr: "0142",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -318,9 +310,9 @@ documents! {
     "action-outcome": ActionOutcome => variants(samples::action_outcome()),
     "action-refusal": ActionRefusal => variants(samples::action_refusal()),
     "job-actions": JobActions => variants(samples::job_actions()),
+    "measure": Measure => variants(samples::measure()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
-    "measure": Measure => variants(samples::measure()),
 }
 
 /// The previous release's samples, one file per document.

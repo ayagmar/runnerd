@@ -1,5 +1,49 @@
 {
   "full": {
+    "disk": {
+      "drive": {
+        "commits": {
+          "count": 49500,
+          "watched": 23760
+        },
+        "device": "nvme0n1",
+        "shares": {
+          "daemon": 3221225472,
+          "jobs": 150323855360,
+          "slice": 196494753792,
+          "watched": 23000,
+          "written": 612032839680
+        },
+        "store": "loop0",
+        "watched": 23760,
+        "written": 616327806976
+      },
+      "jobs": {
+        "dirty": 3221225472,
+        "measured": 529,
+        "median": 51380224,
+        "p90": 641728512,
+        "partial": 12,
+        "total": 155692564480
+      },
+      "top_jobs": [
+        {
+          "job": "test",
+          "jobs": 31,
+          "repository": "tidewater/halyard",
+          "total": 12884901888,
+          "workflow": "CI"
+        }
+      ],
+      "workflows": [
+        {
+          "jobs": 31,
+          "repository": "tidewater/halyard",
+          "total": 12884901888,
+          "workflow": "CI"
+        }
+      ]
+    },
     "host": [
       {
         "credited": 12000,

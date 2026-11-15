@@ -54,5 +54,11 @@
   },
   "runner-starting": {
     "kind": "runner-starting"
+  },
+  "torn": {
+    "kind": "torn",
+    "volumes": [
+      "runnerd-jvm-slot-2"
+    ]
   }
 }
