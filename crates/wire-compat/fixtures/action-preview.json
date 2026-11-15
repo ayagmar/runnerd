@@ -40,6 +40,12 @@
           "cpu_stalled": 140000,
           "cpu_throttled": 900,
           "cpu_time": 1200000,
+          "disk": {
+            "bytes": 2147483648,
+            "dirty": 100663296,
+            "ios": 41000,
+            "measure": "partial"
+          },
           "memory_average": 3221225472,
           "memory_peak": 5368709120,
           "mirror_bytes": 157286400,
