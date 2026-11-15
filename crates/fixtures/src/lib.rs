@@ -9,7 +9,8 @@
 //! runners, with a 61-second and a 0-second job, and jobs of a public repository, of Dependabot, of a repository
 //! GitHub has not answered for, lost, without an end and run elsewhere; auto sizing's plan, with a change next,
 //! a profile a change holds and a `cpus` raise it cannot make; and insights of a job its CPU cap holds back, as a
-//! warning and as a notice, beside the memory pressure one.
+//! warning and as a notice, beside the memory pressure one; what jobs wrote to disk, a complete figure and a partial
+//! one, and the insights' disk writes with the drive's share no owner runnerd knows.
 //! The job history's lenses have their own cases in `lens` (searches, the slots' timeline and comparisons) and logs
 //! in `logs`.
 //!
@@ -432,6 +433,16 @@ fn not_run_here() -> [JobSummary; 3] {
     [startup_failure, never_started, elsewhere]
 }
 
+/// What a job's container wrote, in writes of 4K and some.
+fn written(bytes: u64, dirty: Option<u64>, measure: api::Measure) -> api::DiskWritten {
+    api::DiskWritten {
+        bytes,
+        ios: bytes / 6000,
+        dirty,
+        measure,
+    }
+}
+
 fn jobs() -> Vec<Job> {
     let [startup_failure, never_started, elsewhere] = not_run_here();
     let mut running = ran(summary(RUNNING, LEDGER, JobState::Running, None), 240, None);
@@ -491,6 +502,12 @@ fn jobs() -> Vec<Job> {
     timed_out.metrics.cpu_periods = Some(20_000);
     timed_out.metrics.cpu_throttled = Some(3_600);
     timed_out.metrics.cpu_stalled = Some(1_104_000);
+    // Its container's writes from before its start to its end, with some still to write back.
+    timed_out.metrics.disk = Some(written(
+        2 * GIB + 312 * MIB,
+        Some(96 * MIB),
+        api::Measure::Complete,
+    ));
     timed_out.metrics.build_cache = BuildCacheCounts {
         hits: 0,
         misses: 0,
@@ -504,11 +521,13 @@ fn jobs() -> Vec<Job> {
         10_000,
         Some(9600),
     );
-    let succeeded = ran(
+    let mut succeeded = ran(
         summary(9200, LEDGER, JobState::Completed, Some("success")),
         12_000,
         Some(11_500),
     );
+    // Its end came while no daemon ran: what was read is a floor.
+    succeeded.metrics.disk = Some(written(640 * MIB, None, api::Measure::Partial));
 
     vec![
         job(running),
@@ -920,6 +939,50 @@ pub fn insights(at: u64) -> api::Insights {
             ),
         ],
         waits: Vec::new(),
+        disk: Some(disk_writes()),
+    }
+}
+
+/// What jobs and the drive wrote over the insights' window: 6 h of the drive read, most of it no job's.
+fn disk_writes() -> api::DiskWrites {
+    let top = |workflow: &str, job: Option<&str>, jobs: u32, total: u64| api::WriteTop {
+        repository: LEDGER.to_owned(),
+        workflow: Some(workflow.to_owned()),
+        job: job.map(str::to_owned),
+        jobs,
+        total,
+    };
+    api::DiskWrites {
+        jobs: api::JobWrites {
+            measured: 529,
+            partial: 12,
+            total: 145 * GIB,
+            median: 49 * MIB,
+            p90: 612 * MIB,
+            dirty: 3 * GIB,
+        },
+        workflows: vec![
+            top("CI", None, 426, 99 * GIB),
+            top("images", None, 17, 33 * GIB),
+        ],
+        top_jobs: vec![top("images", Some("image-app"), 5, 13 * GIB)],
+        drive: Some(api::DriveWrites {
+            device: "nvme0n1".to_owned(),
+            watched: 6 * 3600 + 36 * 60,
+            written: 574 * GIB,
+            shares: api::DriveShares {
+                watched: 6 * 3600 + 36 * 60,
+                written: 574 * GIB,
+                jobs: 140 * GIB,
+                slice: Some(183 * GIB),
+                daemon: Some(3 * GIB),
+            },
+            commits: Some(api::Commits {
+                count: 49_500,
+                watched: 6 * 3600 + 36 * 60,
+            }),
+            store: Some("loop0".to_owned()),
+        }),
     }
 }
 
@@ -1049,6 +1112,8 @@ pub struct JobRow {
     pub waited: Option<String>,
     /// How long it ran; `None` for a job no client gives a run time.
     pub ran: Option<String>,
+    /// What it wrote to disk, as a table cell writes it: `≥640M` for a partial figure; `None` when not measured.
+    pub written: Option<String>,
 }
 
 /// A step as core says it: its outcome and how long it took.
@@ -1173,6 +1238,7 @@ fn row(job: &JobSummary) -> JobRow {
         kind: outcome.kind,
         waited: job.waited(NOW).map(api::duration),
         ran: job.ran(NOW).map(api::duration),
+        written: job.metrics.disk.map(|disk| disk.short()),
     }
 }
 

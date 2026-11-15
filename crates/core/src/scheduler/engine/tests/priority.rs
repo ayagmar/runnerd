@@ -862,7 +862,7 @@ async fn pausing_backing_off_or_preparing_takes_the_mark() {
         .unwrap();
     paused.engine.tick(Shutdown::No).await;
     assert_eq!(paused.waits(), Waits::default(), "pausing");
-    stopped(|fixture| {
+    Box::pin(stopped(|fixture| {
         fixture.engine.set_held(
             "o/big",
             "big",
@@ -871,11 +871,11 @@ async fn pausing_backing_off_or_preparing_takes_the_mark() {
                 cause: HoldCause::NoJob,
             },
         );
-    })
+    }))
     .await;
-    stopped(|fixture| {
+    Box::pin(stopped(|fixture| {
         fixture.engine.ask_reseed("big");
-    })
+    }))
     .await;
 }
 
@@ -990,6 +990,8 @@ impl Fixture {
                 network_received: 0,
                 network_sent: 0,
                 cpu_held: CpuHeld::default(),
+                written: None,
+                dirty: None,
                 events: Events {
                     oom: Some(0),
                     oom_kill: Some(0),

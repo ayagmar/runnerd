@@ -684,6 +684,7 @@ async fn get_insights() -> axum::Json<Insights> {
         insights: Vec::new(),
         waits: Vec::new(),
         host: Vec::new(),
+        disk: None,
     })
 }
 

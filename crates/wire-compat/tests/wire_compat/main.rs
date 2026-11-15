@@ -312,6 +312,7 @@ documents! {
     "job-actions": JobActions => variants(samples::job_actions()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
+    "measure": Measure => variants(samples::measure()),
 }
 
 /// The previous release's samples, one file per document.

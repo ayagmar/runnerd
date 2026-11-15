@@ -535,6 +535,8 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
         // The container's own 9G limit stopped an allocation.
         daemon.store.samples(vec![SampleRecord {
             cpu_held: runnerd_core::observe::metrics::CpuHeld::default(),
+            written: None,
+            dirty: None,
             events: runnerd_core::observe::metrics::Events {
                 oom: Some(1),
                 local_oom: Some(1),
@@ -626,6 +628,8 @@ async fn finished_jobs_at(store: &Store, profile: &str, cap: u64, peak: u64, now
         store.claimed(id, 2, &runner, now - 40_000);
         store.samples(vec![SampleRecord {
             cpu_held: runnerd_core::observe::metrics::CpuHeld::default(),
+            written: None,
+            dirty: None,
             events: runnerd_core::observe::metrics::Events::default(),
             runner: runner.clone(),
             at: now - 30_000,
@@ -857,6 +861,8 @@ async fn met_cap(store: &Store, profile: &str, cap: u64) {
     store.claimed(11, 3, "runner-11", now - 40_000);
     store.samples(vec![SampleRecord {
         cpu_held: runnerd_core::observe::metrics::CpuHeld::default(),
+        written: None,
+        dirty: None,
         events: runnerd_core::observe::metrics::Events {
             oom: Some(1),
             oom_kill: Some(1),

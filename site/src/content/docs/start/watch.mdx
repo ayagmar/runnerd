@@ -53,6 +53,7 @@ Usage
   CPU time         37m 43s
   Received         506.45M
   Sent             56.27M
+  Written to disk  1.84G in 31207 writes; 64M more waited to be written back as its container ended
   From the mirror  168.82M
   CPU held back    held at its CPU cap in 5% of its busy time, waited for a CPU 25% of its run
   Build cache      30 of 36 lookups hit (83%), 101.29M served, 12.66M stored
@@ -60,6 +61,6 @@ Usage
   memory peaks are sampled every 2 s; spikes shorter than that do not show
 ```
 
-The job tables have the columns Outcome, Job, Repository, Branch, Queued, Waited, Ran, Memory peak and CPU. `CPU held back` gives a share of the job's busy time, which reads higher than the share of the whole run that [auto sizing](../../guides/sizing/#auto-sizing) counts.
+The job tables have the columns Outcome, Job, Repository, Branch, Queued, Waited, Ran, Memory peak, CPU and Written. Written is what the job's runner container sent the disk under Docker's root, its own containers' writes included, from the job's start to the container's end; `≥` marks a floor, when part of the run was not read, such as an end while runnerd was stopped. `CPU held back` gives a share of the job's busy time, which reads higher than the share of the whole run that [auto sizing](../../guides/sizing/#auto-sizing) counts.
 
 Frames set in JetBrains Mono ([OFL](../../fonts/JetBrainsMono-OFL.txt)).

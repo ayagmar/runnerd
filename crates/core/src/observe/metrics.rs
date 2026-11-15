@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
+
+use super::disk::{self, Disks, Windows};
 
 use crate::api;
 use crate::store::{SampleRecord, Store};
@@ -49,6 +51,8 @@ pub struct Paths {
     pub cgroup: PathBuf,
     /// Usually `/proc`.
     pub proc: PathBuf,
+    /// Usually `/sys`, for the disks (`disk`).
+    pub sys: PathBuf,
 }
 
 impl Default for Paths {
@@ -56,6 +60,7 @@ impl Default for Paths {
         Paths {
             cgroup: PathBuf::from("/sys/fs/cgroup"),
             proc: PathBuf::from("/proc"),
+            sys: PathBuf::from("/sys"),
         }
     }
 }
@@ -91,6 +96,9 @@ pub struct Usage {
     pub memory: u64,
     /// `memory.current` less `inactive_file`: page cache read twice still counts.
     pub memory_with_active_file: u64,
+    /// Page cache written and not yet on the disk (`file_dirty` and `file_writeback` of `memory.stat`); `None` on a
+    /// kernel without them.
+    pub dirty: Option<u64>,
 }
 
 /// What a cgroup's `memory.events` counted so far, its descendants' included, and `memory.events.local`'s `oom`, its
@@ -168,6 +176,9 @@ pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
         cpu_usage,
         memory: current.saturating_sub(active_file + inactive_file),
         memory_with_active_file: current.saturating_sub(inactive_file),
+        dirty: field(&stat, "file_dirty")
+            .zip(field(&stat, "file_writeback"))
+            .map(|(dirty, writeback)| dirty.saturating_add(writeback)),
     })
 }
 
@@ -394,8 +405,13 @@ pub struct Sampled {
     pub host: Option<api::HostSample>,
     /// The runners whose container's cgroup was there at the last pass and is gone now: nothing of it holds memory.
     pub gone: Vec<String>,
+    /// The runners whose container's cgroup the last pass read and this one found gone, whether the engine still
+    /// tracks them or not: their last sample is within a sample of their end.
+    pub ended: Vec<String>,
     /// The runners whose container's cgroup this pass read, sample or not: a container that came back is one of them.
     pub read: Vec<String>,
+    /// The window of the drive's figures this pass closed.
+    pub window: Option<disk::Window>,
 }
 
 /// Samples containers and their slice, turning CPU time into CPU use between samples.
@@ -403,10 +419,21 @@ pub struct Sampled {
 pub struct Sampler {
     paths: Paths,
     slice: String,
-    previous: HashMap<String, (u64, u64)>,
+    /// Each runner's CPU time (µs) at its last read and when (ms), with its container.
+    previous: HashMap<String, Last>,
     previous_host: Option<(u64, u64)>,
     /// The last `read_holders` and when (ms) it was read.
     holders: Option<(u64, Vec<api::Holder>)>,
+    /// The disks under Docker's root, once known (`watch_disk`), and the windows of their figures.
+    disk: Option<(Disks, Windows)>,
+}
+
+/// A runner's container as the last pass read it.
+#[derive(Debug, Clone)]
+struct Last {
+    at: u64,
+    cpu_usage: u64,
+    container: String,
 }
 
 /// Millicores used between two readings of CPU time (µs) taken at two times (ms).
@@ -428,7 +455,19 @@ impl Sampler {
             previous: HashMap::new(),
             previous_host: None,
             holders: None,
+            disk: None,
         }
+    }
+
+    /// Reads the disks of `target` from the next pass on: what each container writes to them, and the drive's
+    /// windows. Until then a sample's writes are unknown.
+    pub fn watch_disk(&mut self, target: Disks) {
+        self.disk = Some((target, Windows::default()));
+    }
+
+    /// The window of the drive's figures being added up, if it spans any time: what a stop stores.
+    pub fn close_window(&mut self) -> Option<disk::Window> {
+        self.disk.as_mut().and_then(|(_, windows)| windows.close())
     }
 
     /// The host's memory at `at` (ms), beside what the slice holds that `MemAvailable` leaves out
@@ -456,17 +495,18 @@ impl Sampler {
         let mut seen = HashMap::new();
         for container in tracked {
             let cgroup = self.paths.container(&self.slice, &container.container);
-            let before = self.previous.get(&container.runner).copied();
+            let last = self.previous.get(&container.runner).cloned();
+            let before = last.as_ref().map(|last| (last.at, last.cpu_usage));
             let usage = match read_usage(&cgroup) {
                 Ok(usage) => usage,
                 Err(error) => {
-                    match before {
+                    match last {
                         Some(_) if error.kind() == io::ErrorKind::NotFound && !cgroup.exists() => {
                             gone.push(container.runner.clone());
                         }
                         // Not gone yet as far as this read says: the next one tells.
-                        Some(before) => {
-                            seen.insert(container.runner.clone(), before);
+                        Some(last) => {
+                            seen.insert(container.runner.clone(), last);
                         }
                         None => {}
                     }
@@ -474,11 +514,22 @@ impl Sampler {
                 }
             };
             read.push(container.runner.clone());
-            seen.insert(container.runner.clone(), (at, usage.cpu_usage));
+            seen.insert(
+                container.runner.clone(),
+                Last {
+                    at,
+                    cpu_usage: usage.cpu_usage,
+                    container: container.container.clone(),
+                },
+            );
             let Ok((received, sent)) = read_network(&self.paths, container.pid) else {
                 continue;
             };
             let cpu = millicores(before, at, usage.cpu_usage);
+            let written = self
+                .disk
+                .as_ref()
+                .and_then(|(target, _)| target.written(&cgroup));
             samples.push(SampleRecord {
                 runner: container.runner.clone(),
                 at,
@@ -489,7 +540,19 @@ impl Sampler {
                 network_sent: sent,
                 events: read_events(&cgroup),
                 cpu_held: read_cpu_held(&cgroup),
+                written,
+                dirty: written.and(usage.dirty),
             });
+        }
+        // A runner the engine stopped tracking since the last pass, as it does once it saw the container stop, whose
+        // cgroup is gone too: that pass read it within a sample of its end.
+        let mut ended = gone.clone();
+        for (runner, last) in &self.previous {
+            if !tracked.iter().any(|container| container.runner == *runner)
+                && !self.paths.container(&self.slice, &last.container).exists()
+            {
+                ended.push(runner.clone());
+            }
         }
         self.previous = seen;
         let host = read_usage(&self.paths.slice(&self.slice))
@@ -503,34 +566,60 @@ impl Sampler {
                     memory: usage.memory_with_active_file,
                 }
             });
+        let slice = self.paths.slice(&self.slice);
+        let window = self
+            .disk
+            .as_mut()
+            .and_then(|(target, windows)| windows.add(target.read(&self.paths, &slice, at)));
         Sampled {
             samples,
             host,
             gone,
+            ended,
             read,
+            window,
         }
     }
 }
 
-/// Samples the tracked containers every `SAMPLE_INTERVAL` into the store, until the engine drops its sender.
-pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: Store) {
+/// Samples the tracked containers every `SAMPLE_INTERVAL` into the store, until the engine drops its sender; then,
+/// at once, stores the drive's window it was adding up, so that a daemon awaiting it before it closes its history
+/// keeps it. Reads the disks once `disk` names them.
+pub async fn run(
+    state: Sampler,
+    tracked: watch::Receiver<Vec<Tracked>>,
+    store: Store,
+    mut disk: oneshot::Receiver<Disks>,
+) {
     let state = Arc::new(Mutex::new(state));
     let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut watching = tracked.clone();
+    let released = async move { while watching.changed().await.is_ok() {} };
+    tokio::pin!(released);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            () = &mut released => {}
+        }
         if tracked.has_changed().is_err() {
+            if let Some(window) = lock(&state).close_window() {
+                store.disk_window(window);
+            }
             return;
+        }
+        if let Ok(target) = disk.try_recv() {
+            lock(&state).watch_disk(target);
         }
         let containers = tracked.borrow().clone();
         let state = state.clone();
         // Reading cgroup files is quick but blocking.
-        let Ok((sampled, memory)) = tokio::task::spawn_blocking(move || {
+        let Ok((sampled, memory, at)) = tokio::task::spawn_blocking(move || {
             // A panic midway through a sample leaves the counters of the last or of this one, either of which the
             // next sample measures from.
             let mut state = lock(&state);
             let at = time::now_ms();
-            (state.sample(&containers, at), state.host_memory(at))
+            (state.sample(&containers, at), state.host_memory(at), at)
         })
         .await
         else {
@@ -541,6 +630,10 @@ pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: 
         }
         store.containers_read(&sampled.read);
         store.containers_gone(sampled.gone);
+        store.containers_ended(sampled.ended, at);
+        if let Some(window) = sampled.window {
+            store.disk_window(window);
+        }
         if !sampled.samples.is_empty() {
             store.samples(sampled.samples);
         }

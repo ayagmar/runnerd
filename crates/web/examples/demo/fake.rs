@@ -45,6 +45,9 @@ use runnerd_core::api::{
     WaitSpread, WeekWaits,
 };
 use runnerd_core::api::{
+    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
+};
+use runnerd_core::api::{
     CompareQuery, JobComparison, JobList, RecordMark, SlotTimeline, StepUsage, TimelineQuery,
 };
 use runnerd_core::api::{LogLinesQuery, LogOutline, LogSearchQuery, Search, StyledLine};
@@ -315,6 +318,13 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             cpu_periods: Some(count * 18),
             cpu_throttled: Some(count * 18 * (spec.slot % 3) as u64 / 20),
             cpu_stalled: Some(count * 2000 * ((spec.slot % 3) as u64 + 1) / 8),
+            // Its unpacked downloads and build output, most of what it received written out again.
+            disk: Some(DiskWritten {
+                bytes: received * 3 / 2,
+                ios: received / 40_000,
+                dirty: Some(received / 30),
+                measure: Measure::Complete,
+            }),
         },
         log: LogSummary {
             lines: lines.len() as u64,
@@ -1054,6 +1064,58 @@ fn insights(fixtures: &Fixtures) -> Insights {
             },
         ],
         host: Vec::new(),
+        disk: Some(disk_writes()),
+    }
+}
+
+/// What the demo's jobs and its drive wrote over the insights' window.
+fn disk_writes() -> DiskWrites {
+    const G: u64 = 1 << 30;
+    const M: u64 = 1 << 20;
+    let top =
+        |repository: &str, workflow: &str, job: Option<&str>, jobs: u32, total: u64| WriteTop {
+            repository: repository.to_owned(),
+            workflow: Some(workflow.to_owned()),
+            job: job.map(str::to_owned),
+            jobs,
+            total,
+        };
+    DiskWrites {
+        jobs: JobWrites {
+            measured: 1_412,
+            partial: 9,
+            total: 402 * G,
+            median: 120 * M,
+            p90: 780 * M,
+            dirty: 6 * G,
+        },
+        workflows: vec![
+            top("halyard/ledger", "CI", None, 820, 214 * G),
+            top("halyard/storefront", "CI", None, 540, 131 * G),
+            top("halyard/ledger", "images", None, 52, 57 * G),
+        ],
+        top_jobs: vec![
+            top("halyard/ledger", "images", Some("image-api"), 26, 41 * G),
+            top("halyard/ledger", "CI", Some("test"), 410, 118 * G),
+            top("halyard/storefront", "CI", Some("e2e"), 270, 96 * G),
+        ],
+        drive: Some(DriveWrites {
+            device: "nvme0n1".to_owned(),
+            watched: 13 * 86_400 + 20 * 3600,
+            written: 1_310 * G,
+            shares: DriveShares {
+                watched: 13 * 86_400 + 20 * 3600,
+                written: 1_310 * G,
+                jobs: 398 * G,
+                slice: Some(470 * G),
+                daemon: Some(7 * G),
+            },
+            commits: Some(Commits {
+                count: 3_110_000,
+                watched: 13 * 86_400 + 20 * 3600,
+            }),
+            store: None,
+        }),
     }
 }
 

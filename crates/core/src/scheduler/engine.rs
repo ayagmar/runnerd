@@ -53,7 +53,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -89,6 +89,7 @@ use crate::config::Config;
 use crate::docker::{self, Docker, DockerApi};
 use crate::github::{Github, GithubApi};
 use crate::isolation::{self, Isolation};
+use crate::observe::disk::Disks;
 use crate::observe::metrics::{self, Paths, Sampler, Tracked};
 use crate::observe::mirror::Leases;
 use crate::store::{Announced, MirrorPosition, Store};
@@ -754,13 +755,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Runs until a shutdown request is carried out, or `STOP_DEADLINE` after a stop that detaches or is forced
-    /// began, whichever comes first. Either way it returns, so the daemon still closes its history.
+    /// began, whichever comes first. Either way it returns, once the sampler stored what it was adding up, so the
+    /// daemon still closes its history.
     pub async fn run(mut self) {
-        tokio::spawn(metrics::run(
+        let (disk, disk_read) = oneshot::channel();
+        let sampler = tokio::spawn(metrics::run(
             Sampler::new(self.paths.clone(), &self.config.host.slice),
             self.tracked.subscribe(),
             self.store.clone(),
+            disk_read,
         ));
+        tokio::spawn(disk_target(self.docker.clone(), self.paths.clone(), disk));
         let control = self.control.clone();
         let deadline = async {
             control.hurried().await;
@@ -773,6 +778,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 STOP_DEADLINE.as_secs()
             ),
         }
+        // Letting go of the tracked containers stops the sampler, which stores the drive's window it was adding up:
+        // the daemon closes its history right after this returns.
+        drop(self);
+        let _ = sampler.await;
     }
 
     /// Recovers, then schedules until a shutdown request is carried out.
@@ -1088,6 +1097,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (slots, upkeep) = (&self.slots, &self.upkeep);
         self.retired
             .retain(|name, _| slots.contains_key(name) || upkeep.reseed_runs(name));
+    }
+}
+
+/// Asks Docker for its root until it answers, every 5 s, and sends the sampler the disks it is on (ADR 0143). Stops
+/// once the sampler is gone. Disks that can't be told are logged once, and nothing is sent: writes stay unknown.
+async fn disk_target<D: DockerApi>(docker: Arc<D>, paths: Paths, disk: oneshot::Sender<Disks>) {
+    let root = loop {
+        if disk.is_closed() {
+            return;
+        }
+        match docker.root_dir().await {
+            Ok(root) => break root,
+            Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
+        }
+    };
+    let resolved = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || Disks::resolve(&paths, std::path::Path::new(&root))
+    })
+    .await;
+    if let Ok(Some(target)) = resolved {
+        info!("disk writes are read from {}, under {root}", target.name());
+        let _ = disk.send(target);
+    } else {
+        warn!("cannot tell the disks under Docker's root {root}: what runners write stays unknown");
     }
 }
 

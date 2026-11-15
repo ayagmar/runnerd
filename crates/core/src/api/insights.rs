@@ -38,6 +38,10 @@ pub struct Insights {
     /// a daemon before 0.0.30.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host: Vec<HostHazard>,
+    /// What the jobs that ended in the window and the drive under Docker's root wrote (ADR 0143); `None` when no job
+    /// was measured and the daemon read no drive, and from a daemon before 0.1.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<super::DiskWrites>,
 }
 
 /// What the host's memory came to while CI ran over a window, from the readings the budget's events stored (ADR 0108):

@@ -37,6 +37,7 @@ pub(super) fn engine_with_cache(
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
                 proc: dir.0.join("proc"),
+                sys: dir.0.join("sys"),
             },
             build_cache: Some(cache.clone()),
             unsynced: dir.0.join("unsynced"),

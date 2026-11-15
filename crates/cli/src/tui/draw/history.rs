@@ -88,6 +88,9 @@ pub(super) fn history(
                 job.metrics.cpu_average.map_or_else(String::new, cores_used),
             ));
         }
+        if shown(Column::Written) {
+            cells.push(written(job, theme));
+        }
         if record_shown {
             cells.push(Cell::from(
                 job.record_mark
@@ -123,7 +126,14 @@ pub(super) fn history(
     table_hits(hits, body, List::History, state.offset(), jobs.len());
 }
 
-/// The table's columns and their widths at `width`: branch and CPU only when wide, the record mark when a job has one,
+/// What a job wrote, in its tone: a floor reads in the background.
+fn written(job: &JobSummary, theme: Theme) -> Cell<'static> {
+    Cell::from(job.metrics.disk.map_or_else(Span::default, |disk| {
+        Span::styled(disk.short(), theme.of(disk.tone()))
+    }))
+}
+
+/// The table's columns and their widths at `width`: branch, CPU and what a job wrote only when wide, the record mark when a job has one,
 /// the memory peak, the wait and when it was queued only when the names keep [`NAMES_MIN`] cells.
 fn columns(jobs: &[JobSummary], width: u16, now: u64) -> Vec<(Column, usize)> {
     let wide = width >= 110;
@@ -154,6 +164,16 @@ fn columns(jobs: &[JobSummary], width: u16, now: u64) -> Vec<(Column, usize)> {
     ]);
     if wide {
         columns.push((Column::Cpu, 5));
+        let written = jobs
+            .iter()
+            .filter_map(|job| Some(job.metrics.disk?.short().width()))
+            .max();
+        if let Some(written) = written {
+            columns.push((
+                Column::Written,
+                written.max(column_title(Column::Written).len()),
+            ));
+        }
     }
     if let Some(marks) = marks.filter(|_| width >= 90) {
         columns.push((

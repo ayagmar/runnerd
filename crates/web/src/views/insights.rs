@@ -4,8 +4,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits, RunLink, Tone, View,
-    WaitSpread,
+    Digest, DiskWrites, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits, RunLink,
+    Tone, View, WaitSpread,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -68,6 +68,21 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
                 ul.host-days {
                     @for host in &insights.host {
                         li { (host.dated_line()) }
+                    }
+                }
+            }
+        }
+        @if let Some(disk) = &insights.disk {
+            section aria-labelledby="disk-title" {
+                div.section-head {
+                    h2 #disk-title { (DiskWrites::TITLE) }
+                }
+                @for part in disk.sections() {
+                    h3 { (part.title) }
+                    ul.host-days {
+                        @for line in &part.lines {
+                            li { (line) }
+                        }
                     }
                 }
             }

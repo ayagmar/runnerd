@@ -19,6 +19,7 @@ use crate::admission::trace::Trace;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, NamedRun, QueuedJob};
+use crate::observe::disk::{Window, Written};
 use crate::observe::metrics::{CpuHeld, Events};
 use crate::scheduler::warm;
 use crate::sizing;
@@ -86,6 +87,20 @@ const MIGRATIONS: &[(u32, &str)] = &[
         23,
         "CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, sampled_at INTEGER);\n\
          ALTER TABLE records ADD COLUMN gone_at INTEGER;",
+    ),
+    (
+        24,
+        "ALTER TABLE jobs ADD COLUMN disk_written INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN disk_write_ios INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN disk_dirty INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN disk_measure TEXT;\n\
+         ALTER TABLE runners ADD COLUMN cgroup_gone_at INTEGER;\n\
+         ALTER TABLE samples ADD COLUMN written INTEGER;\n\
+         ALTER TABLE samples ADD COLUMN write_ios INTEGER;\n\
+         ALTER TABLE samples ADD COLUMN dirty INTEGER;\n\
+         CREATE TABLE disk_windows (start INTEGER PRIMARY KEY NOT NULL, end_at INTEGER NOT NULL, \
+         device TEXT NOT NULL, store TEXT, drive INTEGER, slice INTEGER, daemon INTEGER, commits INTEGER) WITHOUT ROWID;\n\
+         CREATE INDEX jobs_by_runner ON jobs (runner);",
     ),
 ];
 
@@ -204,6 +219,10 @@ pub struct SampleRecord {
     pub events: Events,
     /// What held the container's CPU back so far.
     pub cpu_held: CpuHeld,
+    /// What it wrote to the disks under Docker's root so far; `None` where it was not read.
+    pub written: Option<Written>,
+    /// Page cache it had written and the kernel not yet to the disk; `None` where it was not read.
+    pub dirty: Option<u64>,
 }
 
 /// The last measurement of the cache volumes.
@@ -354,6 +373,11 @@ enum Write {
         _backlog: OwnedSemaphorePermit,
     },
     Samples(Vec<SampleRecord>),
+    CgroupsGone {
+        runners: Vec<String>,
+        at: u64,
+    },
+    DiskWindow(Window),
     HostSample(api::HostSample),
     MirrorBytes {
         bytes: Vec<(String, u64)>,
@@ -702,6 +726,20 @@ impl Store {
     /// until they are removed. Kept in memory only: a restart finds such a container stopped.
     pub fn containers_gone(&self, runners: Vec<String>) {
         lock(&self.gone).extend(runners);
+    }
+
+    /// Records that these runners' containers' cgroups were gone at `at` (ms), one sample after they were last read
+    /// (`metrics::Sampled::ended`): what they wrote is measured to their end (ADR 0143). A job already closed gets
+    /// its figure again.
+    pub fn containers_ended(&self, runners: Vec<String>, at: u64) {
+        if !runners.is_empty() {
+            self.send(Write::CgroupsGone { runners, at });
+        }
+    }
+
+    /// Records a window of what the disks under Docker's root wrote.
+    pub fn disk_window(&self, window: Window) {
+        self.send(Write::DiskWindow(window));
     }
 
     /// Notes that these runners' containers' cgroups were read (`metrics::Sampled::read`): one marked gone came back,

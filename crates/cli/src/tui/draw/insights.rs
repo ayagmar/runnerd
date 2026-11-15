@@ -1,5 +1,6 @@
 //! The insights view: what the job minutes would have cost on GitHub's runners, then what the history says, one row
-//! per insight in its tone, the selected one's whole sentence under them, and the host's memory on the days CI ran.
+//! per insight in its tone, the selected one's whole sentence under them, the host's memory on the days CI ran, and
+//! what jobs and the drive wrote.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -51,6 +52,7 @@ pub(super) fn insights(
         .iter()
         .map(api::HostHazard::dated_line)
         .collect();
+    let disk = disk_lines(insights, width, theme);
     let rows = area.height.saturating_sub(1);
     // Whole or not at all: its basis and what it leaves out stay with the dollars.
     let savings_height = if length(savings.len()) <= rows / 4 {
@@ -64,12 +66,25 @@ pub(super) fn insights(
     } else {
         length(host.len() + 1).min(rows / 4)
     };
-    let [title, savings_area, list_area, detail_area, host_area] = Layout::vertical([
+    let disk_height = if disk.is_empty() {
+        0
+    } else {
+        length(disk.len() + 1).min(rows / 3)
+    };
+    let [
+        title,
+        savings_area,
+        list_area,
+        detail_area,
+        host_area,
+        disk_area,
+    ] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(savings_height),
         Constraint::Min(1),
         Constraint::Length(detail_height),
         Constraint::Length(host_height),
+        Constraint::Length(disk_height),
     ])
     .areas(area);
     heading(
@@ -86,6 +101,11 @@ pub(super) fn insights(
         Paragraph::new(savings.into_iter().map(Line::from).collect::<Vec<_>>()),
         savings_area,
     );
+    if disk_height > 0 {
+        let mut lines = vec![Line::styled(api::DiskWrites::TITLE, bold())];
+        lines.extend(disk);
+        frame.render_widget(Paragraph::new(lines), disk_area);
+    }
     if insights.insights.is_empty() {
         frame.render_widget(Line::styled(insights.empty_line(), theme.dim()), list_area);
         return;
@@ -100,6 +120,26 @@ pub(super) fn insights(
         lines.extend(host.into_iter().map(|line| Line::styled(line, theme.dim())));
         frame.render_widget(Paragraph::new(lines), host_area);
     }
+}
+
+/// What jobs and the drive wrote, each part under its title, its lines wrapped to `width`.
+fn disk_lines(insights: &api::Insights, width: usize, theme: Theme) -> Vec<Line<'static>> {
+    insights
+        .disk
+        .iter()
+        .flat_map(api::DiskWrites::sections)
+        .flat_map(|section| {
+            let mut lines = vec![Line::styled(section.title, bold())];
+            lines.extend(
+                section
+                    .lines
+                    .into_iter()
+                    .flat_map(|line| wrap(&line, width))
+                    .map(|line| Line::styled(line, theme.dim())),
+            );
+            lines
+        })
+        .collect()
 }
 
 /// A row per insight: a dot and its kind in its tone, then its sentence, cut; the selected one stays in sight.

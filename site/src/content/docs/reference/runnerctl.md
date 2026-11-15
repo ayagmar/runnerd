@@ -27,7 +27,7 @@ List jobs, newest first
 
 ## `runnerctl job <ID>`
 
-Show one job: its timeline and wait, steps with their durations, and its CPU and what held it back, memory, network and build cache
+Show one job: its timeline and wait, steps with their durations, and its CPU and what held it back, memory, network, disk writes and build cache
 
 - `<ID>`
 
@@ -55,7 +55,7 @@ Keys: 1-5 the views, tab and j/k to move, enter to open, / to search, ? for all.
 
 ## `runnerctl insights`
 
-Show what the history says: what the job minutes would have cost on GitHub's runners, jobs that got slower and stayed so, fail and pass on a re-run, run near their memory cap or miss the build cache, downloads slowed for want of memory, and how long each repository's jobs wait this week against the last. One line per insight
+Show what the history says: what the job minutes would have cost on GitHub's runners, jobs that got slower and stayed so, fail and pass on a re-run, run near their memory cap or miss the build cache, downloads slowed for want of memory, what jobs and the drive wrote, and how long each repository's jobs wait this week against the last. One line per insight
 
 - `--days <DAYS>`: Days of history to read [default: 14, at most 90]
 - `--digest`: Show the last 24 hours instead: jobs finished and failed, new insights and the longest waits

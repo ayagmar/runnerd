@@ -51,6 +51,7 @@ mod admission;
 mod attention;
 mod budget;
 mod control;
+mod disk;
 mod events;
 mod insights;
 mod jobs;
@@ -82,6 +83,10 @@ pub use budget::{
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
     ReplaceQuery, RunningJob,
+};
+pub use disk::{
+    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteSection,
+    WriteTop,
 };
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use insights::{

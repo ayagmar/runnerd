@@ -76,6 +76,14 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
             [before(history.events)],
         ),
     );
+    // Kept as long as the jobs whose writes insights set against them.
+    logged(
+        "prune disk windows",
+        db.execute(
+            "DELETE FROM disk_windows WHERE end_at < ?1",
+            [before(history.jobs)],
+        ),
+    );
     logged("prune jobs", jobs(db, before(history.jobs)));
 }
 

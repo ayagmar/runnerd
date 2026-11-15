@@ -126,7 +126,7 @@ fn jobs_state_each_outcome_wait_and_run_time_as_core_does() {
         let line = line_of(&text, &[&row.job.to_string()]);
         assert!(line.contains(&row.title), "{}: {line}", row.title);
         assert!(line.contains(&row.label), "{}: {line}", row.label);
-        for figure in [&row.waited, &row.ran].into_iter().flatten() {
+        for figure in [&row.waited, &row.ran, &row.written].into_iter().flatten() {
             assert!(line.contains(figure.as_str()), "{figure}: {line}");
         }
         assert!(
@@ -243,6 +243,13 @@ fn insights_state_each_insight_s_severity_kind_and_sentence_as_core_does() {
             "{}: {text}",
             day.dated_line()
         );
+    }
+    let disk = shown.disk.as_ref().unwrap();
+    for section in disk.sections() {
+        assert!(text.contains(section.title), "{}: {text}", section.title);
+        for line in &section.lines {
+            assert!(text.contains(line.as_str()), "{line}: {text}");
+        }
     }
 }
 

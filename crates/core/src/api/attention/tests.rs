@@ -71,6 +71,7 @@ fn insights(insights: Vec<Insight>) -> Insights {
         insights,
         waits: Vec::new(),
         host: Vec::new(),
+        disk: None,
     }
 }
 

@@ -166,6 +166,37 @@ impl Writer<'_> {
                     self.samples(&samples, announced)
                 });
             }
+            Write::CgroupsGone { runners, at } => {
+                self.change("record runners' cgroups gone", |_| {
+                    for runner in &runners {
+                        self.db.execute(
+                            "UPDATE runners SET cgroup_gone_at = coalesce(cgroup_gone_at, ?2) WHERE name = ?1",
+                            params![runner, at],
+                        )?;
+                        self.disk_again(runner)?;
+                    }
+                    Ok(())
+                });
+            }
+            Write::DiskWindow(window) => {
+                self.change("record a window of disk writes", |_| {
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO disk_windows (start, end_at, device, store, drive, slice, \
+                         daemon, commits) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            window.start,
+                            window.end,
+                            window.device,
+                            window.store,
+                            window.drive,
+                            window.slice,
+                            window.daemon,
+                            window.commits
+                        ],
+                    )?;
+                    Ok(())
+                });
+            }
             Write::HostSample(sample) => {
                 // Live: no ID to wait for.
                 let _ = self.events.send(Arc::new(EventEnvelope {
@@ -761,7 +792,8 @@ impl Writer<'_> {
             "UPDATE jobs SET state = ?2, finished_at = coalesce(finished_at, ?3), cpu_time = ?4, \
              cpu_peak = ?5, cpu_average = ?6, memory_peak = ?7, memory_average = ?8, \
              network_received = ?9, network_sent = ?10, cpu_periods = ?11, cpu_throttled = ?12, \
-             cpu_stalled = ?13 WHERE id = ?1 AND state = 'running'",
+             cpu_stalled = ?13, disk_written = ?14, disk_write_ios = ?15, disk_dirty = ?16, disk_measure = ?17 \
+             WHERE id = ?1 AND state = 'running'",
             params![
                 job,
                 state,
@@ -776,6 +808,10 @@ impl Writer<'_> {
                 metrics.cpu_periods,
                 metrics.cpu_throttled,
                 metrics.cpu_stalled,
+                metrics.disk.map(|disk| disk.bytes),
+                metrics.disk.map(|disk| disk.ios),
+                metrics.disk.and_then(|disk| disk.dirty),
+                metrics.disk.map(|disk| read::measure_word(disk.measure)),
             ],
         )?;
         if closed == 1 {
@@ -785,6 +821,33 @@ impl Writer<'_> {
             && let Some(job) = read::summary(&self.db, job)?
         {
             announced.push(Event::JobFinished { job });
+        }
+        Ok(())
+    }
+
+    /// Works out again what the final jobs of a runner whose end the sampler saw wrote (`read::disk_written`): the
+    /// engine may close a job before the sampler's next pass finds its cgroup gone.
+    fn disk_again(&self, runner: &str) -> rusqlite::Result<()> {
+        let jobs: Vec<(u64, Option<u64>)> = self
+            .db
+            .prepare_cached(
+                "SELECT id, started_at FROM jobs WHERE runner = ?1 AND state IN ('completed', 'lost')",
+            )?
+            .query_map([runner], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (job, started) in jobs {
+            let disk = read::disk_written(&self.db, runner, started.unwrap_or(0))?;
+            self.db.execute(
+                "UPDATE jobs SET disk_written = ?2, disk_write_ios = ?3, disk_dirty = ?4, disk_measure = ?5 \
+                 WHERE id = ?1",
+                params![
+                    job,
+                    disk.map(|disk| disk.bytes),
+                    disk.map(|disk| disk.ios),
+                    disk.and_then(|disk| disk.dirty),
+                    disk.map(|disk| read::measure_word(disk.measure)),
+                ],
+            )?;
         }
         Ok(())
     }
@@ -909,8 +972,8 @@ impl Writer<'_> {
         for sample in samples {
             self.db.execute(
                 "INSERT OR REPLACE INTO samples (runner, at, cpu, cpu_usage, memory, network_received, \
-                 network_sent, cpu_periods, cpu_throttled, cpu_stalled) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 network_sent, cpu_periods, cpu_throttled, cpu_stalled, written, write_ios, dirty) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     sample.runner,
                     sample.at,
@@ -922,6 +985,9 @@ impl Writer<'_> {
                     sample.cpu_held.periods,
                     sample.cpu_held.throttled,
                     sample.cpu_held.stalled,
+                    sample.written.map(|written| written.bytes),
+                    sample.written.map(|written| written.ios),
+                    sample.dirty,
                 ],
             )?;
             if let Some(ooms) = sample.events.oom {

@@ -410,6 +410,10 @@ pub struct JobMetrics {
     /// or by the other runners and programs on the host's CPUs. `None` without pressure stall information.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_stalled: Option<u64>,
+    /// What its runner container wrote to the disks under Docker's root (ADR 0143). `None` where no reading measured
+    /// it, as without the io controller, and in records from before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<super::DiskWritten>,
 }
 
 /// One figure of what a job used, worded for every client.
@@ -438,6 +442,7 @@ impl JobMetrics {
         add("CPU time", self.cpu_time.map(cpu_time));
         add("Received", self.network_received.map(bytes));
         add("Sent", self.network_sent.map(bytes));
+        add("Written to disk", self.disk.map(|disk| disk.line()));
         // Counted from the mirror's own log, so a job without network samples still has it.
         add(
             "From the mirror",

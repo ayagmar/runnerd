@@ -81,6 +81,10 @@ name = "docker_smoke"
 required-features = ["host"]
 
 [[test]]
+name = "disk_writes"
+required-features = ["host"]
+
+[[test]]
 name = "cache_reseed"
 required-features = ["host"]
 

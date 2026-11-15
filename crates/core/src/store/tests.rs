@@ -17,6 +17,7 @@ use crate::observe::metrics::{CpuHeld, Events};
 use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
+mod disk;
 mod lens;
 mod log_outline;
 mod waits;
@@ -583,6 +584,8 @@ fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord 
         memory: 1000,
         network_received: received,
         network_sent: received / 10,
+        written: None,
+        dirty: None,
     }
 }
 

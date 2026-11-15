@@ -163,6 +163,17 @@ fn the_history_states_each_outcome_wait_and_run_time_as_core_does() {
     history(&mut app, &daemon);
     let (rows, buffer) = frame(&app);
     assert_rows(&rows, &buffer, &facts.rows);
+    // A wide history says what each job wrote, a partial figure as a floor.
+    for fact in &facts.rows {
+        if let Some(written) = &fact.written {
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains(&fact.title) && row.contains(written.as_str())),
+                "{written}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
 }
 
 #[test]
@@ -1574,4 +1585,27 @@ fn opens_at_its_failed_step(id: u64) {
         "Enter on its header folds it: {}",
         header(&app)
     );
+}
+
+#[test]
+fn the_insights_view_says_what_jobs_and_the_drive_wrote_as_core_words_it() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights(NOW);
+    app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
+    app.update(super::tab(View::Insights));
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (rows, _) = frame_of(&app, 300, 120);
+    let shown = words(&rows.join(" "));
+    for section in insights.disk.unwrap().sections() {
+        assert!(
+            shown.contains(section.title),
+            "{}:\n{}",
+            section.title,
+            rows.join("\n")
+        );
+        for line in &section.lines {
+            assert!(shown.contains(&words(line)), "{line}:\n{}", rows.join("\n"));
+        }
+    }
 }
