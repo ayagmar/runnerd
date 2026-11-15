@@ -594,7 +594,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 );
                 return;
             }
-            match self.unsynced.refused() {
+            let held = refused
+                .iter()
+                .filter(|refusal| refusal.held())
+                .map(|refusal| refusal.volume.clone())
+                .collect();
+            match self.unsynced.refused(held) {
                 AfterRefusal::Again { tries } => warn!(
                     "cannot empty what a host crash may have torn, so no runner starts until it is (try {tries} of \
                      {REFUSALS}): {why}"

@@ -1015,6 +1015,20 @@ async fn a_slot_volume_held_past_the_last_try_has_its_layers_started_over_before
         "torn\n",
         "and the caches stay torn on disk"
     );
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    let queued = &status.queued[0];
+    let waiting = queued.waiting.clone().expect("the job waits");
+    assert_eq!(
+        (waiting.kind(), waiting.reason(queued, &status, 0)),
+        (
+            api::WaitKind::Act,
+            "A host crash may have torn caches a container holds; once nothing mounts them: docker volume rm \
+             runnerd-app-slot-1"
+                .to_owned()
+        ),
+        "the job says what keeps it and how to clear it"
+    );
 
     // A restart keeps them torn: it tries the volume again, then the layers.
     drop(handle);

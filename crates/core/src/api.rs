@@ -796,6 +796,13 @@ pub enum Waiting {
         /// The labels it asks for.
         labels: Vec<String>,
     },
+    /// A host crash may have torn what runners wrote without syncing, and the daemon has not emptied it yet, so no
+    /// runner starts (ADR 0141, 0142).
+    Torn {
+        /// The volumes a container keeps it from removing, as of its last try: the owner's to remove once nothing
+        /// mounts them. Empty while it has not tried, or Docker failed.
+        volumes: Vec<String>,
+    },
     /// A reason from a newer daemon than this client knows, so a reason added later does not keep the client from
     /// reading the status.
     #[serde(other)]
@@ -827,8 +834,10 @@ impl Waiting {
     pub fn kind(&self) -> WaitKind {
         match self {
             Waiting::Paused | Waiting::Backoff { .. } | Waiting::NoPool { .. } => WaitKind::Act,
+            Waiting::Torn { volumes } if !volumes.is_empty() => WaitKind::Act,
             Waiting::Unknown => WaitKind::Other,
-            Waiting::RunnerStarting
+            Waiting::Torn { .. }
+            | Waiting::RunnerStarting
             | Waiting::Reseeding { .. }
             | Waiting::PullingImage { .. }
             | Waiting::BehindStart { .. } => WaitKind::Soon,
@@ -879,6 +888,13 @@ impl Waiting {
                 None => "A runner is starting for it".to_owned(),
             },
             Waiting::Reseeding { profile } => format!("{profile} is rebuilding its snapshot"),
+            Waiting::Torn { volumes } if volumes.is_empty() => {
+                "Emptying the caches a host crash may have torn".to_owned()
+            }
+            Waiting::Torn { volumes } => format!(
+                "A host crash may have torn caches a container holds; once nothing mounts them: docker volume rm {}",
+                volumes.join(" ")
+            ),
             Waiting::PullingImage { profile } => format!("Pulling {profile}'s image"),
             Waiting::NoSlot { profile } => {
                 let slots = status

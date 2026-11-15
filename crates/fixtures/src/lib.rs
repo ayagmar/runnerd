@@ -1492,6 +1492,20 @@ pub fn paused() -> Daemon {
     daemon
 }
 
+/// The fixtures after a host crash whose torn caches a container keeps the daemon from emptying: every queued job a
+/// pool serves waits for them (ADR 0141, 0142).
+pub fn torn() -> Daemon {
+    let mut daemon = daemon();
+    for queued in &mut daemon.status.queued {
+        if !queued.waiting.as_ref().is_some_and(Waiting::cannot_start) {
+            queued.waiting = Some(Waiting::Torn {
+                volumes: vec!["runnerd-jvm-slot-2".to_owned(), "runnerd-pnpm".to_owned()],
+            });
+        }
+    }
+    daemon
+}
+
 /// `GET /v1/attention` at revision 1 of the instance `fixtures` for `daemon`, `doctor` and the insights at [`NOW`]:
 /// core's items (`api::attention_items`). For the fixtures: the doctor's failure, the token or the listings, labels no
 /// pool serves, the long wait for the host's memory, the warning insights and the rate limit.

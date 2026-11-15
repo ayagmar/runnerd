@@ -118,6 +118,17 @@ fn a_host_limit_past_memory_max_reads_as_core_says_it() {
 }
 
 #[test]
+fn why_jobs_wait_for_caches_a_crash_tore_reads_as_core_says_it() {
+    let daemon = runnerd_fixtures::torn();
+    let facts = facts(&daemon);
+    let (rows, _) = frame(&app(&daemon));
+    let all = rows.join("\n");
+    for wait in &facts.waits {
+        assert!(shows(&rows, &wait.reason), "{}: {all}", wait.reason);
+    }
+}
+
+#[test]
 fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_them() {
     let daemon = runnerd_fixtures::host_credit();
     let facts = facts(&daemon);

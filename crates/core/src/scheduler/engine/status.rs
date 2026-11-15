@@ -198,9 +198,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The queued jobs the repositories' pools can take and none holds, and those the plan says no pool serves,
-    /// oldest first, with why each `waiting`; none of a repository whose last listing failed or was skipped.
+    /// oldest first, with why each `waiting`; none of a repository whose last listing failed or was skipped. While
+    /// the caches are torn, a job the config would start waits for them (ADR 0141).
     fn queued(&self, waiting: &BTreeMap<u64, api::Waiting>) -> Vec<api::QueuedJob> {
         let taken = self.taken();
+        let torn = self.unsynced.torn();
         let mut queued: Vec<api::QueuedJob> = self
             .repositories
             .iter_listed()
@@ -227,7 +229,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         branch: job.branch.clone(),
                         url: job.url.clone(),
                         queued_at: job.created_at / 1000,
-                        waiting: waiting.get(&job.id).cloned(),
+                        waiting: match (torn, waiting.get(&job.id)) {
+                            (Some(volumes), planned)
+                                if !planned.is_some_and(api::Waiting::cannot_start) =>
+                            {
+                                Some(api::Waiting::Torn {
+                                    volumes: volumes.to_vec(),
+                                })
+                            }
+                            (_, planned) => planned.cloned(),
+                        },
                     })
             })
             .collect();

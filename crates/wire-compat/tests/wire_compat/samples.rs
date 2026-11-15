@@ -245,6 +245,9 @@ pub(crate) fn waiting() -> Vec<Waiting> {
         Waiting::NoPool {
             labels: vec!["halyard-lite".to_owned()],
         },
+        Waiting::Torn {
+            volumes: vec!["runnerd-jvm-slot-2".to_owned()],
+        },
     ];
     for waiting in &every {
         match waiting {
@@ -261,6 +264,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
             | Waiting::BehindMemory { .. }
             | Waiting::BehindStart { .. }
             | Waiting::NoPool { .. }
+            | Waiting::Torn { .. }
             // What a client reads a later daemon's reason as; no daemon sends it, so it has no sample.
             | Waiting::Unknown => {}
         }

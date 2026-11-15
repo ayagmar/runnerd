@@ -49,7 +49,15 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[];
+const ACCEPTED: &[Accepted] = &[
+    // The previous release reads a job waiting for torn caches as its `Unknown` fallback, which says it waits for a
+    // reason that client does not know yet.
+    Accepted {
+        reader: Reader::Previous,
+        item: "waiting/torn",
+        adr: "0142",
+    },
+];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;

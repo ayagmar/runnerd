@@ -66,8 +66,9 @@ enum Owed {
     Since { boot: String },
     /// The host booted again after `Since` with no clean stop between and no orderly shutdown that ended it: what
     /// runners wrote may be torn, so the slots' volumes and the shared stores are emptied before any runner starts.
-    /// `refusals` counts the ticks since this daemon started that found a container left on a torn volume.
-    Torn { refusals: u32 },
+    /// `refusals` counts the ticks since this daemon started that found a container left on a torn volume; `held`
+    /// are the volumes the last of them could not empty.
+    Torn { refusals: u32, held: Vec<String> },
 }
 
 /// How many emptyings Docker may refuse before the engine gives up on them and starts runners on what the caches
@@ -105,12 +106,18 @@ impl Unsynced {
     pub(crate) fn open(file: PathBuf, proc: &Path, durability: Durability) -> Unsynced {
         let state = match std::fs::read_to_string(&file) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Owed::Synced,
-            Err(_) => Owed::Torn { refusals: 0 },
+            Err(_) => Owed::Torn {
+                refusals: 0,
+                held: Vec::new(),
+            },
             Ok(text) => match text.trim_end().strip_prefix(SINCE) {
                 Some(boot) if !boot.is_empty() => Owed::Since {
                     boot: boot.to_owned(),
                 },
-                _ => Owed::Torn { refusals: 0 },
+                _ => Owed::Torn {
+                    refusals: 0,
+                    held: Vec::new(),
+                },
             },
         };
         Unsynced {
@@ -141,7 +148,10 @@ impl Unsynced {
             self.settle()?;
             return Ok(Recovered::ShutDownInOrder);
         }
-        self.state = Owed::Torn { refusals: 0 };
+        self.state = Owed::Torn {
+            refusals: 0,
+            held: Vec::new(),
+        };
         write(&self.file, TORN)?;
         Ok(Recovered::Torn)
     }
@@ -149,6 +159,15 @@ impl Unsynced {
     /// Whether the caches must be emptied before any runner starts.
     pub(crate) fn is_torn(&self) -> bool {
         matches!(self.state, Owed::Torn { .. })
+    }
+
+    /// While the caches are torn, the volumes a container kept the last try from emptying: none before a try, or
+    /// after one Docker failed.
+    pub(crate) fn torn(&self) -> Option<&[String]> {
+        match &self.state {
+            Owed::Torn { held, .. } => Some(held),
+            Owed::Synced | Owed::Since { .. } => None,
+        }
     }
 
     /// Before a runner that may skip its syncs starts: whether it may, once that is kept on disk. A runner that may not
@@ -179,14 +198,15 @@ impl Unsynced {
         self.settle()
     }
 
-    /// A container left on a torn cache kept it from being emptied. After `REFUSALS` of them the engine may give up
+    /// A container left on each of `volumes`, torn caches, kept them from being emptied. After `REFUSALS` of them the engine may give up
     /// and start runners on what the caches hold, as a cache that may be torn costs less than no runner at all; it
     /// stays torn until it does (`gave_up`).
-    pub(crate) fn refused(&mut self) -> AfterRefusal {
-        let Owed::Torn { refusals } = &mut self.state else {
+    pub(crate) fn refused(&mut self, volumes: Vec<String>) -> AfterRefusal {
+        let Owed::Torn { refusals, held } = &mut self.state else {
             return AfterRefusal::GiveUp;
         };
         *refusals = refusals.saturating_add(1);
+        *held = volumes;
         let tries = *refusals;
         if tries < REFUSALS {
             return AfterRefusal::Again { tries };
