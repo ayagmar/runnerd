@@ -27,7 +27,9 @@ Docker Engine inside it puts its containers and BuildKit's in cgroups below the 
 - A job's figure is its container's counters from its last sample before the job's start to its container's last
   sample. The counters are the cgroup's own, so a daemon that stops and starts again mid-job loses nothing and counts
   nothing twice; a warm runner's writes before its job are not the job's. Without a sample before the start, the
-  figure counts from the container's start.
+  figure counts from the container's start. The start is the job's `started_at`, GitHub's time once it reports the
+  job, to the second; the claim's time is not kept apart from it. A start GitHub reports before the warm runner's
+  first sample counts the runner's own start, a few megabytes, into the job.
 - It is `complete` when that baseline was read, the counters never fell, from the baseline on, and the sampler first
   found the cgroup gone after the last sample and within two samples (4 seconds) of it (`runners.cgroup_gone_at`,
   which keeps the first time): the container ran at most that long unread. The sampler finds that whether or not the
@@ -62,6 +64,8 @@ Docker Engine inside it puts its containers and BuildKit's in cgroups below the 
   are the file system's, outside any job.
 - What a container writes after its last sample, its shutdown and its pages written back late, is not the job's
   figure. It shows as the runner slice's share beside the jobs', so it is neither lost nor spread over jobs.
-- `samples` gains three columns and `runners` one; at one sample every 2 seconds per runner this is a few bytes per
-  sample. The drive's windows are 144 rows a day.
+- `samples` gains three columns and `runners` one: about 14 bytes on a sample row of about 75, some 20% more sample
+  data, about 20 MB a day with 33 runners sampled all day. `dirty` is read only from a job's last sample, but which
+  sample is last is not known when it is written. The drive's windows are 144 rows a day. `jobs_by_runner` keeps the
+  recount when a cgroup goes from scanning the job table.
 - Schema 24. A runnerd before it refuses the database as newer, as every schema change does (ADR 0073).

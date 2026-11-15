@@ -1,4 +1,4 @@
-//! Starts a runner container in `runnerd-test.slice`, waits for its Docker Engine, takes a "job" that writes from the
+//! Starts a runner container in `runnerdtest.slice`, waits for its Docker Engine, takes a "job" that writes from the
 //! container itself and from a container of its Docker Engine, and follows it through the sampler and the history as
 //! the daemon does (ADR 0143): the job's stored figure beside the container's `io.stat` read by hand, and the drive's
 //! window beside `/sys/class/block/<disk>/stat` read by hand. Needs the isolation backend and a runner image:
@@ -38,7 +38,7 @@ fn now_ms() -> u64 {
     u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
 }
 
-const SLICE: &str = "runnerd-test.slice";
+const SLICE: &str = "runnerdtest.slice";
 const MIB: u64 = 1 << 20;
 
 /// The job: 64 MiB from the container itself, 128 MiB from a container of its Docker Engine, each synced so the
@@ -257,7 +257,7 @@ async fn run(
     );
     let window = window.ok_or("no window of the drive")?;
     println!(
-        "drive {} by hand: {} bytes over the test, the slice {}; window {}..{} ms: drive {:?}, slice {:?}, commits {:?}",
+        "drive {} by hand: {} bytes over the test, the slice {}; window {}..{} ms: drive {:?}, slice {:?}, this test's own {:?}, commits {:?}",
         disks.name(),
         drive_after - drive_before,
         slice_after - slice_before,
@@ -265,6 +265,7 @@ async fn run(
         window.end,
         window.drive,
         window.slice,
+        window.daemon,
         window.commits
     );
     let _ = std::fs::remove_dir_all(&dir);
