@@ -514,7 +514,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Empties what runners write and later jobs read, once a host crash may have torn it (ADR 0141): every slot's
-    /// volume, layers and Docker store alike, and the pnpm store and Maven repository every slot shares, each after
+    /// volume Docker has under runnerd's prefix, the config's and those of a lowered slot count or a removed profile
+    /// alike (ADR 0142), layers and Docker store, and the pnpm store and Maven repository every slot shares, each after
     /// the stopped containers of runnerd's that mount it (`cache::empty_volumes`). Not the snapshots, which only a
     /// reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs. It waits for the records
     /// being committed, whose containers mount the slots' volumes and go once committed. A volume Docker does not
@@ -525,6 +526,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if self.records.is_recording() {
             return;
         }
+        let listed = match self.docker.volumes(&self.names.volume_prefix()).await {
+            Ok(listed) => listed,
+            Err(error) => {
+                warn!(
+                    "cannot list the volumes a host crash may have torn, so no runner starts until Docker does: \
+                     {error}"
+                );
+                return;
+            }
+        };
         let volumes: Vec<String> = cache::volumes(&self.names, &self.config)
             .into_iter()
             .filter(|volume| {
@@ -534,6 +545,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 )
             })
             .map(|volume| volume.name)
+            .chain(
+                listed
+                    .into_iter()
+                    .filter(|volume| self.names.is_slot(volume)),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect();
         let cache::Cleared { removed, refused } =
             cache::empty_volumes(&*self.docker, &volumes).await;

@@ -17,9 +17,9 @@ use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CommitContainerOptionsBuilder, CreateContainerOptionsBuilder,
     CreateImageOptionsBuilder, DataUsageOptionsBuilder, DownloadFromContainerOptionsBuilder,
     EventsOptionsBuilder, InspectContainerOptionsBuilder, ListContainersOptionsBuilder,
-    ListImagesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder,
-    UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
+    ListImagesOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
+    ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -433,6 +433,8 @@ pub trait DockerApi: Send + Sync {
     fn holders(&self, volume: &str) -> impl Future<Output = Result<Vec<Container>, Error>> + Send;
     /// The disk size of every volume Docker knows, by name. Slow: Docker measures each volume.
     fn volume_sizes(&self) -> impl Future<Output = Result<BTreeMap<String, u64>, Error>> + Send;
+    /// The names of the volumes Docker has whose names start with `prefix`. Fast: nothing is measured.
+    fn volumes(&self, prefix: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// The paths a container's own layer added or changed, not those it deleted.
     fn changes(&self, container: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// The bytes a container's own layer holds.
@@ -821,6 +823,23 @@ impl DockerApi for Docker {
             Err(error) if is_not_found(&error) => Ok(()),
             other => other,
         }
+    }
+
+    async fn volumes(&self, prefix: &str) -> Result<Vec<String>, Error> {
+        // Docker's name filter matches anywhere in the name; the prefix is checked here.
+        let options = ListVolumesOptionsBuilder::new()
+            .filters(&HashMap::from([("name", vec![prefix])]))
+            .build();
+        Ok(self
+            .api
+            .list_volumes(Some(options))
+            .await?
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|volume| volume.name)
+            .filter(|name| name.starts_with(prefix))
+            .collect())
     }
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, Error> {

@@ -6,8 +6,8 @@
 //! on disk once a sync ran, or once the host shut down in order. After every restart:
 //!
 //! - `a_crash_empties_what_it_may_have_torn`: a crash while what a runner wrote unsynced was not yet on disk empties
-//!   every slot's volume and the pnpm and Maven volumes, before any runner starts; none starts while Docker refuses
-//!   one.
+//!   every slot's volume Docker has, of a lowered slot count and a removed profile too, and the pnpm and Maven
+//!   volumes, before any runner starts; none starts while Docker refuses one. Snapshots and the mirror stay.
 //! - `nothing_is_emptied_without_cause`: nothing is emptied unless the host crashed since a runner skipped its syncs,
 //!   with no stop between that left no runner running: an orderly reboot keeps the caches, busy runners or not.
 //! - `only_a_filtered_image_arms`: a runner skips its syncs only if its image carries the filter, and only once the
@@ -20,12 +20,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
-/// What a crash may tear and the guard empties.
-const TORN: [&str; 4] = [
+/// What a crash may tear and the guard empties: the config's slots, the shared stores, and the slot volumes Docker
+/// still has from before (`LEFT`).
+const TORN: [&str; 6] = [
     "runnerd-app-slot-1",
     "runnerd-app-slot-2",
     "runnerd-pnpm",
     "runnerd-maven",
+    "runnerd-app-slot-3",
+    "runnerd-gone-slot-1",
+];
+
+/// The volumes Docker has that the config does not list: a slot past a lowered `slots`, a slot and the snapshot of
+/// a removed profile, and the mirror's storage. Runners of before may have written the slots unsynced; the snapshot
+/// and the mirror keep their syncs and are never emptied.
+const LEFT: [&str; 4] = [
+    "runnerd-app-slot-3",
+    "runnerd-gone-slot-1",
+    "runnerd-gone-base",
+    "runnerd-mirror",
 ];
 
 /// The profile's image, as `image_stage = "app"` names it.
@@ -186,6 +199,12 @@ impl Case {
         let dir = TestDir::new(&format!("unsynced-{seed}"));
         boot(&dir, "boot-0");
         let host = Host::default();
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .listed_volumes
+            .extend(LEFT.map(str::to_owned));
         let (mut engine, handle) =
             engine_durable(&github, &docker, &dir, &config(true), host.durability());
         engine.recover().await.unwrap();
@@ -456,6 +475,13 @@ impl Case {
                 "nothing_is_emptied_without_cause: {emptied:?} emptied after a {boot:?} boot"
             )));
         }
+        if self.docker.calls()[from..].iter().any(|call| {
+            call == "remove volume runnerd-gone-base" || call == "remove volume runnerd-mirror"
+        }) {
+            return Err(self.fail(
+                "a_crash_empties_what_it_may_have_torn: a snapshot or the mirror, which keep their syncs, was emptied",
+            ));
+        }
         let removed: BTreeSet<&str> = emptied.iter().map(|(_, name)| *name).collect();
         if removed.len() != TORN.len() {
             return Err(self.fail(&format!(
@@ -577,6 +603,12 @@ async fn after_mark(
     ended: &[&str],
 ) -> (TestDir, FakeDocker, Vec<String>, bool) {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .listed_volumes
+        .extend(LEFT.map(str::to_owned));
     let dir = TestDir::new(name);
     boot(&dir, "boot-1");
     if let Some(mark) = mark {
@@ -686,6 +718,12 @@ async fn a_mark_that_cannot_be_read_empties_the_caches() {
         return;
     }
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .listed_volumes
+        .extend(LEFT.map(str::to_owned));
     let dir = TestDir::new("unsynced-unreadable");
     boot(&dir, "boot-1");
     let file = dir.0.join("unsynced");

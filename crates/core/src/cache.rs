@@ -71,6 +71,24 @@ impl Names {
             .ok()
     }
 
+    /// Whether `volume` is a slot's volume of any profile, configured now or not: `<prefix>-<profile>-slot-<N>`.
+    /// A prefix that is another's start, as a test's `runnerd-test-…` is `runnerd`'s, matches the other's too.
+    pub fn is_slot(&self, volume: &str) -> bool {
+        volume
+            .strip_prefix(&format!("{}-", self.prefix))
+            .and_then(|rest| rest.rsplit_once("-slot-"))
+            .is_some_and(|(profile, slot)| {
+                !profile.is_empty()
+                    && !slot.is_empty()
+                    && slot.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    }
+
+    /// The prefix every volume of runnerd's starts with, with its dash.
+    pub fn volume_prefix(&self) -> String {
+        format!("{}-", self.prefix)
+    }
+
     /// The container that rebuilds the profile's snapshot.
     pub fn seed(&self, profile: &str) -> String {
         format!("{}-{profile}-seed", self.prefix)
