@@ -2645,6 +2645,8 @@ impl Case {
                     network_received: 0,
                     network_sent: 0,
                     cpu_held: crate::observe::metrics::CpuHeld::default(),
+                    written: None,
+                    dirty: None,
                     events: Events::default(),
                 }]);
                 let mut ran = details(id, "completed", Some("success"));
@@ -3890,6 +3892,8 @@ fn sample(
             network_received: 0,
             network_sent: 0,
             cpu_held: crate::observe::metrics::CpuHeld::default(),
+            written: None,
+            dirty: None,
             events: Events::default(),
         });
     }

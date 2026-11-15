@@ -82,7 +82,10 @@ fn assert_rows(html: &str, facts: &[JobRow], figures: bool) {
         assert!(row.contains(&badge), "{badge}: {row}");
         assert!(text(row).contains(&fact.name), "{}: {row}", fact.name);
         if figures {
-            for figure in [&fact.waited, &fact.ran].into_iter().flatten() {
+            for figure in [&fact.waited, &fact.ran, &fact.written]
+                .into_iter()
+                .flatten()
+            {
                 assert!(row.contains(&format!(">{figure}<")), "{figure}: {row}");
             }
         }
@@ -343,6 +346,12 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
             "{}: {shown}",
             day.dated_line()
         );
+    }
+    for section in insights.disk.as_ref().unwrap().sections() {
+        assert!(shown.contains(section.title), "{}: {shown}", section.title);
+        for line in &section.lines {
+            assert!(shown.contains(line.as_str()), "{line}: {shown}");
+        }
     }
 }
 

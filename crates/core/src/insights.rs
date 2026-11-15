@@ -16,6 +16,7 @@ use crate::config::{Admission, ByteSize, Config};
 use crate::sizing::auto::{CpuRun, RAISE_RUNS, cpu_step, unhelped_raise};
 use crate::sizing::{HELD, Throttling, spread};
 
+mod disk;
 mod host;
 
 const SECOND: u64 = 1000;
@@ -105,6 +106,8 @@ pub struct Run {
     pub cpu_periods: Option<u64>,
     /// Of those, the periods its quota throttled it in.
     pub cpu_throttled: Option<u64>,
+    /// What its runner container wrote to the disks under Docker's root (ADR 0143), when measured.
+    pub disk: Option<api::DiskWritten>,
     /// How much of its wait passed while no runnerd ran.
     pub unseen: u64,
 }
@@ -219,6 +222,8 @@ pub struct History {
     pub host: Option<HostHold>,
     /// The host's readings the budget's events stored, oldest first.
     pub readings: Vec<HostReading>,
+    /// The windows of what the disks under Docker's root wrote, oldest first (ADR 0143).
+    pub disk: Vec<crate::observe::disk::Window>,
 }
 
 /// A job as insights tell jobs apart: repository, workflow and name.
@@ -281,6 +286,7 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         insights: found,
         waits,
         host: host_days,
+        disk: disk::writes(&window, &history.disk, since, now),
     }
 }
 

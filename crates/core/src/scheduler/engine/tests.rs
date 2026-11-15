@@ -1912,6 +1912,11 @@ impl DockerApi for FakeDocker {
         Ok(self.0.lock().unwrap().free.unwrap_or(1 << 40))
     }
 
+    async fn root_dir(&self) -> Result<String, docker::Error> {
+        self.outage().await?;
+        Ok("/var/lib/docker".to_owned())
+    }
+
     async fn shell(
         &self,
         name: &str,
@@ -2032,6 +2037,7 @@ fn engine_durable(
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
                 proc: dir.0.join("proc"),
+                sys: dir.0.join("sys"),
             },
             build_cache: None,
             unsynced: dir.0.join("unsynced"),

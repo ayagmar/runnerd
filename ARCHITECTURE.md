@@ -90,7 +90,9 @@ flowchart TB
   holds back by the rule sizing reads, `sizing::Throttling::held` ([ADR 0087](docs/adr/0087-an-insight-for-jobs-their-cpu-cap-holds-back.md)), and
   for jobs the host lacks memory for, from the store's reading of now (`Store::host_waiting`, which `note_host` sets)
   beside the history ([ADR 0100](docs/adr/0100-an-insight-for-jobs-held-for-the-hosts-memory.md),
-  [ADR 0103](docs/adr/0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md)). All three are pure:
+  [ADR 0103](docs/adr/0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md)), and adds up what
+  the window's jobs and the drive's stored windows wrote (`insights::disk`,
+  [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)). All three are pure:
   the engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.
@@ -283,7 +285,10 @@ queued → slot → container → removed
    `cpu.pressure` from the container's cgroup every 2 s (`observe::metrics`,
    which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them, and every 30 s the name and
    memory of each process outside the slice, never its command line
-   ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), and the
+   ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), what the container wrote to the disks under
+   Docker's root from its `io.stat`, and in windows of up to 10 minutes what those disks, the slice and btrfs's
+   commits came to (`observe::disk`; the job's figure runs from its start to its container's last sample, complete
+   once the sampler saw the cgroup go a sample later, [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`). A job that failed is then
    read for a runner fault: `record::runner_fault` over its stored log, kept in `jobs.runner_fault`, which makes

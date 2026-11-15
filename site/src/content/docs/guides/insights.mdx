@@ -45,6 +45,30 @@ host memory while CI ran:
 
 The lines are the host's margin plus a quarter of its memory, and a tenth of its memory: 19.4G and 6.2G on a 62G host. Each reading counts until the next for a minute at most, so time runnerd was down is not counted.
 
+### Disk writes
+
+Next, `runnerctl insights` and the dashboard say what the window's jobs wrote to the disk under Docker's root, which workflows and jobs wrote most, and what that disk wrote while runnerd read it:
+
+```text
+disk writes:
+  Jobs:
+    529 jobs wrote 145G: median 49M, p90 612M a job; 12 partial, counted as far as read; 3G more waited to be written back as their containers ended
+  Drive:
+    nvme0n1 wrote 574G over the 6h 36m runnerd read it: 2.04T a day at this rate
+    Runner jobs 24%; the rest of the runner slice 7% (seeds, the mirror, runners before and after their jobs, write-back after a container ended); no owner runnerd knows 68%
+    btrfs committed 2.0 times a second
+  Workflows that wrote most:
+    halyard/ledger CI: 99G over 426 jobs, 237.97M a job
+  Jobs that wrote most:
+    halyard/ledger images / image-app: 13G over 5 jobs, 2.6G a job
+```
+
+- A job's figure is its runner container's cgroup `io.stat`, which counts what its Docker Engine and that engine's containers write too. It starts at the last reading before the job, so a warm runner's start is not the job's, and ends at the container's last reading, at most 2 s before it ended. A job is partial when its end, or its start, was not read, or its container was started again; a host without the io controller has no figure.
+- Only the disks under Docker's root count: a partition counts as its whole disk; swap on zram does not count.
+- Pages still in memory when a container ends are written after it, to the runner slice's account, as is what seeds and the mirror write.
+- No owner: the disk's writes outside the runner slice, from the system, other programs, runnerd's history and build cache, and the file system's own work. btrfs commits appear only on btrfs.
+- The drive is read in windows of up to 10 minutes; the time runnerd was stopped is in none, and the daily rate is over the time read.
+
 ## What the minutes would have cost
 
 `runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. Each job is billed as GitHub bills it: minutes rounded up, at the rate of the runner its profile's [`priced_as`](../../reference/configuration/#profilesname) names. Not counted:

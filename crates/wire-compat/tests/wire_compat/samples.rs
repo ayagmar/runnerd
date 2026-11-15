@@ -35,6 +35,7 @@ use runnerd_core::api::{
     StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View,
     WaitSpread, Waiting, WeekWaits,
 };
+use runnerd_core::api::{DiskWrites, DiskWritten, DriveWrites, JobWrites, Measure, WriteTop};
 
 pub(crate) fn status() -> Status {
     Status {
@@ -769,6 +770,12 @@ pub(crate) fn job_summary() -> JobSummary {
             cpu_periods: Some(5_800),
             cpu_throttled: Some(900),
             cpu_stalled: Some(140_000),
+            disk: Some(DiskWritten {
+                bytes: 2 << 30,
+                ios: 41_000,
+                dirty: Some(96 << 20),
+                measure: Measure::Partial,
+            }),
         },
         log: LogSummary {
             lines: 1_200,
@@ -1369,7 +1376,48 @@ pub(crate) fn insights() -> Insights {
             before: week_waits(),
         }],
         host: vec![host_hazard()],
+        disk: Some(disk_writes()),
     }
+}
+
+fn disk_writes() -> DiskWrites {
+    let top = |job: Option<&str>| WriteTop {
+        repository: "tidewater/halyard".to_owned(),
+        workflow: Some("CI".to_owned()),
+        job: job.map(str::to_owned),
+        jobs: 31,
+        total: 12 << 30,
+    };
+    DiskWrites {
+        jobs: JobWrites {
+            measured: 529,
+            partial: 12,
+            total: 145 << 30,
+            median: 49 << 20,
+            p90: 612 << 20,
+            dirty: 3 << 30,
+        },
+        workflows: vec![top(None)],
+        top_jobs: vec![top(Some("test"))],
+        drive: Some(DriveWrites {
+            device: "nvme0n1".to_owned(),
+            watched: 23_760,
+            written: 574 << 30,
+            slice: Some(183 << 30),
+            jobs: 140 << 30,
+            commits: Some(49_500),
+        }),
+    }
+}
+
+pub(crate) fn measure() -> Vec<Measure> {
+    let every = vec![Measure::Complete, Measure::Partial, Measure::Unknown];
+    for measure in &every {
+        match measure {
+            Measure::Complete | Measure::Partial | Measure::Unknown => {}
+        }
+    }
+    every
 }
 
 fn host_hazard() -> HostHazard {

@@ -65,6 +65,7 @@ const SUMMARY: &str = concat!(
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
      j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault, ",
     record_mark!(),
+    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure",
     " FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
 );
 
@@ -233,6 +234,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             cpu_periods: row.get(40)?,
             cpu_throttled: row.get(41)?,
             cpu_stalled: row.get(42)?,
+            disk: stored_disk(row, 46)?,
         },
         log: api::LogSummary {
             lines: row.get(27)?,
@@ -245,6 +247,109 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             .as_deref()
             .map(record_mark),
     })
+}
+
+/// How the history names a [`api::Measure`].
+pub(super) fn measure_word(measure: api::Measure) -> &'static str {
+    match measure {
+        api::Measure::Complete => "complete",
+        api::Measure::Partial | api::Measure::Unknown => "partial",
+    }
+}
+
+/// A job's kept [`api::DiskWritten`] from its four columns from `at`: bytes, write requests, dirty and measure.
+fn stored_disk(row: &Row<'_>, at: usize) -> rusqlite::Result<Option<api::DiskWritten>> {
+    let (Some(bytes), Some(ios), Some(measure)) = (
+        row.get::<_, Option<u64>>(at)?,
+        row.get::<_, Option<u64>>(at + 1)?,
+        row.get::<_, Option<String>>(at + 3)?,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(api::DiskWritten {
+        bytes,
+        ios,
+        dirty: row.get(at + 2)?,
+        measure: match measure.as_str() {
+            "complete" => api::Measure::Complete,
+            _ => api::Measure::Partial,
+        },
+    }))
+}
+
+/// What a runner's container wrote to the disks under Docker's root from `from` (ms), its job's start, to its last
+/// sample (ADR 0143). The counters are its cgroup's so far, so a daemon's restart between two samples loses nothing.
+/// The baseline is its last sample before `from`, as a warm runner's writes before its job are not the job's, or 0
+/// at its container's start when there is none. Complete when that baseline was read, the counters never fell, and
+/// the sampler saw its cgroup go a sample after its last read; otherwise partial, a floor. A counter that fell, as a
+/// `docker restart` starts it again, counts from 0 on. `None` when no sample read it.
+pub(super) fn disk_written(
+    db: &Connection,
+    runner: &str,
+    from: u64,
+) -> rusqlite::Result<Option<api::DiskWritten>> {
+    let before = db
+        .query_row(
+            "SELECT written, write_ios FROM samples WHERE runner = ?1 AND at < ?2 ORDER BY at DESC LIMIT 1",
+            params![runner, from],
+            |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<u64>>(1)?)),
+        )
+        .optional()?;
+    let mut complete = true;
+    let mut base = match before {
+        None => Some((0, 0)),
+        Some((Some(bytes), Some(ios))) => Some((bytes, ios)),
+        Some(_) => {
+            complete = false;
+            None
+        }
+    };
+    let mut statement = db.prepare_cached(
+        "SELECT at, written, write_ios, dirty FROM samples WHERE runner = ?1 AND at >= ?2 \
+         AND written IS NOT NULL AND write_ios IS NOT NULL ORDER BY at",
+    )?;
+    let mut rows = statement.query(params![runner, from])?;
+    let mut total = (0u64, 0u64);
+    let mut last: Option<(u64, u64, u64, Option<u64>)> = None;
+    while let Some(row) = rows.next()? {
+        let (at, bytes, ios, dirty): (u64, u64, u64, Option<u64>) =
+            (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+        let start = *base.get_or_insert((bytes, ios));
+        if let Some((_, last_bytes, last_ios, _)) = last
+            && (bytes < last_bytes || ios < last_ios)
+        {
+            total.0 = total.0.saturating_add(last_bytes.saturating_sub(start.0));
+            total.1 = total.1.saturating_add(last_ios.saturating_sub(start.1));
+            base = Some((0, 0));
+            complete = false;
+        }
+        last = Some((at, bytes, ios, dirty));
+    }
+    let Some((at, bytes, ios, dirty)) = last else {
+        return Ok(None);
+    };
+    let start = base.unwrap_or((bytes, ios));
+    total.0 = total.0.saturating_add(bytes.saturating_sub(start.0));
+    total.1 = total.1.saturating_add(ios.saturating_sub(start.1));
+    let gone: Option<u64> = db
+        .query_row(
+            "SELECT cgroup_gone_at FROM runners WHERE name = ?1",
+            [runner],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let ended = gone.is_some_and(|gone| gone >= at);
+    Ok(Some(api::DiskWritten {
+        bytes: total.0,
+        ios: total.1,
+        dirty,
+        measure: if complete && ended {
+            api::Measure::Complete
+        } else {
+            api::Measure::Partial
+        },
+    }))
 }
 
 /// A job without its steps. Before a record is final, its metrics come from its samples so far.
@@ -271,7 +376,7 @@ fn listed_summary(db: &Connection, id: u64) -> rusqlite::Result<Option<(api::Job
     );
     let Some((summary, cut)) = db
         .query_row(&format!("SELECT {select} WHERE j.id = ?1"), [id], |row| {
-            Ok((summary_from(row)?, row.get::<_, bool>(46)?))
+            Ok((summary_from(row)?, row.get::<_, bool>(50)?))
         })
         .optional()?
     else {
@@ -319,6 +424,7 @@ pub(super) fn metrics(db: &Connection, job: u64) -> rusqlite::Result<api::JobMet
     if metrics.memory_peak.is_none() {
         metrics = window_metrics(db, &runner, 0, u64::MAX)?;
     }
+    metrics.disk = disk_written(db, &runner, from)?;
     Ok(metrics)
 }
 
@@ -416,6 +522,7 @@ fn window_metrics(
                 cpu_periods: counted(8, baseline.periods)?,
                 cpu_throttled: counted(10, baseline.throttled)?,
                 cpu_stalled: counted(12, baseline.stalled)?.map(|stalled| stalled / 1000),
+                disk: None,
             })
         },
     )
@@ -1224,7 +1331,8 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
          r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
-         j.cpu_throttled FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure \
+         FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
     .query_map([since], |row| {
@@ -1261,6 +1369,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             cpu_cap: row.get(24)?,
             cpu_periods: row.get(25)?,
             cpu_throttled: row.get(26)?,
+            disk: stored_disk(row, 27)?,
         })
     })?
     .collect::<rusqlite::Result<_>>()?;
@@ -1270,7 +1379,29 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
         kept_since,
         host: None,
         readings: host_readings(db, since)?,
+        disk: disk_windows(db, since)?,
     })
+}
+
+/// The windows of what the disks under Docker's root wrote that end at or after `since` (ms), oldest first.
+fn disk_windows(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<Vec<crate::observe::disk::Window>> {
+    db.prepare_cached(
+        "SELECT start, end_at, device, drive, slice, commits FROM disk_windows WHERE end_at >= ?1 ORDER BY start",
+    )?
+    .query_map([since], |row| {
+        Ok(crate::observe::disk::Window {
+            start: row.get(0)?,
+            end: row.get(1)?,
+            device: row.get(2)?,
+            drive: row.get(3)?,
+            slice: row.get(4)?,
+            commits: row.get(5)?,
+        })
+    })?
+    .collect()
 }
 
 /// The host's readings the budget's events stored from `since` (ms), oldest first (ADR 0108). Only the figures the

@@ -1,4 +1,4 @@
--- The job history at schema version 23, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 24, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -56,7 +56,15 @@ CREATE TABLE jobs (
     seen_at INTEGER,
     -- Whether the runner failed the job rather than its code (ADR 0120): read from its log once the record is final.
     -- 0 in rows from before schema 20.
-    runner_fault INTEGER NOT NULL DEFAULT 0
+    runner_fault INTEGER NOT NULL DEFAULT 0,
+    -- What its runner container wrote to the disks under Docker's root (ADR 0143), kept once the record is final as
+    -- the totals above are: bytes and write requests from its cgroup's `io.stat`, the page cache still to write back
+    -- at its container's last read, and 'complete' or 'partial'. NULL where no reading measured it, and in rows from
+    -- before schema 24.
+    disk_written INTEGER,
+    disk_write_ios INTEGER,
+    disk_dirty INTEGER,
+    disk_measure TEXT
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
@@ -108,7 +116,10 @@ CREATE TABLE runners (
     stopped_for TEXT,
     -- When a forced pause that cancelled its run removes it if it still runs, in ms since the epoch; NULL for one no
     -- forced pause cancelled, and in rows from before schema 21.
-    cancel_by INTEGER
+    cancel_by INTEGER,
+    -- When the sampler found its container's cgroup gone, one sample after it last read it (ADR 0143): its last
+    -- sample is within a sample of its end. NULL while it was not seen to go, and in rows from before schema 24.
+    cgroup_gone_at INTEGER
 );
 
 CREATE TABLE steps (
@@ -125,7 +136,8 @@ CREATE TABLE steps (
 -- cpu: millicores over the interval before the sample; cpu_usage: the container's CPU time so far, in
 -- microseconds; network: bytes since the container started; cpu_periods, cpu_throttled: `cpu.stat`'s `nr_periods`
 -- and `nr_throttled` so far, cpu_stalled: `cpu.pressure`'s `some` `total` so far, in microseconds, each NULL where
--- the kernel keeps none.
+-- the kernel keeps none; written, write_ios: `io.stat`'s `wbytes` and `wios` so far on the disks under Docker's root,
+-- dirty: `memory.stat`'s `file_dirty` and `file_writeback`, each NULL where it was not read (ADR 0143).
 CREATE TABLE samples (
     runner TEXT NOT NULL,
     at INTEGER NOT NULL,
@@ -137,7 +149,22 @@ CREATE TABLE samples (
     cpu_periods INTEGER,
     cpu_throttled INTEGER,
     cpu_stalled INTEGER,
+    written INTEGER,
+    write_ios INTEGER,
+    dirty INTEGER,
     PRIMARY KEY (runner, at)
+) WITHOUT ROWID;
+
+-- What the disks under Docker's root wrote while a daemon read them, a window of up to 10 minutes per row (ADR 0143):
+-- from its first reading to its last, in ms; the disks' names; the bytes they wrote; of those, the runner slice's;
+-- btrfs commits. NULL where a reading lacked the figure. Pruned with job records.
+CREATE TABLE disk_windows (
+    start INTEGER PRIMARY KEY NOT NULL,
+    end_at INTEGER NOT NULL,
+    device TEXT NOT NULL,
+    drive INTEGER,
+    slice INTEGER,
+    commits INTEGER
 ) WITHOUT ROWID;
 
 CREATE TABLE host_samples (

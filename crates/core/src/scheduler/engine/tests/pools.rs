@@ -154,6 +154,8 @@ async fn ran_in(store: &Store, profile: &str, labels: &[&str], name: &str, first
             network_received: 0,
             network_sent: 0,
             cpu_held: crate::observe::metrics::CpuHeld::default(),
+            written: None,
+            dirty: None,
             events: crate::observe::metrics::Events::default(),
         }]);
         store.lost(id, at + 60_000);

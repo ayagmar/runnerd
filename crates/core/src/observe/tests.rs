@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use super::capture::{Captured, MAX_LINE, Parser, worker_job, worker_run};
+use super::disk::{Disks, Window, Windows, Written};
 use super::metrics::{CpuHeld, Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
 use super::mirror::{self, Leases};
 use crate::api;
@@ -48,6 +49,7 @@ fn paths(dir: &Path) -> Paths {
     Paths {
         cgroup: dir.join("cgroup"),
         proc: dir.join("proc"),
+        sys: dir.join("sys"),
     }
 }
 
@@ -843,4 +845,248 @@ fn what_held_a_containers_cpu_back_is_read_where_the_kernel_keeps_it_and_unknown
         }
     );
     assert_eq!(held[0].cpu, 1000, "CPU use reads as before");
+}
+
+/// A host of fixture files whose Docker root, `/var/lib/docker`, is on partition `nvme9n1p2` (259:7) of disk
+/// `nvme9n1` (259:5), on `fs`: btrfs, with UUID `u-1`, or ext4.
+fn disk_host(paths: &Paths, fs: &str) {
+    let devices = paths.sys.join("devices/pci0/nvme/nvme9n1");
+    std::fs::create_dir_all(devices.join("nvme9n1p2")).unwrap();
+    std::fs::write(devices.join("dev"), "259:5\n").unwrap();
+    std::fs::write(devices.join("nvme9n1p2/dev"), "259:7\n").unwrap();
+    std::fs::write(devices.join("nvme9n1p2/partition"), "2\n").unwrap();
+    let class = paths.sys.join("class/block");
+    std::fs::create_dir_all(&class).unwrap();
+    std::os::unix::fs::symlink(devices.join("nvme9n1p2"), class.join("nvme9n1p2")).unwrap();
+    std::os::unix::fs::symlink(&devices, class.join("nvme9n1")).unwrap();
+    std::fs::create_dir_all(paths.sys.join("dev/block")).unwrap();
+    std::os::unix::fs::symlink(devices.join("nvme9n1p2"), paths.sys.join("dev/block/259:7"))
+        .unwrap();
+    let mount_device = if fs == "btrfs" {
+        let btrfs = paths.sys.join("fs/btrfs/u-1");
+        std::fs::create_dir_all(btrfs.join("devices")).unwrap();
+        std::os::unix::fs::symlink(devices.join("nvme9n1p2"), btrfs.join("devices/nvme9n1p2"))
+            .unwrap();
+        "0:33"
+    } else {
+        "259:7"
+    };
+    std::fs::create_dir_all(paths.proc.join("self")).unwrap();
+    std::fs::write(
+        paths.proc.join("self/mountinfo"),
+        format!(
+            "22 1 0:21 / /proc rw,nosuid - proc proc rw\n\
+             40 1 {mount_device} /@ / rw,noatime shared:1 - {fs} /dev/nvme9n1p2 rw\n\
+             41 40 0:44 / /var/lib/docker/overlay2/x/merged rw - overlay overlay rw\n\
+             45 1 0:29 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
+        ),
+    )
+    .unwrap();
+    drive(paths, 1000, 10);
+}
+
+/// Sets the drive's sectors written and btrfs's commits so far.
+fn drive(paths: &Paths, sectors: u64, commits: u64) {
+    std::fs::write(
+        paths.sys.join("devices/pci0/nvme/nvme9n1/stat"),
+        format!("100 0 2000 50 300 0 {sectors} 900 0 400 950 0 0 0 0 0 0\n"),
+    )
+    .unwrap();
+    let btrfs = paths.sys.join("fs/btrfs/u-1");
+    if btrfs.exists() {
+        std::fs::write(
+            btrfs.join("commit_stats"),
+            format!("commits {commits}\ncur_commit_ms 0\nlast_commit_ms 15\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// Writes a cgroup's `io.stat`: zram's swap writes, which never reach the drive, beside `bytes` to the drive.
+fn io_stat(cgroup: &Path, bytes: u64) {
+    std::fs::write(
+        cgroup.join("io.stat"),
+        format!(
+            "253:0 rbytes=0 wbytes=999999 rios=0 wios=99 dbytes=0 dios=0\n\
+             259:5 rbytes=4096 wbytes={bytes} rios=1 wios={} dbytes=0 dios=0\n",
+            bytes / 4096
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn docker_s_root_on_a_btrfs_partition_reads_as_its_whole_disk_and_its_file_system() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    assert_eq!(disks.name(), "nvme9n1");
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    io_stat(&slice, 8192);
+    let reading = disks.read(&paths, &slice, 1_000);
+    let mut windows = Windows::default();
+    assert_eq!(windows.add(reading), None);
+    drive(&paths, 3000, 25);
+    io_stat(&slice, 8192 + 4096);
+    let closed = windows
+        .add(disks.read(&paths, &slice, 1_000 + 600_000))
+        .unwrap();
+    assert_eq!(
+        closed,
+        Window {
+            start: 1_000,
+            end: 601_000,
+            device: "nvme9n1".to_owned(),
+            drive: Some(2000 * 512),
+            slice: Some(4096),
+            commits: Some(15),
+        }
+    );
+}
+
+#[test]
+fn a_file_system_other_than_btrfs_has_no_commits_and_an_unreadable_drive_no_figure() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "ext4");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker/volumes")).unwrap();
+    assert_eq!(disks.name(), "nvme9n1");
+    // No io controller for the slice: no io.stat.
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    drive(&paths, 1500, 0);
+    let window = windows.add(disks.read(&paths, &slice, 600_000)).unwrap();
+    assert_eq!(window.drive, Some(500 * 512));
+    assert_eq!(window.slice, None, "absent, not 0");
+    assert_eq!(window.commits, None, "absent, not 0");
+    std::fs::remove_file(paths.sys.join("devices/pci0/nvme/nvme9n1/stat")).unwrap();
+    windows.add(disks.read(&paths, &slice, 900_000));
+    assert_eq!(
+        windows.close().unwrap().drive,
+        None,
+        "a window with an unread drive has no figure"
+    );
+}
+
+#[test]
+fn a_host_without_mountinfo_or_sysfs_names_no_disks() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    assert_eq!(Disks::resolve(&paths, Path::new("/var/lib/docker")), None);
+    disk_host(&paths, "btrfs");
+    std::fs::remove_dir_all(paths.sys.join("class")).unwrap();
+    assert_eq!(Disks::resolve(&paths, Path::new("/var/lib/docker")), None);
+}
+
+#[test]
+fn a_container_s_writes_count_only_the_drive_under_docker_s_root() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    container(&paths, "a", 10, 4_000_000, 1_500_000, 1_000_000);
+    let cgroup = paths.container("ci.slice", "a");
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    assert_eq!(
+        state.sample(&runners, 1_000).samples[0].written,
+        None,
+        "unknown until the disks are"
+    );
+    state.watch_disk(disks.clone());
+    assert_eq!(
+        state.sample(&runners, 3_000).samples[0].written,
+        None,
+        "no io.stat: no io controller"
+    );
+    std::fs::write(
+        cgroup.join("io.stat"),
+        "253:0 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\n",
+    )
+    .unwrap();
+    assert_eq!(
+        state.sample(&runners, 5_000).samples[0].written,
+        Some(Written { bytes: 0, ios: 0 }),
+        "no line for the drive: none written to it yet"
+    );
+    io_stat(&cgroup, 40_960);
+    let sample = &state.sample(&runners, 7_000).samples[0];
+    assert_eq!(
+        sample.written,
+        Some(Written {
+            bytes: 40_960,
+            ios: 10
+        })
+    );
+}
+
+#[test]
+fn a_container_the_engine_let_go_of_whose_cgroup_went_ended_within_a_sample_of_its_last_read() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000_000, 1_500_000, 1_000_000);
+    container(&paths, "b", 11, 4_000_000, 1_500_000, 1_000_000);
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let both = [tracked("runner-a", "a", 10), tracked("runner-b", "b", 11)];
+    state.sample(&both, 1_000);
+    // The engine saw both stop and let go of a; b's cgroup goes while it is still tracked.
+    std::fs::remove_dir_all(paths.container("ci.slice", "a")).unwrap();
+    std::fs::remove_dir_all(paths.container("ci.slice", "b")).unwrap();
+    let sampled = state.sample(&both[1..], 3_000);
+    let mut ended = sampled.ended.clone();
+    ended.sort();
+    assert_eq!(ended, ["runner-a", "runner-b"]);
+    assert_eq!(
+        sampled.gone,
+        ["runner-b"],
+        "admission hears only of the tracked one"
+    );
+    assert!(
+        state.sample(&[], 5_000).ended.is_empty(),
+        "an end is told once"
+    );
+}
+
+#[test]
+fn a_container_let_go_of_whose_cgroup_stays_has_not_ended() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000_000, 1_500_000, 1_000_000);
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    state.sample(&[tracked("runner-a", "a", 10)], 1_000);
+    assert!(
+        state.sample(&[], 3_000).ended.is_empty(),
+        "its cgroup is still there"
+    );
+}
+
+#[test]
+fn a_restart_starts_a_new_window_and_a_counter_that_fell_adds_nothing() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    io_stat(&slice, 0);
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    drive(&paths, 2000, 20);
+    windows.add(disks.read(&paths, &slice, 100_000));
+    // The disk's counters fell, as after it was taken out and put back.
+    drive(&paths, 500, 21);
+    windows.add(disks.read(&paths, &slice, 200_000));
+    let stopped = windows.close().unwrap();
+    assert_eq!((stopped.start, stopped.end), (0, 200_000));
+    assert_eq!(stopped.drive, Some(1000 * 512));
+    assert_eq!(windows.close(), None, "a stop stores its window once");
+    // The next daemon's first reading only starts a window: the time no daemon ran is in none.
+    let mut next = Windows::default();
+    drive(&paths, 9000, 30);
+    assert_eq!(next.add(disks.read(&paths, &slice, 900_000)), None);
+    assert_eq!(next.close(), None);
 }

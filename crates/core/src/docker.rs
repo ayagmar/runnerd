@@ -445,6 +445,8 @@ pub trait DockerApi: Send + Sync {
     fn remove_image(&self, reference: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// The free disk where Docker keeps its images and containers.
     fn free_space(&self) -> impl Future<Output = Result<u64, Error>> + Send;
+    /// Where Docker keeps its images, containers and volumes (`DockerRootDir`), whose disks runners write to.
+    fn root_dir(&self) -> impl Future<Output = Result<String, Error>> + Send;
     /// Creates a container with a terminal of `size`, attaches to it and starts it. The container's stdin closes
     /// when `Tty::input` is dropped.
     fn shell(
@@ -990,6 +992,10 @@ impl DockerApi for Docker {
             Err(error) if is_not_found(&error) => Ok(()),
             other => other.map(|_| ()),
         }
+    }
+
+    async fn root_dir(&self) -> Result<String, Error> {
+        Ok(self.api.info().await?.docker_root_dir.unwrap_or_default())
     }
 
     async fn free_space(&self) -> Result<u64, Error> {

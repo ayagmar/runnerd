@@ -66,6 +66,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         cpu_cap: Some(4000),
         cpu_periods: None,
         cpu_throttled: None,
+        disk: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn whole(runs: &[Run]) -> History {
         kept_since: 0,
         host: None,
         readings: Vec::new(),
+        disk: Vec::new(),
     }
 }
 
@@ -1320,4 +1322,93 @@ fn the_digest_reads_the_host_over_its_own_24_hours() {
         None,
         "no runner ran in its 24 hours"
     );
+}
+
+/// Run `n` of `workflow / name`, finished `hours_ago`, which wrote `bytes`.
+fn writing(
+    n: u64,
+    hours_ago: u64,
+    workflow: &str,
+    name: &str,
+    bytes: u64,
+    measure: api::Measure,
+) -> Run {
+    Run {
+        workflow: Some(workflow.to_owned()),
+        name: name.to_owned(),
+        disk: Some(api::DiskWritten {
+            bytes,
+            ios: bytes / 4096,
+            dirty: Some(bytes / 10),
+            measure,
+        }),
+        ..test_run(n, hours_ago, 60)
+    }
+}
+
+#[test]
+fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_ended_in() {
+    const M: u64 = 1 << 20;
+    let complete = api::Measure::Complete;
+    let runs = [
+        writing(1, 1, "images", "image-api", 3 * G, complete),
+        writing(2, 1, "CI", "test", 100 * M, complete),
+        writing(3, 2, "CI", "test", 300 * M, api::Measure::Partial),
+        writing(4, 30, "CI", "lint", 10 * M, complete),
+        // Not measured: no figure, and not counted as 0.
+        test_run(5, 1, 60),
+    ];
+    // The drive was read for the last three hours only, an hour of it before a restart.
+    let window = |hours_ago: u64, drive: u64, slice: u64| crate::observe::disk::Window {
+        start: NOW - hours_ago * HOUR,
+        end: NOW - (hours_ago - 1) * HOUR,
+        device: "nvme0n1".to_owned(),
+        drive: Some(drive),
+        slice: Some(slice),
+        commits: Some(7200),
+    };
+    let history = History {
+        disk: vec![
+            window(3, 2 * G, G),
+            window(2, 4 * G, 2 * G),
+            window(1, 4 * G, 3 * G + 500 * M),
+        ],
+        ..whole(&runs)
+    };
+    let disk = insights(&history, &config(), 14, NOW).disk.unwrap();
+    assert_eq!(
+        disk.jobs,
+        api::JobWrites {
+            measured: 4,
+            partial: 1,
+            total: 3 * G + 410 * M,
+            median: 100 * M,
+            p90: 3 * G,
+            dirty: 3 * G / 10 + 100 * M / 10 + 300 * M / 10 + 10 * M / 10,
+        }
+    );
+    let workflows: Vec<_> = disk
+        .workflows
+        .iter()
+        .map(|top| (top.workflow.as_deref().unwrap(), top.jobs, top.total))
+        .collect();
+    assert_eq!(workflows, [("images", 1, 3 * G), ("CI", 3, 410 * M)]);
+    assert_eq!(disk.top_jobs[1].job.as_deref(), Some("test"));
+    let drive = disk.drive.unwrap();
+    assert_eq!(drive.watched, 3 * 3600);
+    assert_eq!(drive.written, 10 * G);
+    assert_eq!(drive.slice, Some(6 * G + 500 * M));
+    assert_eq!(drive.commits, Some(3 * 7200));
+    assert_eq!(
+        drive.jobs,
+        3 * G + 400 * M,
+        "the lint run ended while no window read the drive"
+    );
+    assert_eq!(drive.per_day(), 80 * G);
+}
+
+#[test]
+fn a_window_without_measured_jobs_or_a_read_drive_has_no_disk_writes() {
+    let runs = [test_run(1, 1, 60)];
+    assert_eq!(insights(&whole(&runs), &config(), 14, NOW).disk, None);
 }

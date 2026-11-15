@@ -85,6 +85,8 @@ async fn runs_of(
             network_received: 0,
             network_sent: 0,
             cpu_held: crate::observe::metrics::CpuHeld::default(),
+            written: None,
+            dirty: None,
             events: Events {
                 oom: Some(0),
                 oom_kill: Some(if i == count - 1 { oom_kills } else { 0 }),
@@ -458,6 +460,8 @@ fn runners_used(github: &FakeGithub, store: &Store, memory: u64, at: u64) {
             network_received: 0,
             network_sent: 0,
             cpu_held: crate::observe::metrics::CpuHeld::default(),
+            written: None,
+            dirty: None,
             events: Events::default(),
         })
         .collect();
@@ -2704,6 +2708,8 @@ async fn any_stale_reading_takes_the_credit_back() {
         network_received: 0,
         network_sent: 0,
         cpu_held: crate::observe::metrics::CpuHeld::default(),
+        written: None,
+        dirty: None,
         events: Events::default(),
     }]);
     assert_eq!(credit(&mut engine), None, "its one job left to pool");

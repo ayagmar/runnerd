@@ -293,9 +293,10 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
         Column::Waited,
         Column::Ran,
         Column::MemoryPeak,
+        Column::Written,
         Column::Queued,
     ])
-    .right(&[5, 6, 7]);
+    .right(&[5, 6, 7, 8]);
     for job in &page.jobs {
         table.row(vec![
             cell(job.id.to_string(), Tone::Dim),
@@ -308,6 +309,9 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
             job.metrics
                 .memory_peak
                 .map_or_else(dash, |m| plain(bytes(m))),
+            job.metrics
+                .disk
+                .map_or_else(dash, |disk| cell(disk.short(), disk.tone().into())),
             cell(ago(job.timeline.queued_at, now), Tone::Dim),
         ]);
     }
@@ -851,8 +855,8 @@ fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
     counts.activity().map(|activity| activity.line())
 }
 
-/// `runnerctl insights`: one line per insight, warnings first, then the host's memory on each day CI ran, then each
-/// repository's waits this week against the last.
+/// `runnerctl insights`: one line per insight, warnings first, then the host's memory on each day CI ran, what jobs
+/// and the drive wrote, then each repository's waits this week against the last.
 pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     let mut out = String::new();
     if insights.insights.is_empty() {
@@ -875,6 +879,15 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     }
     for day in &insights.host {
         let _ = writeln!(out, "  {}", day.dated_line());
+    }
+    if let Some(disk) = &insights.disk {
+        let _ = writeln!(out, "\n{}:", api::DiskWrites::TITLE.to_lowercase());
+        for section in disk.sections() {
+            let _ = writeln!(out, "  {}:", section.title);
+            for line in &section.lines {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
     }
     if insights.waits.is_empty() {
         return out;

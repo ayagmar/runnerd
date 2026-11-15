@@ -156,6 +156,8 @@ pub enum Column {
     MemoryPeak,
     /// Its average CPU, in cores.
     Cpu,
+    /// What its runner container wrote to disk (ADR 0143).
+    Written,
     /// When a record of the failed job was made.
     Made,
     /// How much disk a record takes.
@@ -180,6 +182,7 @@ impl Column {
             Column::Ran => "Ran",
             Column::MemoryPeak => "Memory peak",
             Column::Cpu => "CPU",
+            Column::Written => "Written",
             Column::Made => "Made",
             Column::Size => "Size",
             Column::Workflow => "Workflow",

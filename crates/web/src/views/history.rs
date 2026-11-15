@@ -833,6 +833,7 @@ fn jobs(history: &History) -> Markup {
                                 (sort_header(filter, Column::Ran, JobSort::Run, Align::Number))
                                 (sort_header(filter, Column::MemoryPeak, JobSort::Memory, Align::Number))
                                 th scope="col" .number { (Column::Cpu.title()) }
+                                th scope="col" .number { (Column::Written.title()) }
                             }
                         }
                         tbody {
@@ -860,6 +861,10 @@ fn jobs(history: &History) -> Markup {
                                     td.number data-label="ran" { (job.ran(now).map_or("–".to_owned(), format::duration)) }
                                     td.number data-label="peak" { (job.metrics.memory_peak.map_or("–".to_owned(), format::bytes)) }
                                     td.number data-label="CPU" { (job.metrics.cpu_average.map_or("–".to_owned(), format::cores_used)) }
+                                    @match job.metrics.disk {
+                                        Some(disk) => td.number class=(tone_class(disk.tone())) data-label="written" { (disk.short()) },
+                                        None => td.number data-label="written" { "–" },
+                                    }
                                 }
                             }
                         }
