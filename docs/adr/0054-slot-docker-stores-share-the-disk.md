@@ -1,6 +1,7 @@
 # 0054. The slots' Docker stores share a quarter of the disk
 
-Status: **Accepted** (2026-10-24), amended by [0089](0089-a-slots-cache-mounts-go-last.md), [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md), [0141](0141-runners-answer-sync-calls-without-syncing.md). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md), [0041](0041-snapshot-and-mirror-limits.md).
+Status: **Accepted** (2026-10-24), amended by [0089](0089-a-slots-cache-mounts-go-last.md), [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md), [0141](0141-runners-answer-sync-calls-without-syncing.md);
+amended 2026-11-15 for a Docker root in a file. Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md), [0041](0041-snapshot-and-mirror-limits.md).
 
 ## Context
 
@@ -17,6 +18,12 @@ host: too large for a small disk, and a knob to hand-tune is what auto sizing ex
   slot volumes already hold. Adding back what the volumes hold means the budget does not shrink as the stores fill
   the disk they were given. Each slot gets an equal share of the profiles' configured slots, in whole GiB, at
   least 1 and at most 20, the old fixed budget.
+- Docker's free disk is what `statfs` leaves an unprivileged user on the file system that holds Docker's root. When
+  that file system is in a file, on a loop device, the file can grow only while the file system under it has room,
+  so the free disk is the least of the free space of each file system down to the disk, nested loops included
+  (`observe::disk::free_space`, which every reader takes through `DockerApi::free_space`; 2026-11-15). A file system
+  under the file that can't be found or measured leaves the figure of those above it, never 0. On a sparse file the
+  file system inside reports its whole size, so without this the budget would count room the disk does not have.
 - The engine measures Docker's free disk and the volumes once at start (`Engine::recover`), in the background
   since the volumes holding Docker stores take minutes to measure, and again with every check of the caches, which
   already measures every volume while no runner runs (`cache::trim_shared`). A runner started before the first
