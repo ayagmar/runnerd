@@ -157,12 +157,15 @@ CREATE TABLE samples (
 ) WITHOUT ROWID;
 
 -- What the disks under Docker's root wrote while a daemon read them, a window of up to 10 minutes per row (ADR 0143):
--- from its first reading to its last, in ms; the disks' names; the bytes they wrote; of those, the runner slice's;
--- what the daemon itself wrote, to any disk; btrfs commits. NULL where a reading lacked the figure. Pruned with job records.
+-- from its first reading to its last, in ms; the disks' names; the loop devices Docker's root is on when it is a
+-- file system in a file on those disks, NULL otherwise; the bytes the disks wrote; of those, the runner slice's, to
+-- the loop devices when there are any; what the daemon itself wrote, to any disk; btrfs commits. NULL where a reading
+-- lacked the figure. Pruned with job records.
 CREATE TABLE disk_windows (
     start INTEGER PRIMARY KEY NOT NULL,
     end_at INTEGER NOT NULL,
     device TEXT NOT NULL,
+    store TEXT,
     drive INTEGER,
     slice INTEGER,
     daemon INTEGER,

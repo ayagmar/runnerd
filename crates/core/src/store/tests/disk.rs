@@ -265,6 +265,7 @@ async fn insights_read_the_drive_s_windows_and_pruning_drops_them_with_job_recor
         slice: Some(MIB),
         daemon: Some(MIB),
         commits: None,
+        store: Some("loop0".to_owned()),
     };
     store.disk_window(window(1_000_000, Some(4 * MIB)));
     store.disk_window(window(1_600_000, None));

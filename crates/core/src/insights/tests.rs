@@ -1368,6 +1368,7 @@ fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_e
         slice,
         daemon: Some(100 * M),
         commits: Some(7200),
+        store: None,
     };
     let history = History {
         disk: vec![

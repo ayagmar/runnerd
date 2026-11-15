@@ -24,6 +24,15 @@ Docker Engine inside it puts its containers and BuildKit's in cgroups below the 
   disk, as `io.stat` keys it, and a btrfs file system as each of its devices (`/sys/fs/btrfs/<uuid>/devices`). Runners
   write their layers, slot volumes and shared caches there. Other lines of `io.stat`, such as zram's swap, never reach
   the drive. A device-mapper volume counts as itself: its disks' lines would count the same bytes again.
+- When Docker's root is a file system in a file, on a loop device, a container's figure and the slice's are the loop
+  device's `io.stat` line: what they wrote to that file system. The backing drive's line is never counted beside it:
+  the loop's writes to its backing file are charged to the container only some of the time, and sometimes to no
+  cgroup (measured on the owner's host: 13 to 600 MiB charged for 512 MiB the loop device saw). The drive's bytes and
+  btrfs's commits follow the backing file (`/sys/block/loopN/loop/backing_file`) to the disk and the file system
+  under it, so "no owner runnerd knows" is still the physical drive's bytes less the owners'. The figures are then
+  bytes written to the store's file system; what the drive writes for them differs by that file system's journal and
+  the overhead of the one under it, btrfs's copy-on-write and metadata, and the drive section says so
+  (`disk_windows.store`, `api::DriveWrites::store`).
 - A job's figure is its container's counters from its last sample before the job's start to its container's last
   sample. The counters are the cgroup's own, so a daemon that stops and starts again mid-job loses nothing and counts
   nothing twice; a warm runner's writes before its job are not the job's. Without a sample before the start, the

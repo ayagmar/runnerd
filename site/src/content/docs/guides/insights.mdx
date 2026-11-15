@@ -65,6 +65,7 @@ disk writes:
 
 - A job's figure is its runner container's cgroup `io.stat`, which counts what its Docker Engine and that engine's containers write too. It starts at the last reading before the job, so a warm runner's start is not the job's, and ends at the container's last reading, at most 4 s before it ended. A job is partial when its end, or its start, was not read, or its container was started again; a host without the io controller has no figure.
 - Only the disks under Docker's root count: a partition counts as its whole disk; swap on zram does not count.
+- When Docker's root is a file system in a file, on a loop device, the jobs' and the runner slice's figures are bytes written to that file system, and the drive is the disk the file is on. The drive writes more than that for them: the inner file system's journal and the outer one's overhead. The drive section then says so in a line.
 - Pages still in memory when a container ends are written after it, to the runner slice's account, as is what seeds and the mirror write.
 - runnerd itself: what the daemon wrote, its history, logs and build cache among it.
 - No owner: the disk's writes outside the runner slice and runnerd, from the system, other programs and the file system's own work. btrfs commits appear only on btrfs.

@@ -9,6 +9,11 @@
 //! a cgroup's `io.stat` also lists other devices, such as zram's swap, whose bytes never reach the drive. A
 //! partition counts as its whole disk, which is how `io.stat` keys it; a device-mapper volume counts as itself, not
 //! the disks under it, whose `io.stat` lines would count the same bytes again.
+//!
+//! When Docker's root is a file system in a file, on a loop device, a cgroup's figure is the loop device's line:
+//! what it wrote to that file system. The loop's own writes to its backing file reach the drive charged to the
+//! cgroup only some of the time, sometimes to none, so that line is never counted. The drive's bytes and commits
+//! follow the backing file (`/sys/block/loopN/loop/backing_file`) to the disk and file system under it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,26 +32,38 @@ pub struct Device {
     name: String,
 }
 
-/// The disks Docker's root sits on, and its btrfs file system's UUID when it is one.
+/// How deep a loop device's backing file is followed: a loop on a loop on a disk.
+const LOOP_DEPTH: u8 = 4;
+
+/// The devices Docker's root sits on: those a cgroup's writes to it are counted on, the physical disks under them,
+/// and the btrfs file system's UUID when the disks hold one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Disks {
-    devices: Vec<Device>,
+    /// What `io.stat` counts: the disks, or the loop devices when the root is in a file.
+    charged: Vec<Device>,
+    /// The physical disks: the drive.
+    drive: Vec<Device>,
     btrfs: Option<String>,
 }
 
 impl Disks {
     /// What `root`, Docker's root directory, is on, from the mount that holds it: its file system's block devices,
-    /// each a partition's disk, and its btrfs UUID. `None` when the mount or its devices can't be read, as without
-    /// `/proc/self/mountinfo` or sysfs, or on a file system without a block device.
+    /// each a partition's disk, and its btrfs UUID; through a loop device, the disks and file system its backing
+    /// file is on. `None` when the mount or its devices can't be read, as without `/proc/self/mountinfo` or sysfs,
+    /// or on a file system without a block device.
     pub fn resolve(paths: &Paths, root: &Path) -> Option<Disks> {
         let mountinfo = std::fs::read_to_string(paths.proc.join("self/mountinfo")).ok()?;
+        Disks::under(paths, &mountinfo, root, LOOP_DEPTH)
+    }
+
+    fn under(paths: &Paths, mountinfo: &str, path: &Path, depth: u8) -> Option<Disks> {
         let mount = mountinfo
             .lines()
             .filter_map(Mount::parse)
-            .filter(|mount| root.starts_with(&mount.point))
+            .filter(|mount| path.starts_with(&mount.point))
             .max_by_key(|mount| mount.point.components().count())?;
         let class = paths.sys.join("class/block");
-        let btrfs = (mount.kind == "btrfs")
+        let mut btrfs = (mount.kind == "btrfs")
             .then(|| btrfs_uuid(paths, &mount.source))
             .flatten();
         let names: Vec<String> = if let Some(uuid) = &btrfs {
@@ -59,7 +76,8 @@ impl Disks {
             let link = paths.sys.join("dev/block").join(&mount.device);
             vec![file_name(&std::fs::canonicalize(link).ok()?)?]
         };
-        let mut devices = BTreeSet::new();
+        let mut charged = BTreeSet::new();
+        let mut drive = BTreeSet::new();
         for name in names {
             let dir = class.join(&name);
             // A partition's directory sits in its disk's: the disk is what `io.stat` and the drive's `stat` count.
@@ -68,31 +86,39 @@ impl Disks {
             } else {
                 std::fs::canonicalize(&dir).ok()?
             };
-            let number = std::fs::read_to_string(disk.join("dev")).ok()?;
-            let (major, minor) = number.trim().split_once(':')?;
-            devices.insert(Device {
-                major: major.parse().ok()?,
-                minor: minor.parse().ok()?,
-                name: file_name(&disk)?,
-            });
+            let device = Device::read(&disk)?;
+            if let Ok(backing) = std::fs::read_to_string(disk.join("loop/backing_file")) {
+                // A deleted backing file keeps its path, marked; the mount that held it still tells the drive.
+                let backing = backing.trim_end();
+                let backing = backing.strip_suffix(" (deleted)").unwrap_or(backing);
+                let under =
+                    Disks::under(paths, mountinfo, Path::new(backing), depth.checked_sub(1)?)?;
+                drive.extend(under.drive);
+                btrfs = under.btrfs;
+            } else {
+                drive.insert(device.clone());
+            }
+            charged.insert(device);
         }
-        (!devices.is_empty()).then(|| Disks {
-            devices: devices.into_iter().collect(),
+        (!charged.is_empty()).then(|| Disks {
+            charged: charged.into_iter().collect(),
+            drive: drive.into_iter().collect(),
             btrfs,
         })
     }
 
-    /// The disks' names, joined by `+`: `nvme2n1`.
+    /// The loop devices Docker's root is on, joined by `+`, when it is a file system in a file: `loop0`.
+    pub fn store(&self) -> Option<String> {
+        (self.charged != self.drive).then(|| join(&self.charged))
+    }
+
+    /// The physical disks' names, joined by `+`: `nvme2n1`.
     pub fn name(&self) -> String {
-        self.devices
-            .iter()
-            .map(|device| device.name.as_str())
-            .collect::<Vec<_>>()
-            .join("+")
+        join(&self.drive)
     }
 
     /// The bytes and write requests a cgroup and its descendants have sent the disks so far (`io.stat` `wbytes`,
-    /// `wios`). `None` when the cgroup has no `io.stat`, as without the io controller or once it is gone; a disk
+    /// `wios`), or the loop devices when the root is in a file: what they wrote to its file system. `None` when the cgroup has no `io.stat`, as without the io controller or once it is gone; a disk
     /// without a line in it has had none of the cgroup's I/O yet, which is 0.
     pub fn written(&self, cgroup: &Path) -> Option<Written> {
         let stat = std::fs::read_to_string(cgroup.join("io.stat")).ok()?;
@@ -103,7 +129,7 @@ impl Disks {
             else {
                 continue;
             };
-            if !self.devices.iter().any(|device| {
+            if !self.charged.iter().any(|device| {
                 major.parse() == Ok(device.major) && minor.parse() == Ok(device.minor)
             }) {
                 continue;
@@ -128,7 +154,7 @@ impl Disks {
     /// The disks', the slice's and the file system's counters now, at `at` (ms).
     pub fn read(&self, paths: &Paths, slice: &Path, at: u64) -> Reading {
         let mut drive = Some(0u64);
-        for device in &self.devices {
+        for device in &self.drive {
             // Sectors written, the seventh field, in 512-byte units whatever the disk's own sector size.
             let sectors = std::fs::read_to_string(
                 paths
@@ -165,6 +191,7 @@ impl Disks {
             daemon,
             commits,
             device: self.name(),
+            store: self.store(),
         }
     }
 }
@@ -224,6 +251,28 @@ fn unescape(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+impl Device {
+    /// The block device whose sysfs directory is `dir`.
+    fn read(dir: &Path) -> Option<Device> {
+        let number = std::fs::read_to_string(dir.join("dev")).ok()?;
+        let (major, minor) = number.trim().split_once(':')?;
+        Some(Device {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+            name: file_name(dir)?,
+        })
+    }
+}
+
+/// Devices' names joined by `+`.
+fn join(devices: &[Device]) -> String {
+    devices
+        .iter()
+        .map(|device| device.name.as_str())
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 fn file_name(path: &Path) -> Option<String> {
     path.file_name()?.to_str().map(str::to_owned)
 }
@@ -253,6 +302,7 @@ pub struct Reading {
     daemon: Option<u64>,
     commits: Option<u64>,
     device: String,
+    store: Option<String>,
 }
 
 /// What a window's readings add up to, as the history stores it.
@@ -274,6 +324,9 @@ pub struct Window {
     pub daemon: Option<u64>,
     /// btrfs transaction commits; `None` on another file system or when a reading lacked them.
     pub commits: Option<u64>,
+    /// The loop devices Docker's root is on when it is a file system in a file on `device`: `loop0`. The runner
+    /// slice's figure is then what it wrote to that file system.
+    pub store: Option<String>,
 }
 
 /// The window being added up: from its first reading to its last, and what the counters rose by between them.
@@ -318,6 +371,7 @@ impl Open {
             start: self.first,
             end: self.last.at,
             device: self.last.device.clone(),
+            store: self.last.store.clone(),
             drive: self.drive,
             slice: self.slice,
             daemon: self.daemon,
@@ -340,7 +394,7 @@ impl Windows {
             self.open = Some(Open::new(reading));
             return None;
         };
-        if reading.device != open.last.device {
+        if reading.device != open.last.device || reading.store != open.last.store {
             let closed = open.close();
             self.open = Some(Open::new(reading));
             return Some(closed).filter(|window| window.end > window.start);

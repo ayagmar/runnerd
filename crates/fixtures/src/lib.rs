@@ -981,6 +981,7 @@ fn disk_writes() -> api::DiskWrites {
                 count: 49_500,
                 watched: 6 * 3600 + 36 * 60,
             }),
+            store: Some("loop0".to_owned()),
         }),
     }
 }

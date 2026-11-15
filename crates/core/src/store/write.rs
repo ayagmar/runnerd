@@ -181,12 +181,13 @@ impl Writer<'_> {
             Write::DiskWindow(window) => {
                 self.change("record a window of disk writes", |_| {
                     self.db.execute(
-                        "INSERT OR REPLACE INTO disk_windows (start, end_at, device, drive, slice, daemon, \
-                         commits) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT OR REPLACE INTO disk_windows (start, end_at, device, store, drive, slice, \
+                         daemon, commits) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             window.start,
                             window.end,
                             window.device,
+                            window.store,
                             window.drive,
                             window.slice,
                             window.daemon,

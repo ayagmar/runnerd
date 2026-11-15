@@ -121,6 +121,7 @@ fn drive(
         .collect();
     Some(DriveWrites {
         device: last.device.clone(),
+        store: last.store.clone(),
         watched: seconds(&read),
         written: sum(&read, |window| window.drive)?,
         shares: DriveShares {

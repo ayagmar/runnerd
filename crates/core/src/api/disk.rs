@@ -146,6 +146,11 @@ pub struct DriveWrites {
     /// btrfs transaction commits; `None` on another file system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commits: Option<Commits>,
+    /// The loop devices Docker's root is on when it is a file system in a file on the disks: `loop0`. Jobs' and the
+    /// runner slice's figures are then bytes written to that file system, which the disks write with its journal
+    /// and the overhead of the file system under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 /// Whose the drive's bytes were, over the stretches the daemon read the runner slice, or over all it read the drive
@@ -239,7 +244,8 @@ impl DriveWrites {
         u64::try_from(day).unwrap_or(u64::MAX)
     }
 
-    /// Them in lines: what the drive wrote and its daily rate; whose it was, runner jobs', the rest of the runner
+    /// Them in lines: what the drive wrote and its daily rate; what the figures count when Docker's root is in a
+    /// file on it; whose it was, runner jobs', the rest of the runner
     /// slice's, runnerd's own and the share no one in runnerd owns; and btrfs's commits a second.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![format!(
@@ -249,6 +255,14 @@ impl DriveWrites {
             duration(self.watched),
             ByteSize(self.per_day())
         )];
+        if let Some(store) = &self.store {
+            lines.push(format!(
+                "Docker's root is a file system in a file on it ({store}): the jobs' and the runner slice's figures \
+                 are bytes written to that file system; {} also wrote its journal and the overhead of the file \
+                 system under it",
+                self.device
+            ));
+        }
         lines.push(self.shares.line(self.watched));
         if let Some(commits) = self.commits {
             let tenths = u128::from(commits.count) * 10 / u128::from(commits.watched.max(1));
@@ -398,6 +412,7 @@ mod tests {
                 count: 43_200,
                 watched: 6 * 3600,
             }),
+            store: None,
         };
         assert_eq!(
             drive.lines(),
@@ -424,6 +439,16 @@ mod tests {
              jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0%"
         );
         assert_eq!(over.lines().len(), 2, "no commits line off btrfs");
+        let in_a_file = DriveWrites {
+            store: Some("loop0".to_owned()),
+            ..over.clone()
+        };
+        assert_eq!(
+            in_a_file.lines()[1],
+            "Docker's root is a file system in a file on it (loop0): the jobs' and the runner slice's figures are \
+             bytes written to that file system; nvme0n1 also wrote its journal and the overhead of the file system \
+             under it"
+        );
         // The slice read over only part of the time: its shares say over which.
         let part = DriveWrites {
             shares: DriveShares {

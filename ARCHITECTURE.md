@@ -286,7 +286,8 @@ queued → slot → container → removed
    which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them, and every 30 s the name and
    memory of each process outside the slice, never its command line
    ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), what the container wrote to the disks under
-   Docker's root from its `io.stat`, and in windows of up to 10 minutes what those disks, the slice, the daemon itself
+   Docker's root from its `io.stat` (the loop device's line when that root is a file system in a file, whose
+   backing file's disk is then the drive), and in windows of up to 10 minutes what those disks, the slice, the daemon itself
    and btrfs's commits came to (`observe::disk`; the job's figure runs from its start to its container's last sample,
    complete once the sampler first saw the cgroup go within two samples of it; `Engine::run` waits for the sampler to
    store its open window before it returns, [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and the

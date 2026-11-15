@@ -943,6 +943,7 @@ fn docker_s_root_on_a_btrfs_partition_reads_as_its_whole_disk_and_its_file_syste
             slice: Some(4096),
             daemon: None,
             commits: Some(15),
+            store: None,
         }
     );
 }
@@ -1130,4 +1131,67 @@ async fn the_sampler_stores_the_drive_s_open_window_as_soon_as_the_engine_lets_g
     assert_eq!(windows.len(), 1, "the open window is stored: {windows:?}");
     assert_eq!(windows[0].drive, Some(2000 * 512));
     assert_eq!(windows[0].daemon, Some(8192), "the daemon's own writes");
+}
+
+#[test]
+fn docker_s_root_in_a_file_counts_the_loop_device_s_line_and_reads_the_drive_under_its_backing_file()
+ {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    // An ext4 file system in /var/lib/runnerd/docker.img on the btrfs root, on loop0, mounted at Docker's root.
+    let lo = paths.sys.join("devices/virtual/block/loop0");
+    std::fs::create_dir_all(lo.join("loop")).unwrap();
+    std::fs::write(lo.join("dev"), "7:0\n").unwrap();
+    std::fs::write(
+        lo.join("loop/backing_file"),
+        "/var/lib/runnerd/docker.img\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&lo, paths.sys.join("class/block/loop0")).unwrap();
+    std::os::unix::fs::symlink(&lo, paths.sys.join("dev/block/7:0")).unwrap();
+    let mountinfo = paths.proc.join("self/mountinfo");
+    let mut mounts = std::fs::read_to_string(&mountinfo).unwrap();
+    mounts.push_str("50 40 7:0 / /var/lib/docker rw,relatime shared:9 - ext4 /dev/loop0 rw\n");
+    std::fs::write(&mountinfo, mounts).unwrap();
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    assert_eq!(disks.name(), "nvme9n1", "the drive is the backing file's");
+    assert_eq!(disks.store().as_deref(), Some("loop0"));
+    // The container's line for the loop device is what it wrote to the store; the drive's line, charged to it only
+    // some of the time, is not counted beside it.
+    let cgroup = dir.0.join("cgroup-a");
+    std::fs::create_dir_all(&cgroup).unwrap();
+    std::fs::write(
+        cgroup.join("io.stat"),
+        "7:0 rbytes=0 wbytes=8192 rios=0 wios=2 dbytes=0 dios=0\n\
+         259:5 rbytes=0 wbytes=4096 rios=0 wios=1 dbytes=0 dios=0\n",
+    )
+    .unwrap();
+    assert_eq!(
+        disks.written(&cgroup),
+        Some(Written {
+            bytes: 8192,
+            ios: 2
+        })
+    );
+    // The drive and the commits are the physical disk's and its btrfs's.
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    drive(&paths, 1400, 13);
+    let window = windows.add(disks.read(&paths, &slice, 600_000)).unwrap();
+    assert_eq!(window.drive, Some(400 * 512));
+    assert_eq!(window.commits, Some(3));
+    assert_eq!(window.store.as_deref(), Some("loop0"));
+    // A backing file deleted while attached keeps its path, marked.
+    std::fs::write(
+        lo.join("loop/backing_file"),
+        "/var/lib/runnerd/docker.img (deleted)\n",
+    )
+    .unwrap();
+    assert_eq!(
+        Disks::resolve(&paths, Path::new("/var/lib/docker")),
+        Some(disks)
+    );
 }

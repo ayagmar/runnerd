@@ -370,3 +370,94 @@ async fn exec(
     };
     run.await.map_err(|e| e.to_string())
 }
+
+/// Docker's root can't be moved for a test, so this reads a volume on a loop device the way the sampler reads a
+/// loop-backed root: `RUNNERD_TEST_LOOP_MOUNT` is the mount point of a file system on a loop device, as
+/// `udisksctl loop-setup` and `udisksctl mount` make without root. A container in `runnerdtest.slice` writes 128 MiB
+/// to it; its figure must be the loop device's `io.stat` line alone, and the drive the backing file's disk.
+#[test]
+#[ignore = "needs Docker and a file system on a loop device in RUNNERD_TEST_LOOP_MOUNT"]
+fn a_container_writing_to_a_file_system_in_a_file_is_charged_the_loop_device_s_line() {
+    let mount =
+        PathBuf::from(std::env::var("RUNNERD_TEST_LOOP_MOUNT").expect("RUNNERD_TEST_LOOP_MOUNT"));
+    let paths = Paths::default();
+    let disks = Disks::resolve(&paths, &mount).expect("the disks under the mount");
+    let store = disks.store().expect("the mount is on a loop device");
+    println!(
+        "{} is on {store}, a file on {}",
+        mount.display(),
+        disks.name()
+    );
+    let name = format!("runnerd-test-disk-loop-{}", std::process::id());
+    let run = std::process::Command::new("docker")
+        .args(["run", "-d", "--cgroup-parent", SLICE, "--name", &name, "-v"])
+        .arg(format!("{}:/data", mount.display()))
+        .args([
+            "alpine:3.22",
+            "sh",
+            "-c",
+            "sleep 3; dd if=/dev/urandom of=/data/written bs=1M count=128 conv=fsync status=none; \
+             rm /data/written; touch /data/done; sleep 600",
+        ])
+        .output()
+        .expect("docker run");
+    let id = String::from_utf8_lossy(&run.stdout).trim().to_owned();
+    assert!(
+        run.status.success(),
+        "docker run: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let result = std::panic::catch_unwind(|| {
+        let cgroup = paths.container(SLICE, &id);
+        let slice = paths.slice(SLICE);
+        let mut windows = runnerd_core::observe::disk::Windows::default();
+        std::thread::sleep(Duration::from_secs(1));
+        let before = disks.written(&cgroup).expect("the container's io.stat");
+        let drive_before = drive(&paths, &disks);
+        windows.add(disks.read(&paths, &slice, now_ms()));
+        for _ in 0..120 {
+            if mount.join("done").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        assert!(
+            mount.join("done").exists(),
+            "the container wrote within a minute"
+        );
+        let after = disks.written(&cgroup).expect("the container's io.stat");
+        let window = windows
+            .add(disks.read(&paths, &slice, now_ms()))
+            .or_else(|| windows.close())
+            .expect("a window");
+        let drive_after = drive(&paths, &disks);
+        let stat = std::fs::read_to_string(cgroup.join("io.stat")).unwrap_or_default();
+        println!("io.stat by hand: {}", stat.trim().replace('\n', " | "));
+        println!(
+            "figure: {} bytes in {} writes (from {} at the start)",
+            after.bytes - before.bytes,
+            after.ios - before.ios,
+            before.bytes
+        );
+        println!(
+            "drive {} by hand: {} bytes; window: drive {:?}, store {:?}, commits {:?}",
+            disks.name(),
+            drive_after - drive_before,
+            window.drive,
+            window.store,
+            window.commits
+        );
+        assert!(
+            after.bytes - before.bytes >= 128 * MIB,
+            "the loop device's line has the 128 MiB"
+        );
+        assert_eq!(window.store.as_deref(), Some(store.as_str()));
+    });
+    let _ = std::fs::remove_file(mount.join("done"));
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f", &name])
+        .output();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

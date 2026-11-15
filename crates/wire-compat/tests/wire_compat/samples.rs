@@ -1416,6 +1416,7 @@ fn disk_writes() -> DiskWrites {
                 count: 49_500,
                 watched: 23_760,
             }),
+            store: Some("loop0".to_owned()),
         }),
     }
 }

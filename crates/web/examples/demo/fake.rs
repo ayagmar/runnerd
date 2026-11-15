@@ -1114,6 +1114,7 @@ fn disk_writes() -> DiskWrites {
                 count: 3_110_000,
                 watched: 13 * 86_400 + 20 * 3600,
             }),
+            store: None,
         }),
     }
 }
