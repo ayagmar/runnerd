@@ -63,7 +63,7 @@ disk writes:
     halyard/ledger images / image-app: 13G over 5 jobs, 2.6G a job
 ```
 
-- A job's figure is its runner container's cgroup `io.stat`, which counts what its Docker Engine and that engine's containers write too. It starts at the last reading before the job, so a warm runner's start is not the job's, and ends at the container's last reading, at most 2 s before it ended. A job is partial when its end, or its start, was not read, or its container was started again; a host without the io controller has no figure.
+- A job's figure is its runner container's cgroup `io.stat`, which counts what its Docker Engine and that engine's containers write too. It starts at the last reading before the job, so a warm runner's start is not the job's, and ends at the container's last reading, at most 4 s before it ended. A job is partial when its end, or its start, was not read, or its container was started again; a host without the io controller has no figure.
 - Only the disks under Docker's root count: a partition counts as its whole disk; swap on zram does not count.
 - Pages still in memory when a container ends are written after it, to the runner slice's account, as is what seeds and the mirror write.
 - No owner: the disk's writes outside the runner slice, from the system, other programs, runnerd's history and build cache, and the file system's own work. btrfs commits appear only on btrfs.

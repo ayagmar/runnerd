@@ -296,9 +296,14 @@ pub(super) fn disk_written(
         )
         .optional()?;
     let mut complete = true;
+    // What the counters read before, for a fall: the baseline sample's, until the job's first.
+    let mut previous = None;
     let mut base = match before {
         None => Some((0, 0)),
-        Some((Some(bytes), Some(ios))) => Some((bytes, ios)),
+        Some((Some(bytes), Some(ios))) => {
+            previous = Some((bytes, ios));
+            Some((bytes, ios))
+        }
         Some(_) => {
             complete = false;
             None
@@ -315,7 +320,9 @@ pub(super) fn disk_written(
         let (at, bytes, ios, dirty): (u64, u64, u64, Option<u64>) =
             (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
         let start = *base.get_or_insert((bytes, ios));
-        if let Some((_, last_bytes, last_ios, _)) = last
+        // The container started again since the last read: its counters did too. What it wrote between that read
+        // and the restart is lost.
+        if let Some((last_bytes, last_ios)) = previous
             && (bytes < last_bytes || ios < last_ios)
         {
             total.0 = total.0.saturating_add(last_bytes.saturating_sub(start.0));
@@ -323,6 +330,7 @@ pub(super) fn disk_written(
             base = Some((0, 0));
             complete = false;
         }
+        previous = Some((bytes, ios));
         last = Some((at, bytes, ios, dirty));
     }
     let Some((at, bytes, ios, dirty)) = last else {
@@ -339,7 +347,10 @@ pub(super) fn disk_written(
         )
         .optional()?
         .flatten();
-    let ended = gone.is_some_and(|gone| gone >= at);
+    // Read to its end: the cgroup was first found gone after the last sample, and within two samples of it, so the
+    // container ran at most that long unread.
+    let gap = 2 * api::SAMPLE_INTERVAL * 1000;
+    let ended = gone.is_some_and(|gone| gone >= at && gone - at <= gap);
     Ok(Some(api::DiskWritten {
         bytes: total.0,
         ios: total.1,

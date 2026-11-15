@@ -282,3 +282,66 @@ async fn insights_read_the_drive_s_windows_and_pruning_drops_them_with_job_recor
         [window(1_600_000, None)]
     );
 }
+
+#[tokio::test]
+async fn a_last_sample_long_before_the_cgroup_went_leaves_the_figure_partial() {
+    let dir = TestDir::new("disk");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    started(&store);
+    // Restarted mid-job, the container's network could no longer be read: no sample for a minute before its end.
+    store.samples(vec![
+        sample("r1", 1_000_100, Some(0)),
+        sample("r1", 1_000_300, Some(40 * MIB)),
+    ]);
+    store.containers_ended(vec!["r1".to_owned()], 1_060_000);
+    store.lost(1, 1_060_100);
+    let done = written(&store).await.unwrap();
+    assert_eq!(done.bytes, 40 * MIB);
+    assert_eq!(
+        done.measure,
+        Measure::Partial,
+        "the minute before the end was not read"
+    );
+}
+
+#[tokio::test]
+async fn a_container_seen_to_go_and_sampled_again_is_partial() {
+    let dir = TestDir::new("disk");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    started(&store);
+    // `docker restart`: the cgroup went, and its new counters had passed the old ones by the next read.
+    store.samples(vec![
+        sample("r1", 1_000_100, Some(0)),
+        sample("r1", 1_000_300, Some(10 * MIB)),
+    ]);
+    store.containers_ended(vec!["r1".to_owned()], 1_000_302);
+    store.samples(vec![
+        sample("r1", 1_000_500, Some(30 * MIB)),
+        sample("r1", 1_000_700, Some(50 * MIB)),
+    ]);
+    store.containers_ended(vec!["r1".to_owned()], 1_000_702);
+    store.lost(1, 1_000_800);
+    assert_eq!(
+        written(&store).await.unwrap().measure,
+        Measure::Partial,
+        "what it wrote across the restart was not all read"
+    );
+}
+
+#[tokio::test]
+async fn a_counter_that_fell_before_the_job_s_first_sample_counts_from_zero_and_is_partial() {
+    let dir = TestDir::new("disk");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    started(&store);
+    // The warm runner had written 100M; started again around the job's start, its counters read 5M next.
+    store.samples(vec![
+        sample("r1", 1_000_100, Some(100 * MIB)),
+        sample("r1", 1_000_300, Some(5 * MIB)),
+        sample("r1", 1_000_500, Some(25 * MIB)),
+    ]);
+    store.containers_ended(vec!["r1".to_owned()], 1_000_502);
+    store.lost(1, 1_000_600);
+    let done = written(&store).await.unwrap();
+    assert_eq!(done.bytes, 25 * MIB);
+    assert_eq!(done.measure, Measure::Partial);
+}

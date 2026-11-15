@@ -170,7 +170,7 @@ impl Writer<'_> {
                 self.change("record runners' cgroups gone", |_| {
                     for runner in &runners {
                         self.db.execute(
-                            "UPDATE runners SET cgroup_gone_at = ?2 WHERE name = ?1",
+                            "UPDATE runners SET cgroup_gone_at = coalesce(cgroup_gone_at, ?2) WHERE name = ?1",
                             params![runner, at],
                         )?;
                         self.disk_again(runner)?;

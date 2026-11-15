@@ -117,8 +117,8 @@ CREATE TABLE runners (
     -- When a forced pause that cancelled its run removes it if it still runs, in ms since the epoch; NULL for one no
     -- forced pause cancelled, and in rows from before schema 21.
     cancel_by INTEGER,
-    -- When the sampler found its container's cgroup gone, one sample after it last read it (ADR 0143): its last
-    -- sample is within a sample of its end. NULL while it was not seen to go, and in rows from before schema 24.
+    -- When the sampler first found its container's cgroup gone (ADR 0143); a later sample means the container ran
+    -- again. NULL while it was not seen to go, and in rows from before schema 24.
     cgroup_gone_at INTEGER
 );
 

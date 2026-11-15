@@ -28,13 +28,15 @@ Docker Engine inside it puts its containers and BuildKit's in cgroups below the 
   sample. The counters are the cgroup's own, so a daemon that stops and starts again mid-job loses nothing and counts
   nothing twice; a warm runner's writes before its job are not the job's. Without a sample before the start, the
   figure counts from the container's start.
-- It is `complete` when that baseline was read, the counters never fell, and the sampler found the cgroup gone one
-  pass after it last read it (`runners.cgroup_gone_at`): the last sample is within 2 seconds of the end. The sampler
-  finds that whether or not the engine still tracks the runner, since the engine lets go of it as soon as Docker says
-  it stopped. A job closed before that pass gets its figure again when it comes. Anything else is `partial`, a floor:
-  an end while no daemon ran, a counter that fell because the container was started again (each run of the counter
-  is added), or a baseline sample taken before the disks were known. A host without the io controller, cgroup v1 or
-  a sysfs runnerd cannot read has no figure at all, never 0.
+- It is `complete` when that baseline was read, the counters never fell, from the baseline on, and the sampler first
+  found the cgroup gone after the last sample and within two samples (4 seconds) of it (`runners.cgroup_gone_at`,
+  which keeps the first time): the container ran at most that long unread. The sampler finds that whether or not the
+  engine still tracks the runner, since the engine lets go of it as soon as Docker says it stopped. A job closed
+  before that pass gets its figure again when it comes. Anything else is `partial`, a floor: an end while no daemon
+  ran, a pass that stalled or a container no sample read for a while, a counter that fell because the container was
+  started again (each run of the counter is added; a restart whose new counters passed the old ones by the next read
+  shows as a sample after the cgroup was first found gone), or a baseline sample taken before the disks were known.
+  A host without the io controller, cgroup v1 or a sysfs runnerd cannot read has no figure at all, never 0.
 - The pages still dirty at the last sample are kept beside the figure: written after the container ends, unless
   deleted first, to the runner slice's account.
 - The sampler also reads, each pass, the disks' sectors written (`/sys/class/block/<disk>/stat`), the runner slice's
