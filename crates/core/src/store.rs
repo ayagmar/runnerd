@@ -99,7 +99,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
          ALTER TABLE samples ADD COLUMN write_ios INTEGER;\n\
          ALTER TABLE samples ADD COLUMN dirty INTEGER;\n\
          CREATE TABLE disk_windows (start INTEGER PRIMARY KEY NOT NULL, end_at INTEGER NOT NULL, \
-         device TEXT NOT NULL, drive INTEGER, slice INTEGER, commits INTEGER) WITHOUT ROWID;",
+         device TEXT NOT NULL, drive INTEGER, slice INTEGER, commits INTEGER) WITHOUT ROWID;\n\
+         CREATE INDEX jobs_by_runner ON jobs (runner);",
     ),
 ];
 

@@ -69,6 +69,7 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
 CREATE INDEX jobs_by_queued_at ON jobs (queued_at);
+CREATE INDEX jobs_by_runner ON jobs (runner);
 
 -- One row per runner container this daemon started.
 CREATE TABLE runners (
