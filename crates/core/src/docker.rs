@@ -74,7 +74,8 @@ pub const SKIP_SYNCS_LABEL: &str = "runnerd.skip-syncs";
 
 /// The label of a runner image whose entrypoint, asked `SKIP_SYNCS`, also mounts the slot's layers `volatile`, so
 /// unmounting them syncs nothing (ADR 0142): `1`. The crash guard is the same as for the sync calls, so runnerd asks
-/// by `SKIP_SYNCS_LABEL` alone; this one tells doctor what such a runner skips.
+/// by `SKIP_SYNCS_LABEL` alone; this one tells doctor what such a runner skips. Any value reads as volatile layers: a
+/// later version of the label still says the image has them.
 pub const VOLATILE_LAYERS_LABEL: &str = "runnerd.volatile-layers";
 
 /// Whether an image's labels say it answers `SKIP_SYNCS`.
@@ -92,10 +93,7 @@ pub fn image_syncs<S: std::hash::BuildHasher>(
     use crate::config::ImageSyncs;
     if !skips_syncs(labels) {
         ImageSyncs::Syncs
-    } else if labels
-        .get(VOLATILE_LAYERS_LABEL)
-        .is_some_and(|version| version == "1")
-    {
+    } else if labels.contains_key(VOLATILE_LAYERS_LABEL) {
         ImageSyncs::Skips
     } else {
         ImageSyncs::SkipsCalls

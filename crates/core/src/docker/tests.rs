@@ -2,11 +2,11 @@
 //! hosts are accepted, and which container a failed start says it left. No Docker needed: a fake Engine answers on a
 //! Unix socket.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{
-    DockerApi, Error, FILES_LIMIT, JitConfig, RunnerSpec, connect_to, create_body, files_in,
-    is_being_removed, is_log_gone, is_not_running,
+    DockerApi, Error, FILES_LIMIT, JitConfig, RunnerSpec, SKIP_SYNCS_LABEL, VOLATILE_LAYERS_LABEL,
+    connect_to, create_body, files_in, image_syncs, is_being_removed, is_log_gone, is_not_running,
 };
 use crate::isolation::Sysbox;
 
@@ -397,4 +397,40 @@ fn only_an_exec_into_a_stopped_container_reads_as_not_running() {
         500,
         "container f7f5b92ece29 is not running"
     )));
+}
+
+#[test]
+fn an_images_labels_say_what_its_runners_skip_when_asked() {
+    use crate::config::ImageSyncs;
+    let labels = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    };
+    for (pairs, wanted, why) in [
+        (&[][..], ImageSyncs::Syncs, "an image before the filter"),
+        (
+            &[(SKIP_SYNCS_LABEL, "1")][..],
+            ImageSyncs::SkipsCalls,
+            "the filter alone, as the 0.1.2 images",
+        ),
+        (
+            &[(SKIP_SYNCS_LABEL, "1"), (VOLATILE_LAYERS_LABEL, "1")][..],
+            ImageSyncs::Skips,
+            "the filter and volatile layers",
+        ),
+        (
+            &[(SKIP_SYNCS_LABEL, "1"), (VOLATILE_LAYERS_LABEL, "2")][..],
+            ImageSyncs::Skips,
+            "a later version of the volatile layers' label still has them",
+        ),
+        (
+            &[(SKIP_SYNCS_LABEL, "2"), (VOLATILE_LAYERS_LABEL, "1")][..],
+            ImageSyncs::Syncs,
+            "a version of the variable runnerd does not know: never asked",
+        ),
+    ] {
+        assert_eq!(image_syncs(&labels(pairs)), wanted, "{why}");
+    }
 }
