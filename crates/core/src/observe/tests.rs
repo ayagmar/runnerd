@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::capture::{Captured, MAX_LINE, Parser, worker_job, worker_run};
-use super::disk::{Disks, Window, Windows, Written};
+use super::disk::{self, Disks, Window, Windows, Written};
 use super::metrics::{CpuHeld, Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
 use super::mirror::{self, Leases};
 use crate::api;
@@ -1193,5 +1193,116 @@ fn docker_s_root_in_a_file_counts_the_loop_device_s_line_and_reads_the_drive_und
     assert_eq!(
         Disks::resolve(&paths, Path::new("/var/lib/docker")),
         Some(disks)
+    );
+}
+
+/// Adds loop device `n` with its backing file at `backing`, an ext4 on it mounted at `point`.
+fn loop_device(paths: &Paths, n: u32, backing: &str, point: &str) {
+    let lo = paths.sys.join(format!("devices/virtual/block/loop{n}"));
+    std::fs::create_dir_all(lo.join("loop")).unwrap();
+    std::fs::write(lo.join("dev"), format!("7:{n}\n")).unwrap();
+    std::fs::write(lo.join("loop/backing_file"), format!("{backing}\n")).unwrap();
+    std::os::unix::fs::symlink(&lo, paths.sys.join(format!("class/block/loop{n}"))).unwrap();
+    std::os::unix::fs::symlink(&lo, paths.sys.join(format!("dev/block/7:{n}"))).unwrap();
+    let mountinfo = paths.proc.join("self/mountinfo");
+    let mut mounts = std::fs::read_to_string(&mountinfo).unwrap();
+    mounts += &[
+        (60 + n).to_string(),
+        format!("40 7:{n} / {point} rw,relatime - ext4 /dev/loop{n} rw\n"),
+    ]
+    .join(" ");
+    std::fs::write(&mountinfo, mounts).unwrap();
+}
+
+/// `statfs`'s free space by mount point, as the test sets it; any other path can't be measured.
+fn statfs(free: &[(&str, u64)]) -> impl Fn(&Path) -> std::io::Result<u64> {
+    let free: Vec<(std::path::PathBuf, u64)> = free
+        .iter()
+        .map(|(path, bytes)| (std::path::PathBuf::from(path), *bytes))
+        .collect();
+    move |path: &Path| {
+        free.iter()
+            .find(|(point, _)| point == path)
+            .map(|(_, bytes)| *bytes)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    }
+}
+
+const GIB: u64 = 1 << 30;
+
+#[test]
+fn docker_s_free_disk_on_a_plain_root_is_its_own_file_system_s() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let root = Path::new("/var/lib/docker");
+    let free = statfs(&[("/var/lib/docker", 100 * GIB), ("/", 30 * GIB)]);
+    assert_eq!(disk::free_space(&paths, root, &free).unwrap(), 100 * GIB);
+    assert!(
+        disk::free_space(&paths, root, statfs(&[])).is_err(),
+        "a root that can't be measured is an error, as before"
+    );
+}
+
+#[test]
+fn docker_s_free_disk_in_a_file_is_the_least_of_its_own_and_the_file_system_under_the_file() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    loop_device(&paths, 0, "/var/lib/runnerd/docker.img", "/var/lib/docker");
+    let root = Path::new("/var/lib/docker");
+    // A 560G sparse file with 100G free inside, on a btrfs with room for more: the ext4's own figure.
+    let roomy = statfs(&[("/var/lib/docker", 100 * GIB), ("/", 300 * GIB)]);
+    assert_eq!(disk::free_space(&paths, root, &roomy).unwrap(), 100 * GIB);
+    // The btrfs under it has less: the file can grow only that far.
+    let tight = statfs(&[("/var/lib/docker", 100 * GIB), ("/", 40 * GIB)]);
+    assert_eq!(disk::free_space(&paths, root, &tight).unwrap(), 40 * GIB);
+    // The file under the mount point can't be searched, the mount point can: the figure is the mount point's.
+    // Deleted while attached, the file keeps its blocks on the same file system.
+    std::fs::write(
+        paths
+            .sys
+            .join("devices/virtual/block/loop0/loop/backing_file"),
+        "/var/lib/runnerd/docker.img (deleted)\n",
+    )
+    .unwrap();
+    assert_eq!(disk::free_space(&paths, root, &tight).unwrap(), 40 * GIB);
+    // The side under the file can't be measured: the root's own figure, never 0.
+    let unread = statfs(&[("/var/lib/docker", 100 * GIB)]);
+    assert_eq!(disk::free_space(&paths, root, &unread).unwrap(), 100 * GIB);
+    std::fs::remove_file(
+        paths
+            .sys
+            .join("devices/virtual/block/loop0/loop/backing_file"),
+    )
+    .unwrap();
+    assert_eq!(
+        disk::free_space(&paths, root, &tight).unwrap(),
+        100 * GIB,
+        "a loop device whose backing file can't be read: the root's own"
+    );
+    std::fs::remove_file(paths.proc.join("self/mountinfo")).unwrap();
+    assert_eq!(disk::free_space(&paths, root, &tight).unwrap(), 100 * GIB);
+}
+
+#[test]
+fn docker_s_free_disk_in_a_file_in_a_file_is_the_least_down_to_the_disk() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    loop_device(&paths, 1, "/data/outer.img", "/srv/outer");
+    loop_device(&paths, 0, "/srv/outer/docker.img", "/var/lib/docker");
+    let root = Path::new("/var/lib/docker");
+    let free = statfs(&[
+        ("/var/lib/docker", 100 * GIB),
+        ("/srv/outer", 60 * GIB),
+        ("/", 30 * GIB),
+    ]);
+    assert_eq!(disk::free_space(&paths, root, &free).unwrap(), 30 * GIB);
+    let middle = statfs(&[("/var/lib/docker", 100 * GIB), ("/srv/outer", 60 * GIB)]);
+    assert_eq!(
+        disk::free_space(&paths, root, &middle).unwrap(),
+        60 * GIB,
+        "the disk at the bottom unmeasured: the least of those measured"
     );
 }

@@ -1,7 +1,8 @@
 //! What the disk under Docker's root writes: which block devices hold that root (`Disks::resolve`, from
 //! `/proc/self/mountinfo` and sysfs), the bytes a cgroup wrote to them (`io.stat`), and over windows of
 //! `WINDOW` the bytes the drive wrote (`/sys/class/block/<disk>/stat`), the bytes the runners' slice wrote and the
-//! btrfs commits of the file system (`/sys/fs/btrfs/<uuid>/commit_stats`). A figure the host does not give, as on
+//! btrfs commits of the file system (`/sys/fs/btrfs/<uuid>/commit_stats`); and the free disk Docker has
+//! (`free_space`), down through a loop device's backing file. A figure the host does not give, as on
 //! cgroup v1, a kernel without the io controller, a file system other than btrfs or an unreadable sysfs, is absent,
 //! never 0. Reads files only; it writes nothing to the host and decides nothing.
 //!
@@ -57,42 +58,14 @@ impl Disks {
     }
 
     fn under(paths: &Paths, mountinfo: &str, path: &Path, depth: u8) -> Option<Disks> {
-        let mount = mountinfo
-            .lines()
-            .filter_map(Mount::parse)
-            .filter(|mount| path.starts_with(&mount.point))
-            .max_by_key(|mount| mount.point.components().count())?;
-        let class = paths.sys.join("class/block");
-        let mut btrfs = (mount.kind == "btrfs")
-            .then(|| btrfs_uuid(paths, &mount.source))
-            .flatten();
-        let names: Vec<String> = if let Some(uuid) = &btrfs {
-            std::fs::read_dir(paths.sys.join("fs/btrfs").join(uuid).join("devices"))
-                .ok()?
-                .flatten()
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .collect()
-        } else {
-            let link = paths.sys.join("dev/block").join(&mount.device);
-            vec![file_name(&std::fs::canonicalize(link).ok()?)?]
-        };
+        let held = Held::find(paths, mountinfo, path)?;
+        let mut btrfs = held.btrfs;
         let mut charged = BTreeSet::new();
         let mut drive = BTreeSet::new();
-        for name in names {
-            let dir = class.join(&name);
-            // A partition's directory sits in its disk's: the disk is what `io.stat` and the drive's `stat` count.
-            let disk = if dir.join("partition").is_file() {
-                std::fs::canonicalize(&dir).ok()?.parent()?.to_path_buf()
-            } else {
-                std::fs::canonicalize(&dir).ok()?
-            };
+        for disk in held.disks {
             let device = Device::read(&disk)?;
-            if let Ok(backing) = std::fs::read_to_string(disk.join("loop/backing_file")) {
-                // A deleted backing file keeps its path, marked; the mount that held it still tells the drive.
-                let backing = backing.trim_end();
-                let backing = backing.strip_suffix(" (deleted)").unwrap_or(backing);
-                let under =
-                    Disks::under(paths, mountinfo, Path::new(backing), depth.checked_sub(1)?)?;
+            if let Some(backing) = backing_file(&disk) {
+                let under = Disks::under(paths, mountinfo, &backing, depth.checked_sub(1)?)?;
                 drive.extend(under.drive);
                 btrfs = under.btrfs;
             } else {
@@ -118,8 +91,9 @@ impl Disks {
     }
 
     /// The bytes and write requests a cgroup and its descendants have sent the disks so far (`io.stat` `wbytes`,
-    /// `wios`), or the loop devices when the root is in a file: what they wrote to its file system. `None` when the cgroup has no `io.stat`, as without the io controller or once it is gone; a disk
-    /// without a line in it has had none of the cgroup's I/O yet, which is 0.
+    /// `wios`), or the loop devices when the root is in a file: what they wrote to its file system. `None` when the
+    /// cgroup has no `io.stat`, as without the io controller or once it is gone; a disk without a line in it has had
+    /// none of the cgroup's I/O yet, which is 0.
     pub fn written(&self, cgroup: &Path) -> Option<Written> {
         let stat = std::fs::read_to_string(cgroup.join("io.stat")).ok()?;
         let mut written = Written::default();
@@ -215,6 +189,15 @@ struct Mount {
 }
 
 impl Mount {
+    /// The mount in `mountinfo` that holds `path`: the deepest whose point it is under.
+    fn holding(mountinfo: &str, path: &Path) -> Option<Mount> {
+        mountinfo
+            .lines()
+            .filter_map(Mount::parse)
+            .filter(|mount| path.starts_with(&mount.point))
+            .max_by_key(|mount| mount.point.components().count())
+    }
+
     fn parse(line: &str) -> Option<Mount> {
         let (front, back) = line.split_once(" - ")?;
         let mut front = front.split(' ');
@@ -249,6 +232,100 @@ fn unescape(field: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The file system that holds a path: its btrfs UUID when it is btrfs, and the sysfs directories of the whole disks
+/// under it.
+struct Held {
+    btrfs: Option<String>,
+    disks: Vec<PathBuf>,
+}
+
+impl Held {
+    /// What holds `path`, from `mountinfo` and sysfs; `None` when the mount or a device can't be read.
+    fn find(paths: &Paths, mountinfo: &str, path: &Path) -> Option<Held> {
+        let mount = Mount::holding(mountinfo, path)?;
+        let class = paths.sys.join("class/block");
+        let btrfs = (mount.kind == "btrfs")
+            .then(|| btrfs_uuid(paths, &mount.source))
+            .flatten();
+        let names: Vec<String> = if let Some(uuid) = &btrfs {
+            std::fs::read_dir(paths.sys.join("fs/btrfs").join(uuid).join("devices"))
+                .ok()?
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect()
+        } else {
+            let link = paths.sys.join("dev/block").join(&mount.device);
+            vec![file_name(&std::fs::canonicalize(link).ok()?)?]
+        };
+        let mut disks = Vec::new();
+        for name in names {
+            let dir = class.join(&name);
+            // A partition's directory sits in its disk's: the disk is what `io.stat` and the drive's `stat` count.
+            disks.push(if dir.join("partition").is_file() {
+                std::fs::canonicalize(&dir).ok()?.parent()?.to_path_buf()
+            } else {
+                std::fs::canonicalize(&dir).ok()?
+            });
+        }
+        Some(Held { btrfs, disks })
+    }
+}
+
+/// The file a loop device whose sysfs directory is `disk` reads and writes; `None` for another device. A deleted
+/// backing file keeps its path, marked; the mount that held it still holds its blocks.
+fn backing_file(disk: &Path) -> Option<PathBuf> {
+    let backing = std::fs::read_to_string(disk.join("loop/backing_file")).ok()?;
+    let backing = backing.trim_end();
+    Some(PathBuf::from(
+        backing.strip_suffix(" (deleted)").unwrap_or(backing),
+    ))
+}
+
+/// The bytes Docker can still write under `root`, its root directory (ADR 0054): `statfs`'s free space for an
+/// unprivileged user, `free`, on the file system that holds it. When that file system is in a file, on a loop device,
+/// the file can grow only while the file system under it has room too, so it is the least of the free space of each
+/// file system down to the disk, nested loops included. A file system under it that can't be found or measured
+/// leaves the figure of those above it, never 0. `free` is the one boundary to the host, so tests give their own.
+///
+/// # Errors
+///
+/// `free`'s error for `root` itself.
+pub fn free_space(
+    paths: &Paths,
+    root: &Path,
+    free: impl Fn(&Path) -> std::io::Result<u64>,
+) -> std::io::Result<u64> {
+    let own = free(root)?;
+    let under = std::fs::read_to_string(paths.proc.join("self/mountinfo"))
+        .ok()
+        .and_then(|mountinfo| free_under(paths, &mountinfo, root, &free, LOOP_DEPTH));
+    Ok(under.map_or(own, |under| own.min(under)))
+}
+
+/// The least free space of the file systems that hold the backing files of the loop devices `path`'s file system is
+/// on, and of those under them; `None` when it is on no loop device or none of them could be measured.
+fn free_under(
+    paths: &Paths,
+    mountinfo: &str,
+    path: &Path,
+    free: &impl Fn(&Path) -> std::io::Result<u64>,
+    depth: u8,
+) -> Option<u64> {
+    let depth = depth.checked_sub(1)?;
+    let held = Held::find(paths, mountinfo, path)?;
+    held.disks
+        .iter()
+        .filter_map(|disk| backing_file(disk))
+        .filter_map(|backing| {
+            // The mount point, not the file: runnerd may not be allowed to search the directories above the file.
+            let point = Mount::holding(mountinfo, &backing)?.point;
+            let own = free(&point).ok();
+            let under = free_under(paths, mountinfo, &backing, free, depth);
+            own.into_iter().chain(under).min()
+        })
+        .min()
 }
 
 impl Device {

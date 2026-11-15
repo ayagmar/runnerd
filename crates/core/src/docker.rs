@@ -443,7 +443,8 @@ pub trait DockerApi: Send + Sync {
     fn container_images(&self) -> impl Future<Output = Result<BTreeSet<String>, Error>> + Send;
     /// Removes an image and the layers only it used; one that does not exist is not an error.
     fn remove_image(&self, reference: &str) -> impl Future<Output = Result<(), Error>> + Send;
-    /// The free disk where Docker keeps its images and containers.
+    /// The free disk where Docker keeps its images and containers: on a root in a file, on a loop device, the least
+    /// of its own and the free disk under the file (`observe::disk::free_space`).
     fn free_space(&self) -> impl Future<Output = Result<u64, Error>> + Send;
     /// Where Docker keeps its images, containers and volumes (`DockerRootDir`), whose disks runners write to.
     fn root_dir(&self) -> impl Future<Output = Result<String, Error>> + Send;
@@ -1001,10 +1002,16 @@ impl DockerApi for Docker {
     async fn free_space(&self) -> Result<u64, Error> {
         let root = self.api.info().await?.docker_root_dir.unwrap_or_default();
         // Only the directories above Docker's root need to be searchable: the daemon's user cannot read the root.
-        let stat = rustix::fs::statvfs(root.as_str()).map_err(|error| Error::IOError {
-            err: std::io::Error::other(format!("cannot measure the disk of {root}: {error}")),
-        })?;
-        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        let statfs = |path: &std::path::Path| {
+            let stat = rustix::fs::statvfs(path).map_err(std::io::Error::from)?;
+            Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        };
+        let paths = crate::observe::metrics::Paths::default();
+        crate::observe::disk::free_space(&paths, std::path::Path::new(&root), statfs).map_err(
+            |error| Error::IOError {
+                err: std::io::Error::other(format!("cannot measure the disk of {root}: {error}")),
+            },
+        )
     }
 
     async fn shell(
