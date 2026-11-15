@@ -77,6 +77,14 @@ neither: one ended on a GPU fault, one stopped mid-session, and one died during 
 Docker's overlays. A daemon that took its own stop signal as an orderly shutdown would have kept the caches after that
 last one.
 
+This rests on one assumption: no runner process is alive when `systemd-shutdown` starts. It holds where Docker's
+cgroup driver is `systemd`, so each container is a systemd scope that systemd stops with the other units, and
+`live-restore` cannot keep one past that; the owner's host is set up so. It does not hold with the `cgroupfs` driver
+and `live-restore` on, or after `systemctl poweroff --force`, which skips stopping units: runner processes then live
+on past the sync the two lines vouch for, until `systemd-shutdown` kills them. systemd 262's `shutdown.c` syncs a
+second time after that, once the unmounts are done and just before `reboot()`, so even there the data is lost only if
+the host also dies between the two syncs, such as a hung unmount ended with the power button.
+
 So the engine notes, before a runner that skips its syncs starts, the boot it starts in, and forgets it once what
 runners wrote is on disk (`scheduler::engine::unsynced`, kept in `unsynced` beside the job history):
 
