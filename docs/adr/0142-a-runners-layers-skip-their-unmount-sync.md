@@ -34,7 +34,9 @@ leaves the call to the user: removing it is right when the system has not crashe
   a raised count or a profile added back would mount, and a reseed copy, as they are. So a runner finding the
   directory is on a volume whose last mount ended in an orderly unmount, a killed container's included, in this boot
   or one that synced. A volume of a prefix that starts with runnerd's, as the tests' `runnerd-test-…` do, is emptied
-  too.
+  too, unless a running container mounts it: a slot's volume the config does not have that a running container
+  mounts belongs to another daemon, or the owner, and that container started in this boot, so the guard leaves it
+  and logs it, counts no refusal for it, starts none of its layers over and starts runners beside it.
 - A slot's volume the guard cannot remove, as another container holds it, is ADR 0141's exception: after 5 tries
   runners start on what the caches hold. A volatile layer makes what such a volume holds worse than ADR 0141 weighed:
   overlayfs also skips its copy-up sync, so a file a job only touched can come back empty in the upper and hide the
@@ -48,7 +50,10 @@ leaves the call to the user: removing it is right when the system has not crashe
   runner, and adds no state: `Torn` lasts until the layers are gone, where the reseed marker would need a second
   value that survives restarts, owned beside the `unsynced` one, and a seed run, which needs the profile's slots
   idle and its image. The slot's Docker store stays as ADR 0141 left it: `start_docker` empties a store dockerd does
-  not start on.
+  not start on. While the caches stay torn, every queued job a pool serves says so (`api::Waiting::Torn`): it
+  names the volumes a container held at the last try and the `docker volume rm` that clears them, as the log does, so
+  a start-over that keeps failing, its image missing or its container refused, shows in `status`, the TUI and the
+  dashboard, not only in the log.
 - A kernel or file system that refuses `volatile` gets the plain mount, and the container's output says which layer
   and why. Only an error from the mount itself counts; the plain mount that follows fails the start as before.
 - The slot's Docker Engine and BuildKit keep their overlays as they are. containerd 2.4.2's overlayfs snapshotter
@@ -75,6 +80,7 @@ leaves the call to the user: removing it is right when the system has not crashe
   every start in `mount_layers`, with only the kernel's mount error on the container's output. Going back to such an
   image, or to a daemon whose published images are such, needs every slot's volume removed first:
   `docker volume rm $(docker volume ls -q --filter name=runnerd- | grep -- '-slot-')` while no runner runs.
+- A client of 0.1.2 reads a job waiting for torn caches as waiting for a reason it does not know yet (ADR 0132).
 - A daemon without the guard, as 0.1.1, with an image of this change: it sets no variable, so the layers mount plain,
   but the directory still goes. After a crash while a daemon of this change ran, a first start under such a daemon
   mounts a torn upper, as it has no guard to empty it.
