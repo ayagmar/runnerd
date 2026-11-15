@@ -3,21 +3,23 @@
 
 Under the runner's entrypoint, before anything else of the runner's starts: with RUNNERD_SKIP_SYNCS=1, which runnerd
 sets by default ([host] skip_syncs, docs/adr/0141), it installs a seccomp filter in which fsync, fdatasync, sync,
-syncfs, sync_file_range and msync return 0 at once, then execs its arguments. The filter cannot be removed and every
-process started from here on inherits it: the runner, its job, the container's Docker Engine and its containers and
-builders, whose own filters the kernel runs beside this one, with an error winning over an allow. Everything a runner
-writes is a cache or goes with its container (ADR 0054 empties a slot's Docker store that does not start), so a sync
-spares the disk nothing it needs. Without the variable, or where the filter cannot be installed, it only execs its
-arguments: the runner then syncs as before.
+sync_file_range and syncfs return 0 at once, then execs its arguments. The filter cannot be removed and every process
+started from here on inherits it: the runner, its job, the container's Docker Engine and its containers and builders,
+whose own filters the kernel runs beside this one, with an error winning over an allow. Without the variable, or
+where the filter cannot be installed for any reason, it only execs its arguments: the runner then syncs as before.
+
+A filter sees a call's arguments, not what they name, so the calls return 0 on a descriptor the kernel would refuse
+too: fsync(999) returns 0, not EBADF. msync is left alone: answered 0, a probe of whether an address is mapped would
+go on to read memory that is not.
 
 Docker's own seccomp profile cannot do this: sysbox-runc removes a profile's error rule for a call its own allowlist
 holds, which every sync call is. This is a filter of its own, which root in the container may install since it has
 CAP_SYS_ADMIN in the container's user namespace, so no_new_privs, which would stop the runner's sudo, stays unset.
 
 The numbers are from the kernel's syscall tables (arch/x86/entry/syscalls/syscall_64.tbl and
-include/uapi/asm-generic/unistd.h): x86_64 msync 26, fsync 74, fdatasync 75, sync 162, sync_file_range 277,
-syncfs 306; aarch64 sync 81, fsync 82, fdatasync 83, sync_file_range 84, msync 227, syncfs 267. A call of another
-ABI, a 32-bit program on x86_64, syncs as before.
+include/uapi/asm-generic/unistd.h): x86_64 fsync 74, fdatasync 75, sync 162, sync_file_range 277, syncfs 306;
+aarch64 sync 81, fsync 82, fdatasync 83, sync_file_range 84, syncfs 267. The aarch64 half has not run: runnerd
+publishes amd64 images. A call of another ABI, a 32-bit program on x86_64, syncs as before.
 """
 
 import ctypes
@@ -27,8 +29,8 @@ import sys
 
 # The AUDIT_ARCH_* value seccomp reports for each machine, and its sync calls' numbers.
 ARCHES = {
-    "x86_64": (0xC000003E, (26, 74, 75, 162, 277, 306)),
-    "aarch64": (0xC00000B7, (81, 82, 83, 84, 227, 267)),
+    "x86_64": (0xC000003E, (74, 75, 162, 277, 306)),
+    "aarch64": (0xC00000B7, (82, 83, 81, 84, 267)),
 }
 
 BPF_LD_W_ABS = 0x20
@@ -70,7 +72,10 @@ def skip_syncs():
     buffer = ctypes.create_string_buffer(code)
     fprog = SockFprog(len(code) // 8, ctypes.addressof(buffer))
     libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(fprog), 0, 0) != 0:
+    # Every argument as a word, as the kernel reads them, whatever the ABI passes a variadic call's in.
+    libc.prctl.argtypes = [ctypes.c_ulong] * 5
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.addressof(fprog), 0, 0) != 0:
         return os.strerror(ctypes.get_errno())
     return None
 
@@ -79,7 +84,10 @@ def main():
     if len(sys.argv) < 2:
         sys.exit("usage: runnerd-skip-syncs COMMAND [ARGUMENT...]")
     if os.environ.get("RUNNERD_SKIP_SYNCS") == "1":
-        refused = skip_syncs()
+        try:
+            refused = skip_syncs()
+        except Exception as error:  # noqa: BLE001 - whatever fails here, the runner must still start
+            refused = f"{type(error).__name__}: {error}"
         if refused is not None:
             print(f"runnerd: cannot skip sync calls ({refused}): this runner syncs", file=sys.stderr)
     os.execvp(sys.argv[1], sys.argv[1:])
