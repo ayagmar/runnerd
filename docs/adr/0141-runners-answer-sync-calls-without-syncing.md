@@ -123,8 +123,8 @@ runners wrote is on disk (`scheduler::engine::unsynced`, kept in `unsynced` besi
   file that is empty, cannot be read, or holds what the engine does not write reads as torn. The file a daemon of this
   change's first version wrote, `since <boot ID>` or `torn`, reads the same.
 
-Volumes of a profile the config no longer has are not emptied; a profile added back with the same name finds them as
-they were.
+Volumes of a profile the config no longer has were not emptied; ADR 0142 empties every slot's volume Docker has
+under runnerd's prefix, and starts the layers of one it cannot remove over before giving up.
 
 ## Old and new
 

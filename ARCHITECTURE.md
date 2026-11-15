@@ -605,7 +605,9 @@ always returns, so the daemon closes and flushes the history.
   ([ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)). `boots` runs `journalctl` and decides
   nothing. Asked the same, the entrypoint mounts the slot's layers with overlayfs's `volatile`, so stopping the
   container commits nothing of the file system, and removes the `work/incompat` such a mount leaves before it mounts
-  a layer again: the same guard is what makes that safe. The label `runnerd.volatile-layers=1`
+  a layer again: the same guard is what makes that safe, so after a crash it empties every slot's volume Docker has
+  under runnerd's prefix, configured or not, and gives up on one it cannot remove only once a container has deleted
+  its layers (`cache::start_layers_over`). The label `runnerd.volatile-layers=1`
   (`docker::VOLATILE_LAYERS_LABEL`) tells doctor; the runner's Docker Engine and builds keep their overlays' syncs
   ([ADR 0142](docs/adr/0142-a-runners-layers-skip-their-unmount-sync.md)).
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It

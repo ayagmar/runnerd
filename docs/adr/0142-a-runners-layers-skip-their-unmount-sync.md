@@ -29,9 +29,26 @@ leaves the call to the user: removing it is right when the system has not crashe
 - `mount_layer` removes a layer's `work/work/incompat` before mounting it, whatever runnerd asks now. That is safe
   because the daemon starts no runner on a slot's volume a crash may have torn: from the first runner that skips its
   syncs, the `unsynced` mark stays until a `sync(2)` once a stop leaves no runner running, and a boot that did not end
-  in an orderly shutdown empties every slot's volume before any runner starts. So a runner finding the directory is
-  on a volume whose last mount ended in an orderly unmount, a killed container's included, in this boot or one that
-  synced. The exception is ADR 0141's: a volume another container holds for 5 ticks starts runners on what it holds.
+  in an orderly shutdown empties, before any runner starts, every slot's volume Docker has under runnerd's prefix
+  (`DockerApi::volumes`, `Names::is_slot`): the config's, and those a lowered `slots` or a removed profile left, which
+  a raised count or a profile added back would mount, and a reseed copy, as they are. So a runner finding the
+  directory is on a volume whose last mount ended in an orderly unmount, a killed container's included, in this boot
+  or one that synced. A volume of a prefix that starts with runnerd's, as the tests' `runnerd-test-…` do, is emptied
+  too.
+- A slot's volume the guard cannot remove, as another container holds it, is ADR 0141's exception: after 5 tries
+  runners start on what the caches hold. A volatile layer makes what such a volume holds worse than ADR 0141 weighed:
+  overlayfs also skips its copy-up sync, so a file a job only touched can come back empty in the upper and hide the
+  snapshot's whole copy, and the kernel's refusal, which would have caught it, is what `mount_layer` removes. So the
+  engine gives up only once the layers of every such slot volume are started over: a container of a runner image
+  mounts the volume and deletes everything in it but the Docker store (`cache::start_layers_over`). Docker lets a
+  second container mount a held volume. Until that container has run, the caches stay torn, in the `unsynced` file
+  too, so a restart tries the volume again and then the layers; no runner, reseed, measure, trim or shell starts
+  meanwhile. Of the two ways the review named, asking the profile's next reseed to start over (`/base/.reseeding`)
+  and never giving up on slot volumes, this keeps ADR 0141's reason for giving up, a held volume must not stop every
+  runner, and adds no state: `Torn` lasts until the layers are gone, where the reseed marker would need a second
+  value that survives restarts, owned beside the `unsynced` one, and a seed run, which needs the profile's slots
+  idle and its image. The slot's Docker store stays as ADR 0141 left it: `start_docker` empties a store dockerd does
+  not start on.
 - A kernel or file system that refuses `volatile` gets the plain mount, and the container's output says which layer
   and why. Only an error from the mount itself counts; the plain mount that follows fails the start as before.
 - The slot's Docker Engine and BuildKit keep their overlays as they are. containerd 2.4.2's overlayfs snapshotter
@@ -52,9 +69,15 @@ leaves the call to the user: removing it is right when the system has not crashe
   the layers mount volatile under it.
 - A daemon of this change and an image of 0.1.2: asked, the image installs the filter and mounts its layers plain;
   doctor says its runners skip sync calls only.
-- A slot whose volume was last mounted volatile and is now mounted plain, after a reload or an older image, mounts:
-  the directory goes first whatever is asked. An image older than this change does not remove it, so a slot that ran one after a volatile mount
-  needs its volume emptied first.
+- A slot whose volume was last mounted volatile and is now mounted plain, after a reload, mounts: the directory goes
+  first whatever is asked.
+- An image older than this change does not remove the directory, so a slot it runs on after a volatile mount fails
+  every start in `mount_layers`, with only the kernel's mount error on the container's output. Going back to such an
+  image, or to a daemon whose published images are such, needs every slot's volume removed first:
+  `docker volume rm $(docker volume ls -q --filter name=runnerd- | grep -- '-slot-')` while no runner runs.
+- A daemon without the guard, as 0.1.1, with an image of this change: it sets no variable, so the layers mount plain,
+  but the directory still goes. After a crash while a daemon of this change ran, a first start under such a daemon
+  mounts a torn upper, as it has no guard to empty it.
 
 ## Evidence
 
