@@ -1368,7 +1368,7 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
     // count.
     assert_eq!(
         rows.len(),
-        36,
+        37,
         "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();

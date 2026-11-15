@@ -584,6 +584,12 @@ always returns, so the daemon closes and flushes the history.
   profile's count. A store whose engine does not start is emptied
   ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md)).
+- Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner
+  `RUNNERD_SKIP_SYNCS=1` (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before
+  anything of the runner's starts, that answers `fsync` and the other sync calls 0 for the runner, its Docker Engine
+  and their containers. A Docker profile cannot, since sysbox drops its rules for those calls. Seed, mirror, measure
+  and shell containers keep their syncs; a host crash can tear what a slot cached in its last minute, which cleaning
+  the slot's volume recovers ([ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)).
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.

@@ -150,6 +150,7 @@ fn a_ready_host_passes_every_check() {
             "repository",
             "repository",
             "GitHub Actions' cache",
+            "runner syncs",
             "/dev/kvm"
         ]
     );

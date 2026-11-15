@@ -729,6 +729,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     );
     if let Some(config) = config {
         checks.push(config.caches.build.actions_cache_check());
+        checks.push(config.host.syncs_check());
     }
     checks.push(Check {
         name: "/dev/kvm".to_owned(),

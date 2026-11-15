@@ -82,9 +82,31 @@ pub struct Host {
     /// take, the way back if a host meets what the count did not foresee.
     #[serde(default = "default_on")]
     pub pooled_count: bool,
+    /// Whether runners answer `fsync` and the other sync calls without syncing (ADR 0141). Default on: what a runner
+    /// writes is a cache or goes with its container, and the syncs cost the disk wear. A reload applies it from the
+    /// next runner on.
+    #[serde(default = "default_on")]
+    pub skip_syncs: bool,
 }
 
 impl Host {
+    /// Doctor's word on whether runners sync what they write: for information, it fails nothing.
+    pub fn syncs_check(&self) -> api::Check {
+        api::Check {
+            name: "runner syncs".to_owned(),
+            status: api::CheckStatus::Info,
+            detail: if self.skip_syncs {
+                "skipped: fsync and the other sync calls return at once in runners of runnerd's images, sparing \
+                 the disk; a host crash can tear what a slot cached in its last minute, and [host] skip_syncs = \
+                 false keeps the syncs"
+            } else {
+                "kept, as [host] skip_syncs = false sets"
+            }
+            .to_owned(),
+            fix: None,
+        }
+    }
+
     /// Refuses a `cpu_overcommit` that is not above 0 and at most `MAX_CPU_OVERCOMMIT`.
     fn check_cpu_overcommit(&self) -> Result<(), ConfigError> {
         match self.cpu_overcommit {

@@ -452,24 +452,28 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
     }
 
-    /// A runner container's environment: its slot's share of what the slots' Docker Engines may keep, which its
-    /// image's job cleanup holds it to, once the caches' check has measured Docker's disk.
+    /// A runner container's environment: whether its image skips the runner's sync calls, as `[host] skip_syncs`
+    /// says when it starts, and its slot's share of what the slots' Docker Engines may keep, which its image's job
+    /// cleanup holds it to, once the caches' check has measured Docker's disk.
     pub(super) fn runner_env(&self) -> Vec<String> {
-        self.docker_disk
-            .borrow()
-            .map(|disk| {
-                let slots = self
-                    .config
-                    .profiles
-                    .values()
-                    .map(|p| u64::from(p.slots))
-                    .sum();
-                vec![format!(
-                    "RUNNERD_DOCKER_BUDGET_GB={}",
-                    cache::docker_budget_gib(disk, slots)
-                )]
-            })
-            .unwrap_or_default()
+        let skip_syncs = self
+            .config
+            .host
+            .skip_syncs
+            .then(|| docker::SKIP_SYNCS.to_owned());
+        let budget = self.docker_disk.borrow().map(|disk| {
+            let slots = self
+                .config
+                .profiles
+                .values()
+                .map(|p| u64::from(p.slots))
+                .sum();
+            format!(
+                "RUNNERD_DOCKER_BUDGET_GB={}",
+                cache::docker_budget_gib(disk, slots)
+            )
+        });
+        skip_syncs.into_iter().chain(budget).collect()
     }
 
     /// Removes a slot's runner, busy or not, and kills its job. Nothing once Docker stopped answering a stop: the

@@ -4138,8 +4138,43 @@ async fn each_slots_docker_engine_keeps_its_share_of_a_quarter_of_the_disk_not_o
     assert_eq!(started, 1, "one runner started: {envs:?}");
     assert_eq!(
         envs[0].1,
-        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        &[
+            docker::SKIP_SYNCS.to_owned(),
+            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned()
+        ],
         "{envs:?}"
+    );
+}
+
+#[tokio::test]
+async fn runners_skip_syncs_unless_the_config_turns_it_off() {
+    let mut skipping = Vec::new();
+    for config in [
+        CONFIG.to_owned(),
+        CONFIG.replace(
+            "admission = \"caps\"",
+            "admission = \"caps\"\nskip_syncs = false",
+        ),
+    ] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("engine");
+        let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+        engine.recover().await.unwrap();
+        {
+            let mut state = github.0.lock().unwrap();
+            state.queued = vec![job(1)];
+            state.jobs.insert(1, details(1, "in_progress", None));
+        }
+        engine.tick(Shutdown::No).await;
+        let state = docker.0.lock().unwrap();
+        let envs: Vec<_> = state.envs.values().collect();
+        assert_eq!(envs.len(), 1, "one runner started: {envs:?}");
+        skipping.push(envs[0].iter().any(|var| var == docker::SKIP_SYNCS));
+    }
+    assert_eq!(
+        skipping,
+        [true, false],
+        "a runner skips syncs by default and keeps them under skip_syncs = false"
     );
 }
 
@@ -4173,7 +4208,10 @@ async fn a_runner_started_before_any_check_of_the_caches_gets_its_slots_docker_b
     assert_eq!(envs.len(), 1, "one runner started: {envs:?}");
     assert_eq!(
         envs[0].1,
-        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        &[
+            docker::SKIP_SYNCS.to_owned(),
+            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned()
+        ],
         "{envs:?}"
     );
 }

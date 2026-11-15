@@ -27,6 +27,20 @@ Each job gets a new container, but its [slot](../../concepts/terms/#slot) keeps 
 
 `docker/setup-buildx-action` starts a new BuildKit container per job, which keeps none of this; set `driver: docker` to build on the slot's Docker Engine, as `docker build` does.
 
+### What a crash can leave
+
+Runners skip `fsync` and the other sync calls: what they write is a cache or goes with the container, and the syncs wear the disk for nothing a later job needs. A container that stops or is killed loses nothing to it; only a host crash or power loss can cut short what a slot wrote in its last minute:
+
+| After a crash | |
+|---|---|
+| the slot's Docker Engine does not start on its store | the store is emptied and the slot's next job runs cold |
+| it starts, but an image's files were cut short | that image's jobs fail in that slot until `runnerctl caches --clean runnerd-<profile>-slot-<n>` |
+| a file in the slot's layers, the pnpm store or the Maven repository was cut short | a job that fails on it fails until that volume is cleaned |
+| a record's files | may be cut short; its job's log is the daemon's |
+| the mirror, the build cache, a reseed | keep their syncs; a reseed takes slot 1's layers as they are |
+
+`skip_syncs = false` under [`[host]`](../../reference/configuration/#host) keeps the syncs, for runners started after the reload.
+
 ## Build cache
 
 One store per repository, kept in `~/.cache/runnerd/build-cache`, that every runner reaches: a task built in slot 2 is a hit in slot 3, and a pull request's build gets what `main` built.

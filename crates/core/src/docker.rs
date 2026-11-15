@@ -63,6 +63,10 @@ pub struct RunnerSpec {
 /// which Docker stores and clients may log.
 pub const JIT_CONFIG_PATH: &str = "/run/runnerd/jitconfig";
 
+/// What a runner container's environment holds to have its image answer the runner's sync calls without syncing
+/// (`[host] skip_syncs`, ADR 0141). An image without `runnerd-skip-syncs` ignores it and syncs.
+pub const SKIP_SYNCS: &str = "RUNNERD_SKIP_SYNCS=1";
+
 /// A runner's just-in-time config from GitHub: credentials, never printed.
 #[derive(Clone)]
 pub struct JitConfig(pub String);

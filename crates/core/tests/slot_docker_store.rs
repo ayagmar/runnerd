@@ -1,6 +1,7 @@
 //! A slot's Docker Engine keeps its images and build cache between the slot's jobs, each in a new container, within
 //! the Docker budget runnerd gives it, BuildKit's cache mounts the longest, and a store its engine does not start on
-//! is emptied. Needs Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
+//! is emptied. Told to, a runner answers its sync calls without syncing, down to its job's containers and builds.
+//! Needs Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
 //!
 //! ```sh
 //! cargo test -p runnerd-core --test slot_docker_store -- --ignored --nocapture
@@ -16,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use runnerd_core::cache::{self, Names, runner_mounts};
-use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
+use runnerd_core::docker::{self, Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
 const PROFILE: &str = "store";
@@ -31,8 +32,8 @@ const BUILD: &str = "mkdir -p /root/app && cd /root/app && echo app > app.txt \
     && printf 'FROM scratch\\nCOPY app.txt /app.txt\\n' > Dockerfile \
     && docker build --progress=plain -t store-app . 2>&1";
 
-/// Runs `script` as root in a new runner container of slot 1, after its layers are mounted and its Docker Engine
-/// started as the runner's entrypoint does them; returns its exit code and output. The container is removed after,
+/// Runs `script` as root in a new runner container of slot 1, under `runnerd-skip-syncs` as the image's entrypoint
+/// runs the runner, after its layers are mounted and its Docker Engine started as the runner's entrypoint does them; returns its exit code and output. The container is removed after,
 /// as a runner's is.
 async fn job(
     docker: &Docker,
@@ -53,6 +54,7 @@ async fn job(
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
             "dind".to_owned(),
+            "runnerd-skip-syncs".to_owned(),
             "bash".to_owned(),
             "-euo".to_owned(),
             "pipefail".to_owned(),
@@ -70,7 +72,7 @@ async fn job(
         Ok((code, docker.logs(&id).await?))
     }
     .await
-    .map_err(|e: runnerd_core::docker::Error| e.to_string());
+    .map_err(|e: docker::Error| e.to_string());
     let removed = docker.remove(&id).await.map_err(|e| e.to_string());
     let result = result?;
     removed?;
@@ -333,6 +335,57 @@ async fn cache_mount_scenario(docker: &Docker, names: &Names) -> Result<(), Stri
         ));
     }
     Ok(())
+}
+
+/// Reports, for the runner as root and as its user, a container of its Docker Engine and a build step, whether
+/// `fsync` synced: on `/dev/null` a real one fails with EINVAL, a skipped one returns 0. The build step words its
+/// answer only as it runs, so the step's own text, which the build shows, never matches.
+const SYNC_PROBES: &str = "probe() { dd if=/dev/zero of=/dev/null count=1 conv=fsync status=none 2> /dev/null \
+        && echo \"$1: SKIPPED\" || echo \"$1: SYNCED\"; } \
+    && probe root && setpriv --reuid=runner --regid=runner --init-groups -- bash -c \"$(declare -f probe); probe user\" \
+    && docker run --rm --network none store-shell bash -c \"$(declare -f probe); probe container\" \
+    && printf '%s\\n' 'FROM store-shell' 'SHELL [\"bash\", \"-c\"]' \
+        'RUN dd if=/dev/zero of=/dev/null count=1 conv=fsync status=none 2> /dev/null && r=SKIPPED || r=SYNCED; echo build: $r' \
+        | docker build --no-cache --progress=plain - 2>&1 | grep -o 'build: [A-Z]*$'";
+
+async fn skip_syncs_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    for (env, expected) in [(vec![docker::SKIP_SYNCS], "SKIPPED"), (vec![], "SYNCED")] {
+        let (code, output) = job(
+            docker,
+            names,
+            &env,
+            &format!("{SHELL_IMAGE} && {SYNC_PROBES}"),
+        )
+        .await?;
+        println!("{output}");
+        let seen = ["root", "user", "container", "build"]
+            .iter()
+            .filter(|place| output.contains(&format!("{place}: {expected}")))
+            .count();
+        if code != 0 || seen != 4 {
+            return Err(format!(
+                "with {env:?}, the runner, its user, its container and its build step do not all report \
+                 {expected} (exit {code}):\n{output}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_runner_told_to_skip_syncs_skips_them_down_to_its_jobs_containers_and_builds() {
+    let names = Names::new(&format!("runnerd-test-syncs-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = skip_syncs_scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
 }
 
 #[tokio::test]
