@@ -1091,3 +1091,43 @@ fn a_restart_starts_a_new_window_and_a_counter_that_fell_adds_nothing() {
     assert_eq!(next.add(disks.read(&paths, &slice, 900_000)), None);
     assert_eq!(next.close(), None);
 }
+
+#[tokio::test]
+async fn the_sampler_stores_the_drive_s_open_window_as_soon_as_the_engine_lets_go_of_it() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    io_stat(&slice, 0);
+    let io = paths.proc.join("self/io");
+    std::fs::write(&io, "rchar: 1\nwchar: 1\nwrite_bytes: 4096\n").unwrap();
+    let store = crate::store::Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let (tracked, watched) = tokio::sync::watch::channel(Vec::new());
+    let (disks, disks_read) = tokio::sync::oneshot::channel();
+    disks
+        .send(Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap())
+        .unwrap();
+    let sampler = tokio::spawn(super::metrics::run(
+        Sampler::new(paths.clone(), "ci.slice"),
+        watched,
+        store.clone(),
+        disks_read,
+    ));
+    // Two passes read the drive: the first starts the window, the second adds to it.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    drive(&paths, 3000, 12);
+    std::fs::write(&io, "rchar: 1\nwchar: 1\nwrite_bytes: 12288\n").unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    // A daemon that stops closes its history right after the engine returns: the window must be sent by then.
+    drop(tracked);
+    tokio::time::timeout(std::time::Duration::from_millis(500), sampler)
+        .await
+        .expect("the sampler ends when the engine lets go of it")
+        .unwrap();
+    store.flush().await;
+    let windows = store.insights(0).await.unwrap().disk;
+    assert_eq!(windows.len(), 1, "the open window is stored: {windows:?}");
+    assert_eq!(windows[0].drive, Some(2000 * 512));
+    assert_eq!(windows[0].daemon, Some(8192), "the daemon's own writes");
+}

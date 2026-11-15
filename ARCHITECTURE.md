@@ -286,9 +286,10 @@ queued → slot → container → removed
    which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them, and every 30 s the name and
    memory of each process outside the slice, never its command line
    ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), what the container wrote to the disks under
-   Docker's root from its `io.stat`, and in windows of up to 10 minutes what those disks, the slice and btrfs's
-   commits came to (`observe::disk`; the job's figure runs from its start to its container's last sample, complete
-   once the sampler saw the cgroup go a sample later, [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and the
+   Docker's root from its `io.stat`, and in windows of up to 10 minutes what those disks, the slice, the daemon itself
+   and btrfs's commits came to (`observe::disk`; the job's figure runs from its start to its container's last sample,
+   complete once the sampler first saw the cgroup go within two samples of it; `Engine::run` waits for the sampler to
+   store its open window before it returns, [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`). A job that failed is then
    read for a runner fault: `record::runner_fault` over its stored log, kept in `jobs.runner_fault`, which makes

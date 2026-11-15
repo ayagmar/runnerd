@@ -755,10 +755,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Runs until a shutdown request is carried out, or `STOP_DEADLINE` after a stop that detaches or is forced
-    /// began, whichever comes first. Either way it returns, so the daemon still closes its history.
+    /// began, whichever comes first. Either way it returns, once the sampler stored what it was adding up, so the
+    /// daemon still closes its history.
     pub async fn run(mut self) {
         let (disk, disk_read) = oneshot::channel();
-        tokio::spawn(metrics::run(
+        let sampler = tokio::spawn(metrics::run(
             Sampler::new(self.paths.clone(), &self.config.host.slice),
             self.tracked.subscribe(),
             self.store.clone(),
@@ -777,6 +778,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 STOP_DEADLINE.as_secs()
             ),
         }
+        // Letting go of the tracked containers stops the sampler, which stores the drive's window it was adding up:
+        // the daemon closes its history right after this returns.
+        drop(self);
+        let _ = sampler.await;
     }
 
     /// Recovers, then schedules until a shutdown request is carried out.

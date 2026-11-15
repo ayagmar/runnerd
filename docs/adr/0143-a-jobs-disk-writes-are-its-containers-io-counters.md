@@ -40,9 +40,12 @@ Docker Engine inside it puts its containers and BuildKit's in cgroups below the 
 - The pages still dirty at the last sample are kept beside the figure: written after the container ends, unless
   deleted first, to the runner slice's account.
 - The sampler also reads, each pass, the disks' sectors written (`/sys/class/block/<disk>/stat`), the runner slice's
-  `io.stat` (which keeps what its ended containers wrote), and btrfs's commit count, and adds them up into windows of
-  up to 10 minutes (`disk_windows`, pruned with job records). A daemon's stop stores the window it is in; the time no
-  daemon ran is in none. A figure a reading lacks leaves the window's absent.
+  `io.stat` (which keeps what its ended containers wrote), the daemon's own `write_bytes` in `/proc/self/io`, and
+  btrfs's commit count, and adds them up into windows of up to 10 minutes (`disk_windows`, pruned with job records).
+  A daemon's stop stores the window it is in: the engine lets go of the sampler and waits for it before the daemon
+  closes its history. The time no daemon ran is in none. A figure a reading lacks leaves the window's absent, and
+  insights share the drive's bytes out over the windows that read the slice, so one missed read costs only its
+  window.
 - The daemon's own writes are a line of the drive's shares, so "no owner runnerd knows" leaves runnerd out. They are
   what it sent to any disk, its history, logs and build cache among them; on a host whose history is on another
   disk than Docker's root they are shown against a drive they did not reach, capped at what the drive's other shares

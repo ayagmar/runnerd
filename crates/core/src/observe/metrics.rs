@@ -582,8 +582,9 @@ impl Sampler {
     }
 }
 
-/// Samples the tracked containers every `SAMPLE_INTERVAL` into the store, until the engine drops its sender; then
-/// stores the drive's window it was adding up. Reads the disks once `disk` names them.
+/// Samples the tracked containers every `SAMPLE_INTERVAL` into the store, until the engine drops its sender; then,
+/// at once, stores the drive's window it was adding up, so that a daemon awaiting it before it closes its history
+/// keeps it. Reads the disks once `disk` names them.
 pub async fn run(
     state: Sampler,
     tracked: watch::Receiver<Vec<Tracked>>,
@@ -593,8 +594,14 @@ pub async fn run(
     let state = Arc::new(Mutex::new(state));
     let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut watching = tracked.clone();
+    let released = async move { while watching.changed().await.is_ok() {} };
+    tokio::pin!(released);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            () = &mut released => {}
+        }
         if tracked.has_changed().is_err() {
             if let Some(window) = lock(&state).close_window() {
                 store.disk_window(window);
@@ -607,12 +614,12 @@ pub async fn run(
         let containers = tracked.borrow().clone();
         let state = state.clone();
         // Reading cgroup files is quick but blocking.
-        let Ok((sampled, memory)) = tokio::task::spawn_blocking(move || {
+        let Ok((sampled, memory, at)) = tokio::task::spawn_blocking(move || {
             // A panic midway through a sample leaves the counters of the last or of this one, either of which the
             // next sample measures from.
             let mut state = lock(&state);
             let at = time::now_ms();
-            (state.sample(&containers, at), state.host_memory(at))
+            (state.sample(&containers, at), state.host_memory(at), at)
         })
         .await
         else {
@@ -623,7 +630,7 @@ pub async fn run(
         }
         store.containers_read(&sampled.read);
         store.containers_gone(sampled.gone);
-        store.containers_ended(sampled.ended, time::now_ms());
+        store.containers_ended(sampled.ended, at);
         if let Some(window) = sampled.window {
             store.disk_window(window);
         }
