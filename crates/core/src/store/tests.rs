@@ -157,6 +157,23 @@ async fn jobs_list_newest_first_by_repository_in_pages() {
 }
 
 #[tokio::test]
+async fn a_job_claimed_before_github_names_it_is_listed_with_no_name() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let start = crate::time::now_ms();
+    store.runner_started(runner("unlisted", start));
+    store.claimed(7, 70, "unlisted", start + 5000);
+    store.flush().await;
+    let page = store.jobs(JobQuery::default()).await.unwrap().page;
+    let names: Vec<(u64, &str)> = page
+        .jobs
+        .iter()
+        .map(|job| (job.id, job.name.as_str()))
+        .collect();
+    assert_eq!(names, [(7, "")]);
+}
+
+#[tokio::test]
 async fn jobs_list_by_workflow_and_name_to_compare_runs_of_one_job() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();

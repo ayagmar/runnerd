@@ -149,10 +149,13 @@ fn text_cut() -> String {
 }
 
 /// The bytes of the job `j`'s text as a list shows it, which a page counts ([`api::row_bytes`]), in SQL.
+///
+/// Every prefix is coalesced, the columns that are never NULL too: `substr` of an empty blob is NULL, and a job a
+/// runner claimed before GitHub's listing named it has an empty name.
 fn row_bytes() -> String {
     format!(
-        "octet_length({}) + coalesce(octet_length({}), 0) + octet_length({}) + coalesce(octet_length({}), 0) + \
-         coalesce(octet_length({}), 0) + octet_length({})",
+        "coalesce(octet_length({}), 0) + coalesce(octet_length({}), 0) + coalesce(octet_length({}), 0) + \
+         coalesce(octet_length({}), 0) + coalesce(octet_length({}), 0) + octet_length({})",
         listed("j.repository"),
         listed("j.workflow"),
         listed("j.name"),
