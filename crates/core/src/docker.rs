@@ -64,8 +64,20 @@ pub struct RunnerSpec {
 pub const JIT_CONFIG_PATH: &str = "/run/runnerd/jitconfig";
 
 /// What a runner container's environment holds to have its image answer the runner's sync calls without syncing
-/// (`[host] skip_syncs`, ADR 0141). An image without `runnerd-skip-syncs` ignores it and syncs.
+/// (`[host] skip_syncs`, ADR 0141). runnerd sets it only for an image that carries `SKIP_SYNCS_LABEL`; an image
+/// without `runnerd-skip-syncs` would ignore it and sync.
 pub const SKIP_SYNCS: &str = "RUNNERD_SKIP_SYNCS=1";
+
+/// The label of a runner image whose entrypoint runs `runnerd-skip-syncs` (`image/Dockerfile`), with the version of
+/// what it answers to: `1`, `SKIP_SYNCS`. Runner images before it lack it, and their runners keep their syncs.
+pub const SKIP_SYNCS_LABEL: &str = "runnerd.skip-syncs";
+
+/// Whether an image's labels say it answers `SKIP_SYNCS`.
+pub fn skips_syncs<S: std::hash::BuildHasher>(labels: &HashMap<String, String, S>) -> bool {
+    labels
+        .get(SKIP_SYNCS_LABEL)
+        .is_some_and(|version| version == "1")
+}
 
 /// A runner's just-in-time config from GitHub: credentials, never printed.
 #[derive(Clone)]
@@ -383,14 +395,19 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<Output, Error>> + Send;
     /// Whether Docker has an image.
     fn image_present(&self, image: &str) -> impl Future<Output = Result<bool, Error>> + Send;
+    /// Whether Docker has an image and it answers `SKIP_SYNCS`, as its labels say (`skips_syncs`).
+    fn image_skips_syncs(&self, image: &str) -> impl Future<Output = Result<bool, Error>> + Send;
     /// Pulls an image, logging its progress every few seconds.
     fn pull(&self, image: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// Creates a bridge network unless it exists.
     fn ensure_network(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// Creates a volume unless it exists.
     fn ensure_volume(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
-    /// Removes a volume; a volume that does not exist is not an error.
+    /// Removes a volume; a volume that does not exist is not an error. Docker refuses one a container mounts, even
+    /// a stopped one.
     fn remove_volume(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Every container, running or not, that mounts the volume.
+    fn holders(&self, volume: &str) -> impl Future<Output = Result<Vec<Container>, Error>> + Send;
     /// The disk size of every volume Docker knows, by name. Slow: Docker measures each volume.
     fn volume_sizes(&self) -> impl Future<Output = Result<BTreeMap<String, u64>, Error>> + Send;
     /// The paths a container's own layer added or changed, not those it deleted.
@@ -487,6 +504,31 @@ impl Docker {
             Err(error) if is_not_found(&error) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Every container, running or not, that `filter` matches with `value`, as `docker ps --all --filter` does.
+    async fn containers(&self, filter: &str, value: &str) -> Result<Vec<Container>, Error> {
+        let options = ListContainersOptionsBuilder::new()
+            .all(true)
+            .filters(&HashMap::from([(filter, vec![value])]))
+            .build();
+        let containers = self.api.list_containers(Some(options)).await?;
+
+        Ok(containers
+            .into_iter()
+            .map(|container| Container {
+                id: container.id.unwrap_or_default(),
+                name: container
+                    .names
+                    .and_then(|names| names.into_iter().next())
+                    .unwrap_or_default()
+                    .trim_start_matches('/')
+                    .to_owned(),
+                running: container.state
+                    == Some(bollard::models::ContainerSummaryStateEnum::RUNNING),
+                labels: container.labels.unwrap_or_default(),
+            })
+            .collect())
     }
 
     /// Asks the image's registry for its manifest, without pulling it, and returns the platforms it is built for,
@@ -615,26 +657,11 @@ impl DockerApi for Docker {
     }
 
     async fn list(&self, label: &str) -> Result<Vec<Container>, Error> {
-        let options = ListContainersOptionsBuilder::new()
-            .all(true)
-            .filters(&HashMap::from([("label", vec![label])]))
-            .build();
-        let containers = self.api.list_containers(Some(options)).await?;
-        Ok(containers
-            .into_iter()
-            .map(|container| Container {
-                id: container.id.unwrap_or_default(),
-                name: container
-                    .names
-                    .and_then(|names| names.into_iter().next())
-                    .unwrap_or_default()
-                    .trim_start_matches('/')
-                    .to_owned(),
-                running: container.state
-                    == Some(bollard::models::ContainerSummaryStateEnum::RUNNING),
-                labels: container.labels.unwrap_or_default(),
-            })
-            .collect())
+        self.containers("label", label).await
+    }
+
+    async fn holders(&self, volume: &str) -> Result<Vec<Container>, Error> {
+        self.containers("volume", volume).await
     }
 
     fn exits(&self) -> BoxStream<'static, Result<String, Error>> {
@@ -713,6 +740,13 @@ impl DockerApi for Docker {
 
     async fn image_present(&self, image: &str) -> Result<bool, Error> {
         Ok(self.image_labels(image).await?.is_some())
+    }
+
+    async fn image_skips_syncs(&self, image: &str) -> Result<bool, Error> {
+        Ok(self
+            .image_labels(image)
+            .await?
+            .is_some_and(|labels| skips_syncs(&labels)))
     }
 
     async fn pull(&self, image: &str) -> Result<(), Error> {

@@ -792,6 +792,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .to_owned(),
             ));
         }
+        // So does their emptying after a host crash that may have torn them (ADR 0141).
+        if self.unsynced.is_torn() {
+            return Err(ControlError::Conflict(
+                "the shared caches, which a shell mounts, are emptied after a host crash; open it once they are"
+                    .to_owned(),
+            ));
+        }
         if let Some(max) = self.memory_max {
             let in_use = self.count(self.host_remembered()).pooled();
             if in_use.saturating_add(memory) > max {

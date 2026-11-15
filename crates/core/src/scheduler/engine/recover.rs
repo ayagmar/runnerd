@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use super::leftovers::Unread;
 use super::records::Undecided;
+use super::unsynced::Recovered;
 use super::{Engagement, Engine, Occupant, Slot};
 use crate::api;
 use crate::cache;
@@ -392,18 +393,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Ok(())
     }
 
-    /// Notes whether the host booted again since runners wrote without syncing, with no clean stop between: the
-    /// first tick then empties their caches before it starts any runner (ADR 0141).
+    /// Notes whether the host booted again since runners wrote without syncing, with neither a clean stop nor an
+    /// orderly shutdown between: the first tick then empties their caches before it starts any runner (ADR 0141).
     fn recover_unsynced(&mut self) {
         match self.unsynced.recovered() {
-            Ok(true) => warn!(
-                "the host booted again since runners wrote without syncing, with no clean stop between: their caches \
-                 are emptied before any runner starts"
+            Ok(Recovered::Torn) => warn!(
+                "the host booted again since runners wrote without syncing, and the journal shows no orderly \
+                 shutdown that wrote it: their caches are emptied before any runner starts"
             ),
-            Ok(false) => {}
+            Ok(Recovered::ShutDownInOrder) => info!(
+                "the host shut down in order since runners wrote without syncing, which wrote it all: their caches \
+                 are kept"
+            ),
+            Ok(Recovered::Unchanged) => {}
             Err(error) => warn!(
-                "the host booted again since runners wrote without syncing; their caches are emptied before any \
-                 runner starts, but that could not be kept for the next start: {error}"
+                "cannot keep for the next start what the host's boot since runners wrote without syncing came to: \
+                 {error}"
             ),
         }
     }

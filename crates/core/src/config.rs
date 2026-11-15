@@ -82,29 +82,138 @@ pub struct Host {
     /// take, the way back if a host meets what the count did not foresee.
     #[serde(default = "default_on")]
     pub pooled_count: bool,
-    /// Whether runners are asked to answer `fsync` and the other sync calls without syncing (ADR 0141). Default on:
-    /// what a runner writes is a cache or goes with its container, and a host crash empties those caches. A reload
+    /// Whether runners whose image carries `runnerd-skip-syncs` are asked to answer `fsync` and the other sync calls
+    /// without syncing (ADR 0141). Default on: what a runner writes is a cache or goes with its container, and a host
+    /// crash empties those caches. A runner of an image without it keeps its syncs whatever this says. A reload
     /// applies it from the next runner on.
     #[serde(default = "default_on")]
     pub skip_syncs: bool,
 }
 
+/// Whether a profile's image answers its runner's sync calls without syncing, as doctor reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageSyncs {
+    /// It carries `runnerd-skip-syncs`, as its label says: runnerd asks its runners to skip their syncs.
+    Skips,
+    /// It lacks it, as runner images before it do: runnerd never asks its runners, and they sync.
+    Syncs,
+    /// Docker does not have it, or did not answer: each runner's start reads it.
+    Unread,
+}
+
+/// Whether the systemd journal tells runnerd how a past boot ended (`boots::past_boots`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PastBoots {
+    /// It keeps past boots and runnerd's user reads `systemd`'s lines.
+    Read,
+    /// It keeps none: `/var/log/journal` is missing, so the journal lives in memory.
+    NotKept,
+    /// runnerd's user reads none of `systemd`'s lines.
+    Unreadable,
+}
+
 impl Host {
-    /// Doctor's word on whether runners sync what they write: for information, it fails nothing.
-    pub fn syncs_check(&self) -> api::Check {
-        api::Check {
+    /// Doctor's word on whether runners sync what they write, from what each profile's image carries (`images`, by
+    /// reference) and whether the journal shows how past boots ended (`boots`). For information, unless a crash guard
+    /// that cannot read the journal empties the caches after every boot.
+    pub fn syncs_check(
+        &self,
+        images: &BTreeMap<String, ImageSyncs>,
+        boots: PastBoots,
+    ) -> api::Check {
+        let check = |status, detail: String, fix: Option<&str>| api::Check {
             name: "runner syncs".to_owned(),
-            status: api::CheckStatus::Info,
-            detail: if self.skip_syncs {
-                "asked of each runner: an image with runnerd-skip-syncs answers fsync and the other sync calls \
-                 without syncing, and one without it ignores the ask and syncs. If the host boots again with no \
-                 clean stop since a runner was asked, the slots' volumes and the pnpm and Maven stores are emptied \
-                 before any runner starts; [host] skip_syncs = false keeps the syncs"
-            } else {
-                "kept, as [host] skip_syncs = false sets"
-            }
-            .to_owned(),
-            fix: None,
+            status,
+            detail,
+            fix: fix.map(str::to_owned),
+        };
+        if !self.skip_syncs {
+            return check(
+                api::CheckStatus::Info,
+                "kept, as [host] skip_syncs = false sets".to_owned(),
+                None,
+            );
+        }
+        let of = |wanted: ImageSyncs| -> Vec<&str> {
+            images
+                .iter()
+                .filter(|(_, syncs)| **syncs == wanted)
+                .map(|(image, _)| image.as_str())
+                .collect()
+        };
+        let (skips, syncs, unread) = (
+            of(ImageSyncs::Skips),
+            of(ImageSyncs::Syncs),
+            of(ImageSyncs::Unread),
+        );
+        let mut parts = Vec::new();
+        if !skips.is_empty() {
+            parts.push(format!(
+                "skipped by the runners of {}, which carry runnerd-skip-syncs",
+                skips.join(", ")
+            ));
+        }
+        if !syncs.is_empty() {
+            parts.push(format!(
+                "kept by the runners of {}: they lack runnerd-skip-syncs, so runnerd never asks them",
+                syncs.join(", ")
+            ));
+        }
+        if !unread.is_empty() {
+            parts.push(format!(
+                "decided at each runner's start for {}, which Docker does not have yet",
+                unread.join(", ")
+            ));
+        }
+        if parts.is_empty() {
+            parts.push(
+                "decided at each runner's start, from its image's runnerd.skip-syncs label"
+                    .to_owned(),
+            );
+        }
+        let runners = parts.join("; ");
+        if skips.is_empty() && unread.is_empty() && !syncs.is_empty() {
+            return check(
+                api::CheckStatus::Info,
+                format!("{runners}. Nothing is emptied after a crash"),
+                None,
+            );
+        }
+        let crash = "a crash or power loss while such a runner ran empties the slots' volumes and the pnpm and Maven \
+                     stores before any runner starts";
+        match boots {
+            PastBoots::Read => check(
+                api::CheckStatus::Info,
+                format!(
+                    "{runners}. After {crash}; an orderly shutdown or reboot keeps them, as the journal shows its \
+                     final sync"
+                ),
+                None,
+            ),
+            PastBoots::NotKept => check(
+                api::CheckStatus::Warn,
+                format!(
+                    "{runners}. This host's journal keeps no past boot, so runnerd cannot tell an orderly shutdown \
+                     from a crash: every boot after such a runner ran empties the slots' volumes and the pnpm and \
+                     Maven stores before any runner starts"
+                ),
+                Some(
+                    "keep the journal across boots: sudo mkdir -p /var/log/journal && sudo journalctl --flush; \
+                     or set [host] skip_syncs = false",
+                ),
+            ),
+            PastBoots::Unreadable => check(
+                api::CheckStatus::Warn,
+                format!(
+                    "{runners}. runnerd's user cannot read the system journal, so runnerd cannot tell an orderly \
+                     shutdown from a crash: every boot after such a runner ran empties the slots' volumes and the \
+                     pnpm and Maven stores before any runner starts"
+                ),
+                Some(
+                    "let runnerd's user read the journal: sudo usermod -aG systemd-journal \"$USER\", then log in \
+                     again; or set [host] skip_syncs = false",
+                ),
+            ),
         }
     }
 

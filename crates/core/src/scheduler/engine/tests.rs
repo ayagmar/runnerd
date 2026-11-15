@@ -11,7 +11,7 @@ use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
 use super::{
-    Author, Command, Commit, ControlError, Engine, Flush, Handle, HostIdentity, RunningJobs,
+    Author, Command, Commit, ControlError, Durability, Engine, Handle, HostIdentity, RunningJobs,
     RunningSlots, Setup, Shutdown, Target,
 };
 use crate::api::{self, JobState};
@@ -911,6 +911,10 @@ struct DockerState {
     panic_starts: u32,
     /// Volumes a container still uses, which Docker refuses to remove.
     volumes_in_use: BTreeSet<String>,
+    /// The containers that mount each volume, by its name: Docker refuses to remove it while one is left.
+    holders: BTreeMap<String, Vec<Container>>,
+    /// Runner images that lack `runnerd-skip-syncs`, as those before it do.
+    lacking_filter: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -1457,6 +1461,9 @@ impl DockerApi for FakeDocker {
         state
             .containers
             .retain(|candidate| candidate.id != container && candidate.name != container);
+        for holders in state.holders.values_mut() {
+            holders.retain(|candidate| candidate.id != container && candidate.name != container);
+        }
         // Docker gives the next container a new ID: one that takes the name gets none of this one's output.
         state.container_captures.remove(container);
         Ok(())
@@ -1644,6 +1651,19 @@ impl DockerApi for FakeDocker {
         Ok(!self.0.lock().unwrap().missing_images.contains(image))
     }
 
+    async fn image_skips_syncs(&self, image: &str) -> Result<bool, docker::Error> {
+        self.outage().await?;
+        let state = self.0.lock().unwrap();
+        Ok(!state.missing_images.contains(image) && !state.lacking_filter.contains(image))
+    }
+
+    async fn holders(&self, volume: &str) -> Result<Vec<Container>, docker::Error> {
+        self.outage().await?;
+        let mut state = self.0.lock().unwrap();
+        state.call(format!("holders {volume}"));
+        Ok(state.holders.get(volume).cloned().unwrap_or_default())
+    }
+
     async fn pull(&self, image: &str) -> Result<(), docker::Error> {
         self.outage().await?;
         self.0.lock().unwrap().call(format!("pull {image}"));
@@ -1712,7 +1732,12 @@ impl DockerApi for FakeDocker {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("remove volume {name}"));
-        if state.volumes_in_use.contains(name) {
+        if state.volumes_in_use.contains(name)
+            || state
+                .holders
+                .get(name)
+                .is_some_and(|holders| !holders.is_empty())
+        {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 409,
                 message: format!("remove {name}: volume is in use"),
@@ -1955,7 +1980,13 @@ fn engine_with(
     dir: &TestDir,
     config: &str,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
-    engine_flushing(github, docker, dir, config, Flush::new(|| {}))
+    engine_durable(
+        github,
+        docker,
+        dir,
+        config,
+        Durability::new(|| {}, |_| false),
+    )
 }
 
 /// The kernel's boot ID the engine in `dir` reads: a new one is a host that booted again.
@@ -1965,13 +1996,14 @@ fn boot(dir: &TestDir, id: &str) {
     std::fs::write(file, format!("{id}\n")).unwrap();
 }
 
-/// An engine whose writes to disk go through `flush`, in a host that booted once unless the test says otherwise.
-fn engine_flushing(
+/// An engine whose writes to disk go through `durability`, in a host that booted once unless the test says
+/// otherwise.
+fn engine_durable(
     github: &FakeGithub,
     docker: &FakeDocker,
     dir: &TestDir,
     config: &str,
-    flush: Flush,
+    durability: Durability,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
     if !dir.0.join("proc/sys/kernel/random/boot_id").exists() {
         boot(dir, "boot-1");
@@ -1995,7 +2027,7 @@ fn engine_flushing(
             },
             build_cache: None,
             unsynced: dir.0.join("unsynced"),
-            flush,
+            durability,
         },
     )
 }

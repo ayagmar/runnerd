@@ -75,7 +75,7 @@ use self::registrations::Registrations;
 use self::repository_state::RepositoryState;
 use self::slot::Slot;
 use self::tick::Scope;
-pub use self::unsynced::Flush;
+pub use self::unsynced::Durability;
 use self::unsynced::Unsynced;
 use self::upkeep::Upkeep;
 use self::watches::Watches;
@@ -223,8 +223,9 @@ pub struct Setup {
     /// Where the engine keeps whether what runners wrote without syncing may be lost to a host crash (ADR 0141), such
     /// as `unsynced` beside the job history.
     pub unsynced: PathBuf,
-    /// Writes what the kernel holds in memory to disk, before the engine says nothing is owed: `sync(2)`.
-    pub flush: Flush,
+    /// Writes what the kernel holds in memory to disk, before the engine says nothing is owed, and tells whether a
+    /// past boot ended in an orderly shutdown: `sync(2)` and the systemd journal.
+    pub durability: Durability,
 }
 
 /// Why a runner starts, as its start's log line and its record say (ADR 0092).
@@ -607,9 +608,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             paths,
             build_cache,
             unsynced,
-            flush,
+            durability,
         } = setup;
-        let unsynced = Unsynced::open(unsynced, &paths.proc, flush);
+        let unsynced = Unsynced::open(unsynced, &paths.proc, durability);
         let slots = config
             .profiles
             .iter()

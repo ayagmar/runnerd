@@ -60,8 +60,8 @@ flowchart TB
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `actions`, `admission`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`,
-  `scheduler`, `observe`, `sizing`, `store`: `host` only
+- `actions`, `admission`, `boots`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`, `isolation`,
+  `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
   through the engine's own `Github`, off the engine's loop: a preview that reads the run and issues a confirmation,
   then, for a request that carries one, one POST within a deadline, once a permit `Github` asks with the token in hand
@@ -584,14 +584,19 @@ always returns, so the daemon closes and flushes the history.
   profile's count. A store whose engine does not start is emptied
   ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md)).
-- Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner
-  `RUNNERD_SKIP_SYNCS=1` (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before
-  anything of the runner's starts, that answers `fsync` and the other sync calls 0 for the runner, its Docker Engine
-  and their containers. A Docker profile cannot, since sysbox drops its rules for those calls. Seed, mirror, measure
-  and shell containers keep their syncs. Before such a runner starts, the engine keeps on disk the boot it starts in
-  (`engine/unsynced`), and forgets it after a `sync(2)` once a stop leaves no runner running; a start in another boot
-  with it still kept empties every slot's volume and the pnpm and Maven volumes before any runner starts
-  ([ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)).
+- Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner whose image
+  carries the label `runnerd.skip-syncs=1` (`docker::SKIP_SYNCS_LABEL`) `RUNNERD_SKIP_SYNCS=1`
+  (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before anything of the runner's
+  starts, that answers `fsync` and the other sync calls 0 for the runner, its Docker Engine and their containers. A
+  Docker profile cannot, since sysbox drops its rules for those calls. An image without the label is never asked.
+  Seed, mirror, measure and shell containers keep their syncs. Before such a runner starts, the engine keeps on disk
+  the boot it starts in (`engine/unsynced`), and forgets it after a `sync(2)` once a stop leaves no runner running. A
+  start in another boot with it still kept asks `boots` whether the journal shows that boot ended in an orderly
+  shutdown, whose final sync wrote everything; if not, no runner, reseed, measure, trim or shell starts until every
+  slot's volume and the pnpm and Maven volumes are emptied, past runnerd's stopped containers on them
+  (`cache::empty_volumes`), or Docker refused 5 ticks
+  ([ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)). `boots` runs `journalctl` and decides
+  nothing.
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.

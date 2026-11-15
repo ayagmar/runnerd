@@ -62,6 +62,7 @@ fn ready_host(os_release: &str) -> Host {
             .map(|stage| {
                 let found = ImageFound::Present {
                     version: Some(VERSION.to_owned()),
+                    skips_syncs: true,
                 };
                 (published(stage), Ok(found))
             })
@@ -106,6 +107,7 @@ fn ready_host(os_release: &str) -> Host {
             path: "/home/dana/.config/runnerd/runnerd.toml".into(),
             mode: 0o600,
         }),
+        past_boots: runnerd_core::config::PastBoots::Read,
     }
 }
 
@@ -981,6 +983,7 @@ fn an_image_built_for_another_release_warns() {
         published("jvm"),
         Ok(ImageFound::Present {
             version: Some("0.0.1".to_owned()),
+            skips_syncs: false,
         }),
     );
     let checks = checks(&host, Some(&config));

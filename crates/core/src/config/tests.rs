@@ -1406,3 +1406,73 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
         wrong.join("\n")
     );
 }
+
+#[test]
+fn doctor_says_which_images_skip_syncs_and_whether_a_reboot_keeps_their_caches() {
+    use super::{ImageSyncs, PastBoots};
+    use crate::api::CheckStatus;
+    let host = Config::parse(MINIMAL).unwrap().host;
+    let images = |list: &[(&str, ImageSyncs)]| -> std::collections::BTreeMap<String, ImageSyncs> {
+        list.iter()
+            .map(|(image, syncs)| ((*image).to_owned(), *syncs))
+            .collect()
+    };
+    let new = images(&[("runner:jvm-0.2.0", ImageSyncs::Skips)]);
+    let check = host.syncs_check(&new, PastBoots::Read);
+    assert_eq!(check.status, CheckStatus::Info, "{}", check.detail);
+    assert!(
+        check
+            .detail
+            .contains("skipped by the runners of runner:jvm-0.2.0")
+            && check
+                .detail
+                .contains("an orderly shutdown or reboot keeps them"),
+        "{}",
+        check.detail
+    );
+
+    let old = images(&[("runner:jvm-0.1.1", ImageSyncs::Syncs)]);
+    let check = host.syncs_check(&old, PastBoots::NotKept);
+    assert_eq!(
+        (check.status, check.detail.as_str()),
+        (
+            CheckStatus::Info,
+            "kept by the runners of runner:jvm-0.1.1: they lack runnerd-skip-syncs, so runnerd never asks them. \
+             Nothing is emptied after a crash"
+        ),
+        "an image without the filter arms nothing, whatever the journal keeps"
+    );
+
+    for boots in [PastBoots::NotKept, PastBoots::Unreadable] {
+        let check = host.syncs_check(&new, boots);
+        assert_eq!(
+            check.status,
+            CheckStatus::Warn,
+            "{boots:?}: {}",
+            check.detail
+        );
+        assert!(
+            check
+                .detail
+                .contains("every boot after such a runner ran empties")
+                && check.fix.is_some(),
+            "{boots:?}: {check:?}"
+        );
+    }
+
+    let unread = host.syncs_check(&images(&[]), PastBoots::Read);
+    assert!(
+        unread
+            .detail
+            .starts_with("decided at each runner's start, from its image's runnerd.skip-syncs label. After a crash"),
+        "with no image read, as when Docker does not answer: {}",
+        unread.detail
+    );
+
+    let mut off = Config::parse(MINIMAL).unwrap().host;
+    off.skip_syncs = false;
+    assert_eq!(
+        off.syncs_check(&new, PastBoots::Read).detail,
+        "kept, as [host] skip_syncs = false sets"
+    );
+}

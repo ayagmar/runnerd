@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use super::unsynced::{AfterRefusal, REFUSALS};
 use super::upkeep::Due;
 use super::{Engine, Meanwhile, Occupant, Shutdown, Slot};
 use crate::admission::host;
@@ -58,8 +59,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Measures slot 1 of the profiles whose slot 1 ran a job, and reseeds the idle profiles due to reseed, once Docker
     /// has their image; with no runner running at all, stops the mirror and, unless shutting down, empties the shared
-    /// caches over their limit.
+    /// caches over their limit. None of it while caches a crash may have torn wait to be emptied.
     pub(super) async fn idle_caches(&mut self, mode: Shutdown, tick_began: SystemTime) {
+        // Caches a crash may have torn are emptied first: a reseed would copy slot 1's layers into the snapshot, and
+        // a measure or a trim would mount the volumes being removed.
+        if self.unsynced.is_torn() {
+            return;
+        }
         if mode == Shutdown::No {
             self.start_measures(tick_began);
             let due: Vec<String> = self
@@ -508,33 +514,62 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Empties what runners write and later jobs read, once a host crash may have torn it (ADR 0141): every slot's
-    /// volume, layers and Docker store alike, and the pnpm store and Maven repository every slot shares. Not the
-    /// snapshots, which only a reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs.
-    /// A volume Docker does not remove keeps them owed, and no runner starts, until a later tick removes it.
+    /// volume, layers and Docker store alike, and the pnpm store and Maven repository every slot shares, each after
+    /// the stopped containers of runnerd's that mount it (`cache::empty_volumes`). Not the snapshots, which only a
+    /// reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs. It waits for the records
+    /// being committed, whose containers mount the slots' volumes and go once committed. A volume Docker does not
+    /// remove keeps them owed, and no runner starts, until a later tick removes it, or `unsynced::REFUSALS` ticks
+    /// were refused: then runners start on what the caches hold. Docker not answering at all counts no refusal.
     pub(super) async fn empty_torn_caches(&mut self) {
-        let mut refused = Vec::new();
-        let mut emptied = Vec::new();
-        for volume in cache::volumes(&self.names, &self.config) {
-            if !matches!(
-                volume.kind,
-                api::CacheKind::Slot { .. } | api::CacheKind::Pnpm | api::CacheKind::Maven
-            ) {
-                continue;
-            }
-            match self.docker.remove_volume(&volume.name).await {
-                Ok(()) => emptied.push(volume.name),
-                Err(error) if is_not_found(&error) => {}
-                Err(error) => refused.push(format!("{}: {error}", volume.name)),
-            }
+        if self.records.is_recording() {
+            return;
         }
+        let volumes: Vec<String> = cache::volumes(&self.names, &self.config)
+            .into_iter()
+            .filter(|volume| {
+                matches!(
+                    volume.kind,
+                    api::CacheKind::Slot { .. } | api::CacheKind::Pnpm | api::CacheKind::Maven
+                )
+            })
+            .map(|volume| volume.name)
+            .collect();
+        let cache::Cleared { removed, refused } =
+            cache::empty_volumes(&*self.docker, &volumes).await;
         // Each slot's layers no longer hold what a job cached.
         self.ran.clear();
         self.trim_due = true;
         if !refused.is_empty() {
-            warn!(
-                "cannot empty what a host crash may have torn, so no runner starts until it is: {}",
-                refused.join("; ")
-            );
+            let why = refused
+                .iter()
+                .map(|refusal| format!("{}: {}", refusal.volume, refusal.why))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if refused.iter().all(|refusal| refusal.unreachable) {
+                warn!(
+                    "cannot empty what a host crash may have torn while Docker does not answer: {why}"
+                );
+                return;
+            }
+            match self.unsynced.refused() {
+                Ok(AfterRefusal::Again { tries }) => warn!(
+                    "cannot empty what a host crash may have torn, so no runner starts until it is (try {tries} of \
+                     {REFUSALS}): {why}"
+                ),
+                Ok(AfterRefusal::GaveUp) => warn!(
+                    "gave up emptying what a host crash may have torn after {REFUSALS} tries: runners start on what \
+                     {} hold; remove them once nothing mounts them, with docker volume rm: {why}",
+                    refused
+                        .iter()
+                        .map(|refusal| refusal.volume.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Err(error) => warn!(
+                    "gave up emptying what a host crash may have torn, but cannot note it, so no runner starts: \
+                     {error}; {why}"
+                ),
+            }
             return;
         }
         if let Err(error) = self.unsynced.emptied() {
@@ -543,10 +578,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         info!(
             "the host booted again with what runners wrote unsynced; emptied {} before any runner starts",
-            if emptied.is_empty() {
+            if removed.is_empty() {
                 "nothing, as no cache volume was left".to_owned()
             } else {
-                emptied.join(", ")
+                removed.join(", ")
             }
         );
     }

@@ -39,9 +39,13 @@ the sync calls answered `SCMP_ACT_ERRNO`, `errnoRet: 0`), does not work under sy
   language's or a file system library's own tests may, fails in a runner; such a host sets `skip_syncs = false`.
 - The filter knows x86_64, where it was run, and aarch64, from the kernel's generic syscall table; runnerd publishes
   amd64 images, so the aarch64 half has not run. A call of another ABI syncs.
-- runnerd puts `RUNNERD_SKIP_SYNCS=1` (`docker::SKIP_SYNCS`) in a runner container's environment unless
-  `[host] skip_syncs = false`. A reload applies it from the next runner on; a running one keeps what it started with.
-  The setting does not depend on `isolation`: the filter works the same under `unsafe-dind`.
+- The image says it has the filter: the runner image carries the label `runnerd.skip-syncs=1`
+  (`docker::SKIP_SYNCS_LABEL`), the version of the variable it answers. Before each runner start the engine asks
+  Docker for its image's labels, and puts `RUNNERD_SKIP_SYNCS=1` (`docker::SKIP_SYNCS`) in the container's
+  environment only if the label is there and `[host] skip_syncs` is not `false`. A runner of an image without it,
+  such as the 0.1.1 images, is never asked and arms nothing below, whatever the config says. A reload applies the
+  setting from the next runner on; a running one keeps what it started with. The setting does not depend on
+  `isolation`: the filter works the same under `unsafe-dind`.
 - Only runners. A seed container keeps its syncs: `seed.sh` syncs the snapshot's and slots' volumes on purpose around
   `/base/.reseeding` (ADR 0066), and its `sync -f` also writes what slot 1's runners left in memory. The mirror is
   Docker's registry image, which runnerd does not change, and keeps its syncs. The containers that measure layers and
@@ -63,6 +67,16 @@ another can come back empty under its new name. Neither shows to ADR 0054's chec
 its engine does not start, and a reseed copies slot 1's layers as they are into the snapshot every slot reads, where
 cleaning a slot no longer reaches it.
 
+An orderly shutdown or reboot loses nothing. systemd stops every unit first, and with them every container; then
+`systemd-shutdown` logs `Syncing filesystems and block devices.`, calls `sync(2)`, and once it returns logs `Sending
+SIGTERM to remaining processes...` before it unmounts. journald writes both lines and syncs its files when that signal
+stops it. So a past boot whose journal holds both lines, in that order and with no timeout between, ended with
+everything its runners wrote on disk; a crash at any point before leaves the second line out. The owner's host
+boots about once a day. Of the 100 past boots its journal kept on 2026-11-15, 97 left both lines. The other 3 left
+neither: one ended on a GPU fault, one stopped mid-session, and one died during its shutdown, while systemd unmounted
+Docker's overlays. A daemon that took its own stop signal as an orderly shutdown would have kept the caches after that
+last one.
+
 So the engine notes, before a runner that skips its syncs starts, the boot it starts in, and forgets it once what
 runners wrote is on disk (`scheduler::engine::unsynced`, kept in `unsynced` beside the job history):
 
@@ -70,32 +84,43 @@ runners wrote is on disk (`scheduler::engine::unsynced`, kept in `unsynced` besi
   and renamed into place. If it cannot write the file or read the kernel's boot ID, the runner starts without
   `RUNNERD_SKIP_SYNCS` and syncs: a crash after it could not be told.
 - A stop that leaves no runner running calls `sync(2)` and then removes the file. A stop that leaves busy runners for
-  the next start keeps it.
-- At start, a file whose boot ID is not the kernel's, a boot since, with no such stop between, makes the caches torn:
-  the file says `torn`, no runner starts, and the first tick removes every slot's volume, layers and Docker store
-  alike, and the pnpm and Maven volumes. Once Docker removed them all, the engine calls `sync(2)` and removes the
-  file. A volume Docker does not remove keeps the caches torn, and no runner starts, until a later tick removes it;
-  the log names it.
+  the next start keeps it: they go on writing.
+- At start, a file whose boot ID is not the kernel's is a boot since. If the journal shows that boot ended in an
+  orderly shutdown (`boots::ended_synced`, `journalctl _BOOT_ID=<id> SYSLOG_IDENTIFIER=systemd-shutdown`), the engine
+  removes the file and keeps the caches, busy runners at the shutdown or not. Otherwise the caches are torn: a crash,
+  a stop followed by a crash while the runners it left kept writing, a journal that keeps no past boot, or one
+  runnerd's user cannot read. The file then says `torn`, and no runner, reseed, measure, trim or record shell starts.
+- Each tick while the caches are torn waits for the records being committed, whose containers mount their slots'
+  volumes and go once committed. Then, for every slot's volume, layers and Docker store alike, and the pnpm and Maven
+  volumes, it asks Docker which containers mount it (`docker ps --all --filter volume=`), removes those of runnerd's
+  that no longer run, such as a runner or a seed the crash stopped, and removes the volume (`cache::empty_volumes`).
+  Once all are gone, the engine calls `sync(2)` and removes the file.
+- A volume Docker does not remove keeps the caches torn, and no runner starts, until a later tick removes it; the log
+  names the volume and why. A running container or one that is not runnerd's on it is never removed, and is a refusal
+  at once rather than a wait. After 5 ticks with a refusal (`unsynced::REFUSALS`), the engine gives up: it calls
+  `sync(2)`, removes the file, logs the volumes left and the `docker volume rm` that empties them, and runners start on
+  what the caches hold. A torn cache can fail some jobs; no runner at all fails every job. Docker not answering at all
+  counts no refusal, as nothing can start then anyway. The count is not kept: a restart tries 5 times again.
 - The pnpm store and the Maven repository go too. Each is one volume every slot of every profile writes, so a torn
   file there fails every job that uses that package, on every slot, and nothing replaces it: Maven does not check an
   artifact it has. A crash costs one download of each package.
-- The snapshots stay. Only a reseed writes them, with its syncs, and slot 1's layers are emptied before any reseed can
-  copy them. The mirror and the build cache keep their syncs. A record is a committed image of a failed job's
+- The snapshots stay. Only a reseed writes them, with its syncs, and no reseed starts before slot 1's layers are
+  emptied. The mirror and the build cache keep their syncs. A record is a committed image of a failed job's
   container: its files may be torn, and it is kept, as it shows what the job left; its log and data are the daemon's.
 - A daemon that dies and starts again in the same boot finds its boot ID and empties nothing: the kernel lost nothing.
-  A clean reboot after a stop that left runners running, or after the daemon died, empties the caches, as the engine
-  cannot tell it from a crash: one cold start per slot, which ADR 0054 already accepts for a store that does not start.
-- The file is the state, so it survives a restart; a reload does not change it. A file that is not one the engine
-  writes reads as torn.
+  A boot ID that cannot be read at start cannot be told from another boot, so the journal decides as above.
+- The file is the state, so it survives a restart; a reload does not change it. A missing file is nothing owed. A
+  file that is empty, cannot be read, or holds what the engine does not write reads as torn. The file a daemon of this
+  change's first version wrote, `since <boot ID>` or `torn`, reads the same.
 
 Volumes of a profile the config no longer has are not emptied; a profile added back with the same name finds them as
 they were.
 
 ## Old and new
 
-An image without `runnerd-skip-syncs` ignores the variable and syncs; a daemon without the setting sets no variable,
-and the new image then syncs. Neither pairing breaks, and each syncs as before. A daemon with the setting and an old
-image still notes the boot and empties the caches after a crash, which that image did not need.
+An image without `runnerd-skip-syncs` lacks its label, so the engine never asks its runners and arms nothing: no
+mark, nothing emptied after a crash. A daemon without the setting sets no variable, and the new image then syncs.
+Neither pairing breaks, and each syncs as before.
 
 ## Evidence
 
@@ -138,24 +163,39 @@ dockerd, containerd, the builds, postgres, apt and dpkg (`dpkg --audit` clean), 
 runner's sudo all worked. Kernel-side syncs stay: overlayfs syncs each copy-up, in the slot's layers and in the
 engine's containers.
 
-`a_runner_told_to_skip_syncs_skips_them_down_to_its_jobs_containers_and_builds` in
-`crates/core/tests/slot_docker_store.rs` checks the image's entrypoint and, on an image built from the tree, each call
-the filter answers, for the runner as root and as its user, and `fsync` in a container and a build step of its
-engine. `what_runners_wrote_unsynced_is_emptied_after_a_crash_and_only_then` in
+`crates/core/tests/slot_docker_store.rs`, against Docker and sysbox:
+
+- `a_runner_told_to_skip_syncs_skips_them_down_to_its_jobs_containers_and_builds` checks the image's entrypoint and
+  label and, on an image built from the tree, each call the filter answers, for the runner as root and as its user,
+  and `fsync` in a container and a build step of its engine.
+- `a_runner_image_from_before_the_filter_is_never_asked_to_skip_syncs` reads the 0.1.1 image's labels: no filter.
+- `torn_volumes_are_emptied_past_runnerds_leftovers_and_a_held_one_is_refused_at_once` leaves an exited
+  container of runnerd's on one volume and a running container of someone else's on another. Docker refuses to
+  remove the second; `cache::empty_volumes` removes the leftover and then its volume, and returns the second as
+  refused, naming the container, without waiting or touching it.
+
+`what_runners_wrote_unsynced_is_emptied_after_a_crash_and_only_then` in
 `crates/core/src/scheduler/engine/tests/unsynced.rs` runs the engine on the fakes through generated sequences of runner
-starts, jobs ending, stops, daemon deaths, clean reboots, crashes, reloads of `skip_syncs` and volumes Docker refuses
-to remove.
+starts, jobs taken and ending, stops, daemon deaths, orderly reboots with runners busy, crashes, a crash after a stop
+that left runners writing, reloads and restarts of `skip_syncs`, images with and without the filter, a volume another
+container holds, with the daemon dying meanwhile, and a leftover container of runnerd's on a slot's volume. Each of
+these breaks it: ignoring the journal, trusting it always, asking an image without the filter, and leaving runnerd's
+leftovers in place. The cases after it take the file's contents, a missing boot ID, a refusal that never ends and an
+outage one at a time. `boots`'s own tests read the journal's lines of an orderly poweroff, a crash before and during
+the sync, and a sync that timed out.
 
 ## Consequences
 
 - Runners write less: in the measured load, about a fifth fewer bytes and half the write requests of their own. The
   btrfs commit rate did not measurably change in that load.
-- A host crash costs every slot and the shared pnpm and Maven stores a cold start.
+- A host crash costs every slot and the shared pnpm and Maven stores a cold start. An orderly shutdown or reboot
+  costs nothing, on a host whose journal keeps past boots where runnerd's user can read them.
 - A program that relies on `fsync` to see a write error, or on its `EBADF`, does not see it. `O_SYNC` and `O_DSYNC`
   writes still sync; io_uring, whose `fsync` the filter cannot see, is blocked in a sysbox runner, whose profile is
   Docker's default with sysbox's own allowlist, neither of which allows it; a privileged `unsafe-dind` runner has no
   profile.
-- `runnerd doctor`, and so the dashboard's config view, words what core knows in an information check, `runner syncs`
-  (`config::Host::syncs_check`): that each runner is asked, that an image without the wrapper ignores the ask, and
-  what a crash empties. It does not say whether a runner's filter is in: the wrapper says that only on the container's
-  output.
+- `runnerd doctor`, and so the dashboard's config view, words what core knows in a check, `runner syncs`
+  (`config::Host::syncs_check`): which profiles' images carry the filter and so skip, which lack it and sync, which
+  Docker does not have yet, and what a crash empties. It reads the journal too (`boots::past_boots`): a host whose
+  journal keeps no past boot, or that runnerd's user cannot read, gets a warning that every boot empties the caches,
+  with the fix. It does not say whether a runner's filter is in: the wrapper says that only on the container's output.

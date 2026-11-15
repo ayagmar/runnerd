@@ -14,7 +14,7 @@ use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
-use runnerd_core::scheduler::engine::{Control, Engine, Flush, HostIdentity, Setup, Shutdown};
+use runnerd_core::scheduler::engine::{Control, Durability, Engine, HostIdentity, Setup, Shutdown};
 use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
@@ -885,7 +885,7 @@ async fn serve(
             paths: Paths::default(),
             build_cache,
             unsynced,
-            flush: Flush::host(),
+            durability: Durability::host(),
         },
     );
     tokio::spawn(shut_down_on_signals(handle.control.clone()));

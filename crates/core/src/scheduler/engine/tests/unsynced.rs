@@ -1,15 +1,20 @@
 //! What runners wrote without syncing, over generated sequences on the fakes (ADR 0141): runners started with syncs
-//! skipped or kept, jobs ending, clean stops, daemon deaths, clean reboots, host crashes, reloads of `skip_syncs`, and
-//! Docker refusing to remove a volume. The host's `sync(2)` is a counter: what runners wrote is on disk once it ran,
-//! or once the host shut down cleanly. After every restart:
+//! skipped or kept, of images with and without `runnerd-skip-syncs`, jobs ending, clean stops, daemon deaths, orderly
+//! reboots with runners busy, host crashes, a crash after a stop that left runners writing, reloads and restarts with
+//! `skip_syncs` turned over, and Docker refusing to remove a volume, or holding it in a leftover container. The host's
+//! `sync(2)` is a counter and its journal a set of the boots that ended in an orderly shutdown: what runners wrote is
+//! on disk once a sync ran, or once the host shut down in order. After every restart:
 //!
 //! - `a_crash_empties_what_it_may_have_torn`: a crash while what a runner wrote unsynced was not yet on disk empties
 //!   every slot's volume and the pnpm and Maven volumes, before any runner starts; none starts while Docker refuses
 //!   one.
-//! - `nothing_is_emptied_without_cause`: nothing is emptied unless the host booted again since a runner skipped its
-//!   syncs, with no stop between that left no runner running.
+//! - `nothing_is_emptied_without_cause`: nothing is emptied unless the host crashed since a runner skipped its syncs,
+//!   with no stop between that left no runner running: an orderly reboot keeps the caches, busy runners or not.
+//! - `only_a_filtered_image_arms`: a runner skips its syncs only if its image carries the filter, and only once the
+//!   mark says so on disk.
 //!
-//! A failure prints its seed and steps; `RUNNERD_UNSYNCED_SEED` replays one seed.
+//! A failure prints its seed and steps; `RUNNERD_UNSYNCED_SEED` replays one seed. The cases after it each take one
+//! edge on its own: what the file holds, a boot ID that cannot be read, and Docker refusing for good.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -23,7 +28,10 @@ const TORN: [&str; 4] = [
     "runnerd-maven",
 ];
 
-const CASES: u64 = 48;
+/// The profile's image, as `image_stage = "app"` names it.
+const IMAGE: &str = "runnerd-runner:app";
+
+const CASES: u64 = 64;
 const STEPS: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,14 +44,25 @@ enum Step {
     Stop,
     /// The daemon is killed and started again in the same boot.
     Die,
-    /// The daemon stops on its signal and the host shuts down cleanly, writing everything, then boots.
+    /// The daemon stops on its signal, leaving busy runners, and the host shuts down in order, which stops them and
+    /// writes everything, then boots.
     Reboot,
     /// The host loses power: what was not written is lost, and it boots.
     Crash,
-    /// As `Crash`, while Docker refuses to remove the pnpm volume at the first tick after.
+    /// A signal's stop that leaves busy runners writing, then the host loses power.
+    StopCrash,
+    /// As `Crash`, while a container that is not runnerd's mounts the pnpm volume at the first tick after.
     CrashRefused,
-    /// A reload turns `skip_syncs` over, as a restart with the other config does.
+    /// As `CrashRefused`, and the daemon dies before the tick after it is gone, then starts again.
+    CrashRefusedDie,
+    /// As `Crash`, with a stopped seed container of runnerd's left mounting slot 1's volume.
+    CrashLeftover,
+    /// A restart with `skip_syncs` turned over.
     Toggle,
+    /// A reload with `skip_syncs` turned over.
+    Reload,
+    /// The profile's image is replaced by one with the filter if it lacked it, or one without if it had it.
+    Image,
 }
 
 /// A xorshift generator: a seed replays its case.
@@ -58,16 +77,63 @@ impl Rng {
     }
 
     fn step(&mut self) -> Step {
-        match self.below(16) {
-            0..=4 => Step::Job,
-            5..=7 => Step::EndJobs,
-            8 => Step::Stop,
-            9 => Step::Die,
-            10..=11 => Step::Reboot,
-            12..=13 => Step::Crash,
-            14 => Step::CrashRefused,
-            _ => Step::Toggle,
+        match self.below(22) {
+            0..=5 => Step::Job,
+            6..=8 => Step::EndJobs,
+            9 => Step::Stop,
+            10 => Step::Die,
+            11..=12 => Step::Reboot,
+            13..=14 => Step::Crash,
+            15 => Step::StopCrash,
+            16 => Step::CrashRefused,
+            17 => Step::CrashRefusedDie,
+            18 => Step::CrashLeftover,
+            19 => Step::Toggle,
+            20 => Step::Reload,
+            _ => Step::Image,
         }
+    }
+}
+
+/// How the host came to the boot a restart starts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Boot {
+    /// The same boot.
+    Same,
+    /// A boot after an orderly shutdown.
+    Orderly,
+    /// A boot after a crash; `lost` is whether it lost what a runner wrote unsynced.
+    Crashed { lost: bool },
+}
+
+/// What mounts a torn volume when the host is back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Nothing,
+    /// A container that is not runnerd's mounts the pnpm volume until the first tick is done.
+    Foreign,
+    /// As `Foreign`, and the daemon dies after that tick.
+    ForeignThenDie,
+    /// A stopped seed container of runnerd's mounts slot 1's volume.
+    Leftover,
+}
+
+/// The host: its syncs, by count, and the boots its journal shows ended in an orderly shutdown.
+#[derive(Clone, Default)]
+struct Host {
+    flushes: Arc<AtomicUsize>,
+    ended: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl Host {
+    fn durability(&self) -> Durability {
+        let (flushes, ended) = (self.flushes.clone(), self.ended.clone());
+        Durability::new(
+            move || {
+                flushes.fetch_add(1, Ordering::SeqCst);
+            },
+            move |boot| ended.lock().unwrap().contains(boot),
+        )
     }
 }
 
@@ -75,7 +141,7 @@ struct Case {
     github: FakeGithub,
     docker: FakeDocker,
     dir: TestDir,
-    flushes: Arc<AtomicUsize>,
+    host: Host,
     /// The host's `sync(2)` calls the model has seen.
     flushes_seen: usize,
     boots: u32,
@@ -83,9 +149,9 @@ struct Case {
     engine: Engine<FakeGithub, FakeDocker>,
     handle: Handle,
     next_job: u64,
-    /// A runner skipped its syncs since what was written last reached the disk: a crash now loses it.
+    /// What a runner wrote unsynced may not be on disk: one skipped its syncs since the last sync, or still runs.
     unwritten: bool,
-    /// A runner skipped its syncs since the last stop that left no runner running, or the last emptying.
+    /// A runner skipped its syncs since the last stop that left no runner running, orderly shutdown or emptying.
     since_clean: bool,
     steps: Vec<Step>,
 }
@@ -93,34 +159,25 @@ struct Case {
 /// What broke, with the steps that led to it.
 type Failure = String;
 
-impl Case {
-    fn config(skip: bool) -> String {
-        if skip {
-            CONFIG.to_owned()
-        } else {
-            CONFIG.replace(
-                "admission = \"caps\"",
-                "admission = \"caps\"\nskip_syncs = false",
-            )
-        }
+fn config(skip: bool) -> String {
+    if skip {
+        CONFIG.to_owned()
+    } else {
+        CONFIG.replace(
+            "admission = \"caps\"",
+            "admission = \"caps\"\nskip_syncs = false",
+        )
     }
+}
 
-    fn build(
-        github: &FakeGithub,
-        docker: &FakeDocker,
-        dir: &TestDir,
-        flushes: &Arc<AtomicUsize>,
-        skip: bool,
-    ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
-        let flushes = flushes.clone();
-        engine_flushing(
-            github,
-            docker,
-            dir,
-            &Case::config(skip),
-            Flush::new(move || {
-                flushes.fetch_add(1, Ordering::SeqCst);
-            }),
+impl Case {
+    fn build(&self) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+        engine_durable(
+            &self.github,
+            &self.docker,
+            &self.dir,
+            &config(self.skip),
+            self.host.durability(),
         )
     }
 
@@ -128,14 +185,15 @@ impl Case {
         let (github, docker) = (FakeGithub::default(), FakeDocker::default());
         let dir = TestDir::new(&format!("unsynced-{seed}"));
         boot(&dir, "boot-0");
-        let flushes = Arc::new(AtomicUsize::new(0));
-        let (mut engine, handle) = Case::build(&github, &docker, &dir, &flushes, true);
+        let host = Host::default();
+        let (mut engine, handle) =
+            engine_durable(&github, &docker, &dir, &config(true), host.durability());
         engine.recover().await.unwrap();
         Case {
             github,
             docker,
             dir,
-            flushes,
+            host,
             flushes_seen: 0,
             boots: 0,
             skip: true,
@@ -152,19 +210,27 @@ impl Case {
         format!("{what}\nsteps: {:?}", self.steps)
     }
 
-    /// Notes the host's syncs since the last look: what runners wrote before is on disk.
+    /// Notes the host's syncs since the last look: what runners wrote before is on disk, and what the runners still
+    /// running write after is not.
     fn note_flushes(&mut self) -> bool {
-        let count = self.flushes.load(Ordering::SeqCst);
+        let count = self.host.flushes.load(Ordering::SeqCst);
         let flushed = count > self.flushes_seen;
         self.flushes_seen = count;
         if flushed {
-            self.unwritten = false;
+            self.unwritten = self.skipping_runners_run();
         }
         flushed
     }
 
     fn calls(&self) -> usize {
         self.docker.0.lock().unwrap().calls.len()
+    }
+
+    fn skips(state: &DockerState, name: &str) -> bool {
+        state
+            .envs
+            .get(name)
+            .is_some_and(|env| env.iter().any(|var| var == docker::SKIP_SYNCS))
     }
 
     /// The runner containers started by calls from `from` on, and whether each skips its syncs.
@@ -178,13 +244,18 @@ impl Case {
                 if name.ends_with("-seed") || name.ends_with("-measure") {
                     return None;
                 }
-                let skips = state
-                    .envs
-                    .get(name)
-                    .is_some_and(|env| env.iter().any(|var| var == docker::SKIP_SYNCS));
-                Some((from + at, skips))
+                Some((from + at, Case::skips(&state, name)))
             })
             .collect()
+    }
+
+    fn skipping_runners_run(&self) -> bool {
+        let state = self.docker.0.lock().unwrap();
+        state.containers.iter().any(|container| {
+            container.running
+                && container.labels.contains_key("runnerd.job")
+                && Case::skips(&state, &container.name)
+        })
     }
 
     /// The torn volumes removed by calls from `from` on, each at its call.
@@ -210,14 +281,33 @@ impl Case {
         github.jobs.insert(id, details(id, "in_progress", None));
     }
 
-    /// A tick, noting the runners it started that skip their syncs.
-    async fn tick(&mut self) {
+    fn mark(&self) -> Option<String> {
+        std::fs::read_to_string(self.dir.0.join("unsynced")).ok()
+    }
+
+    /// A tick, noting the runners it started that skip their syncs; each must be of an image with the filter, under
+    /// `skip_syncs`, with the mark on disk.
+    async fn tick(&mut self) -> Result<(), Failure> {
         let from = self.calls();
+        let lacking = self.docker.0.lock().unwrap().lacking_filter.contains(IMAGE);
         self.engine.tick(Shutdown::No).await;
         if self.runners_started(from).iter().any(|(_, skips)| *skips) {
+            if lacking || !self.skip {
+                return Err(self.fail(&format!(
+                    "only_a_filtered_image_arms: a runner skips its syncs with skip_syncs = {} and an image {}",
+                    self.skip,
+                    if lacking { "without the filter" } else { "with it" }
+                )));
+            }
+            if !self.mark().is_some_and(|mark| mark.starts_with("since ")) {
+                return Err(self.fail(
+                    "only_a_filtered_image_arms: a runner skips its syncs with no mark on disk",
+                ));
+            }
             self.unwritten = true;
             self.since_clean = true;
         }
+        Ok(())
     }
 
     fn end_jobs(&self) {
@@ -229,6 +319,7 @@ impl Case {
             .retain(|container| !container.labels.contains_key("runnerd.job"));
         let mut github = self.github.0.lock().unwrap();
         github.queued.clear();
+        github.runners.clear();
         for details in github.jobs.values_mut() {
             details.status = "completed".to_owned();
             details.conclusion = Some("success".to_owned());
@@ -246,7 +337,7 @@ impl Case {
     }
 
     /// A signal's stop, to its end: once it leaves no runner running, what runners wrote is on disk and nothing is
-    /// owed.
+    /// owed. Busy runners it leaves keep writing.
     async fn stop(&mut self) -> Result<(), Failure> {
         self.handle.control.shutdown(Shutdown::Detach);
         if tokio::time::timeout(Duration::from_secs(60), self.engine.schedule())
@@ -271,8 +362,18 @@ impl Case {
         self.engine.abort_captures();
     }
 
-    /// The host boots again: no container survives it.
-    fn boot_again(&mut self) {
+    /// The host boots again: no container survives it. An orderly shutdown before it wrote everything, once its
+    /// containers stopped, and its journal says so.
+    fn boot_again(&mut self, orderly: bool) {
+        if orderly {
+            self.host
+                .ended
+                .lock()
+                .unwrap()
+                .insert(format!("boot-{}", self.boots));
+            self.unwritten = false;
+            self.since_clean = false;
+        }
         self.boots += 1;
         boot(&self.dir, &format!("boot-{}", self.boots));
         self.docker.0.lock().unwrap().containers.clear();
@@ -281,47 +382,69 @@ impl Case {
         github.runners.clear();
     }
 
-    /// A new daemon in the boot there is now: it recovers, and its first tick has a job queued, so a runner would
-    /// start in the tick that empties the caches. `lost` says what a crash lost; `marked` that the guard should know.
-    async fn restart(&mut self, lost: bool, booted: bool, refused: bool) -> Result<(), Failure> {
-        self.handle.store.flush().await;
-        let (engine, handle) = Case::build(
-            &self.github,
-            &self.docker,
-            &self.dir,
-            &self.flushes,
-            self.skip,
-        );
-        self.engine = engine;
-        self.handle = handle;
-        let may_empty = booted && self.since_clean;
-        if refused {
-            self.docker
-                .0
-                .lock()
-                .unwrap()
-                .volumes_in_use
-                .insert("runnerd-pnpm".to_owned());
+    fn hold(&self, held: Held) {
+        let holder = |name: &str, label: &str| Container {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            running: label.is_empty(),
+            labels: if label.is_empty() {
+                HashMap::new()
+            } else {
+                HashMap::from([(label.to_owned(), String::new())])
+            },
+        };
+        let mut state = self.docker.0.lock().unwrap();
+        match held {
+            Held::Nothing => {}
+            Held::Foreign | Held::ForeignThenDie => {
+                state
+                    .holders
+                    .insert("runnerd-pnpm".to_owned(), vec![holder("someones-own", "")]);
+            }
+            Held::Leftover => {
+                state.holders.insert(
+                    "runnerd-app-slot-1".to_owned(),
+                    vec![holder("runnerd-app-seed", "runnerd.seed")],
+                );
+            }
         }
+    }
+
+    /// A new daemon in the boot `boot` says: it recovers, and its first tick has a job queued, so a runner would
+    /// start in the tick that empties the caches.
+    async fn restart(&mut self, boot: Boot, held: Held) -> Result<(), Failure> {
+        self.handle.store.flush().await;
+        (self.engine, self.handle) = self.build();
+        let crashed = matches!(boot, Boot::Crashed { .. });
+        let may_empty = crashed && self.since_clean;
+        self.hold(held);
         let from = self.calls();
         if self.engine.recover().await.is_err() {
             return Err(self.fail("recovery failed"));
         }
         self.queue();
-        self.tick().await;
-        if refused && may_empty {
+        self.tick().await?;
+        if matches!(held, Held::Foreign | Held::ForeignThenDie) && may_empty {
             if !self.runners_started(from).is_empty() {
                 return Err(self.fail(
                     "a_crash_empties_what_it_may_have_torn: a runner started while Docker refused a torn volume",
                 ));
             }
-            self.docker.0.lock().unwrap().volumes_in_use.clear();
-            self.tick().await;
+            self.docker.0.lock().unwrap().holders.clear();
+            if held == Held::ForeignThenDie {
+                self.die();
+                self.handle.store.flush().await;
+                (self.engine, self.handle) = self.build();
+                if self.engine.recover().await.is_err() {
+                    return Err(self.fail("recovery failed"));
+                }
+            }
+            self.tick().await?;
         }
-        self.docker.0.lock().unwrap().volumes_in_use.clear();
+        self.docker.0.lock().unwrap().holders.clear();
         let emptied = self.emptied(from);
         if emptied.is_empty() {
-            if lost {
+            if boot == (Boot::Crashed { lost: true }) {
                 return Err(self.fail(
                     "a_crash_empties_what_it_may_have_torn: a crash lost what runners wrote, and nothing was emptied",
                 ));
@@ -330,7 +453,7 @@ impl Case {
         }
         if !may_empty {
             return Err(self.fail(&format!(
-                "nothing_is_emptied_without_cause: {emptied:?} emptied with no boot since runners skipped their syncs"
+                "nothing_is_emptied_without_cause: {emptied:?} emptied after a {boot:?} boot"
             )));
         }
         let removed: BTreeSet<&str> = emptied.iter().map(|(_, name)| *name).collect();
@@ -340,12 +463,11 @@ impl Case {
             )));
         }
         let last_removal = emptied.iter().map(|(at, _)| *at).max().unwrap_or(0);
-        let started_before: Vec<_> = self
+        if self
             .runners_started(from)
-            .into_iter()
-            .filter(|(at, _)| *at < last_removal)
-            .collect();
-        if !started_before.is_empty() {
+            .iter()
+            .any(|(at, _)| *at < last_removal)
+        {
             return Err(self.fail(
                 "a_crash_empties_what_it_may_have_torn: a runner started before the torn volumes were emptied",
             ));
@@ -358,42 +480,65 @@ impl Case {
         Ok(())
     }
 
+    async fn crash(&mut self, held: Held) -> Result<(), Failure> {
+        self.die();
+        let lost = self.unwritten;
+        self.boot_again(false);
+        self.restart(Boot::Crashed { lost }, held).await
+    }
+
     async fn step(&mut self, step: Step) -> Result<(), Failure> {
         self.steps.push(step);
         match step {
             Step::Job => {
                 self.queue();
-                self.tick().await;
+                self.tick().await?;
+                // Its runner takes it: a stop leaves it running.
+                for runner in &mut self.github.0.lock().unwrap().runners {
+                    runner.busy = true;
+                }
             }
             Step::EndJobs => {
                 self.end_jobs();
-                self.tick().await;
+                self.tick().await?;
             }
             Step::Stop => {
                 self.stop().await?;
-                self.restart(false, false, false).await?;
+                self.restart(Boot::Same, Held::Nothing).await?;
             }
             Step::Die => {
                 self.die();
-                self.restart(false, false, false).await?;
+                self.restart(Boot::Same, Held::Nothing).await?;
             }
             Step::Reboot => {
                 self.stop().await?;
-                // A clean shutdown writes everything.
-                self.unwritten = false;
-                self.boot_again();
-                self.restart(false, true, false).await?;
+                self.boot_again(true);
+                self.restart(Boot::Orderly, Held::Nothing).await?;
             }
-            Step::Crash | Step::CrashRefused => {
-                self.die();
-                let lost = self.unwritten;
-                self.boot_again();
-                self.restart(lost, true, step == Step::CrashRefused).await?;
+            Step::Crash => self.crash(Held::Nothing).await?,
+            Step::StopCrash => {
+                self.stop().await?;
+                self.crash(Held::Nothing).await?;
             }
+            Step::CrashRefused => self.crash(Held::Foreign).await?,
+            Step::CrashRefusedDie => self.crash(Held::ForeignThenDie).await?,
+            Step::CrashLeftover => self.crash(Held::Leftover).await?,
             Step::Toggle => {
                 self.die();
                 self.skip = !self.skip;
-                self.restart(false, false, false).await?;
+                self.restart(Boot::Same, Held::Nothing).await?;
+            }
+            Step::Reload => {
+                self.skip = !self.skip;
+                self.engine
+                    .reload(Config::parse(&config(self.skip)).unwrap(), None, None);
+                self.tick().await?;
+            }
+            Step::Image => {
+                let mut state = self.docker.0.lock().unwrap();
+                if !state.lacking_filter.remove(IMAGE) {
+                    state.lacking_filter.insert(IMAGE.to_owned());
+                }
             }
         }
         Ok(())
@@ -421,4 +566,291 @@ async fn what_runners_wrote_unsynced_is_emptied_after_a_crash_and_only_then() {
             panic!("seed {seed}: {failure}");
         }
     }
+}
+
+/// An engine in a host now in boot `boot-1` whose `unsynced` file holds `mark`, or none, and whose journal shows
+/// `ended` ended in an orderly shutdown; recovered, with a job queued and one tick run. Returns the volumes the tick
+/// removed and whether a runner started.
+async fn after_mark(
+    name: &str,
+    mark: Option<&[u8]>,
+    ended: &[&str],
+) -> (TestDir, FakeDocker, Vec<String>, bool) {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new(name);
+    boot(&dir, "boot-1");
+    if let Some(mark) = mark {
+        std::fs::write(dir.0.join("unsynced"), mark).unwrap();
+    }
+    let host = Host::default();
+    host.ended
+        .lock()
+        .unwrap()
+        .extend(ended.iter().map(|boot| (*boot).to_owned()));
+    let (mut engine, _handle) = engine_durable(&github, &docker, &dir, CONFIG, host.durability());
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    engine.tick(Shutdown::No).await;
+    let calls = docker.calls();
+    let mut removed: Vec<String> = calls
+        .iter()
+        .filter_map(|call| call.strip_prefix("remove volume "))
+        .map(str::to_owned)
+        .collect();
+    removed.sort();
+    let started = calls
+        .iter()
+        .any(|call| call.starts_with("start ") && !call.ends_with("-seed"));
+    (dir, docker, removed, started)
+}
+
+#[tokio::test]
+async fn the_mark_a_daemon_left_is_read_whatever_it_holds() {
+    let mut all: Vec<String> = TORN.iter().map(|torn| (*torn).to_owned()).collect();
+    all.sort();
+    for (mark, ended, emptied, why) in [
+        (None, &[][..], false, "no file: nothing is owed"),
+        (
+            Some(&b"since boot-1\n"[..]),
+            &[][..],
+            false,
+            "a mark of this boot: the runners that wrote it may still run",
+        ),
+        (
+            Some(&b"since boot-0\n"[..]),
+            &["boot-0"][..],
+            false,
+            "a mark of a boot that ended in an orderly shutdown, as the daemon before this change wrote it",
+        ),
+        (
+            Some(&b"since boot-0\n"[..]),
+            &[][..],
+            true,
+            "a mark of a boot the journal shows no orderly end of",
+        ),
+        (
+            Some(&b"torn\n"[..]),
+            &["boot-0"][..],
+            true,
+            "torn, as a daemon left it mid-emptying",
+        ),
+        (
+            Some(&b""[..]),
+            &[][..],
+            true,
+            "empty: what it held cannot be told",
+        ),
+        (
+            Some(&b"since \n"[..]),
+            &[][..],
+            true,
+            "a mark that names no boot",
+        ),
+        (
+            Some(&b"\xff\xfe since boot-0"[..]),
+            &["boot-0"][..],
+            true,
+            "not text this module writes",
+        ),
+    ] {
+        let (dir, _docker, removed, started) = after_mark("unsynced-mark", mark, ended).await;
+        if emptied {
+            assert_eq!(removed, all, "{why}: every torn volume is emptied");
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+                "since boot-1\n",
+                "{why}: once emptied, only what the runner started after writes is owed"
+            );
+        } else {
+            assert_eq!(removed, Vec::<String>::new(), "{why}: nothing is emptied");
+        }
+        assert!(started, "{why}: a runner starts in the same tick");
+    }
+}
+
+#[tokio::test]
+async fn a_mark_that_cannot_be_read_empties_the_caches() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TestDir::new("unsynced-unreadable-probe");
+    let file = dir.0.join("unsynced");
+    std::fs::write(&file, "since boot-0\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        // Root reads it all the same.
+        return;
+    }
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-unreadable");
+    boot(&dir, "boot-1");
+    let file = dir.0.join("unsynced");
+    std::fs::write(&file, "since boot-1\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let removed: Vec<String> = docker
+        .calls()
+        .iter()
+        .filter_map(|call| call.strip_prefix("remove volume "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(removed.len(), TORN.len(), "unreadable, it reads as torn");
+    assert!(!file.exists(), "once emptied, nothing is owed");
+}
+
+#[tokio::test]
+async fn without_a_boot_id_no_runner_skips_and_a_mark_needs_the_journal() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-no-boot");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    std::fs::remove_file(dir.0.join("proc/sys/kernel/random/boot_id")).unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    engine.tick(Shutdown::No).await;
+    {
+        let state = docker.0.lock().unwrap();
+        assert_eq!(state.envs.len(), 1, "one runner started");
+        assert!(
+            state
+                .envs
+                .values()
+                .all(|env| !env.iter().any(|var| var == docker::SKIP_SYNCS)),
+            "with no boot ID a later crash could not be told, so the runner keeps its syncs"
+        );
+    }
+    assert!(!dir.0.join("unsynced").exists(), "and nothing is marked");
+
+    for (ended, emptied) in [(&["boot-0"][..], false), (&[][..], true)] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("unsynced-no-boot-mark");
+        std::fs::write(dir.0.join("unsynced"), "since boot-0\n").unwrap();
+        let host = Host::default();
+        host.ended
+            .lock()
+            .unwrap()
+            .extend(ended.iter().map(|boot| (*boot).to_owned()));
+        let (mut engine, _handle) =
+            engine_durable(&github, &docker, &dir, CONFIG, host.durability());
+        std::fs::remove_file(dir.0.join("proc/sys/kernel/random/boot_id")).unwrap();
+        engine.recover().await.unwrap();
+        engine.tick(Shutdown::No).await;
+        let removed = docker
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("remove volume "))
+            .count();
+        assert_eq!(
+            removed > 0,
+            emptied,
+            "a mark read with no boot ID is kept if the journal shows its boot ended in order ({ended:?}), and \
+             emptied if not"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_image_without_the_filter_never_arms_the_mark() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-unfiltered");
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .lacking_filter
+        .insert(IMAGE.to_owned());
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    engine.tick(Shutdown::No).await;
+    let state = docker.0.lock().unwrap();
+    assert_eq!(state.envs.len(), 1, "one runner started");
+    assert!(
+        state
+            .envs
+            .values()
+            .all(|env| !env.iter().any(|var| var == docker::SKIP_SYNCS)),
+        "skip_syncs is on, and a runner of an image without the filter is never asked"
+    );
+    assert!(
+        !dir.0.join("unsynced").exists(),
+        "and nothing is marked, so no boot after empties anything"
+    );
+}
+
+#[tokio::test]
+async fn a_volume_docker_keeps_refusing_stops_runners_for_a_bounded_number_of_ticks() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-refused");
+    boot(&dir, "boot-1");
+    std::fs::write(dir.0.join("unsynced"), "since boot-0\n").unwrap();
+    docker.0.lock().unwrap().holders.insert(
+        "runnerd-pnpm".to_owned(),
+        vec![Container {
+            id: "someones-own".to_owned(),
+            name: "someones-own".to_owned(),
+            running: true,
+            labels: HashMap::new(),
+        }],
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let started =
+        |docker: &FakeDocker| docker.calls().iter().any(|call| call.starts_with("start "));
+    for tick in 1..super::super::unsynced::REFUSALS {
+        engine.tick(Shutdown::No).await;
+        assert!(!started(&docker), "no runner starts at refused tick {tick}");
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(
+        started(&docker),
+        "after the last refused try, runners start on what the caches hold"
+    );
+    let calls = docker.calls();
+    assert!(
+        !calls.iter().any(|call| call == "remove someones-own"),
+        "a container that is not runnerd's is never removed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+        "since boot-1\n",
+        "and only what the runners started after write is owed"
+    );
+}
+
+#[tokio::test]
+async fn an_outage_counts_no_refusal() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-outage");
+    boot(&dir, "boot-1");
+    std::fs::write(dir.0.join("unsynced"), "torn\n").unwrap();
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    docker.set_outage(Outage::Refused);
+    for _ in 0..=super::super::unsynced::REFUSALS {
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+        "torn\n",
+        "however long Docker is out, the caches stay owed"
+    );
+    docker.set_outage(Outage::None);
+    engine.tick(Shutdown::No).await;
+    assert!(
+        !dir.0.join("unsynced").exists(),
+        "and are emptied once it answers"
+    );
 }

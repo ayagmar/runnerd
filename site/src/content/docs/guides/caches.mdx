@@ -29,15 +29,18 @@ Each job gets a new container, but its [slot](../../concepts/terms/#slot) keeps 
 
 ### What a crash can leave
 
-Runners skip `fsync`, `fdatasync`, `sync`, `sync_file_range` and `syncfs`, which keep their caches whole across a power loss and cost the disk writes. A container that stops or is killed loses nothing to it. A host crash or power loss can tear what runners wrote in about the last minute: a file comes back short, empty, zero-filled in places, or part old and part new, and a Docker Engine can start on a store whose databases are torn.
+Runners skip `fsync`, `fdatasync`, `sync`, `sync_file_range` and `syncfs`, which keep their caches whole across a power loss and cost the disk writes. Only runners of an image that carries the filter skip them; runnerd reads the image's `runnerd.skip-syncs` label before each start, and a runner of an older image keeps its syncs. A container that stops or is killed loses nothing to it, and neither does an orderly shutdown or reboot, which writes everything before it powers off. A host crash or power loss can tear what runners wrote in about the last minute: a file comes back short, empty, zero-filled in places, or part old and part new, and a Docker Engine can start on a store whose databases are torn.
 
 So runnerd empties what runners write after such a crash, before any runner starts:
 
 | After the host boots again | |
 |---|---|
 | with a stop since that left no runner running | nothing is emptied |
-| without one: a crash, or a reboot after a stop that left runners running or after the daemon died | every slot's volume (layers and Docker store) and the pnpm and Maven volumes are emptied; jobs start cold |
-| a volume Docker does not remove | no runner starts until a later try removes it; the log names it |
+| after an orderly shutdown or reboot, runners busy or not | nothing is emptied: the journal shows the shutdown's final sync |
+| after a crash, or a journal that does not say | every slot's volume (layers and Docker store) and the pnpm and Maven volumes are emptied, after runnerd's stopped containers on them; jobs start cold |
+| a volume Docker does not remove, as another container mounts it | no runner starts until a later tick removes it, for 5 ticks; then runners start on it as it is, and the log names it and the `docker volume rm` to run |
+
+runnerd reads the journal of the boot that ended. A host whose journal is not kept across boots (no `/var/log/journal`), or whose runnerd user cannot read it, cannot tell a reboot from a crash and empties the caches after every boot once runners skipped their syncs; `runnerd doctor` says so and how to fix it.
 
 Snapshots, the mirror and the build cache keep their syncs and are not emptied. A [record](../records/) keeps its files as they are.
 
