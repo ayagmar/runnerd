@@ -22,7 +22,6 @@ aarch64 sync 81, fsync 82, fdatasync 83, sync_file_range 84, syncfs 267. The aar
 publishes amd64 images. A call of another ABI, a 32-bit program on x86_64, syncs as before.
 """
 
-import ctypes
 import os
 import struct
 import sys
@@ -43,10 +42,6 @@ NR, ARCH = 0, 4
 PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 22, 2
 
 
-class SockFprog(ctypes.Structure):
-    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
-
-
 def program(arch, numbers):
     """The filter: another ABI's call is allowed, one of `numbers` returns 0, every other call is allowed."""
     count = len(numbers)
@@ -65,6 +60,12 @@ def program(arch, numbers):
 
 def skip_syncs():
     """Installs the filter; None once it is in, else why it is not."""
+    # Here, under main's try: a Python without ctypes must still start the runner.
+    import ctypes
+
+    class SockFprog(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+
     machine = os.uname().machine
     if machine not in ARCHES:
         return f"no sync calls known for {machine}"
