@@ -641,9 +641,13 @@ async fn torn_volumes_are_emptied_past_runnerds_leftovers_and_a_held_one_is_refu
     }
 }
 
-/// Says how the cache layer is mounted, `LAYER: volatile` or `LAYER: plain`, and what the last job left in it.
-const LAYER_PROBE: &str = "grep ' /home/runner/.cache ' /proc/self/mountinfo | grep -q 'fsync=volatile\\|volatile' \
-    && echo 'LAYER: volatile' || echo 'LAYER: plain'; \
+/// Says how the layers the image has are mounted: `LAYER: volatile` when every one is, `LAYER: plain` when none is,
+/// else how many are; and what the last job left in the cache layer.
+const LAYER_PROBE: &str = "layers=0 volatile=0; for layer in \"${LAYERS[@]}\"; do path=${layer#*:}; \
+    [ -d \"$path\" ] || continue; layers=$((layers + 1)); \
+    ! grep \" $path \" /proc/self/mountinfo | grep -Eq 'fsync=volatile|,volatile(,|$)' || volatile=$((volatile + 1)); \
+    done; if [ \"$volatile\" = \"$layers\" ]; then echo 'LAYER: volatile'; elif [ \"$volatile\" = 0 ]; then \
+    echo 'LAYER: plain'; else echo \"LAYER: $volatile of $layers volatile\"; fi; echo \"LAYERS: $layers\"; \
     echo \"LEFT: $(cat /home/runner/.cache/runnerd-test-left 2> /dev/null || echo none)\"; \
     date +%s%N > /home/runner/.cache/runnerd-test-left";
 
@@ -735,9 +739,12 @@ async fn volatile_layers_scenario(
         .await?;
         println!("{output}");
         let layer = format!("LAYER: {}", wanted.layer);
+        // Every layer the image has: the cache and tools layers in `base`, and the Android SDK's above it.
+        let all = output.contains("LAYERS: 2") || output.contains("LAYERS: 3");
         let left = output.contains("LEFT: none");
         let refused = output.contains("refused volatile");
         if code != 0
+            || !all
             || !output.contains(&layer)
             || left == wanted.kept
             || refused == wanted.before.is_empty()
@@ -771,20 +778,21 @@ async fn killed_job_scenario(
         "echo killed > /home/runner/.cache/runnerd-test-left; echo WROTE; sleep 600",
     )
     .await?;
-    let mut wrote = false;
-    for _ in 0..60 {
-        if docker
-            .logs(&id)
-            .await
-            .map_err(|e| e.to_string())?
-            .contains("WROTE")
-        {
-            wrote = true;
-            break;
+    let wrote = async {
+        for _ in 0..60 {
+            if docker.logs(&id).await?.contains("WROTE") {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Ok(false)
     }
-    docker.remove(&id).await.map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e: docker::Error| e.to_string());
+    // Before any error: left running, it would hold the slot's volume past the test.
+    let removed = docker.remove(&id).await.map_err(|e| e.to_string());
+    let wrote = wrote?;
+    removed?;
     if !wrote {
         return Err("the job to kill never wrote to its cache layer".to_owned());
     }
