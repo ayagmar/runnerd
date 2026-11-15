@@ -17,9 +17,9 @@ use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CommitContainerOptionsBuilder, CreateContainerOptionsBuilder,
     CreateImageOptionsBuilder, DataUsageOptionsBuilder, DownloadFromContainerOptionsBuilder,
     EventsOptionsBuilder, InspectContainerOptionsBuilder, ListContainersOptionsBuilder,
-    ListImagesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder,
-    UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
+    ListImagesOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
+    ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -72,11 +72,32 @@ pub const SKIP_SYNCS: &str = "RUNNERD_SKIP_SYNCS=1";
 /// what it answers to: `1`, `SKIP_SYNCS`. Runner images before it lack it, and their runners keep their syncs.
 pub const SKIP_SYNCS_LABEL: &str = "runnerd.skip-syncs";
 
+/// The label of a runner image whose entrypoint, asked `SKIP_SYNCS`, also mounts the slot's layers `volatile`, so
+/// unmounting them syncs nothing (ADR 0142): `1`. The crash guard is the same as for the sync calls, so runnerd asks
+/// by `SKIP_SYNCS_LABEL` alone; this one tells doctor what such a runner skips. Any value reads as volatile layers: a
+/// later version of the label still says the image has them.
+pub const VOLATILE_LAYERS_LABEL: &str = "runnerd.volatile-layers";
+
 /// Whether an image's labels say it answers `SKIP_SYNCS`.
 pub fn skips_syncs<S: std::hash::BuildHasher>(labels: &HashMap<String, String, S>) -> bool {
     labels
         .get(SKIP_SYNCS_LABEL)
         .is_some_and(|version| version == "1")
+}
+
+/// What an image's runners skip when runnerd asks them, as its labels say: sync calls and their layers' unmount
+/// syncs, sync calls only, or nothing.
+pub fn image_syncs<S: std::hash::BuildHasher>(
+    labels: &HashMap<String, String, S>,
+) -> crate::config::ImageSyncs {
+    use crate::config::ImageSyncs;
+    if !skips_syncs(labels) {
+        ImageSyncs::Syncs
+    } else if labels.contains_key(VOLATILE_LAYERS_LABEL) {
+        ImageSyncs::Skips
+    } else {
+        ImageSyncs::SkipsCalls
+    }
 }
 
 /// A runner's just-in-time config from GitHub: credentials, never printed.
@@ -410,6 +431,8 @@ pub trait DockerApi: Send + Sync {
     fn holders(&self, volume: &str) -> impl Future<Output = Result<Vec<Container>, Error>> + Send;
     /// The disk size of every volume Docker knows, by name. Slow: Docker measures each volume.
     fn volume_sizes(&self) -> impl Future<Output = Result<BTreeMap<String, u64>, Error>> + Send;
+    /// The names of the volumes Docker has whose names start with `prefix`. Fast: nothing is measured.
+    fn volumes(&self, prefix: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// The paths a container's own layer added or changed, not those it deleted.
     fn changes(&self, container: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// The bytes a container's own layer holds.
@@ -798,6 +821,23 @@ impl DockerApi for Docker {
             Err(error) if is_not_found(&error) => Ok(()),
             other => other,
         }
+    }
+
+    async fn volumes(&self, prefix: &str) -> Result<Vec<String>, Error> {
+        // Docker's name filter matches anywhere in the name; the prefix is checked here.
+        let options = ListVolumesOptionsBuilder::new()
+            .filters(&HashMap::from([("name", vec![prefix])]))
+            .build();
+        Ok(self
+            .api
+            .list_volumes(Some(options))
+            .await?
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|volume| volume.name)
+            .filter(|name| name.starts_with(prefix))
+            .collect())
     }
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, Error> {

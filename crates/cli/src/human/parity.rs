@@ -62,6 +62,24 @@ fn status_states_a_host_limit_past_memory_max_as_core_does() {
 }
 
 #[test]
+fn status_states_why_jobs_wait_for_caches_a_crash_tore_as_core_does() {
+    let daemon = runnerd_fixtures::torn();
+    let facts = facts(&daemon);
+    assert!(
+        facts.waits.iter().any(|wait| wait
+            .reason
+            .ends_with("docker volume rm runnerd-jvm-slot-2 runnerd-pnpm")),
+        "the fixture's jobs wait for the torn caches: {:?}",
+        facts.waits
+    );
+    let text = status(&daemon.status, NOW, PLAIN);
+    for wait in &facts.waits {
+        let row = line_of(&text, &[&wait.job.to_string()]);
+        assert!(row.ends_with(&wait.reason), "{}: {row}", wait.reason);
+    }
+}
+
+#[test]
 fn status_states_a_host_credit_and_the_growth_a_held_job_waits_for_as_core_does() {
     let daemon = runnerd_fixtures::host_credit();
     let facts = facts(&daemon);

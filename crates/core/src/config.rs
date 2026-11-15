@@ -93,8 +93,12 @@ pub struct Host {
 /// Whether a profile's image answers its runner's sync calls without syncing, as doctor reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageSyncs {
-    /// It carries `runnerd-skip-syncs`, as its label says: runnerd asks its runners to skip their syncs.
+    /// It carries `runnerd-skip-syncs` and mounts its layers `volatile` under it, as its labels say: runnerd asks its
+    /// runners to skip their sync calls, and unmounting their layers syncs nothing (ADR 0142).
     Skips,
+    /// It carries `runnerd-skip-syncs` and lacks volatile layers, as the 0.1.2 images: runnerd asks its runners to
+    /// skip their sync calls, and their layers sync when unmounted.
+    SkipsCalls,
     /// It lacks it, as runner images before it do: runnerd never asks its runners, and they sync.
     Syncs,
     /// Docker does not have it, or did not answer: each runner's start reads it.
@@ -141,30 +145,36 @@ impl Host {
                 .map(|(image, _)| image.as_str())
                 .collect()
         };
-        let (skips, syncs, unread) = (
-            of(ImageSyncs::Skips),
-            of(ImageSyncs::Syncs),
-            of(ImageSyncs::Unread),
-        );
-        let mut parts = Vec::new();
-        if !skips.is_empty() {
-            parts.push(format!(
-                "skipped by the runners of {}, which carry runnerd-skip-syncs",
-                skips.join(", ")
-            ));
-        }
-        if !syncs.is_empty() {
-            parts.push(format!(
-                "kept by the runners of {}: they lack runnerd-skip-syncs, so runnerd never asks them",
-                syncs.join(", ")
-            ));
-        }
-        if !unread.is_empty() {
-            parts.push(format!(
-                "decided at each runner's start for {}, which Docker does not have yet",
-                unread.join(", ")
-            ));
-        }
+        // What each kind of image's runners do, worded around the images' references.
+        let words = [
+            (
+                ImageSyncs::Skips,
+                "skipped by the runners of ",
+                ", which carry runnerd-skip-syncs and mount their layers volatile",
+            ),
+            (
+                ImageSyncs::SkipsCalls,
+                "skipped in sync calls only by the runners of ",
+                ": they carry runnerd-skip-syncs, and their layers sync when unmounted",
+            ),
+            (
+                ImageSyncs::Syncs,
+                "kept by the runners of ",
+                ": they lack runnerd-skip-syncs, so runnerd never asks them",
+            ),
+            (
+                ImageSyncs::Unread,
+                "decided at each runner's start for ",
+                ", which Docker does not have yet",
+            ),
+        ];
+        let mut parts: Vec<String> = words
+            .iter()
+            .filter_map(|(kind, before, after)| {
+                let list = of(*kind);
+                (!list.is_empty()).then(|| format!("{before}{}{after}", list.join(", ")))
+            })
+            .collect();
         if parts.is_empty() {
             parts.push(
                 "decided at each runner's start, from its image's runnerd.skip-syncs label"
@@ -172,7 +182,8 @@ impl Host {
             );
         }
         let runners = parts.join("; ");
-        if skips.is_empty() && unread.is_empty() && !syncs.is_empty() {
+        let arms = |kind: &ImageSyncs| *kind != ImageSyncs::Syncs;
+        if !images.is_empty() && !images.values().any(arms) {
             return check(
                 api::CheckStatus::Info,
                 format!("{runners}. Nothing is emptied after a crash"),

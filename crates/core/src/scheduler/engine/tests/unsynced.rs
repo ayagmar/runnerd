@@ -1,13 +1,16 @@
 //! What runners wrote without syncing, over generated sequences on the fakes (ADR 0141): runners started with syncs
 //! skipped or kept, of images with and without `runnerd-skip-syncs`, jobs ending, clean stops, daemon deaths, orderly
 //! reboots with runners busy, host crashes, a crash after a stop that left runners writing, reloads and restarts with
-//! `skip_syncs` turned over, and Docker refusing to remove a volume, or holding it in a leftover container. The host's
-//! `sync(2)` is a counter and its journal a set of the boots that ended in an orderly shutdown: what runners wrote is
-//! on disk once a sync ran, or once the host shut down in order. After every restart:
+//! `skip_syncs` turned over, Docker refusing to remove a volume, or holding it in a leftover container, and another
+//! daemon's running runner on its own slot's volume. The host's `sync(2)` is a counter and its journal a set of the
+//! boots that ended in an orderly shutdown: what runners wrote is on disk once a sync ran, or once the host shut down
+//! in order. After every restart:
 //!
 //! - `a_crash_empties_what_it_may_have_torn`: a crash while what a runner wrote unsynced was not yet on disk empties
-//!   every slot's volume and the pnpm and Maven volumes, before any runner starts; none starts while Docker refuses
-//!   one.
+//!   every slot's volume Docker has, of a lowered slot count and a removed profile too, and the pnpm and Maven
+//!   volumes, before any runner starts; none starts while Docker refuses one. Snapshots and the mirror stay.
+//! - `a_crash_leaves_another_daemons_running_slot`: a slot's volume the config does not have, which a running
+//!   container mounts, is neither emptied nor started over, and holds no runner back.
 //! - `nothing_is_emptied_without_cause`: nothing is emptied unless the host crashed since a runner skipped its syncs,
 //!   with no stop between that left no runner running: an orderly reboot keeps the caches, busy runners or not.
 //! - `only_a_filtered_image_arms`: a runner skips its syncs only if its image carries the filter, and only once the
@@ -20,12 +23,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
-/// What a crash may tear and the guard empties.
-const TORN: [&str; 4] = [
+/// What a crash may tear and the guard empties: the config's slots, the shared stores, and the slot volumes Docker
+/// still has from before (`LEFT`), another daemon's whose prefix starts with this one's too.
+const TORN: [&str; 7] = [
     "runnerd-app-slot-1",
     "runnerd-app-slot-2",
     "runnerd-pnpm",
     "runnerd-maven",
+    "runnerd-app-slot-3",
+    "runnerd-gone-slot-1",
+    OTHERS,
+];
+
+/// A slot's volume of another daemon, whose prefix `runnerd-other` starts with this one's.
+const OTHERS: &str = "runnerd-other-app-slot-1";
+
+/// The volumes Docker has that the config does not list: a slot past a lowered `slots`, a slot and the snapshot of
+/// a removed profile, another daemon's slot, and the mirror's storage. Runners of before may have written the slots
+/// unsynced; the snapshot and the mirror keep their syncs and are never emptied.
+const LEFT: [&str; 5] = [
+    "runnerd-app-slot-3",
+    "runnerd-gone-slot-1",
+    "runnerd-gone-base",
+    "runnerd-mirror",
+    OTHERS,
 ];
 
 /// The profile's image, as `image_stage = "app"` names it.
@@ -57,6 +78,8 @@ enum Step {
     CrashRefusedDie,
     /// As `Crash`, with a stopped seed container of runnerd's left mounting slot 1's volume.
     CrashLeftover,
+    /// As `Crash`, while another daemon's runner, started since, mounts that daemon's slot volume and keeps running.
+    CrashOtherRuns,
     /// A restart with `skip_syncs` turned over.
     Toggle,
     /// A reload with `skip_syncs` turned over.
@@ -77,7 +100,7 @@ impl Rng {
     }
 
     fn step(&mut self) -> Step {
-        match self.below(22) {
+        match self.below(23) {
             0..=5 => Step::Job,
             6..=8 => Step::EndJobs,
             9 => Step::Stop,
@@ -90,6 +113,7 @@ impl Rng {
             18 => Step::CrashLeftover,
             19 => Step::Toggle,
             20 => Step::Reload,
+            21 => Step::CrashOtherRuns,
             _ => Step::Image,
         }
     }
@@ -116,6 +140,8 @@ enum Held {
     ForeignThenDie,
     /// A stopped seed container of runnerd's mounts slot 1's volume.
     Leftover,
+    /// Another daemon's running runner mounts `OTHERS` throughout.
+    OtherRuns,
 }
 
 /// The host: its syncs, by count, and the boots its journal shows ended in an orderly shutdown.
@@ -186,6 +212,12 @@ impl Case {
         let dir = TestDir::new(&format!("unsynced-{seed}"));
         boot(&dir, "boot-0");
         let host = Host::default();
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .listed_volumes
+            .extend(LEFT.map(str::to_owned));
         let (mut engine, handle) =
             engine_durable(&github, &docker, &dir, &config(true), host.durability());
         engine.recover().await.unwrap();
@@ -383,10 +415,10 @@ impl Case {
     }
 
     fn hold(&self, held: Held) {
-        let holder = |name: &str, label: &str| Container {
+        let holder = |name: &str, label: &str, running: bool| Container {
             id: name.to_owned(),
             name: name.to_owned(),
-            running: label.is_empty(),
+            running,
             labels: if label.is_empty() {
                 HashMap::new()
             } else {
@@ -397,14 +429,21 @@ impl Case {
         match held {
             Held::Nothing => {}
             Held::Foreign | Held::ForeignThenDie => {
-                state
-                    .holders
-                    .insert("runnerd-pnpm".to_owned(), vec![holder("someones-own", "")]);
+                state.holders.insert(
+                    "runnerd-pnpm".to_owned(),
+                    vec![holder("someones-own", "", true)],
+                );
             }
             Held::Leftover => {
                 state.holders.insert(
                     "runnerd-app-slot-1".to_owned(),
-                    vec![holder("runnerd-app-seed", "runnerd.seed")],
+                    vec![holder("runnerd-app-seed", "runnerd.seed", false)],
+                );
+            }
+            Held::OtherRuns => {
+                state.holders.insert(
+                    OTHERS.to_owned(),
+                    vec![holder("runnerd-other-app-1", "runnerd.job", true)],
                 );
             }
         }
@@ -442,7 +481,26 @@ impl Case {
             self.tick().await?;
         }
         self.docker.0.lock().unwrap().holders.clear();
-        let emptied = self.emptied(from);
+        let mut emptied = self.emptied(from);
+        let mut torn: BTreeSet<&str> = TORN.into_iter().collect();
+        if held == Held::OtherRuns && may_empty {
+            if emptied.iter().any(|(_, name)| *name == OTHERS)
+                || self.docker.calls()[from..]
+                    .iter()
+                    .any(|call| call.contains("start-over"))
+            {
+                return Err(self.fail(
+                    "a_crash_leaves_another_daemons_running_slot: its volume was emptied or its layers started over",
+                ));
+            }
+            if self.runners_started(from).is_empty() {
+                return Err(self.fail(
+                    "a_crash_leaves_another_daemons_running_slot: it kept this daemon's runners from starting",
+                ));
+            }
+            torn.remove(OTHERS);
+        }
+        emptied.retain(|(_, name)| torn.contains(name));
         if emptied.is_empty() {
             if boot == (Boot::Crashed { lost: true }) {
                 return Err(self.fail(
@@ -456,8 +514,15 @@ impl Case {
                 "nothing_is_emptied_without_cause: {emptied:?} emptied after a {boot:?} boot"
             )));
         }
+        if self.docker.calls()[from..].iter().any(|call| {
+            call == "remove volume runnerd-gone-base" || call == "remove volume runnerd-mirror"
+        }) {
+            return Err(self.fail(
+                "a_crash_empties_what_it_may_have_torn: a snapshot or the mirror, which keep their syncs, was emptied",
+            ));
+        }
         let removed: BTreeSet<&str> = emptied.iter().map(|(_, name)| *name).collect();
-        if removed.len() != TORN.len() {
+        if removed != torn {
             return Err(self.fail(&format!(
                 "a_crash_empties_what_it_may_have_torn: only {removed:?} emptied"
             )));
@@ -523,6 +588,7 @@ impl Case {
             Step::CrashRefused => self.crash(Held::Foreign).await?,
             Step::CrashRefusedDie => self.crash(Held::ForeignThenDie).await?,
             Step::CrashLeftover => self.crash(Held::Leftover).await?,
+            Step::CrashOtherRuns => self.crash(Held::OtherRuns).await?,
             Step::Toggle => {
                 self.die();
                 self.skip = !self.skip;
@@ -577,6 +643,12 @@ async fn after_mark(
     ended: &[&str],
 ) -> (TestDir, FakeDocker, Vec<String>, bool) {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .listed_volumes
+        .extend(LEFT.map(str::to_owned));
     let dir = TestDir::new(name);
     boot(&dir, "boot-1");
     if let Some(mark) = mark {
@@ -686,6 +758,12 @@ async fn a_mark_that_cannot_be_read_empties_the_caches() {
         return;
     }
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .listed_volumes
+        .extend(LEFT.map(str::to_owned));
     let dir = TestDir::new("unsynced-unreadable");
     boot(&dir, "boot-1");
     let file = dir.0.join("unsynced");
@@ -881,5 +959,111 @@ async fn a_docker_error_on_a_torn_volume_counts_no_refusal() {
     assert!(
         !docker.calls().iter().any(|call| call.starts_with("start ")),
         "and no runner or seed starts on the torn slot"
+    );
+}
+
+#[tokio::test]
+async fn a_slot_volume_held_past_the_last_try_has_its_layers_started_over_before_any_runner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-held-slot");
+    boot(&dir, "boot-1");
+    std::fs::write(dir.0.join("unsynced"), "since boot-0\n").unwrap();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.holders.insert(
+            "runnerd-app-slot-1".to_owned(),
+            vec![Container {
+                id: "someones-own".to_owned(),
+                name: "someones-own".to_owned(),
+                running: true,
+                labels: HashMap::new(),
+            }],
+        );
+        // Starting the layers over fails until the test lets it.
+        state.start_over_exit = 1;
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let runner_started = |docker: &FakeDocker| {
+        docker
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("start ") && !call.ends_with("-start-over"))
+    };
+    let started_over = |docker: &FakeDocker| {
+        docker
+            .calls()
+            .iter()
+            .any(|call| call == "start runnerd-start-over")
+    };
+    for _ in 0..super::super::unsynced::REFUSALS + 2 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(
+        started_over(&docker) && !runner_started(&docker),
+        "past the last try, no runner starts while the held slot's layers cannot be started over"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+        "torn\n",
+        "and the caches stay torn on disk"
+    );
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    let queued = &status.queued[0];
+    let waiting = queued.waiting.clone().expect("the job waits");
+    assert_eq!(
+        (waiting.kind(), waiting.reason(queued, &status, 0)),
+        (
+            api::WaitKind::Act,
+            "A host crash may have torn caches a container holds; once nothing mounts them: docker volume rm \
+             runnerd-app-slot-1"
+                .to_owned()
+        ),
+        "the job says what keeps it and how to clear it"
+    );
+
+    // A restart keeps them torn: it tries the volume again, then the layers.
+    drop(handle);
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    docker.0.lock().unwrap().start_over_exit = 0;
+    for tick in 1..super::super::unsynced::REFUSALS {
+        engine.tick(Shutdown::No).await;
+        assert!(
+            !runner_started(&docker),
+            "after a restart, no runner starts at refused tick {tick}"
+        );
+    }
+    let from = docker.calls().len();
+    engine.tick(Shutdown::No).await;
+    let calls = docker.calls()[from..].to_vec();
+    let over = calls
+        .iter()
+        .position(|call| call == "start runnerd-start-over")
+        .expect("the held slot's layers are started over at the last try");
+    let runner = calls
+        .iter()
+        .position(|call| call.starts_with("start ") && !call.ends_with("-start-over"))
+        .expect("then runners start");
+    assert!(over < runner, "before any runner: {calls:?}");
+    let mounts = docker.0.lock().unwrap().mounts["runnerd-start-over"].clone();
+    assert_eq!(
+        mounts
+            .iter()
+            .map(|mount| (mount.source.clone(), mount.target.clone()))
+            .collect::<Vec<_>>(),
+        [(
+            Some("runnerd-app-slot-1".to_owned()),
+            Some("/state".to_owned())
+        )],
+        "on the held volume"
     );
 }

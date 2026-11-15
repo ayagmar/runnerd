@@ -163,10 +163,29 @@ mount_layers() {
         fi
         chown runner:runner "/state/$name/upper"
         # Full copies on copy-up and no index, so an upper never depends on the snapshot it was made against.
-        mount -t overlay overlay \
-            -o "lowerdir=$lower,upperdir=/state/$name/upper,workdir=/state/$name/work,index=off,metacopy=off" "$path"
+        mount_layer "$name" "lowerdir=$lower,upperdir=/state/$name/upper,workdir=/state/$name/work,index=off,metacopy=off" \
+            "$path"
         [ "$name" != cache ] || hide_snapshot_secrets "$path" "$image_copies"
     done
+}
+
+# Mounts the layer $1's overlay with the options $2 over its path $3. While runnerd asks the runner to skip its syncs
+# (RUNNERD_SKIP_SYNCS=1, docs/adr/0141), with `volatile` too, so overlayfs syncs nothing of the slot's changes, and
+# unmounting the layer, when the container stops, commits nothing of the file system's: what the layer wrote is lost
+# to a host crash, which empties the slot's volume before the next runner starts (docs/adr/0142). A kernel or file
+# system that refuses the option gets the plain mount, said on the container's output. A volatile mount leaves
+# work/work/incompat in its work directory, after which overlayfs refuses to mount the layer again, volatile or not;
+# it goes first, whatever runnerd asks now. That is safe because the daemon starts no runner on a volume a crash may
+# have torn: a slot that reaches this point either had an orderly unmount or was emptied since.
+mount_layer() {
+    local incompat=/state/$1/work/work/incompat error
+    rm -rf "$incompat"
+    if [ "${RUNNERD_SKIP_SYNCS:-}" = 1 ]; then
+        error=$(mount -t overlay overlay -o "$2,volatile" "$3" 2>&1) && return 0
+        echo "runnerd: the $1 layer's overlay refused volatile (${error%%$'\n'*}): it syncs when unmounted" >&2
+        rm -rf "$incompat"
+    fi
+    mount -t overlay overlay -o "$2" "$3"
 }
 
 # Deletes CACHE_SECRETS from a copy of the cache layer: a slot's changes or a snapshot. A directory of theirs that is a

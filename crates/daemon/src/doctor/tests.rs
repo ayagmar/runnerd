@@ -5,7 +5,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use runnerd_core::api::{self, Sizing};
-use runnerd_core::config::{ByteSize, Config};
+use runnerd_core::config::{self, ByteSize, Config};
 use runnerd_core::sizing;
 
 use super::{
@@ -62,7 +62,7 @@ fn ready_host(os_release: &str) -> Host {
             .map(|stage| {
                 let found = ImageFound::Present {
                     version: Some(VERSION.to_owned()),
-                    skips_syncs: true,
+                    syncs: config::ImageSyncs::Skips,
                 };
                 (published(stage), Ok(found))
             })
@@ -107,7 +107,7 @@ fn ready_host(os_release: &str) -> Host {
             path: "/home/dana/.config/runnerd/runnerd.toml".into(),
             mode: 0o600,
         }),
-        past_boots: runnerd_core::config::PastBoots::Read,
+        past_boots: config::PastBoots::Read,
     }
 }
 
@@ -983,7 +983,7 @@ fn an_image_built_for_another_release_warns() {
         published("jvm"),
         Ok(ImageFound::Present {
             version: Some("0.0.1".to_owned()),
-            skips_syncs: false,
+            syncs: config::ImageSyncs::Syncs,
         }),
     );
     let checks = checks(&host, Some(&config));
@@ -1129,7 +1129,7 @@ fn a_history_too_short_to_advise_on_is_only_information() {
 #[test]
 fn under_measured_admission_caps_over_memory_max_pass_without_claiming_to_fit() {
     let mut config = config("sysbox");
-    config.host.admission = runnerd_core::config::Admission::Measured;
+    config.host.admission = config::Admission::Measured;
     config.profiles.get_mut("jvm").unwrap().slots = 3;
     let checks = checks(&ready_host(ARCH), Some(&config));
     let check = checks.iter().find(|check| check.name == "config").unwrap();

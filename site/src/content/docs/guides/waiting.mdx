@@ -23,6 +23,7 @@ Every queued job says what holds it, in `runnerctl status`, the dashboard's over
 | Next after an older job, whose runner starts first | An older job's runner is about to take the slot, memory or CPU this one would start with. |
 | node is rebuilding its snapshot | Slot 1 is becoming the profile's [snapshot](../caches/#warm-caches); none of the profile's slots starts until it is done. |
 | Pulling node's image | A new runner image is pulling; the profile's slots wait for it. |
+| Emptying the caches a host crash may have torn | The host crashed while runners skipped their syncs, so runnerd empties the slots' volumes and shared caches before any runner starts. [Caches](../caches/) says what goes. |
 
 ## It needs you
 
@@ -31,6 +32,7 @@ Every queued job says what holds it, in `runnerctl status`, the dashboard's over
 | No profile serves the label storefornt-small | No pool of the repository has every label the job asks for, so no runner here can take it. Fix the workflow's `runs-on`, or add the label to a pool's `labels`. The overview lists it as needing attention. |
 | halyard/storefront is paused | `runnerctl resume halyard/storefront`, or **Resume** on the overview. |
 | Runners cannot register with GitHub; retrying in 2m | Runners of the repository failed, so none starts for a while. Also: runners cannot start, failed to take a job, or ended without a job. `journalctl --user -u runnerd` has the error; `runnerctl doctor` checks the token and Docker. |
+| A host crash may have torn caches a container holds; once nothing mounts them: docker volume rm runnerd-pnpm | A container that is not runnerd's, or that still runs, mounts a volume runnerd must empty after the crash, so no runner starts. Stop that container, or remove the volume once nothing mounts it. After five tries runnerd starts runners anyway, once the layers of each held slot volume are started over. |
 
 ## The host is short of memory
 

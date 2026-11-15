@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType};
 use runnerd_core::cache::{self, Names, runner_mounts};
 use runnerd_core::docker::{self, Docker, DockerApi, RunnerSpec};
-use runnerd_core::isolation::Sysbox;
+use runnerd_core::isolation::{Isolation, Sysbox, UnsafeDind};
 
 const PROFILE: &str = "store";
 
@@ -37,20 +37,23 @@ const BUILD: &str = "mkdir -p /root/app && cd /root/app && echo app > app.txt \
     && printf 'FROM scratch\\nCOPY app.txt /app.txt\\n' > Dockerfile \
     && docker build --progress=plain -t store-app . 2>&1";
 
-/// Runs `script` as root in a new runner container of slot 1, under `runnerd-skip-syncs` as the image's entrypoint
-/// runs the runner, after its layers are mounted and its Docker Engine started as the runner's entrypoint does them; returns its exit code and output. The container is removed after,
-/// as a runner's is.
-async fn job(
+/// Starts a runner container of slot 1 under `isolation` that runs `script` as root, under `runnerd-skip-syncs` as
+/// the image's entrypoint runs the runner, after its layers are mounted and its Docker Engine started as the runner's
+/// entrypoint does them; returns its ID. `before` runs first, in the same shell.
+async fn start_job(
     docker: &Docker,
     names: &Names,
+    isolation: &dyn Isolation,
     env: &[&str],
+    before: &str,
     script: &str,
-) -> Result<(i64, String), String> {
+) -> Result<String, String> {
+    // In a slice of its own, so a trace of the host tells these runners and their Docker Engines from live ones.
     let spec = RunnerSpec {
         name: format!("{}-job", names.network()),
         image: image(),
         profile: PROFILE.to_owned(),
-        slice: "system.slice".to_owned(),
+        slice: "runnerdtest.slice".to_owned(),
         cpus: 1,
         memory: "1G".parse().map_err(|e: String| e)?,
         env: env.iter().map(|&var| var.to_owned()).collect(),
@@ -64,14 +67,29 @@ async fn job(
             "-euo".to_owned(),
             "pipefail".to_owned(),
             "-c".to_owned(),
-            format!(". /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; {script}"),
+            format!(
+                "{before}\n. /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; {script}"
+            ),
         ]),
         jit_config: None,
     };
-    let id = docker
-        .start(&spec, &Sysbox)
+    docker
+        .start(&spec, isolation)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
+
+/// Runs `script` in a runner container of slot 1 under `isolation` (`start_job`); returns its exit code and output.
+/// The container is removed after, as a runner's is.
+async fn job_in(
+    docker: &Docker,
+    names: &Names,
+    isolation: &dyn Isolation,
+    env: &[&str],
+    before: &str,
+    script: &str,
+) -> Result<(i64, String), String> {
+    let id = start_job(docker, names, isolation, env, before, script).await?;
     let result = async {
         let code = docker.wait(&id).await?;
         Ok((code, docker.logs(&id).await?))
@@ -82,6 +100,16 @@ async fn job(
     let result = result?;
     removed?;
     Ok(result)
+}
+
+/// Runs `script` in a sysbox runner container of slot 1 (`job_in`).
+async fn job(
+    docker: &Docker,
+    names: &Names,
+    env: &[&str],
+    script: &str,
+) -> Result<(i64, String), String> {
+    job_in(docker, names, &Sysbox, env, "", script).await
 }
 
 async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
@@ -559,7 +587,10 @@ async fn torn_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         ));
     }
     match refused.as_slice() {
-        [refusal] if refusal.volume == held && refusal.held && refusal.why.contains(&foreign) => {}
+        [refusal]
+            if refusal.volume == held
+                && refusal.cause == cache::Kept::Runs
+                && refusal.why.contains(&foreign) => {}
         _ => {
             return Err(format!(
                 "the held volume was not refused as held: {refused:?}"
@@ -607,6 +638,263 @@ async fn torn_volumes_are_emptied_past_runnerds_leftovers_and_a_held_one_is_refu
                 .map_err(|e| e.to_string()),
         );
     }
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}
+
+/// Says how the layers the image has are mounted: `LAYER: volatile` when every one is, `LAYER: plain` when none is,
+/// else how many are; and what the last job left in the cache layer.
+const LAYER_PROBE: &str = "layers=0 volatile=0; for layer in \"${LAYERS[@]}\"; do path=${layer#*:}; \
+    [ -d \"$path\" ] || continue; layers=$((layers + 1)); \
+    ! grep \" $path \" /proc/self/mountinfo | grep -Eq 'fsync=volatile|,volatile(,|$)' || volatile=$((volatile + 1)); \
+    done; if [ \"$volatile\" = \"$layers\" ]; then echo 'LAYER: volatile'; elif [ \"$volatile\" = 0 ]; then \
+    echo 'LAYER: plain'; else echo \"LAYER: $volatile of $layers volatile\"; fi; echo \"LAYERS: $layers\"; \
+    echo \"LEFT: $(cat /home/runner/.cache/runnerd-test-left 2> /dev/null || echo none)\"; \
+    date +%s%N > /home/runner/.cache/runnerd-test-left";
+
+/// Makes `mount` refuse `volatile`, as a kernel before 5.10 does, for the layers `mount_layers` mounts after it.
+const NO_VOLATILE: &str = "mount() { case \"$*\" in *volatile*) echo 'unknown option volatile' >&2; return 32;; \
+    esac; command mount \"$@\"; }";
+
+/// One job of the volatile layers' scenario: its environment, what runs before the layers mount, what it must say
+/// of its cache layer, and whether it finds what the last job left there.
+struct LayerJob {
+    env: &'static [&'static str],
+    before: &'static str,
+    layer: &'static str,
+    kept: bool,
+}
+
+async fn volatile_layers_scenario(
+    docker: &Docker,
+    names: &Names,
+    isolation: &dyn Isolation,
+) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let api = bollard::Docker::connect_with_local_defaults().map_err(|e| e.to_string())?;
+    let labels = api
+        .inspect_image(&image())
+        .await
+        .map_err(|e| e.to_string())?
+        .config
+        .and_then(|config| config.labels)
+        .unwrap_or_default();
+    if docker::image_syncs(&labels) != runnerd_core::config::ImageSyncs::Skips {
+        return Err(format!(
+            "{} mounts its layers volatile, and its labels do not say so: {labels:?}",
+            image()
+        ));
+    }
+    let skip = &[docker::SKIP_SYNCS][..];
+    // Each job ends in order, so its mounts go with its container, as a runner's do when it exits or runnerd stops
+    // it: the next one finds what it left, whichever way the last one mounted.
+    let jobs = [
+        LayerJob {
+            env: skip,
+            before: "",
+            layer: "volatile",
+            kept: false,
+        },
+        LayerJob {
+            env: skip,
+            before: "",
+            layer: "volatile",
+            kept: true,
+        },
+        LayerJob {
+            env: &[],
+            before: "",
+            layer: "plain",
+            kept: true,
+        },
+        LayerJob {
+            env: skip,
+            before: "",
+            layer: "volatile",
+            kept: true,
+        },
+        LayerJob {
+            env: skip,
+            before: NO_VOLATILE,
+            layer: "plain",
+            kept: true,
+        },
+        LayerJob {
+            env: skip,
+            before: "",
+            layer: "volatile",
+            kept: true,
+        },
+    ];
+    for (index, wanted) in jobs.iter().enumerate() {
+        let (code, output) = job_in(
+            docker,
+            names,
+            isolation,
+            wanted.env,
+            wanted.before,
+            LAYER_PROBE,
+        )
+        .await?;
+        println!("{output}");
+        let layer = format!("LAYER: {}", wanted.layer);
+        // Every layer the image has: the cache and tools layers in `base`, and the Android SDK's above it.
+        let all = output.contains("LAYERS: 2") || output.contains("LAYERS: 3");
+        let left = output.contains("LEFT: none");
+        let refused = output.contains("refused volatile");
+        if code != 0
+            || !all
+            || !output.contains(&layer)
+            || left == wanted.kept
+            || refused == wanted.before.is_empty()
+        {
+            return Err(format!(
+                "job {index} with {:?}: wanted {layer}, what the last job left {}, and the refusal said only when \
+                 the kernel refuses (exit {code}):\n{output}",
+                wanted.env,
+                if wanted.kept { "kept" } else { "absent" },
+            ));
+        }
+    }
+
+    killed_job_scenario(docker, names, isolation).await
+}
+
+/// A job killed mid-job with its layers mounted volatile, as an OOM kill or `docker rm -f` does: the slot's next
+/// runner mounts them again and finds what it wrote.
+async fn killed_job_scenario(
+    docker: &Docker,
+    names: &Names,
+    isolation: &dyn Isolation,
+) -> Result<(), String> {
+    let skip = &[docker::SKIP_SYNCS][..];
+    let id = start_job(
+        docker,
+        names,
+        isolation,
+        skip,
+        "",
+        "echo killed > /home/runner/.cache/runnerd-test-left; echo WROTE; sleep 600",
+    )
+    .await?;
+    let wrote = async {
+        for _ in 0..60 {
+            if docker.logs(&id).await?.contains("WROTE") {
+                return Ok(true);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        Ok(false)
+    }
+    .await
+    .map_err(|e: docker::Error| e.to_string());
+    // Before any error: left running, it would hold the slot's volume past the test.
+    let removed = docker.remove(&id).await.map_err(|e| e.to_string());
+    let wrote = wrote?;
+    removed?;
+    if !wrote {
+        return Err("the job to kill never wrote to its cache layer".to_owned());
+    }
+    let (code, output) = job_in(docker, names, isolation, skip, "", LAYER_PROBE).await?;
+    println!("{output}");
+    if code != 0 || !output.contains("LAYER: volatile") || !output.contains("LEFT: killed") {
+        return Err(format!(
+            "after a killed job, the slot's next runner did not mount its layers volatile with what the killed one \
+             wrote (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_slots_layers_skip_their_unmount_sync_and_mount_again_after_any_ending_under_sysbox() {
+    let names = Names::new(&format!("runnerd-test-volatile-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = volatile_layers_scenario(&docker, &names, &Sysbox).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and the runner image, and runs a privileged container"]
+async fn a_slots_layers_skip_their_unmount_sync_and_mount_again_after_any_ending_under_unsafe_dind()
+{
+    let names = Names::new(&format!(
+        "runnerd-test-volatile-dind-{}",
+        std::process::id()
+    ));
+    let docker = Docker::connect().unwrap();
+    let result = volatile_layers_scenario(&docker, &names, &UnsafeDind).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}
+
+async fn start_over_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (code, output) = job(
+        docker,
+        names,
+        &[docker::SKIP_SYNCS],
+        "echo cached > /home/runner/.cache/runnerd-test-left && docker volume create store-kept > /dev/null \
+         && ls -A /state",
+    )
+    .await?;
+    if code != 0 || !output.contains("cache") || !output.contains("docker") {
+        return Err(format!(
+            "the job left no layers or store to start over (exit {code}):\n{output}"
+        ));
+    }
+    let volume = names.slot(PROFILE, 1);
+    cache::start_layers_over(
+        docker,
+        &cache::StartOver {
+            names,
+            volume: &volume,
+            image: &image(),
+            slice: "runnerdtest.slice",
+            isolation: &Sysbox,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let (code, output) = job(
+        docker,
+        names,
+        &[docker::SKIP_SYNCS],
+        "echo \"LEFT: $(cat /home/runner/.cache/runnerd-test-left 2> /dev/null || echo none)\"; \
+         docker volume inspect store-kept > /dev/null && echo STORE-KEPT",
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || !output.contains("LEFT: none") || !output.contains("STORE-KEPT") {
+        return Err(format!(
+            "after starting the layers over, the next job still found them, or lost its Docker store \
+             (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_slots_layers_started_over_leave_its_docker_store_and_nothing_else() {
+    let names = Names::new(&format!("runnerd-test-over-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = start_over_scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
     result.unwrap();
     for removed in cleanup {
         removed.unwrap();

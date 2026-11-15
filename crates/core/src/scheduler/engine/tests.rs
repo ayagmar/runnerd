@@ -958,6 +958,10 @@ struct DockerState {
     envs: HashMap<String, Vec<String>>,
     /// What seed containers exit with, at once; `None`: they run for the whole test.
     seed_exit: Option<i64>,
+    /// What the containers that start a slot's layers over exit with, at once.
+    start_over_exit: i64,
+    /// The volumes Docker lists besides those runnerd made, as one of a profile the config no longer has.
+    listed_volumes: BTreeSet<String>,
     /// What measure containers print as they exit; unset, slot 1 changed 4G, past the default `reseed_at`.
     measured: Option<String>,
     /// While true, measure containers do not exit.
@@ -1507,6 +1511,9 @@ impl DockerApi for FakeDocker {
 
     async fn wait(&self, container: &str) -> Result<i64, docker::Error> {
         self.outage().await?;
+        if container.ends_with("-start-over") {
+            return Ok(self.0.lock().unwrap().start_over_exit);
+        }
         if container.ends_with("-measure") {
             let mut held = self.0.lock().unwrap().measures_held.subscribe();
             let _ = held.wait_for(|held| !held).await;
@@ -1752,6 +1759,18 @@ impl DockerApi for FakeDocker {
             });
         }
         Ok(())
+    }
+
+    async fn volumes(&self, prefix: &str) -> Result<Vec<String>, docker::Error> {
+        self.outage().await?;
+        let state = self.0.lock().unwrap();
+        Ok(state
+            .listed_volumes
+            .iter()
+            .chain(state.volume_sizes.keys())
+            .filter(|name| name.starts_with(prefix))
+            .cloned()
+            .collect())
     }
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, docker::Error> {

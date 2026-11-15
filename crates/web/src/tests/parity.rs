@@ -116,6 +116,15 @@ fn host_reads_as_core_says_it(html: &str, daemon: &Daemon, facts: &Facts) {
 }
 
 #[tokio::test]
+async fn why_jobs_wait_for_caches_a_crash_tore_reads_as_core_says_it() {
+    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::torn()).await;
+    let html = dashboard.page(&cookie, "/").await.body;
+    for wait in &facts.waits {
+        assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
+    }
+}
+
+#[tokio::test]
 async fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_them() {
     let (dashboard, cookie, daemon, facts) = dashboard_of(runnerd_fixtures::host_credit()).await;
     let html = dashboard.page(&cookie, "/").await.body;

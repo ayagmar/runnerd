@@ -71,6 +71,29 @@ impl Names {
             .ok()
     }
 
+    /// Whether `volume` is a slot's volume of any profile, configured now or not: `<prefix>-<profile>-slot-<N>`.
+    /// A prefix that is another's start, as a test's `runnerd-test-…` is `runnerd`'s, matches the other's too.
+    pub fn is_slot(&self, volume: &str) -> bool {
+        volume
+            .strip_prefix(&format!("{}-", self.prefix))
+            .and_then(|rest| rest.rsplit_once("-slot-"))
+            .is_some_and(|(profile, slot)| {
+                !profile.is_empty()
+                    && !slot.is_empty()
+                    && slot.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    }
+
+    /// The prefix every volume of runnerd's starts with, with its dash.
+    pub fn volume_prefix(&self) -> String {
+        format!("{}-", self.prefix)
+    }
+
+    /// The container that starts a slot's layers over after a host crash, when its volume could not be emptied.
+    pub fn start_over(&self) -> String {
+        format!("{}-start-over", self.prefix)
+    }
+
     /// The container that rebuilds the profile's snapshot.
     pub fn seed(&self, profile: &str) -> String {
         format!("{}-{profile}-seed", self.prefix)
@@ -366,9 +389,26 @@ pub struct Refusal {
     pub volume: String,
     /// Why, as the log says it.
     pub why: String,
-    /// Whether a container mounts it that `empty_volumes` leaves: a running one, or one that is not runnerd's. Any
-    /// other refusal is Docker's error, such as an outage, a 5xx or a timeout.
-    pub held: bool,
+    /// What kept it.
+    pub cause: Kept,
+}
+
+/// What kept a volume `empty_volumes` did not remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// A running container mounts it.
+    Runs,
+    /// A stopped container that is not runnerd's mounts it.
+    NotRunnerds,
+    /// Docker's error, such as an outage, a 5xx or a timeout.
+    Docker,
+}
+
+impl Refusal {
+    /// Whether a container mounts it that `empty_volumes` leaves: a running one, or one that is not runnerd's.
+    pub fn held(&self) -> bool {
+        self.cause != Kept::Docker
+    }
 }
 
 /// Removes each of `volumes` that exists, after the containers of runnerd's that mount it and no longer run, such as
@@ -387,12 +427,12 @@ pub async fn empty_volumes(docker: &impl DockerApi, volumes: &[String]) -> Clear
 
 /// Removes `volume`, if it exists, once nothing of runnerd's mounts it.
 async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refusal> {
-    let refused = |why: String, held: bool| Refusal {
+    let refused = |why: String, cause: Kept| Refusal {
         volume: volume.to_owned(),
         why,
-        held,
+        cause,
     };
-    let failed = |error: Error| refused(error.to_string(), false);
+    let failed = |error: Error| refused(error.to_string(), Kept::Docker);
     for holder in docker.holders(volume).await.map_err(failed)? {
         let name = if holder.name.is_empty() {
             &holder.id
@@ -402,7 +442,7 @@ async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refus
         if holder.running {
             return Err(refused(
                 format!("container {name} mounts it and runs"),
-                true,
+                Kept::Runs,
             ));
         }
         if !holder
@@ -412,14 +452,14 @@ async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refus
         {
             return Err(refused(
                 format!("container {name}, which is not runnerd's, mounts it"),
-                true,
+                Kept::NotRunnerds,
             ));
         }
         match docker.remove(&holder.id).await {
             Err(error) if !is_not_found(&error) => {
                 return Err(refused(
                     format!("container {name}, which mounts it, cannot be removed: {error}"),
-                    false,
+                    Kept::Docker,
                 ));
             }
             _ => {}
@@ -554,6 +594,76 @@ pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<Stri
     }
     let id = docker.start(&spec, reseed.isolation).await?;
     finish_reseed(docker, &id).await
+}
+
+/// What `start_layers_over` runs on: a slot's volume a host crash may have torn and the guard could not empty, and
+/// the image, slice and isolation of a runner.
+#[derive(Debug)]
+pub struct StartOver<'volume> {
+    /// Where runnerd's volumes are.
+    pub names: &'volume Names,
+    /// The slot's volume.
+    pub volume: &'volume str,
+    /// A runner image, for its shell: any profile's will do.
+    pub image: &'volume str,
+    /// The systemd slice the container runs in.
+    pub slice: &'volume str,
+    /// How the container is isolated, as runners are.
+    pub isolation: &'volume dyn Isolation,
+}
+
+/// The memory the container of `start_layers_over` may use: it only deletes.
+const START_OVER_MEMORY: ByteSize = ByteSize(256 << 20);
+
+/// Deletes everything in a slot's volume but its Docker Engine's store (`image/layers.sh`'s `DOCKER_DATA_ROOT`), in
+/// a container that mounts it: its layers' changes and work directories, and the record of the snapshot they were
+/// made against. The slot's next runner starts them over from the snapshot, and a reseed finds nothing of slot 1's
+/// to copy (ADR 0142). For a volume the guard could not remove, as another container holds it: Docker lets a second
+/// container mount it. A container an earlier daemon left is removed first.
+pub async fn start_layers_over(
+    docker: &impl DockerApi,
+    start: &StartOver<'_>,
+) -> Result<(), Error> {
+    let name = start.names.start_over();
+    match docker.remove(&name).await {
+        Err(error) if !is_not_found(&error) => return Err(error),
+        _ => {}
+    }
+    let spec = RunnerSpec {
+        name: name.clone(),
+        image: start.image.to_owned(),
+        profile: String::new(),
+        slice: start.slice.to_owned(),
+        cpus: 1,
+        memory: START_OVER_MEMORY,
+        env: Vec::new(),
+        mounts: vec![volume(start.volume.to_owned(), "/state", false)],
+        network: Some("none".to_owned()),
+        labels: BTreeMap::from([("runnerd.seed".to_owned(), String::new())]),
+        entrypoint: Some(
+            [
+                "find",
+                "/state",
+                "-mindepth",
+                "1",
+                "-maxdepth",
+                "1",
+                "!",
+                "-name",
+                "docker",
+                "-exec",
+                "rm",
+                "-rf",
+                "{}",
+                "+",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        ),
+        jit_config: None,
+    };
+    let id = docker.start(&spec, start.isolation).await?;
+    finish_reseed(docker, &id).await.map(|_| ())
 }
 
 /// What a measure container (`image/seed.sh measure`) runs on: the profile's image, its slot 1 and the snapshot,
