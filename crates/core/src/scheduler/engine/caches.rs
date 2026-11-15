@@ -519,7 +519,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs. It waits for the records
     /// being committed, whose containers mount the slots' volumes and go once committed. A volume Docker does not
     /// remove keeps them owed, and no runner starts, until a later tick removes it, or `unsynced::REFUSALS` ticks
-    /// were refused: then runners start on what the caches hold. Docker not answering at all counts no refusal.
+    /// found a container it leaves on one: then runners start on what the caches hold. Docker's own errors, an
+    /// outage, a 5xx or a timeout, count nothing and are retried until it removes them.
     pub(super) async fn empty_torn_caches(&mut self) {
         if self.records.is_recording() {
             return;
@@ -545,9 +546,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .map(|refusal| format!("{}: {}", refusal.volume, refusal.why))
                 .collect::<Vec<_>>()
                 .join("; ");
-            if refused.iter().all(|refusal| refusal.unreachable) {
+            // Only a container left on a volume is the owner's doing; Docker's own errors are retried for good.
+            if !refused.iter().any(|refusal| refusal.held) {
                 warn!(
-                    "cannot empty what a host crash may have torn while Docker does not answer: {why}"
+                    "cannot empty what a host crash may have torn, so no runner starts until Docker removes it: {why}"
                 );
                 return;
             }

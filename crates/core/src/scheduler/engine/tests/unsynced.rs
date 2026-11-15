@@ -854,3 +854,32 @@ async fn an_outage_counts_no_refusal() {
         "and are emptied once it answers"
     );
 }
+
+#[tokio::test]
+async fn a_docker_error_on_a_torn_volume_counts_no_refusal() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-500");
+    boot(&dir, "boot-1");
+    std::fs::write(dir.0.join("unsynced"), "torn\n").unwrap();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volumes_failing
+        .insert("runnerd-app-slot-1".to_owned());
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    for _ in 0..=super::super::unsynced::REFUSALS {
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+        "torn\n",
+        "a 500 is Docker's error, not a container left on the volume: the caches stay owed"
+    );
+    assert!(
+        !docker.calls().iter().any(|call| call.starts_with("start ")),
+        "and no runner or seed starts on the torn slot"
+    );
+}

@@ -97,10 +97,12 @@ runners wrote is on disk (`scheduler::engine::unsynced`, kept in `unsynced` besi
   Once all are gone, the engine calls `sync(2)` and removes the file.
 - A volume Docker does not remove keeps the caches torn, and no runner starts, until a later tick removes it; the log
   names the volume and why. A running container or one that is not runnerd's on it is never removed, and is a refusal
-  at once rather than a wait. After 5 ticks with a refusal (`unsynced::REFUSALS`), the engine gives up: it calls
-  `sync(2)`, removes the file, logs the volumes left and the `docker volume rm` that empties them, and runners start on
-  what the caches hold. A torn cache can fail some jobs; no runner at all fails every job. Docker not answering at all
-  counts no refusal, as nothing can start then anyway. The count is not kept: a restart tries 5 times again.
+  at once rather than a wait. After 5 ticks that found such a container (`unsynced::REFUSALS`), the engine gives up:
+  it calls `sync(2)`, removes the file, logs the volumes left and the `docker volume rm` that empties them, and
+  runners start on what the caches hold. A container left on a runnerd volume is the owner's doing, and no runner at
+  all fails every job. Docker's own errors, an outage, a 5xx or a request that times out, count nothing: the caches
+  stay torn and each tick tries again, as giving up on them would let a reseed copy a torn slot 1 into the snapshot.
+  The count is not kept: a restart tries 5 times again.
 - The pnpm store and the Maven repository go too. Each is one volume every slot of every profile writes, so a torn
   file there fails every job that uses that package, on every slot, and nothing replaces it: Maven does not check an
   artifact it has. A crash costs one download of each package.

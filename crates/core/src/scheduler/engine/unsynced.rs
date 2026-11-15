@@ -66,7 +66,7 @@ enum Owed {
     Since { boot: String },
     /// The host booted again after `Since` with no clean stop between and no orderly shutdown that ended it: what
     /// runners wrote may be torn, so the slots' volumes and the shared stores are emptied before any runner starts.
-    /// `refusals` counts the emptyings Docker refused since this daemon started.
+    /// `refusals` counts the ticks since this daemon started that found a container left on a torn volume.
     Torn { refusals: u32 },
 }
 
@@ -178,7 +178,7 @@ impl Unsynced {
         self.settle()
     }
 
-    /// Docker refused to empty a torn cache. After `REFUSALS` of them nothing is owed, and runners start on what the
+    /// A container left on a torn cache kept it from being emptied. After `REFUSALS` of them nothing is owed, and runners start on what the
     /// caches hold: a cache that may be torn costs less than no runner at all.
     pub(crate) fn refused(&mut self) -> io::Result<AfterRefusal> {
         let Owed::Torn { refusals } = &mut self.state else {

@@ -911,6 +911,8 @@ struct DockerState {
     panic_starts: u32,
     /// Volumes a container still uses, which Docker refuses to remove.
     volumes_in_use: BTreeSet<String>,
+    /// Volumes whose removal fails with a 500, as on a mount an unclean stop left busy.
+    volumes_failing: BTreeSet<String>,
     /// The containers that mount each volume, by its name: Docker refuses to remove it while one is left.
     holders: BTreeMap<String, Vec<Container>>,
     /// Runner images that lack `runnerd-skip-syncs`, as those before it do.
@@ -1732,6 +1734,12 @@ impl DockerApi for FakeDocker {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.call(format!("remove volume {name}"));
+        if state.volumes_failing.contains(name) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: format!("remove {name}: device or resource busy"),
+            });
+        }
         if state.volumes_in_use.contains(name)
             || state
                 .holders

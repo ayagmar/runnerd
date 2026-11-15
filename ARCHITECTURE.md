@@ -594,7 +594,7 @@ always returns, so the daemon closes and flushes the history.
   start in another boot with it still kept asks `boots` whether the journal shows that boot ended in an orderly
   shutdown, whose final sync wrote everything; if not, no runner, reseed, measure, trim or shell starts until every
   slot's volume and the pnpm and Maven volumes are emptied, past runnerd's stopped containers on them
-  (`cache::empty_volumes`), or Docker refused 5 ticks
+  (`cache::empty_volumes`), or a container left on one held it 5 ticks
   ([ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)). `boots` runs `journalctl` and decides
   nothing.
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It

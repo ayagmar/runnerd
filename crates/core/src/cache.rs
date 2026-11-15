@@ -11,7 +11,7 @@ use bollard::models::{
 
 use crate::api;
 use crate::config::{self, ByteSize};
-use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found, is_unreachable};
+use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found};
 use crate::isolation::Isolation;
 
 /// The Docker Hub pull-through cache (`registry` 3.1.2, multi-platform index).
@@ -366,8 +366,9 @@ pub struct Refusal {
     pub volume: String,
     /// Why, as the log says it.
     pub why: String,
-    /// Whether Docker did not answer at all, as while it restarts, rather than refuse.
-    pub unreachable: bool,
+    /// Whether a container mounts it that `empty_volumes` leaves: a running one, or one that is not runnerd's. Any
+    /// other refusal is Docker's error, such as an outage, a 5xx or a timeout.
+    pub held: bool,
 }
 
 /// Removes each of `volumes` that exists, after the containers of runnerd's that mount it and no longer run, such as
@@ -386,12 +387,12 @@ pub async fn empty_volumes(docker: &impl DockerApi, volumes: &[String]) -> Clear
 
 /// Removes `volume`, if it exists, once nothing of runnerd's mounts it.
 async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refusal> {
-    let refused = |why: String, unreachable: bool| Refusal {
+    let refused = |why: String, held: bool| Refusal {
         volume: volume.to_owned(),
         why,
-        unreachable,
+        held,
     };
-    let failed = |error: Error| refused(error.to_string(), is_unreachable(&error));
+    let failed = |error: Error| refused(error.to_string(), false);
     for holder in docker.holders(volume).await.map_err(failed)? {
         let name = if holder.name.is_empty() {
             &holder.id
@@ -401,7 +402,7 @@ async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refus
         if holder.running {
             return Err(refused(
                 format!("container {name} mounts it and runs"),
-                false,
+                true,
             ));
         }
         if !holder
@@ -411,14 +412,14 @@ async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refus
         {
             return Err(refused(
                 format!("container {name}, which is not runnerd's, mounts it"),
-                false,
+                true,
             ));
         }
         match docker.remove(&holder.id).await {
             Err(error) if !is_not_found(&error) => {
                 return Err(refused(
                     format!("container {name}, which mounts it, cannot be removed: {error}"),
-                    is_unreachable(&error),
+                    false,
                 ));
             }
             _ => {}
