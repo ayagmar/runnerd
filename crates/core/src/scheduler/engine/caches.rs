@@ -5,7 +5,7 @@
 //! syncing, it empties the slots' volumes and the shared pnpm and Maven stores before any runner starts (ADR 0141).
 //! It must not start or stop runners.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
@@ -517,13 +517,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// volume Docker has under runnerd's prefix, the config's and those of a lowered slot count or a removed profile
     /// alike (ADR 0142), layers and Docker store, and the pnpm store and Maven repository every slot shares, each after
     /// the stopped containers of runnerd's that mount it (`cache::empty_volumes`). Not the snapshots, which only a
-    /// reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs. It waits for the records
-    /// being committed, whose containers mount the slots' volumes and go once committed. A volume Docker does not
-    /// remove keeps them owed, and no runner starts, until a later tick removes it, or `unsynced::REFUSALS` ticks
-    /// found a container it leaves on one: then runners start on what the caches hold, once the layers of each slot's
-    /// volume left are started over (`cache::start_layers_over`), which a slot's next runner would otherwise mount, and
-    /// a reseed copy, as they are. Docker's own errors, an outage, a 5xx or a timeout, count nothing and are retried
-    /// until it removes them.
+    /// reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs, nor a slot's volume outside
+    /// the config that a running container mounts, which another daemon's runner or the owner's started in this boot.
+    /// It waits for the records being committed, whose containers mount the slots' volumes and go once committed. A
+    /// volume Docker does not remove keeps them owed, and no runner starts, until a later tick removes it, or
+    /// `unsynced::REFUSALS` ticks found a container it leaves on one: then runners start on what the caches hold, once
+    /// the layers of each slot's volume left are started over (`cache::start_layers_over`), which a slot's next runner
+    /// would otherwise mount, and a reseed copy, as they are. Docker's own errors, an outage, a 5xx or a timeout, count
+    /// nothing and are retried until it removes them.
     pub(super) async fn empty_torn_caches(&mut self) {
         if self.records.is_recording() {
             return;
@@ -538,7 +539,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
-        let volumes: Vec<String> = cache::volumes(&self.names, &self.config)
+        let configured: BTreeSet<String> = cache::volumes(&self.names, &self.config)
             .into_iter()
             .filter(|volume| {
                 matches!(
@@ -547,12 +548,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 )
             })
             .map(|volume| volume.name)
+            .collect();
+        let volumes: Vec<String> = configured
+            .iter()
+            .cloned()
             .chain(
                 listed
                     .into_iter()
                     .filter(|volume| self.names.is_slot(volume)),
             )
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         let cache::Cleared { removed, refused } =
@@ -560,6 +565,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Each slot's layers no longer hold what a job cached.
         self.ran.clear();
         self.trim_due = true;
+        // A slot's volume the config does not have, which a running container mounts, is another daemon's whose
+        // prefix starts with this one's, or the owner's: started in this boot, it is that runner's to answer for.
+        let (others, refused): (Vec<_>, Vec<_>) = refused.into_iter().partition(|refusal| {
+            refusal.cause == cache::Kept::Runs && !configured.contains(&refusal.volume)
+        });
+        if !others.is_empty() {
+            info!(
+                "left what a host crash may have torn in {}, which this config does not have and a running container \
+                 mounts",
+                others
+                    .iter()
+                    .map(|refusal| format!("{} ({})", refusal.volume, refusal.why))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         if !refused.is_empty() {
             let why = refused
                 .iter()
@@ -567,7 +588,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .collect::<Vec<_>>()
                 .join("; ");
             // Only a container left on a volume is the owner's doing; Docker's own errors are retried for good.
-            if !refused.iter().any(|refusal| refusal.held) {
+            if !refused.iter().any(cache::Refusal::held) {
                 warn!(
                     "cannot empty what a host crash may have torn, so no runner starts until Docker removes it: {why}"
                 );

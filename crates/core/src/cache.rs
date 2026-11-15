@@ -389,9 +389,26 @@ pub struct Refusal {
     pub volume: String,
     /// Why, as the log says it.
     pub why: String,
-    /// Whether a container mounts it that `empty_volumes` leaves: a running one, or one that is not runnerd's. Any
-    /// other refusal is Docker's error, such as an outage, a 5xx or a timeout.
-    pub held: bool,
+    /// What kept it.
+    pub cause: Kept,
+}
+
+/// What kept a volume `empty_volumes` did not remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// A running container mounts it.
+    Runs,
+    /// A stopped container that is not runnerd's mounts it.
+    NotRunnerds,
+    /// Docker's error, such as an outage, a 5xx or a timeout.
+    Docker,
+}
+
+impl Refusal {
+    /// Whether a container mounts it that `empty_volumes` leaves: a running one, or one that is not runnerd's.
+    pub fn held(&self) -> bool {
+        self.cause != Kept::Docker
+    }
 }
 
 /// Removes each of `volumes` that exists, after the containers of runnerd's that mount it and no longer run, such as
@@ -410,12 +427,12 @@ pub async fn empty_volumes(docker: &impl DockerApi, volumes: &[String]) -> Clear
 
 /// Removes `volume`, if it exists, once nothing of runnerd's mounts it.
 async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refusal> {
-    let refused = |why: String, held: bool| Refusal {
+    let refused = |why: String, cause: Kept| Refusal {
         volume: volume.to_owned(),
         why,
-        held,
+        cause,
     };
-    let failed = |error: Error| refused(error.to_string(), false);
+    let failed = |error: Error| refused(error.to_string(), Kept::Docker);
     for holder in docker.holders(volume).await.map_err(failed)? {
         let name = if holder.name.is_empty() {
             &holder.id
@@ -425,7 +442,7 @@ async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refus
         if holder.running {
             return Err(refused(
                 format!("container {name} mounts it and runs"),
-                true,
+                Kept::Runs,
             ));
         }
         if !holder
@@ -435,14 +452,14 @@ async fn empty_volume(docker: &impl DockerApi, volume: &str) -> Result<(), Refus
         {
             return Err(refused(
                 format!("container {name}, which is not runnerd's, mounts it"),
-                true,
+                Kept::NotRunnerds,
             ));
         }
         match docker.remove(&holder.id).await {
             Err(error) if !is_not_found(&error) => {
                 return Err(refused(
                     format!("container {name}, which mounts it, cannot be removed: {error}"),
-                    false,
+                    Kept::Docker,
                 ));
             }
             _ => {}

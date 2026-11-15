@@ -587,7 +587,10 @@ async fn torn_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         ));
     }
     match refused.as_slice() {
-        [refusal] if refusal.volume == held && refusal.held && refusal.why.contains(&foreign) => {}
+        [refusal]
+            if refusal.volume == held
+                && refusal.cause == cache::Kept::Runs
+                && refusal.why.contains(&foreign) => {}
         _ => {
             return Err(format!(
                 "the held volume was not refused as held: {refused:?}"
