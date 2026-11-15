@@ -11,8 +11,8 @@ use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
 use super::{
-    Author, Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots,
-    Setup, Shutdown, Target,
+    Author, Command, Commit, ControlError, Engine, Flush, Handle, HostIdentity, RunningJobs,
+    RunningSlots, Setup, Shutdown, Target,
 };
 use crate::api::{self, JobState};
 use crate::cache::Names;
@@ -1955,6 +1955,27 @@ fn engine_with(
     dir: &TestDir,
     config: &str,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    engine_flushing(github, docker, dir, config, Flush::new(|| {}))
+}
+
+/// The kernel's boot ID the engine in `dir` reads: a new one is a host that booted again.
+fn boot(dir: &TestDir, id: &str) {
+    let file = dir.0.join("proc/sys/kernel/random/boot_id");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, format!("{id}\n")).unwrap();
+}
+
+/// An engine whose writes to disk go through `flush`, in a host that booted once unless the test says otherwise.
+fn engine_flushing(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+    flush: Flush,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    if !dir.0.join("proc/sys/kernel/random/boot_id").exists() {
+        boot(dir, "boot-1");
+    }
     let store = Store::open(&dir.0.join("history.db")).unwrap();
     Engine::new(
         Config::parse(config).unwrap(),
@@ -1973,6 +1994,8 @@ fn engine_with(
                 proc: dir.0.join("proc"),
             },
             build_cache: None,
+            unsynced: dir.0.join("unsynced"),
+            flush,
         },
     )
 }
@@ -7384,6 +7407,7 @@ mod records;
 mod registrations;
 mod start;
 mod stop;
+mod unsynced;
 mod upkeep;
 mod warm;
 

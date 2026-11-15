@@ -388,7 +388,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
         self.recover_history(&running).await;
         self.measure_docker_disk();
+        self.recover_unsynced();
         Ok(())
+    }
+
+    /// Notes whether the host booted again since runners wrote without syncing, with no clean stop between: the
+    /// first tick then empties their caches before it starts any runner (ADR 0141).
+    fn recover_unsynced(&mut self) {
+        match self.unsynced.recovered() {
+            Ok(true) => warn!(
+                "the host booted again since runners wrote without syncing, with no clean stop between: their caches \
+                 are emptied before any runner starts"
+            ),
+            Ok(false) => {}
+            Err(error) => warn!(
+                "the host booted again since runners wrote without syncing; their caches are emptied before any \
+                 runner starts, but that could not be kept for the next start: {error}"
+            ),
+        }
     }
 
     /// Reads what the history left open: queued jobs to watch, and jobs to close. A job whose runner's container

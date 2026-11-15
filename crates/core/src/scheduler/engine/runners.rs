@@ -452,15 +452,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
     }
 
-    /// A runner container's environment: whether its image skips the runner's sync calls, as `[host] skip_syncs`
-    /// says when it starts, and its slot's share of what the slots' Docker Engines may keep, which its image's job
-    /// cleanup holds it to, once the caches' check has measured Docker's disk.
-    pub(super) fn runner_env(&self) -> Vec<String> {
-        let skip_syncs = self
-            .config
-            .host
-            .skip_syncs
-            .then(|| docker::SKIP_SYNCS.to_owned());
+    /// A runner container's environment: whether its image skips the runner's sync calls, as `skips` says, and its
+    /// slot's share of what the slots' Docker Engines may keep, which its image's job cleanup holds it to, once the
+    /// caches' check has measured Docker's disk.
+    pub(super) fn runner_env(&self, skips: bool) -> Vec<String> {
+        let skip_syncs = skips.then(|| docker::SKIP_SYNCS.to_owned());
         let budget = self.docker_disk.borrow().map(|disk| {
             let slots = self
                 .config

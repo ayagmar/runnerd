@@ -147,4 +147,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0138](0138-measured-admission-is-the-default.md) | Measured admission is the default | Accepted |
 | [0139](0139-steps-that-share-a-second-are-told-apart-by-their-headers.md) | Steps that share a second are told apart by their headers, in order | Accepted |
 | [0140](0140-a-jobs-workflow-is-its-runs-workflow-not-the-runs-name.md) | A job's workflow is its run's workflow, not the run's name | Accepted |
-| [0141](0141-runners-answer-sync-calls-without-syncing.md) | Runners answer sync calls without syncing | Accepted |
+| [0141](0141-runners-answer-sync-calls-without-syncing.md) | Runners answer sync calls without syncing, and a host crash empties what they wrote | Accepted |

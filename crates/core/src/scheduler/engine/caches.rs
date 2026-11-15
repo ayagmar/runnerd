@@ -1,7 +1,9 @@
 //! Cache upkeep: measures what slot 1 changed, reseeds idle profiles, stops the mirror, empties the shared caches and the mirror's storage over
 //! their limit and trims the build cache to its own when no runner runs, and counts what the mirror served each
 //! runner. Measures, reseeds and cache checks run as background tasks the tick collects; the build cache's trim runs before the
-//! tick goes on, as no runner may start during it. It must not start or stop runners.
+//! tick goes on, as no runner may start during it. After a host crash that may have torn what runners wrote without
+//! syncing, it empties the slots' volumes and the shared pnpm and Maven stores before any runner starts (ADR 0141).
+//! It must not start or stop runners.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -503,6 +505,50 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             && !self.records.has_shells()
             && self.slots.values().all(idle);
         reseed || check
+    }
+
+    /// Empties what runners write and later jobs read, once a host crash may have torn it (ADR 0141): every slot's
+    /// volume, layers and Docker store alike, and the pnpm store and Maven repository every slot shares. Not the
+    /// snapshots, which only a reseed writes, with its syncs, nor the mirror or the build cache, which keep theirs.
+    /// A volume Docker does not remove keeps them owed, and no runner starts, until a later tick removes it.
+    pub(super) async fn empty_torn_caches(&mut self) {
+        let mut refused = Vec::new();
+        let mut emptied = Vec::new();
+        for volume in cache::volumes(&self.names, &self.config) {
+            if !matches!(
+                volume.kind,
+                api::CacheKind::Slot { .. } | api::CacheKind::Pnpm | api::CacheKind::Maven
+            ) {
+                continue;
+            }
+            match self.docker.remove_volume(&volume.name).await {
+                Ok(()) => emptied.push(volume.name),
+                Err(error) if is_not_found(&error) => {}
+                Err(error) => refused.push(format!("{}: {error}", volume.name)),
+            }
+        }
+        // Each slot's layers no longer hold what a job cached.
+        self.ran.clear();
+        self.trim_due = true;
+        if !refused.is_empty() {
+            warn!(
+                "cannot empty what a host crash may have torn, so no runner starts until it is: {}",
+                refused.join("; ")
+            );
+            return;
+        }
+        if let Err(error) = self.unsynced.emptied() {
+            warn!("emptied the caches a host crash may have torn, but cannot note it: {error}");
+            return;
+        }
+        info!(
+            "the host booted again with what runners wrote unsynced; emptied {} before any runner starts",
+            if emptied.is_empty() {
+                "nothing, as no cache volume was left".to_owned()
+            } else {
+                emptied.join(", ")
+            }
+        );
     }
 
     /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.

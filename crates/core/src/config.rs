@@ -82,9 +82,9 @@ pub struct Host {
     /// take, the way back if a host meets what the count did not foresee.
     #[serde(default = "default_on")]
     pub pooled_count: bool,
-    /// Whether runners answer `fsync` and the other sync calls without syncing (ADR 0141). Default on: what a runner
-    /// writes is a cache or goes with its container, and the syncs cost the disk wear. A reload applies it from the
-    /// next runner on.
+    /// Whether runners are asked to answer `fsync` and the other sync calls without syncing (ADR 0141). Default on:
+    /// what a runner writes is a cache or goes with its container, and a host crash empties those caches. A reload
+    /// applies it from the next runner on.
     #[serde(default = "default_on")]
     pub skip_syncs: bool,
 }
@@ -96,9 +96,10 @@ impl Host {
             name: "runner syncs".to_owned(),
             status: api::CheckStatus::Info,
             detail: if self.skip_syncs {
-                "skipped: fsync and the other sync calls return at once in runners of runnerd's images, sparing \
-                 the disk; a host crash can tear what a slot cached in its last minute, and [host] skip_syncs = \
-                 false keeps the syncs"
+                "asked of each runner: an image with runnerd-skip-syncs answers fsync and the other sync calls \
+                 without syncing, and one without it ignores the ask and syncs. If the host boots again with no \
+                 clean stop since a runner was asked, the slots' volumes and the pnpm and Maven stores are emptied \
+                 before any runner starts; [host] skip_syncs = false keeps the syncs"
             } else {
                 "kept, as [host] skip_syncs = false sets"
             }

@@ -29,17 +29,19 @@ Each job gets a new container, but its [slot](../../concepts/terms/#slot) keeps 
 
 ### What a crash can leave
 
-Runners skip `fsync` and the other sync calls: what they write is a cache or goes with the container, and the syncs wear the disk for nothing a later job needs. A container that stops or is killed loses nothing to it; only a host crash or power loss can cut short what a slot wrote in its last minute:
+Runners skip `fsync`, `fdatasync`, `sync`, `sync_file_range` and `syncfs`, which keep their caches whole across a power loss and cost the disk writes. A container that stops or is killed loses nothing to it. A host crash or power loss can tear what runners wrote in about the last minute: a file comes back short, empty, zero-filled in places, or part old and part new, and a Docker Engine can start on a store whose databases are torn.
 
-| After a crash | |
+So runnerd empties what runners write after such a crash, before any runner starts:
+
+| After the host boots again | |
 |---|---|
-| the slot's Docker Engine does not start on its store | the store is emptied and the slot's next job runs cold |
-| it starts, but an image's files were cut short | that image's jobs fail in that slot until `runnerctl caches --clean runnerd-<profile>-slot-<n>` |
-| a file in the slot's layers, the pnpm store or the Maven repository was cut short | a job that fails on it fails until that volume is cleaned |
-| a record's files | may be cut short; its job's log is the daemon's |
-| the mirror, the build cache, a reseed | keep their syncs; a reseed takes slot 1's layers as they are |
+| with a stop since that left no runner running | nothing is emptied |
+| without one: a crash, or a reboot after a stop that left runners running or after the daemon died | every slot's volume (layers and Docker store) and the pnpm and Maven volumes are emptied; jobs start cold |
+| a volume Docker does not remove | no runner starts until a later try removes it; the log names it |
 
-`skip_syncs = false` under [`[host]`](../../reference/configuration/#host) keeps the syncs, for runners started after the reload.
+Snapshots, the mirror and the build cache keep their syncs and are not emptied. A [record](../records/) keeps its files as they are.
+
+The calls also return 0 on a file descriptor the kernel would refuse, so a test that expects `fsync` on a closed descriptor to fail fails here. `skip_syncs = false` under [`[host]`](../../reference/configuration/#host) keeps the syncs, for runners started after the reload.
 
 ## Build cache
 
