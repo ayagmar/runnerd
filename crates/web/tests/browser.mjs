@@ -21,7 +21,6 @@ if (!demo) {
 }
 const dir = mkdtempSync(join(tmpdir(), 'runnerd-browser-'));
 const address = `127.0.0.1:${7600 + (process.pid % 300)}`;
-const server = spawn(demo, [dir, address], { stdio: 'ignore' });
 const failures = [];
 const fail = (what) => {
   failures.push(what);
@@ -30,49 +29,51 @@ const fail = (what) => {
 const pass = (what) => console.log(`ok   ${what}`);
 const check = (holds, what) => (holds ? pass(what) : fail(what));
 
-const loginFile = join(dir, 'runnerd.web');
-for (let tries = 0; !existsSync(loginFile) || readFileSync(loginFile, 'utf8').trim() === ''; tries++) {
-  if (tries > 300) throw new Error('the demo wrote no login link');
-  await new Promise((done) => setTimeout(done, 100));
-}
-const login = readFileSync(loginFile, 'utf8').trim().split('\n')[0];
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
-
-// The login link signs one browser in once: its cookies sign in every context after.
-const cookies = await (async () => {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  for (let tries = 0; ; tries++) {
-    try {
-      await page.goto(login);
-      break;
-    } catch (error) {
-      if (tries > 50) throw error;
-      await page.waitForTimeout(100);
-    }
-  }
-  const signed = await context.cookies();
-  await context.close();
-  return signed;
-})();
-
-async function signedIn(size) {
-  const context = await browser.newContext({
-    viewport: { width: size.width, height: size.height },
-    isMobile: !!size.phone,
-    hasTouch: !!size.phone,
-  });
-  await context.addCookies(cookies);
-  return { context, page: await context.newPage() };
-}
-
-const sizes = [
-  { name: '1440x900', width: 1440, height: 900 },
-  { name: '390x844', width: 390, height: 844, phone: true },
-  { name: '390x400', width: 390, height: 400, phone: true },
-];
-
+const server = spawn(demo, [dir, address], { stdio: 'ignore' });
+let browser;
 try {
+  const loginFile = join(dir, 'runnerd.web');
+  for (let tries = 0; !existsSync(loginFile) || readFileSync(loginFile, 'utf8').trim() === ''; tries++) {
+    if (tries > 300) throw new Error('the demo wrote no login link');
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  const login = readFileSync(loginFile, 'utf8').trim().split('\n')[0];
+  browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
+
+  // The login link signs one browser in once: its cookies sign in every context after.
+  const cookies = await (async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    for (let tries = 0; ; tries++) {
+      try {
+        await page.goto(login);
+        break;
+      } catch (error) {
+        if (tries > 50) throw error;
+        await page.waitForTimeout(100);
+      }
+    }
+    const signed = await context.cookies();
+    await context.close();
+    return signed;
+  })();
+
+  async function signedIn(size) {
+    const context = await browser.newContext({
+      viewport: { width: size.width, height: size.height },
+      isMobile: !!size.phone,
+      hasTouch: !!size.phone,
+    });
+    await context.addCookies(cookies);
+    return { context, page: await context.newPage() };
+  }
+
+  const sizes = [
+    { name: '1440x900', width: 1440, height: 900 },
+    { name: '390x844', width: 390, height: 844, phone: true },
+    { name: '390x400', width: 390, height: 400, phone: true },
+  ];
+
   // The attention strip: open stays open, a second press closes it, whatever presses it.
   for (const size of [sizes[0], sizes[1]]) {
     const { context, page } = await signedIn(size);
@@ -158,7 +159,8 @@ try {
     await context.close();
   }
 } finally {
-  await browser.close();
+  // From the spawn on, so a browser that fails to start, or a demo that never signs in, leaves no demo running.
+  await browser?.close();
   server.kill();
   rmSync(dir, { recursive: true, force: true });
 }

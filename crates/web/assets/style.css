@@ -4005,11 +4005,9 @@ html:has(.editor-frame) {
     gap: 0.3rem 0.75rem;
   }
 
-  /* The jobs list drops its wait and CPU columns; each other table says what it drops. */
-  .history-table th:nth-child(4),
-  .history-table td:nth-child(4),
-  .history-table th:nth-child(7),
-  .history-table td:nth-child(7) {
+  /* The jobs list and Capacity's tables drop their fourth and seventh columns; each other table says what it
+     drops. */
+  :is(.history-table, .sizing-table, .profiles-table) :is(th, td):is(:nth-child(4), :nth-child(7)) {
     display: none;
   }
 
