@@ -4871,6 +4871,22 @@ html:has(.editor-frame) {
 }
 
 /* Below a tablet's width a job is a row, not a table's line: eight columns do not fit. */
+/* Beside the sidebar, below 80rem, the jobs list fits its page without a sideways scroll: CPU and Written wait for a
+   wider screen, a name wraps from 9rem, and an outcome's note goes under its badge. */
+@media (min-width: 48.01rem) and (max-width: 80rem) {
+  .history-table :is(th, td):is(:nth-child(7), :nth-child(8)) {
+    display: none;
+  }
+
+  .history-table tbody th {
+    min-width: 9rem;
+  }
+
+  .history-table tbody td:nth-child(2) {
+    white-space: normal;
+  }
+}
+
 @media (max-width: 48rem) {
   /* A job is a row a thumb reads: its name and outcome, its repository, then when, how long it ran and its peak. */
   .history-table thead {

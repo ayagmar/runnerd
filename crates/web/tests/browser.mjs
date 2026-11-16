@@ -178,6 +178,18 @@ try {
     await context.close();
   }
 
+  // Beside the sidebar, the jobs list fits its page: no sideways scroll inside it at a laptop's widths.
+  for (const width of [1024, 1200]) {
+    const { context, page } = await signedIn({ width, height: 800 });
+    await page.goto(new URL('/history', login).href);
+    const fit = await page.evaluate(() => {
+      const wrap = document.querySelector('.history-table').closest('.table-wrap');
+      return { scroll: wrap.scrollWidth, client: wrap.clientWidth };
+    });
+    check(fit.scroll <= fit.client, `${width}px: the jobs list is ${fit.scroll}px in its ${fit.client}px page`);
+    await context.close();
+  }
+
   // A running job's log on a phone: no box scrolling inside the page; the page keeps the reader's place while they
   // read above the newest line, which "Jump to newest" brings back, and then follows the lines as they come.
   {
