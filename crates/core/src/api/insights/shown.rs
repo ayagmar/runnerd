@@ -3,7 +3,8 @@
 //! [`Insights`] and [`Digest`]; the dashboard, `runnerctl`, the TUI and notifications only lay them out.
 
 use super::{
-    Digest, HostHazard, HostSpan, Insight, InsightKind, Insights, LongWait, Severity, WaitSpread,
+    Digest, HostHazard, HostSpan, Insight, InsightKind, Insights, LongWait, RepositoryWaits,
+    Severity, WaitSpread,
 };
 use crate::api::units::short_date;
 use crate::api::{HostMemory, Tone, duration};
@@ -221,6 +222,9 @@ impl Insight {
 }
 
 impl HostHazard {
+    /// What the host's memory while CI ran is called where it shows, as a heading or before its line.
+    pub const TITLE: &'static str = "Host memory while CI ran";
+
     /// The window in a line: `CI ran 9h 12m, 6h 10m of it on a host credit; under 19.4G available for 1h 04m (41m on
     /// a credit); under 6.2G available for 34s (34s on a credit); lowest 4.1G (4.5G on a credit); swap free at least
     /// 8.2G`.
@@ -286,7 +290,7 @@ impl Digest {
     pub fn host_line(&self) -> Option<String> {
         self.host
             .as_ref()
-            .map(|host| format!("Host memory while CI ran: {}.", host.line()))
+            .map(|host| format!("{}: {}.", HostHazard::TITLE, host.line()))
     }
 }
 
@@ -300,6 +304,44 @@ impl LongWait {
             crate::api::job_title(self.workflow.as_deref(), &self.name, Some(self.job)),
             duration(self.waited)
         )
+    }
+}
+
+/// One of a repository's wait figures: its label, such as `Warm median`, and its value, `–` without jobs to take it
+/// over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitFigure {
+    /// `Jobs`, `Median`, `p95`, `Warm median`, `Cold median` or `p95 the week before`.
+    pub label: &'static str,
+    /// The count of jobs, or a wait such as `4m 10s`.
+    pub value: String,
+}
+
+impl RepositoryWaits {
+    /// What a repository's waits are called where they show.
+    pub const TITLE: &'static str = "Waits this week";
+
+    /// Its figures, in the order they show: the week's jobs, their median and p95 wait, the warm and the cold
+    /// median, and the week before's p95.
+    pub fn figures(&self) -> Vec<WaitFigure> {
+        let wait = |spread: &WaitSpread, value: Option<u64>| {
+            spread
+                .reading(value)
+                .map_or_else(|| "–".to_owned(), duration)
+        };
+        let now = &self.now;
+        let before = &self.before.all;
+        [
+            (crate::api::JOBS_HEADING, now.all.jobs.to_string()),
+            ("Median", wait(&now.all, now.all.p50)),
+            ("p95", wait(&now.all, now.all.p95)),
+            ("Warm median", wait(&now.warm, now.warm.p50)),
+            ("Cold median", wait(&now.cold, now.cold.p50)),
+            ("p95 the week before", wait(before, before.p95)),
+        ]
+        .into_iter()
+        .map(|(label, value)| WaitFigure { label, value })
+        .collect()
     }
 }
 

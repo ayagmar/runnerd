@@ -611,6 +611,11 @@ always returns, so the daemon closes and flushes the history.
   then each queued job a pool serves waits with `api::Waiting::Torn`, which names the volumes held. The label `runnerd.volatile-layers=1`
   (`docker::VOLATILE_LAYERS_LABEL`) tells doctor; the runner's Docker Engine and builds keep their overlays' syncs
   ([ADR 0142](docs/adr/0142-a-runners-layers-skip-their-unmount-sync.md)).
+- The mirror runs `registry` without its blob descriptor cache, which serves a blob another repository's expiry
+  deleted as 200 with no data. Before each start, `cache::mirror::repair` removes the links in its volume whose blob
+  is missing or empty, in a container of its image without a network, and never holds the start back; the doctor
+  reads a running mirror's links through `docker exec` and changes nothing
+  ([ADR 0144](docs/adr/0144-the-mirror-keeps-no-blob-descriptor-cache.md)).
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.

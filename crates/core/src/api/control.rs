@@ -111,6 +111,66 @@ pub struct Doctor {
     pub state: Option<DoctorState>,
 }
 
+impl Doctor {
+    /// What a client says while it waits for the checks.
+    pub const CHECKING: &'static str = "Checking the host";
+
+    /// The checks as a client lays them out at `now`: those that need the reader first, the rest folded into a count
+    /// by label. Checks that are not current need nothing of the reader: they all fold, under the line saying why.
+    pub fn summary(&self, now: u64) -> DoctorSummary<'_> {
+        let not_current = self.state.as_ref().and_then(|state| state.line(now));
+        let current = not_current.is_none();
+        let (problems, rest): (Vec<&Check>, Vec<&Check>) = self.checks.iter().partition(|check| {
+            current && matches!(check.status.tone(), super::Tone::Bad | super::Tone::Warn)
+        });
+        let mut counts: Vec<CheckCount> = Vec::new();
+        for check in &rest {
+            let label = check.status.label();
+            match counts.iter_mut().find(|count| count.label == label) {
+                Some(count) => count.count += 1,
+                None => counts.push(CheckCount { label, count: 1 }),
+            }
+        }
+        DoctorSummary {
+            not_current,
+            problems,
+            rest,
+            counts,
+        }
+    }
+}
+
+/// The doctor's checks laid out for a reader, from [`Doctor::summary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorSummary<'doctor> {
+    /// Why the checks are not to be read as current, as [`DoctorState::line`] says it; `None` when they are.
+    pub not_current: Option<String>,
+    /// Current checks that failed or warn, in the doctor's order: each stands with its fix.
+    pub problems: Vec<&'doctor Check>,
+    /// Every other check, in the doctor's order: folded into one line.
+    pub rest: Vec<&'doctor Check>,
+    /// How many of `rest` carry each label, in the order the labels first come.
+    pub counts: Vec<CheckCount>,
+}
+
+/// How many checks carry one [`CheckStatus::label`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckCount {
+    /// Such as `ok`.
+    pub label: &'static str,
+    /// At least 1.
+    pub count: usize,
+}
+
+/// `GET /v1/doctor` query parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorQuery {
+    /// Take the last run as it stands when it is of the config running and no older than the daemon's own refresh
+    /// (10 minutes), instead of asking for a new one past a minute. A daemon before 0.2 ignores it.
+    #[serde(default)]
+    pub recent: bool,
+}
+
 /// How current the daemon's doctor checks are (ADR 0132). Times are seconds since the Unix epoch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
@@ -140,6 +200,18 @@ pub enum DoctorState {
 }
 
 impl DoctorState {
+    /// How old current checks are, as every client says it beside them: `Checked 4m 00s ago`; `None` when they are not
+    /// current, which [`DoctorState::line`] says.
+    pub fn checked(&self, now: u64) -> Option<String> {
+        match self {
+            DoctorState::Ready { at } => Some(format!("Checked {}", super::ago(*at, now))),
+            DoctorState::NotRun
+            | DoctorState::Stale { .. }
+            | DoctorState::Failed { .. }
+            | DoctorState::Unknown => None,
+        }
+    }
+
     /// Why the checks are not to be read as current, as every client says it; `None` when they are.
     pub fn line(&self, now: u64) -> Option<String> {
         match self {
@@ -240,3 +312,6 @@ impl fmt::Display for Check {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

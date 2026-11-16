@@ -27,6 +27,12 @@ description: Every check runnerd doctor makes, what each failure or warning mean
 | records | records near `[records] max_total` | `runnerctl records rm --older-than 2d`, or raise `max_total` |
 | sizing | a profile's jobs need more memory than its cap, or than the slice allows | `runnerctl sizing apply <profile>`, after raising `memory_ceiling`, `max_memory` or the slice's `MemoryMax` where needed |
 
+## Caches
+
+| Check | Fails or warns when | Fix it prints |
+|---|---|---|
+| mirror | the running mirror would serve a layer with no data: one whose data is empty or gone | `docker exec runnerd-mirror rm -f` on those paths, or `docker rm -f runnerd-mirror` for more than a few |
+
 ## GitHub
 
 | Check | Fails or warns when | Fix it prints |
@@ -41,4 +47,5 @@ Two checks only inform: **GitHub Actions' cache** says whether jobs' `actions/ca
 
 - A job never starts: [Why is my job waiting?](../guides/waiting/)
 - The dashboard asks to sign in again: `runnerctl web` signs this browser in with a new link. A link works once.
+- A job fails with `short read: expected … bytes but got 0` while it pulls an image: the mirror served a layer with no data. Run `runnerd doctor`; its `mirror` check names the layers and the fix. runnerd runs the mirror without the cache that causes this, and before it starts the mirror it removes layers whose data is gone or empty ([ADR 0144](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0144-the-mirror-keeps-no-blob-descriptor-cache.md)).
 - The log: `journalctl --user -u runnerd -f`.

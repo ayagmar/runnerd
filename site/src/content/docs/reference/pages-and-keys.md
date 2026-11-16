@@ -9,13 +9,13 @@ The navigation has five views: Overview, Jobs (History and Records), Insights, C
 
 | Page | Shows |
 |---|---|
-| Overview | what needs attention as one line beside the title, which opens to the list; slots running, jobs waiting, the p95 wait over 24 hours and failures as four large figures; the memory budget as lanes, a lane per slot as wide as its share of the slice, filled to what its job uses now and carrying the job's step, time, memory and CPU, then a lane each for the mirror, what is free and what is hatched where the host or [measured admission](../../concepts/admission/#measured-admission) closes it; on a phone the lanes are rows over a strip of the slice; each waiting job with why it waits; the latest jobs; pause and resume per repository, which lasts across restarts; the slice's memory and CPU |
+| Overview | what needs attention as one line beside the title, which opens to the list; slots running, jobs waiting, the p95 wait over 24 hours and failures as four large figures; the memory budget as lanes, a lane per slot as wide as its share of the slice, filled to what its job uses now and carrying the job's step, time, memory and CPU, then a lane each for the mirror, what is free and what is hatched where the host or [measured admission](../../concepts/admission/#measured-admission) closes it; slots that hold no memory, such as idle ones, as a row of chips under the lanes; on a phone, or with more lanes than fit, the lanes are rows over a strip of the slice; each waiting job with why it waits; the latest jobs; pause and resume per repository, which lasts across restarts; the slice's memory and CPU |
 | Jobs | every job, searched by job name, workflow or branch and filtered by repository, workflow, branch, outcome, time and record; a column header sorts, showing the first page of that order; the **Timeline** lens draws what each slot ran over a day or a week, the **Trends** lens charts the last 30 days. Every filter is in the link, so a view can be bookmarked |
 | Records | the [records of failed jobs](../../guides/records/) with size and age, including records whose job has left the history; remove one or all |
 | Sizing | per profile, memory, jobs, waits, warm starts and CPU in one table with the [advice](../../guides/sizing/), which a button opens in the config editor, unsaved; what [auto sizing](../../guides/sizing/#auto-sizing) changes next and has changed, with a link that opens the last change undone |
 | Insights | a card per [insight](../../guides/insights/), warnings first; the last 24 hours; each repository's waits this week against the week before, warm and cold apart |
 | Caches | each volume in one table with its size over 30 days; the build cache's 7-day hit rate and whether it serves [GitHub Actions' cache](../../guides/caches/#github-actions-cache); reseed a snapshot or empty a cache from a volume's menu |
-| Config | the doctor's checks, problems first and the passing ones folded into one line; `runnerd.toml` in an editor with line numbers, as tall as the file, that checks it as you type against `MemoryMax`, marks the line a parse error is on, and shows the changes before **Save and reload**; **Add a device** shows a QR code |
+| Config | the doctor's checks, problems first and the passing ones folded into one line, with how old they are and **Run again**; `runnerd.toml` in an editor with line numbers, as tall as the file, that checks it as you type against `MemoryMax`, marks the line a parse error is on, and shows the changes before **Save and reload**; **Add a device** shows a QR code |
 
 ### Keys
 
@@ -23,14 +23,14 @@ The navigation has five views: Overview, Jobs (History and Records), Insights, C
 
 ## runnerctl tui
 
-Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records and `4` `4` from Sizing to Caches. The overview lists what needs attention, then a row per slot. `enter` opens a job: on a failed one the failure first, then its timeline, steps, memory and CPU against the caps, latest runs, and the log, folded by step and followed while the job runs.
+Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records and `4` `4` from Sizing to Caches. The overview opens on the budget as one strip, a segment per slot labelled under it, then a row per slot in the same order, the queue and the latest jobs; what needs attention is one line until `!` opens it. On a terminal 140 columns wide or more, Insights, Capacity and Settings show the selected row whole beside the list, and Jobs does where the list keeps every column beside it. `enter` opens a job: on a failed one the failure first, then its timeline, steps, memory and CPU against the caps, latest runs, and the log, folded by step and followed while the job runs.
 
 | Key | |
 |---|---|
 | `1` to `5` | overview, jobs, insights, capacity, settings; again for the view's next section; `o` and `h` open the overview and history too |
 | `tab`, `j` `k` or arrows, `PgDn` `PgUp` | the overview's pane; move in it, or in a log; by ten |
-| `enter`, `esc` | open the selected job, or where an attention item points; back |
-| `!` | what needs attention; the header's count opens it too |
+| `enter`, `esc` | open the selected job, an insight's newest run, or where an attention item points; settings: open or fold the passing checks; back |
+| `!` | open or close what needs attention, back to the pane it was opened from; the header's count opens it too |
 | `/`, `n` `N` | jobs: search names, workflows and branches; job: search the log, the next and previous match |
 | `f` `s` `t`, `l`, `x` | jobs: pick a filter, the order, the time range; the slots' timeline; clear the filters |
 | `]` `[` | jobs: next and previous page |
@@ -43,6 +43,6 @@ Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pres
 | `a` | sizing: write the selected profile's advice into the config, after `y` |
 | `u` | settings: read the config and the doctor's checks again |
 | click, wheel | select, click again to open; scroll. `--no-mouse` or `RUNNERCTL_NO_MOUSE=1` leaves the mouse to the terminal |
-| `?`, `q` or `ctrl-c` | all keys; quit |
+| `?`, `q` or `ctrl-c` | all keys, a page at a time on a short terminal, `j` `k` to turn; quit |
 | `ctrl-z` | suspend; `fg` brings it back |
 

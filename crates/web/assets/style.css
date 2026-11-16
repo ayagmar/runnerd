@@ -149,11 +149,17 @@ body {
   overflow-x: clip;
 }
 
+/* Below 60rem the tab bar is fixed along the bottom edge: every page ends that far, its safe area and a gap above it,
+   so its last row is never under the bar. */
+:root {
+  --tab-bar: 3.25rem;
+}
+
 main {
   width: 100%;
   min-height: calc(100vh - 3.5rem);
-  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0)) calc(6rem + env(safe-area-inset-bottom, 0))
-    max(var(--gutter), env(safe-area-inset-left, 0));
+  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0))
+    calc(var(--tab-bar) + 2.75rem + env(safe-area-inset-bottom, 0)) max(var(--gutter), env(safe-area-inset-left, 0));
   background: var(--bg);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -296,7 +302,7 @@ html {
 .top nav a {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 3.25rem;
+  min-height: var(--tab-bar);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1001,11 +1007,19 @@ dialog.palette {
    floor keeps a name legible), in its profile's colour: solid while a job runs, filled from the bottom to what the job
    uses now; pale while a runner waits; an outline while idle. The mirror, seeds and shells are ink, what is free the
    slice's ground, what is closed hatched. A lane shows what its width has room for: the job's name, step, time,
-   memory and CPU, then less, down to its name on its side. In a container under 44rem the lanes are rows instead,
-   each over a strip of the slice with its block where it sits, so the blocks read down the rows as the bar reads
-   across. */
-.slots {
+   memory and CPU, then less, down to its name on its side. A slot that holds none of the budget, as an idle one does
+   under measured admission, is not a sliver in the bar: it is a chip in one row under it. In a container under 44rem
+   the lanes are rows instead, each over a strip of the slice with its block where it sits, so the blocks read down
+   the rows as the bar reads across. So that rows come where the bar's lanes at their floor no longer fit, the server
+   sets `--fit`, the share of the width the container query sees (1 while they fit in 44rem at 2.5rem each); the list itself takes
+   the whole width. */
+.lanes-fit {
   container: slots / inline-size;
+  width: calc(100% * var(--fit, 1));
+}
+
+.lanes-fit > .lanes {
+  width: calc(100% / var(--fit, 1));
 }
 
 .lanes {
@@ -1132,6 +1146,60 @@ dialog.palette {
   .lane.free {
     color: var(--muted);
   }
+
+  /* A waiting runner's pale block keeps its text at full ink: dimmed it falls under AA in the dark theme. */
+  .lane:is(.warm, .starting) :is(.lane-caps, .lane-state, .repo, .lane-since) {
+    opacity: 1;
+  }
+
+  /* Slots that hold none of the budget: chips in one row under the bar, in slot order, each its profile's swatch,
+     its name and its state. The bar's lanes fill the first line; the list's `::after` ends it. */
+  .lanes {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+
+  .lanes::after {
+    content: '';
+    order: 1;
+    flex: 0 0 100%;
+  }
+
+  .lane.empty {
+    order: 2;
+    container-type: normal;
+    flex: none;
+    min-width: 0;
+    min-height: 2.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.5rem 0.5rem 0 0;
+    padding: 0.35rem 0.75rem;
+    background: var(--surface);
+  }
+
+  .lane.empty .lane-block {
+    position: static;
+    flex: none;
+    width: 0.75rem;
+    height: 0.75rem;
+    background: var(--profile);
+    box-shadow: none;
+  }
+
+  .lane.empty :is(.lane-caps, .lane-since, .repo) {
+    display: none;
+  }
+
+  .lane.empty .lane-what {
+    margin: 0;
+    color: var(--muted);
+  }
+
+  .lane.empty .lane-state {
+    opacity: 1;
+  }
 }
 
 .lanes-check .lane:is(.p0, .p1, .p2, .p3, .p4, .p5) {
@@ -1163,8 +1231,9 @@ dialog.palette {
   white-space: nowrap;
 }
 
+/* Sized to its lane, so "7.09G" fits a lane of 75px whole rather than cut to read as another number. */
 .lane.part .lane-size {
-  font-size: clamp(1.25rem, 1rem + 1vw, 1.75rem);
+  font-size: clamp(0.875rem, 30cqi - 0.5rem, 1.75rem);
   letter-spacing: -0.04em;
   line-height: 1;
 }
@@ -1212,6 +1281,18 @@ dialog.palette {
   text-decoration: none;
 }
 
+/* A running job's name takes two lines before it is cut: the lane has rows to spare. */
+@container lane (width >= 6rem) {
+  .lane.running .lane-job {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
 .lane-job .job-name {
   font-weight: 700;
   font-size: 1.0625rem;
@@ -1227,6 +1308,7 @@ dialog.palette {
 
 .lane-since {
   grid-area: since;
+  min-width: 0;
   justify-self: end;
   text-align: end;
   font-size: 0.875rem;
@@ -1314,6 +1396,17 @@ dialog.palette {
   .lane-figure .sparkline,
   .lane-caps {
     display: none;
+  }
+}
+
+/* Narrower still, a waiting runner's age goes, and a running job's time wraps at its space rather than being cut. */
+@container lane (width < 6rem) {
+  .lane.slot:not(.running) > .lane-since {
+    display: none;
+  }
+
+  .lane.running > :is(.lane-since, .lane-figure) {
+    white-space: normal;
   }
 }
 
@@ -1816,23 +1909,20 @@ dialog.palette {
 .repo-note.tone-warn .tone-mark { background: var(--wait); }
 .repo-note.tone-bad .tone-mark { background: var(--failure-ink); }
 
-/* Pause and resume of every repository: under the rows' buttons, quieter than they are. */
-.repo-list .all {
+/* Pause and resume of every repository: the section's own actions, by its title, quieter than a row's. */
+.repositories .section-head .all {
   display: flex;
-  justify-content: flex-end;
   gap: 0.5rem;
-  padding: 0.25rem 1rem 0 0;
 }
 
-.repo-list .all .button-quiet {
+.repositories .section-head .all .button-quiet {
   background: none;
-  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--line);
   font-weight: 500;
 }
 
-.repo-list .all .button-quiet:hover {
+.repositories .section-head .all .button-quiet:hover {
   background: var(--surface-2);
-  color: var(--ink);
 }
 
 .button,
@@ -3114,15 +3204,16 @@ th a.sort:hover {
 .record-mark.tone-warn { color: var(--wait-ink); }
 .record-mark:is(.tone-neutral, .tone-quiet) { color: var(--muted); }
 
+/* A notice: a rule along its top in its tone, as the job page's failure summary has. */
 .notice {
   margin-bottom: 1rem;
   padding: 0.6rem 0.9rem;
   background: var(--surface);
-  box-shadow: inset 3px 0 0 var(--muted);
+  box-shadow: inset 0 3px 0 var(--muted);
 }
 
-.notice.tone-warn { box-shadow: inset 3px 0 0 var(--wait); }
-.notice.tone-bad { box-shadow: inset 3px 0 0 var(--failure-ink); }
+.notice.tone-warn { box-shadow: inset 0 3px 0 var(--wait); }
+.notice.tone-bad { box-shadow: inset 0 3px 0 var(--failure-ink); }
 
 /* The timeline: a lane per slot, its jobs as bars across the window, what the history cannot say hatched. */
 .tl-key {
@@ -4090,7 +4181,7 @@ th a.sort:hover {
 /* The buttons ride along the bottom of the screen, over the tab bar, while the editor is in view. */
 .editor > .editor-actions {
   position: sticky;
-  bottom: calc(3.25rem + env(safe-area-inset-bottom, 0));
+  bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0));
   z-index: 2;
   padding-block: 0.6rem;
   background: var(--bg);
@@ -4100,6 +4191,19 @@ th a.sort:hover {
 @media (min-width: 60rem) {
   .editor > .editor-actions {
     bottom: 0;
+  }
+}
+
+/* The editor never scrolls inside itself, so the browser brings the caret into view by scrolling the page: it stops
+   short of the buttons' bar (44px and its padding) and, on a phone, the tab bar under it, so the line typed on is
+   never under them. */
+html:has(.editor-frame) {
+  scroll-padding-bottom: calc(5rem + var(--tab-bar) + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 60rem) {
+  html:has(.editor-frame) {
+    scroll-padding-bottom: 5rem;
   }
 }
 
@@ -4165,8 +4269,11 @@ th a.sort:hover {
   padding: 0.5rem 0.55rem;
 }
 
-.lanes-check .lane.part .lane-size {
-  font-size: min(1.25rem, 30cqi);
+/* Upright only: a figure turned on its side measures `cqi` along the wrong axis, and takes the narrow lane's size. */
+@container lane (width >= 2.75rem) {
+  .lanes-check .lane.part .lane-size {
+    font-size: min(1.25rem, 30cqi);
+  }
 }
 
 .budget-lanes:has(.max-mark) {
@@ -4356,6 +4463,33 @@ th a.sort:hover {
   margin: 0;
 }
 
+/* Its title, how old the checks are, as core says it, and a quiet button that runs them again. */
+.doctor-head {
+  justify-self: stretch;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+
+.doctor-head h2 {
+  margin-right: auto;
+}
+
+.doctor-age {
+  font-size: 0.875rem;
+}
+
+.doctor-head .button-quiet {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-weight: 500;
+}
+
+.doctor-head .button-quiet:hover {
+  background: var(--surface-2);
+}
+
 .doctor .check-list {
   justify-self: stretch;
   margin: 0;
@@ -4455,7 +4589,7 @@ th a.sort:hover {
 #notice {
   position: fixed;
   right: var(--gutter);
-  bottom: calc(3.25rem + env(safe-area-inset-bottom, 0) + 0.75rem);
+  bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0) + 0.75rem);
   max-width: min(28rem, calc(100vw - 2 * var(--gutter)));
   z-index: 5;
 }
@@ -4565,10 +4699,9 @@ th a.sort:hover {
     display: block;
   }
 
-  .job-table th:nth-child(4),
-  .job-table td:nth-child(4),
-  .job-table th:nth-child(7),
-  .job-table td:nth-child(7) {
+  /* The jobs list and Capacity's tables drop their fourth and seventh columns; each other table says what it
+     drops. */
+  :is(.history-table, .sizing-table, .profiles-table) :is(th, td):is(:nth-child(4), :nth-child(7)) {
     display: none;
   }
 
@@ -4770,11 +4903,16 @@ th a.sort:hover {
   min-height: 40px;
 }
 
-.attention-fix a,
-a.attention-title {
+/* A link or button that stands alone in a line of text: a target 40px tall (44 on a touch screen, below) that does
+   not make its line taller. Shared by every page: put `hit` on the element. */
+.hit {
   display: inline-block;
-  padding-block: 0.6rem;
-  margin-block: -0.6rem;
+  padding-block: var(--hit-pad);
+  margin-block: calc(-1 * var(--hit-pad));
+}
+
+:root {
+  --hit-pad: 0.6rem;
 }
 
 /* Links that stand on their own get a finger's height on a touch screen; links inside a sentence stay text. */
@@ -4826,10 +4964,8 @@ a.attention-title {
     min-height: 44px;
   }
 
-  .attention-fix a,
-  a.attention-title {
-    padding-block: 0.75rem;
-    margin-block: -0.75rem;
+  :root {
+    --hit-pad: 0.75rem;
   }
 }
 

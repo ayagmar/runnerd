@@ -3,13 +3,13 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Paragraph, TableState, Wrap};
 use runnerd_core::api::{self, Column, RecordNote, Records};
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
 use super::job::fit_details;
-use super::{column_title, fit, heading, selected, styled_heading, table_hits};
+use super::{TableColumn, fitted_table, heading, styled_heading, table_hits};
 use crate::human::{self, bytes};
 use crate::tui::app::App;
 use crate::tui::mouse::{Hits, List};
@@ -63,46 +63,46 @@ pub(super) fn records(
             made
         })
         .collect();
-    let made_width = made.iter().map(|made| made.width()).max().unwrap_or(0);
-    let fixed = [12, 6, made_width.max("MADE".len())];
-    // The repository and the job's name share what the other columns and the spaces between them leave.
-    let shared = usize::from(table_area.width).saturating_sub(fixed.iter().sum::<usize>() + 4);
-    let repository_width = shared / 2;
-    let name_width = shared - repository_width;
-    let rows = records.records.iter().zip(made).map(|(record, made)| {
-        Row::new(vec![
-            Cell::from(record.job.to_string()),
-            Cell::from(fit(&record.repository, repository_width)),
-            Cell::from(fit(&record.title().to_string(), name_width)),
-            Cell::from(bytes(record.bytes)),
-            Cell::from(Span::styled(made, theme.dim())),
-        ])
-    });
-    let length = |width: usize| Constraint::Length(u16::try_from(width).unwrap_or(u16::MAX));
-    let table = Table::new(
-        rows,
-        [
-            length(fixed[0]),
-            length(repository_width),
-            Constraint::Fill(1),
-            length(fixed[1]),
-            length(fixed[2]),
-        ],
-    )
-    .header(
-        Row::new(
-            [
-                Column::Id,
-                Column::Repository,
-                Column::Job,
-                Column::Size,
-                Column::Made,
-            ]
-            .map(column_title),
-        )
-        .style(theme.dim()),
-    )
-    .row_highlight_style(selected());
+    let plain = |text: &dyn Fn(&api::Record) -> String| -> Vec<Span<'static>> {
+        records
+            .records
+            .iter()
+            .map(|record| Span::raw(text(record)))
+            .collect()
+    };
+    let columns = vec![
+        TableColumn::words(
+            Column::Id.title(),
+            plain(&|record| record.job.to_string()),
+            0,
+        ),
+        TableColumn::names(
+            Column::Repository.title(),
+            plain(&|record| record.repository.clone()),
+        ),
+        TableColumn::names(
+            Column::Job.title(),
+            plain(&|record| record.title().to_string()),
+        ),
+        TableColumn::figures(
+            Column::Size.title(),
+            plain(&|record| bytes(record.bytes)),
+            0,
+        ),
+        TableColumn::words(
+            Column::Made.title(),
+            made.into_iter()
+                .map(|made| Span::styled(made, theme.dim()))
+                .collect(),
+            0,
+        ),
+    ];
+    let table = fitted_table(
+        columns,
+        usize::from(table_area.width),
+        Some(app.record),
+        theme,
+    );
     let mut state = TableState::default().with_selected(Some(app.record));
     frame.render_stateful_widget(table, table_area, &mut state);
     table_hits(

@@ -39,7 +39,7 @@ use runnerd_core::api::{
 use runnerd_core::api::{
     Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
 };
-use runnerd_core::api::{Attention, DoctorState, attention_items};
+use runnerd_core::api::{Attention, DoctorQuery, DoctorState, attention_items};
 use runnerd_core::api::{
     AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
     WaitSpread, WeekWaits,
@@ -1967,10 +1967,17 @@ fn router(fake: Fake) -> Router {
         )
         .route(
             "/v1/doctor",
-            get(|State(fake): State<Fake>| async move {
+            get(|State(fake): State<Fake>, Query(query): Query<DoctorQuery>| async move {
                 let (delay, error) = {
                     let fixtures = fake.fixtures.lock().unwrap();
-                    (fixtures.doctor_delay, fixtures.doctor_error.clone())
+                    // As the daemon does, a request for a recent run takes one up to its refresh, 10 minutes, old
+                    // at once.
+                    let answer = fixtures.doctor.clone().unwrap_or_else(|| doctor(&fixtures));
+                    let recent = query.recent
+                        && fixtures.doctor_error.is_none()
+                        && matches!(answer.state, Some(DoctorState::Ready { at }) if fixtures.now.saturating_sub(at) <= 600);
+                    let delay = if recent { std::time::Duration::ZERO } else { fixtures.doctor_delay };
+                    (delay, fixtures.doctor_error.clone())
                 };
                 tokio::time::sleep(delay).await;
                 if let Some(message) = error {

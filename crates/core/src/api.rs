@@ -78,11 +78,11 @@ pub use attention::{
 };
 pub use budget::{
     BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, HostFigure, Reading,
-    SlotPart,
+    SlotForm, SlotPart, SlotReading,
 };
 pub use control::{
-    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
-    ReplaceQuery, RunningJob,
+    Busy, Check, CheckCount, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorQuery,
+    DoctorState, DoctorSummary, PauseQuery, Paused, ReplaceQuery, RunningJob,
 };
 pub use disk::{
     Commits, DiskWrites, DiskWritten, DriveShare, DriveShares, DriveWrites, JobWrites, Measure,
@@ -92,7 +92,7 @@ pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use insights::{
     AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,
     InsightFigure, InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent,
-    NotifyTest, NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitSpread,
+    NotifyTest, NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitFigure, WaitSpread,
     WeekWaits,
 };
 #[cfg(feature = "host")]

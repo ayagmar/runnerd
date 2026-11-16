@@ -517,6 +517,91 @@ pub struct SlotPart {
     pub reserved: bool,
 }
 
+/// What a slot's block reads under its name, from [`Status::slot_reading`]: what its job uses of what the block is,
+/// or without a sample of its job, what the slot is doing and the block's size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotReading {
+    /// What its job uses now, `4.12G`; `None` without a sample.
+    used: Option<u64>,
+    /// The block's size in bytes.
+    block: u64,
+    /// What the block is: `cap` under caps, `reserved` under measured admission, where it is what the runner reserves.
+    kind: &'static str,
+    /// What the slot is doing ([`SlotState::word`]).
+    state: &'static str,
+}
+
+/// One way to read a slot's block, from [`SlotReading::forms`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotForm {
+    /// Such as `4.12G of 9G cap` or `idle 9G cap`.
+    pub text: String,
+    /// The cells it may take as what the job uses changes, as wide as `9.99G` (`9.9G` in a short form) at least, so a
+    /// client that fits it by this width does not flip between forms as a sample's digits change.
+    pub room: usize,
+}
+
+impl SlotReading {
+    /// Its forms, longest first: `4.12G of 9G cap`, `4.1G of 9G cap`, `4.12G`, `4.1G`; without a sample `idle 9G
+    /// cap`, `idle 9G`, `idle`. Under measured admission the block is what the runner reserves: `8.2G of 7.75G
+    /// reserved` for a job past it.
+    pub fn forms(&self) -> Vec<SlotForm> {
+        let block = ByteSize(self.block);
+        let kind = self.kind;
+        let Some(used) = self.used.map(ByteSize) else {
+            let state = self.state;
+            return [
+                format!("{state} {block} {kind}"),
+                format!("{state} {}", block.short()),
+                state.to_owned(),
+            ]
+            .into_iter()
+            .map(|text| SlotForm {
+                room: text.chars().count(),
+                text,
+            })
+            .collect();
+        };
+        let long = used.to_string();
+        let short = used.short();
+        let form = |figure: &str, widest: usize, rest: String| {
+            let text = format!("{figure}{rest}");
+            SlotForm {
+                room: text.chars().count() + widest.saturating_sub(figure.chars().count()),
+                text,
+            }
+        };
+        vec![
+            form(&long, 5, format!(" of {block} {kind}")),
+            form(&short, 4, format!(" of {} {kind}", block.short())),
+            form(&long, 5, String::new()),
+            form(&short, 4, String::new()),
+        ]
+    }
+}
+
+impl Status {
+    /// What `part`'s block reads, its job using `used` bytes now when a sample of it is known.
+    pub fn slot_reading(&self, part: &SlotPart, used: Option<u64>) -> SlotReading {
+        let state = self.profiles.get(part.profile).and_then(|profile| {
+            profile
+                .slots
+                .iter()
+                .find(|slot| slot.slot == part.slot)
+                .map(|slot| Status::slot_state(profile, slot))
+        });
+        SlotReading {
+            used: used.filter(|_| part.reserved),
+            block: part.memory,
+            kind: match self.budget.admission {
+                AdmissionPolicy::Caps => "cap",
+                AdmissionPolicy::Measured => "reserved",
+            },
+            state: state.as_ref().map_or("idle", super::SlotState::word),
+        }
+    }
+}
+
 /// Memory the budget holds for something other than a slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldPart {
@@ -575,9 +660,12 @@ pub struct FreePart {
 }
 
 impl FreePart {
+    /// [`FreePart::name`], for a client that draws free memory it computed no part for, such as a config check's.
+    pub const NAME: &'static str = "free";
+
     /// Its name under its figure, where a block or a lane has no room for `reading`'s words: `free`.
     pub fn name(&self) -> &'static str {
-        "free"
+        Self::NAME
     }
 }
 
@@ -613,6 +701,15 @@ impl ClosedKind {
             Self::Host => "held by the host",
             Self::Held => "closed past 90%",
             Self::Stalled => "closed while the host stalls",
+        }
+    }
+
+    /// Its name under a block too narrow for [`ClosedKind::name`], a word: `host`, `closed` or `stalled`.
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Held => "closed",
+            Self::Stalled => "stalled",
         }
     }
 }

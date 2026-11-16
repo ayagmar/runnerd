@@ -15,8 +15,11 @@ use runnerd_core::api::{
 use crate::human::{self, Paint, Table, Tone, bytes, cores_used, duration};
 use runnerd_core::client::{Client, ClientError, Events};
 
-/// Finished jobs kept on screen.
-const RECENT: usize = 5;
+/// Finished jobs kept, of the last 40 jobs: as many as a tall terminal's overview lists.
+const RECENT: usize = 20;
+
+/// Finished jobs `runnerctl watch` prints.
+const RECENT_PRINTED: usize = 5;
 
 /// Seconds between two reads of why queued jobs wait, besides the read after each job or slot change.
 const REASONS_EVERY: u32 = 10;
@@ -55,7 +58,7 @@ impl State {
             .get_query(
                 "/v1/jobs",
                 &JobQuery {
-                    limit: Some(20),
+                    limit: Some(40),
                     ..JobQuery::default()
                 },
             )
@@ -428,7 +431,7 @@ fn jobs(state: &State, now: u64, paint: Paint) -> String {
     if !state.recent.is_empty() {
         let _ = writeln!(out, "\n{}", paint.paint(Tone::Bold, "Finished"));
         let mut recent = Table::default().right(&[3]);
-        for job in &state.recent {
+        for job in state.recent.iter().take(RECENT_PRINTED) {
             let ran = match (job.timeline.started_at, job.timeline.finished_at) {
                 (Some(started), Some(finished)) => duration(finished.saturating_sub(started)),
                 _ => String::new(),

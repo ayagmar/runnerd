@@ -960,6 +960,12 @@ struct DockerState {
     seed_exit: Option<i64>,
     /// What the containers that start a slot's layers over exit with, at once.
     start_over_exit: i64,
+    /// What the container that repairs the mirror's storage prints; unset, that it read no links.
+    repair_log: Option<String>,
+    /// How many of the next repair containers fail to be made, as when the Engine is busy.
+    fail_repair_runs: u32,
+    /// The containers `run` made, in order, such as the mirror and its repair.
+    runs: Vec<String>,
     /// The volumes Docker lists besides those runnerd made, as one of a profile the config no longer has.
     listed_volumes: BTreeSet<String>,
     /// What measure containers print as they exit; unset, slot 1 changed 4G, past the default `reseed_at`.
@@ -1478,6 +1484,28 @@ impl DockerApi for FakeDocker {
     async fn run(&self, name: &str, body: ContainerCreateBody) -> Result<String, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
+        if name.ends_with("-mirror-repair") && state.fail_repair_runs > 0 {
+            state.fail_repair_runs -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
+        if state
+            .containers
+            .iter()
+            .any(|container| container.name == name)
+        {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 409,
+                message: format!("the container name \"/{name}\" is already in use"),
+            });
+        }
+        state.runs.push(name.to_owned());
+        state
+            .envs
+            .insert(name.to_owned(), body.env.clone().unwrap_or_default());
+        let labels = body.labels.clone().unwrap_or_default();
         let memory = body.host_config.and_then(|host| host.memory).unwrap_or(0);
         state
             .memory
@@ -1486,7 +1514,7 @@ impl DockerApi for FakeDocker {
             id: name.to_owned(),
             name: name.to_owned(),
             running: true,
-            labels: HashMap::from([("runnerd.mirror".to_owned(), String::new())]),
+            labels,
         });
         Ok(name.to_owned())
     }
@@ -1514,6 +1542,13 @@ impl DockerApi for FakeDocker {
         if container.ends_with("-start-over") {
             return Ok(self.0.lock().unwrap().start_over_exit);
         }
+        if container.ends_with("-mirror-repair") {
+            let mut state = self.0.lock().unwrap();
+            if let Some(found) = state.containers.iter_mut().find(|c| c.name == container) {
+                found.running = false;
+            }
+            return Ok(0);
+        }
         if container.ends_with("-measure") {
             let mut held = self.0.lock().unwrap().measures_held.subscribe();
             let _ = held.wait_for(|held| !held).await;
@@ -1535,6 +1570,12 @@ impl DockerApi for FakeDocker {
                 status_code: 500,
                 message: "the Engine is busy".to_owned(),
             });
+        }
+        if container.ends_with("-mirror-repair") {
+            return Ok(state
+                .repair_log
+                .clone()
+                .unwrap_or_else(|| "links 0\n".to_owned()));
         }
         if container.ends_with("-measure") {
             return Ok(state
@@ -3857,6 +3898,45 @@ async fn the_mirrors_storage_over_its_limit_is_emptied_once_the_mirror_is_down()
 }
 
 #[tokio::test]
+async fn a_repair_container_left_does_not_keep_the_mirrors_volume_from_being_removed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let names = Names::new("runnerd");
+    let left = Container {
+        id: names.mirror_repair(),
+        name: names.mirror_repair(),
+        running: false,
+        labels: HashMap::from([("runnerd.mirror-repair".to_owned(), String::new())]),
+    };
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.volume_sizes.insert(names.mirror(), 11 << 30);
+        // A daemon killed while the repair ran left its container, which mounts the mirror's volume.
+        state.containers.push(left.clone());
+        state.holders.insert(names.mirror(), vec![left]);
+    }
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_called(&mut engine, &docker, "remove volume runnerd-mirror").await;
+    let calls = docker.calls();
+    let repair = calls
+        .iter()
+        .position(|call| *call == format!("remove {}", names.mirror_repair()));
+    let emptied = calls
+        .iter()
+        .position(|call| call == "remove volume runnerd-mirror");
+    assert!(
+        repair.is_some() && repair < emptied,
+        "the repair's container goes with the mirror, before its volume: {calls:?}"
+    );
+    assert!(
+        docker.0.lock().unwrap().holders[&names.mirror()].is_empty(),
+        "nothing holds the mirror's volume"
+    );
+}
+
+#[tokio::test]
 async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_reseeds_its_profile() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, handle, _dir) = engine(&github, &docker);
@@ -4930,6 +5010,141 @@ async fn a_mirror_recovery_could_not_read_is_started_for_the_first_runner() {
             .iter()
             .any(|container| container.name == mirror && container.running),
         "the mirror runs for the runner started"
+    );
+}
+
+/// An engine with the mirror on, after recovery, and a job queued for its first runner.
+fn mirrored(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> Engine<FakeGithub, FakeDocker> {
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let (engine, _handle) = engine_with(github, docker, dir, &config);
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine
+}
+
+/// Whether the mirror's container runs.
+fn mirror_runs(docker: &FakeDocker) -> bool {
+    let mirror = Names::new("runnerd").mirror();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .containers
+        .iter()
+        .any(|container| container.name == mirror && container.running)
+}
+
+#[tokio::test]
+async fn the_mirror_starts_without_the_descriptor_cache_after_its_storage_is_repaired() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    docker.0.lock().unwrap().repair_log = Some(format!(
+        "gone sha256:{0} repositories/library/node/_layers/sha256/{0}/link\nlinks 499\n",
+        "8".repeat(64)
+    ));
+    let mut engine = mirrored(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "the job starts");
+    let state = docker.0.lock().unwrap();
+    let (repair, mirror) = (
+        Names::new("runnerd").mirror_repair(),
+        Names::new("runnerd").mirror(),
+    );
+    let order: Vec<&String> = state
+        .runs
+        .iter()
+        .filter(|name| **name == repair || **name == mirror)
+        .collect();
+    assert_eq!(
+        order,
+        [&repair, &mirror],
+        "the repair runs before the mirror"
+    );
+    assert!(
+        state.envs[&mirror].contains(&"REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR=".to_owned()),
+        "the mirror keeps no blob descriptor cache: {:?}",
+        state.envs[&mirror]
+    );
+    assert!(
+        !state
+            .containers
+            .iter()
+            .any(|container| container.name == repair),
+        "the repair's container is removed"
+    );
+}
+
+#[tokio::test]
+async fn a_repair_docker_refuses_does_not_keep_the_mirror_from_starting() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    docker.0.lock().unwrap().fail_repair_runs = 1;
+    let mut engine = mirrored(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert!(mirror_runs(&docker), "the mirror starts as its storage is");
+    assert_eq!(registered(&github.calls()).len(), 1, "the job starts");
+}
+
+#[tokio::test]
+async fn a_repair_container_a_daemon_restart_left_is_replaced_by_a_new_repair() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let repair = Names::new("runnerd").mirror_repair();
+    docker.0.lock().unwrap().containers.push(Container {
+        id: repair.clone(),
+        name: repair.clone(),
+        running: true,
+        labels: HashMap::from([("runnerd.mirror-repair".to_owned(), String::new())]),
+    });
+    let mut engine = mirrored(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert!(mirror_runs(&docker), "the mirror starts");
+    let state = docker.0.lock().unwrap();
+    assert_eq!(
+        state.runs.iter().filter(|name| **name == repair).count(),
+        1,
+        "a new repair ran in place of the one cut off"
+    );
+    assert!(
+        !state
+            .containers
+            .iter()
+            .any(|container| container.name == repair),
+        "no repair is left beside the mirror"
+    );
+}
+
+#[tokio::test]
+async fn without_the_mirror_no_repair_runs() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "the job starts");
+    let runs = docker.0.lock().unwrap().runs.clone();
+    assert!(
+        !runs.iter().any(|name| name.contains("mirror")),
+        "neither the mirror nor its repair runs: {runs:?}"
     );
 }
 

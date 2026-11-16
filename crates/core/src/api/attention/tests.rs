@@ -446,12 +446,18 @@ fn many_items_are_capped_and_the_rest_counted_in_core_s_words() {
     assert_eq!(attention.omitted, 10);
     assert_eq!(attention.more(3).as_deref(), Some("and 57 more"));
     assert_eq!(attention.more(50).as_deref(), Some("and 10 more"));
+    assert_eq!(
+        attention.count(),
+        60,
+        "the count takes in the items left out"
+    );
     let few = Attention::new(
         "a1".to_owned(),
         8,
         attention_items(&status(), &ready(Vec::new()), None, NOW),
     );
     assert_eq!(few.more(3), None, "nothing left out");
+    assert_eq!(few.count(), few.items.len() as u64);
 }
 
 #[test]

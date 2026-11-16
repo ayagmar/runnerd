@@ -189,13 +189,18 @@ impl Doctors {
         self.timing
     }
 
-    /// The checks for the config of `revision()` at most `Timing::fresh` old: the last run's when it is, else those of
-    /// a run asked for now, once it ends. Requests at once share that run. A run not done within `Timing::answer`
-    /// goes on, and the last run's checks answer, in their state: not run, stale or failed.
-    pub(super) async fn current(&self, revision: impl Fn() -> String) -> api::Doctor {
+    /// The checks for the config of `revision()` at most `recent` old, `Timing::fresh` unless a client takes an older
+    /// run: the last run's when it is, else those of a run asked for now, once it ends. Requests at once share that
+    /// run. A run not done within `Timing::answer` goes on, and the last run's checks answer, in their state: not run,
+    /// stale or failed.
+    pub(super) async fn current(
+        &self,
+        revision: impl Fn() -> String,
+        recent: Duration,
+    ) -> api::Doctor {
         let asked = super::history::now();
         let mut last = self.last.clone();
-        let recent = asked.saturating_sub(self.timing.fresh.as_secs());
+        let recent = asked.saturating_sub(recent.as_secs());
         if !last.borrow().answers(&revision(), recent) {
             self.wanted.notify_one();
             let done = last.wait_for(|last| last.answers(&revision(), asked));

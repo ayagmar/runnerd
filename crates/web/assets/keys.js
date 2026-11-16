@@ -291,28 +291,23 @@ document.addEventListener('click', (event) => {
   if (line && (line.classList.contains('open') || text.scrollHeight > text.clientHeight + 1)) line.classList.toggle('open');
 });
 
-// The doctor's checks, once they land: their height at this width, for theme.js to reserve on the next visit.
-// Recorded as they land, folded, not after a fold is opened.
+// The doctor's checks, once they land: their height at this width and layout, for theme.js to reserve on the next
+// visit. Only checks that stand are recorded, folded as they land: an error or a timeout is shorter than they are.
 const doctorLayout = document.querySelector('.config-layout');
 if (doctorLayout && document.getElementById('doctor')) {
-  let waiting = document.getElementById('doctor').getAttribute('aria-busy') === 'true';
   const record = () => {
     const doctor = document.getElementById('doctor');
-    const busy = doctor?.getAttribute('aria-busy') === 'true';
-    if (doctor && !busy && waiting) {
-      const height = Math.round(doctor.getBoundingClientRect().height);
-      localStorage.setItem('runnerd-doctor-box', JSON.stringify({ width: innerWidth, height }));
-    }
-    waiting = busy;
+    if (!doctor?.hasAttribute('data-checked')) return;
+    const height = Math.round(doctor.getBoundingClientRect().height);
+    const wide = matchMedia('(min-width: 72rem)').matches;
+    localStorage.setItem('runnerd-doctor-box', JSON.stringify({ width: innerWidth, wide, height }));
   };
+  // Datastar morphs the pending region into the checks, or replaces it: either changes these attributes or the
+  // layout's children. Opening the fold changes neither.
+  new MutationObserver(record).observe(doctorLayout, { childList: true });
   new MutationObserver(record).observe(doctorLayout, {
-    childList: true,
     subtree: true,
-    attributes: true,
-    attributeFilter: ['aria-busy'],
+    attributeFilter: ['data-checked', 'aria-busy'],
   });
-  if (!waiting) {
-    waiting = true;
-    record();
-  }
+  record();
 }

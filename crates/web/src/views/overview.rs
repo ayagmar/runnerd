@@ -267,8 +267,8 @@ fn fix(fix: &Fix) -> Markup {
     html! {
         @match fix {
             Fix::Command { command } => { code.fix-command { (command) } }
-            Fix::Open { view } => { a href=(Page::of(*view).path()) { (fix.line()) } }
-            Fix::Config { .. } => { a href=(Page::of_section(Section::Config).path()) { (fix.line()) } }
+            Fix::Open { view } => { a.hit href=(Page::of(*view).path()) { (fix.line()) } }
+            Fix::Config { .. } => { a.hit href=(Page::of_section(Section::Config).path()) { (fix.line()) } }
             Fix::Text { .. } => { (fix.line()) }
         }
     }
@@ -280,7 +280,7 @@ fn attention_item(item: &AttentionItem, now: u64) -> Markup {
         li class=(format!("attention-item {}", tone_class(item.tone))) data-row tabindex="-1" {
             span.tone-mark aria-hidden="true" {}
             @if let Some(href) = &href {
-                a.attention-title href=(href) { (item.title) }
+                a.attention-title.hit href=(href) { (item.title) }
             } @else {
                 span.attention-title { (item.title) }
             }
@@ -304,13 +304,14 @@ pub(crate) fn attention(overview: &Overview) -> Markup {
                 @match attention.items.first() {
                     None => { div #attention hidden {} }
                     Some(worst) => {
-                        @let count = attention.items.len() as u64 + attention.omitted;
-                        // Kept open across live updates, which replace the region without the attribute.
+                        // The signal holds whether it is open, so a live update, which replaces the region, keeps it
+                        // so. A click on the summary sets the signal and nothing else: a native toggle as well would
+                        // be undone by the signal in the same task. Without JavaScript the native fold opens.
                         details #attention class=(format!("attention {}", tone_class(worst.tone)))
-                            "data-signals:_attention__ifmissing"="false" data-attr:open="$_attention"
-                            data-on:toggle="$_attention = el.open" {
-                            summary aria-label=(format!("Needs attention: {count}")) {
-                                span.attention-count { span.tone-mark aria-hidden="true" {} (count) }
+                            "data-signals:_attention__ifmissing"="false" data-attr:open="$_attention" {
+                            summary "data-on:click__prevent"="$_attention = !$_attention" {
+                                span.visually-hidden { "Needs attention: " }
+                                span.attention-count { span.tone-mark aria-hidden="true" {} (attention.count()) }
                                 span.attention-worst { (worst.title) }
                                 @if let Some(more) = attention.more(1) { span.attention-rest { (more) } }
                             }
@@ -471,47 +472,73 @@ pub(crate) fn slots(overview: &Overview, parts: &Parts) -> Markup {
         status.budget.slice,
         status.budget.memory_reading().line()
     );
+    // The lanes that hold memory make the bar; below the room they need, they are rows.
+    let barred = bar.slots.iter().filter(|part| part.memory > 0).count()
+        + held.len()
+        + usize::from(free.is_some())
+        + usize::from(closed.is_some());
     html! {
         div #slots .slots {
             h2.visually-hidden { "Slots" }
             @if status.profiles.is_empty() {
                 p.muted { "No profiles in runnerd.toml, so no slots." }
             }
-            ol.lanes aria-label=(label) {
-                @for (index, profile) in status.profiles.iter().enumerate() {
-                    @for slot in &profile.slots {
-                        (lane(overview, profile, slot, shares.get(&(index, slot.slot)).copied(), parts))
+            div.lanes-fit style=(format!("--fit: {:.4}", lanes_fit(barred))) {
+                ol.lanes aria-label=(label) {
+                    @for (index, profile) in status.profiles.iter().enumerate() {
+                        @for slot in &profile.slots {
+                            (lane(overview, profile, slot, shares.get(&(index, slot.slot)).copied(), parts))
+                        }
                     }
-                }
-                @for (part, share) in &held {
-                    @let class = match &part.kind {
-                        HeldKind::Mirror => "mirror".to_owned(),
-                        HeldKind::Seed { profile } => format!("seed {}", profile_class(status, profile)),
-                        HeldKind::Shell { .. } => "shell".to_owned(),
-                    };
-                    @let line = format!("{} {}", format::bytes(part.memory), part.holder());
-                    li class=(format!("lane part {class}")) style=(share.style()) aria-label=(line) title=(line) {
-                        (block(None, parts))
-                        span.lane-size { (super::block_size(part.memory)) }
-                        span.lane-name { (part.name()) }
+                    @for (part, share) in &held {
+                        @let class = match &part.kind {
+                            HeldKind::Mirror => "mirror".to_owned(),
+                            HeldKind::Seed { profile } => format!("seed {}", profile_class(status, profile)),
+                            HeldKind::Shell { .. } => "shell".to_owned(),
+                        };
+                        @let line = format!("{} {}", format::bytes(part.memory), part.holder());
+                        li class=(format!("lane part {class}")) style=(share.style()) aria-label=(line) title=(line) {
+                            (block(None, parts))
+                            span.lane-size { (super::block_size(part.memory)) }
+                            span.lane-name { (part.name()) }
+                        }
                     }
-                }
-                @if let Some((part, share)) = free {
-                    li.lane.part.free style=(share.style()) aria-label=(part.reading.line()) title=(part.reading.line()) {
-                        (block(None, parts))
-                        span.lane-size { (part.reading.figure) }
-                        span.lane-name { (part.name()) }
+                    @if let Some((part, share)) = free {
+                        li.lane.part.free style=(share.style()) aria-label=(part.reading.line()) title=(part.reading.line()) {
+                            (block(None, parts))
+                            span.lane-size { (part.reading.figure) }
+                            span.lane-name { (part.name()) }
+                        }
                     }
-                }
-                @if let Some((part, share)) = closed {
-                    li.lane.part.closed style=(share.style()) aria-label=(part.reading.line()) title=(part.reading.line()) {
-                        (block(None, parts))
-                        span.lane-size { (part.reading.figure) }
-                        span.lane-name { (part.kind.name()) }
+                    @if let Some((part, share)) = closed {
+                        li.lane.part.closed style=(share.style()) aria-label=(part.reading.line()) title=(part.reading.line()) {
+                            (block(None, parts))
+                            span.lane-size { (part.reading.figure) }
+                            span.lane-name { (part.kind.name()) }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// How wide, in rem, each lane in the bar must be able to get for the bar to be worth drawing: more than its 1.75rem
+/// floor, where it is a sliver with its name on its side and the proportions are gone; and the gap between lanes.
+const LANE_FLOOR: f64 = 2.5;
+const LANE_GAP: f64 = 0.125;
+/// The narrowest container that lays the lanes out as a bar, in rem: the stylesheet's `@container slots` bound.
+const BAR_FROM: f64 = 44.0;
+
+/// How much of the slots' width the bar's container query sees, so the lanes turn into rows where `barred` lanes at
+/// `LANE_FLOOR` no longer fit, rather than at the stylesheet's bound alone: 1 while they fit in it.
+fn lanes_fit(barred: usize) -> f64 {
+    let lanes = f64::from(u32::try_from(barred).unwrap_or(u32::MAX));
+    let needed = lanes * LANE_FLOOR + (lanes - 1.0).max(0.0) * LANE_GAP;
+    if needed <= BAR_FROM {
+        1.0
+    } else {
+        BAR_FROM / needed
     }
 }
 
@@ -556,8 +583,14 @@ fn lane(
             )
         })
     });
+    // A slot that holds none of the budget leaves the bar for the row of such slots under it.
+    let empty = if share.is_none_or(|(_, reserved)| reserved == 0) {
+        " empty"
+    } else {
+        ""
+    };
     html! {
-        li #(key) class=(format!("lane slot {class} {state}")) style=(style) data-row
+        li #(key) class=(format!("lane slot {class} {state}{empty}")) style=(style) data-row
             aria-label=(format!("{} {}: {}", profile.name, slot.slot, slot_state.line()))
             data-on:pointerenter=(link.enter) data-on:focusin=(link.enter)
             data-on:pointerleave=(link.pointer_leave) data-on:focusout=(link.leave) data-class:linked=(link.linked) {
@@ -816,16 +849,11 @@ fn repositories_noting(status: &Status, attention: Option<&Attention>) -> Markup
     }
     html! {
         section #repositories .repositories aria-labelledby="repositories-title" {
-            h2 #repositories-title { "Repositories" }
-            @if status.repositories.is_empty() {
-                p.muted { "No repositories yet. Add a " code { "[[repositories]]" } " table to runnerd.toml." }
-            }
-            ul.repo-list {
-                @for repository in &status.repositories {
-                    (repository_row_noting(status, repository, attention))
-                }
+            // Pause and resume of every one sit by the title, as the section's own actions, not as a last row.
+            div.section-head {
+                h2 #repositories-title { "Repositories" }
                 @if !every.is_empty() {
-                    li.all {
+                    div.all {
                         @for (action, label, name) in every {
                             button.button-quiet type="button"
                                 data-indicator:_busy_all=""
@@ -836,6 +864,14 @@ fn repositories_noting(status: &Status, attention: Option<&Attention>) -> Markup
                                 aria-label=(name) { (label) }
                         }
                     }
+                }
+            }
+            @if status.repositories.is_empty() {
+                p.muted { "No repositories yet. Add a " code { "[[repositories]]" } " table to runnerd.toml." }
+            }
+            ul.repo-list {
+                @for repository in &status.repositories {
+                    (repository_row_noting(status, repository, attention))
                 }
             }
         }
