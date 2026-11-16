@@ -249,23 +249,30 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
   // The first line on screen, by its number, and where it is.
   let anchor = null;
   // The first shown line from number `from` on; with `onScreen`, the first whose foot is past the scroller's top.
+  // Where the scroller's top is on screen: the box's for a tail with its own, the page's (0) for the page. An anchor
+  // is measured from it, so the page scrolling a box up or down the screen does not read as its lines moving.
+  const origin = (tail) => (ownBox(tail) ? tail.getBoundingClientRect().top : 0);
   const lineAt = (tail, from, onScreen) => {
-    const top = ownBox(tail) ? tail.getBoundingClientRect().top : 0;
+    const top = origin(tail);
     for (const line of tail.children) {
       if (line.value < from || line.getClientRects().length === 0) continue;
       if (!onScreen || line.getBoundingClientRect().bottom > top) return line;
     }
     return null;
   };
+  // A line to hold only while the reader is in the tail: it spans its scroller's top. A page whose log is below the
+  // screen holds nothing, so what grows above the log moves no reader who is not in it.
   const mark = (tail) => {
-    const line = lineAt(tail, 0, true);
-    anchor = line ? { value: line.value, top: line.getBoundingClientRect().top } : null;
+    const box = tail.getBoundingClientRect();
+    const spans = ownBox(tail) || (box.top < 1 && box.bottom > 0);
+    const line = spans ? lineAt(tail, 0, true) : null;
+    anchor = line ? { value: line.value, top: line.getBoundingClientRect().top - origin(tail) } : null;
   };
   const hold = (tail) => {
     if (!anchor) return;
     const line = lineAt(tail, anchor.value, false);
     if (!line) return;
-    const by = line.getBoundingClientRect().top - anchor.top;
+    const by = line.getBoundingClientRect().top - origin(tail) - anchor.top;
     if (Math.abs(by) >= 1) {
       moveBy(tail, by);
       scrolled(tail);

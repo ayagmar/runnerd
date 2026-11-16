@@ -200,6 +200,25 @@ try {
     check(!(await state()).own, `${sizes[1].name}: a running job's log scrolls with the page`);
     await page.waitForTimeout(1500);
     check((await state()).y === 0, `${sizes[1].name}: new lines leave a reader at the top where they are`);
+    // A reader at the top is not in the log: a step growing above it, and the tail crossing 200 lines (its note
+    // appears), move nothing on their screen when the next line comes.
+    await page.evaluate(() => {
+      const grown = document.createElement('div');
+      grown.style.height = '80px';
+      document.getElementById('steps').append(grown);
+      const tail = document.getElementById('log-lines');
+      let value = tail.lastElementChild.value;
+      while (tail.children.length <= 200) {
+        const li = document.createElement('li');
+        li.value = ++value;
+        li.innerHTML = `<span class="ln">${value}</span><span class="text">appended</span>`;
+        tail.append(li);
+      }
+    });
+    await page.waitForTimeout(2500);
+    const topped = await state();
+    const noted = await page.evaluate(() => getComputedStyle(document.querySelector('.older-lines')).display !== 'none');
+    check(noted && topped.y === 0, `${sizes[1].name}: growth above the log leaves a reader at the top at ${topped.y}`);
     await page.evaluate(() => document.getElementById('log-lines').scrollIntoView({ block: 'start' }));
     await page.waitForTimeout(300);
     const above = await state();
@@ -217,12 +236,23 @@ try {
     // A small scroll up is the reader's: the page stops following, however fast the lines come.
     await page.evaluate(() => scrollBy({ top: -40, behavior: 'instant' }));
     await page.waitForTimeout(300);
-    const nudged = await state();
+    // The reader's line, the first on screen: lines hidden above it as the tail passes 200 move the page, not it.
+    const reading = () =>
+      page.evaluate(() => {
+        const line = [...document.getElementById('log-lines').children].find(
+          (li) => li.getClientRects().length > 0 && li.getBoundingClientRect().top >= 0,
+        );
+        return { value: line.value, top: Math.round(line.getBoundingClientRect().top) };
+      });
+    const nudged = { ...(await state()), line: await reading() };
     await page.waitForTimeout(2500);
-    const held = await state();
+    const held = await page.evaluate(
+      (value) => Math.round([...document.getElementById('log-lines').children].find((li) => li.value === value).getBoundingClientRect().top),
+      nudged.line.value,
+    );
     check(
-      nudged.jump && held.y === nudged.y,
-      `${sizes[1].name}: 40px up from the newest line stops following (${nudged.y} then ${held.y})`,
+      nudged.jump && Math.abs(held - nudged.line.top) <= 1,
+      `${sizes[1].name}: 40px up from the newest line stops following (line ${nudged.line.value} at ${nudged.line.top} then ${held})`,
     );
     // Lines hidden or dropped above the reader leave their line where it is. Chromium's own anchoring is off for the
     // tail, as Safari has none, so this is the script's doing; Safari itself is not run.
@@ -272,6 +302,16 @@ try {
     const shown = await page.evaluate(() => !document.querySelector('[data-jump]').hidden);
     const after = await below();
     check(shown && before === after, `${sizes[0].name}: Jump to newest shows and the charts stay at ${before} (${after})`);
+    // Scrolling the page while reading up the log's box leaves the box where the reader left it as lines come.
+    const read = await page.evaluate(() => document.getElementById('log-lines').scrollTop);
+    await page.mouse.move(20, 450);
+    await page.mouse.wheel(0, 300);
+    await page.waitForTimeout(2500);
+    const kept = await page.evaluate(() => ({ top: document.getElementById('log-lines').scrollTop, y: scrollY }));
+    check(
+      kept.y > 0 && kept.top === read,
+      `${sizes[0].name}: a page scroll leaves the log's box at ${read} as lines come (${kept.top})`,
+    );
     await context.close();
   }
 
