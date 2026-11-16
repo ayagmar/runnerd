@@ -4,8 +4,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits,
-    RunLink, ShareOwner, Tone, View, WriteTop,
+    Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, LabelledFigure,
+    RepositoryWaits, RunLink, ShareOwner, Tone, View, WriteTop,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -117,31 +117,16 @@ fn card(insight: &Insight, now: u64) -> Markup {
 /// The disk writes as figures and ranked bars: what the jobs wrote, what the drive wrote and whose it was, and the
 /// workflows and jobs that wrote most; core's sentences, with what the figures leave out, folded under them.
 fn disk_writes(disk: &DiskWrites) -> Markup {
-    let jobs = &disk.jobs;
     html! {
         section.disk aria-labelledby="disk-title" {
             div.section-head {
                 h2 #disk-title { (DiskWrites::TITLE) }
             }
-            dl.headline.disk-figures {
-                @if jobs.measured > 0 {
-                    div { dt { "Jobs wrote" } dd { (format::bytes(jobs.total)) } }
-                    div { dt { (JOBS_HEADING) } dd { (jobs.measured) } }
-                    div { dt { "Median a job" } dd { (format::bytes(jobs.median)) } }
-                    div { dt { "p90 a job" } dd { (format::bytes(jobs.p90)) } }
-                }
-                @if let Some(drive) = &disk.drive {
-                    div { dt { (drive.device) " wrote" } dd { (format::bytes(drive.written)) } }
-                    div { dt { "A day at this rate" } dd { (format::bytes(drive.per_day())) } }
-                    @if let Some(commits) = drive.commits {
-                        div { dt { "btrfs commits a second" } dd { (commits.per_second()) } }
-                    }
-                }
-            }
+            (figure_list("headline disk-figures", &disk.figures()))
             @if let Some(drive) = &disk.drive {
                 @let parts = drive.shares.parts();
                 div.share {
-                    h3 { "Whose the drive's writes were" }
+                    h3 { (DiskWrites::SHARES_TITLE) }
                     div.share-bar role="img" aria-label=(drive.shares.line(drive.watched)) {
                         @for part in parts.iter().filter(|part| part.bytes > 0) {
                             span class=(format!("share-part {}", owner_class(part.owner))) style=(format!("flex-grow: {}", part.bytes)) {}
@@ -159,8 +144,8 @@ fn disk_writes(disk: &DiskWrites) -> Markup {
                 }
             }
             div.write-tops {
-                (ranked("Workflows that wrote most", &disk.workflows))
-                (ranked("Jobs that wrote most", &disk.top_jobs))
+                (ranked(DiskWrites::WORKFLOWS_TITLE, &disk.workflows))
+                (ranked(DiskWrites::TOP_JOBS_TITLE, &disk.top_jobs))
             }
             details.in-words {
                 summary { "In sentences" }
@@ -169,6 +154,25 @@ fn disk_writes(disk: &DiskWrites) -> Markup {
                     ul.host-days {
                         @for line in &part.lines {
                             li { (line) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Figures core words, each its label over its value and what it is out of, in a list classed `class`.
+pub(crate) fn figure_list(class: &str, figures: &[LabelledFigure]) -> Markup {
+    html! {
+        @if !figures.is_empty() {
+            dl class=(class) {
+                @for figure in figures {
+                    div {
+                        dt { (figure.label) }
+                        dd {
+                            (figure.value)
+                            @if let Some(of) = &figure.of { span.muted { " " (of) } }
                         }
                     }
                 }
@@ -200,10 +204,7 @@ fn ranked(title: &str, tops: &[WriteTop]) -> Markup {
                             span.ranked-name { (top.name()) }
                             span.ranked-value { (format::bytes(top.total)) }
                             span.ranked-bar aria-hidden="true" {}
-                            span.ranked-note {
-                                (top.jobs) @if top.jobs == 1 { " job" } @else { " jobs" }
-                                ", " (format::bytes(top.per_job())) " a job"
-                            }
+                            span.ranked-note { (top.note()) }
                         }
                     }
                 }

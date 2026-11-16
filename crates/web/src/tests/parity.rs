@@ -269,21 +269,9 @@ async fn the_build_cache_states_its_week_and_tools_as_core_does() {
         .build
         .as_ref()
         .expect("the build cache's stats");
-    let week = &build.week;
-    let lookups = match week.hit_percent() {
-        Some(percent) => format!("{percent}% of {}", week.lookups()),
-        None => "Lookups, 7 days 0".to_owned(),
-    };
-    for figure in [
-        format!("Entries {}", build.entries),
-        lookups,
-        format!(
-            "Stored {}",
-            runnerd_core::config::ByteSize(week.written_bytes)
-        ),
-        format!("Uploads refused {}", week.refused),
-    ] {
-        assert!(shown.contains(&figure), "{figure}: {shown}");
+    for figure in build.figures() {
+        let said = labelled(&figure);
+        assert!(shown.contains(&said), "{said}: {shown}");
     }
     assert!(shown.contains(&facts.actions_cache), "{shown}");
     assert!(
@@ -338,6 +326,10 @@ async fn sizing_states_each_profile_s_advice_and_need_as_core_does() {
             "{} shows its advice as a figure: {shown}",
             profile.name
         );
+        for figure in profile.figures() {
+            let said = labelled(&figure);
+            assert!(shown.contains(&said), "{}: {said}: {shown}", profile.name);
+        }
         // A profile a bound holds shows what its jobs need, not the bound.
         let need = runnerd_core::config::ByteSize(sizing.need(profile).memory);
         assert!(
@@ -397,11 +389,16 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
         }
     }
     // The figures beside the sentences are core's.
+    for figure in disk.figures() {
+        let said = labelled(&figure);
+        assert!(shown.contains(&said), "{said}: {shown}");
+    }
     for top in disk.workflows.iter().chain(&disk.top_jobs) {
         let row = format!(
-            "{} {}",
+            "{} {} {}",
             top.name(),
-            runnerd_core::config::ByteSize(top.total)
+            runnerd_core::config::ByteSize(top.total),
+            top.note()
         );
         assert!(shown.contains(&row), "{row}: {shown}");
     }
@@ -410,6 +407,14 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
             let share = format!("{}% {}", part.percent, part.owner.label());
             assert!(shown.contains(&share), "{share}: {shown}");
         }
+    }
+}
+
+/// A figure of core's as a page's text reads it: its label, its value, and what it is out of.
+fn labelled(figure: &runnerd_core::api::LabelledFigure) -> String {
+    match &figure.of {
+        Some(of) => format!("{} {} {of}", figure.label, figure.value),
+        None => format!("{} {}", figure.label, figure.value),
     }
 }
 

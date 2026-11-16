@@ -1,8 +1,9 @@
 // What only a browser sees, against the demo: the attention strip opens and closes by mouse, finger and keyboard
 // with its script running; the line typed on in the settings editor stays above the buttons' bar and the tab bar;
 // a first visit to Settings, the doctor's checks included, moves nothing once painted; the jobs list's chips sit in
-// the Filters fold on a phone and beside the search on a wide screen; and on a phone a running job's log is part of
-// the page, followed only while the reader is at its newest line.
+// the Filters fold on a phone and beside the search on a wide screen; on a phone a running job's log is part of the
+// page, last, followed only while the reader is at its newest line, and holds the reader's line as lines above go;
+// "Jump to newest" moves nothing; and reseeding a snapshot asks first.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -212,6 +213,87 @@ try {
     check(
       !followed.jump && followed.past < 48 && followed.past > -160,
       `${sizes[1].name}: after the jump, the newest line stays at the foot (${followed.past}px)`,
+    );
+    // A small scroll up is the reader's: the page stops following, however fast the lines come.
+    await page.evaluate(() => scrollBy({ top: -40, behavior: 'instant' }));
+    await page.waitForTimeout(300);
+    const nudged = await state();
+    await page.waitForTimeout(2500);
+    const held = await state();
+    check(
+      nudged.jump && held.y === nudged.y,
+      `${sizes[1].name}: 40px up from the newest line stops following (${nudged.y} then ${held.y})`,
+    );
+    // Lines hidden or dropped above the reader leave their line where it is. Chromium's own anchoring is off for the
+    // tail, as Safari has none, so this is the script's doing; Safari itself is not run.
+    const kept = await page.evaluate(async () => {
+      const tail = document.getElementById('log-lines');
+      const foot = document.querySelector('.top nav').getBoundingClientRect().top;
+      const line = [...tail.children].findLast((li) => li.getBoundingClientRect().top < foot - 60);
+      const before = line.getBoundingClientRect().top;
+      let value = tail.lastElementChild.value;
+      for (let n = 0; n < 150; n++) {
+        const li = document.createElement('li');
+        li.value = ++value;
+        li.innerHTML = `<span class="ln">${value}</span><span class="text">appended</span>`;
+        tail.append(li);
+      }
+      await new Promise((done) => setTimeout(done, 300));
+      return { hidden: [...tail.children].filter((li) => li.getClientRects().length === 0).length, moved: Math.round(line.getBoundingClientRect().top - before) };
+    });
+    check(
+      kept.hidden > 0 && Math.abs(kept.moved) <= 1,
+      `${sizes[1].name}: ${kept.hidden} lines hidden above the reader move their line ${kept.moved}px`,
+    );
+    // The log comes last on a phone, after the charts and the latest runs, so they stay near the top.
+    const order = await page.evaluate(() =>
+      ['metrics', 'runs', 'log'].map((id) => document.getElementById(id)?.getBoundingClientRect().top ?? -1),
+    );
+    check(order[0] < order[2] && order[1] < order[2], `${sizes[1].name}: a running job's log comes after its charts and runs`);
+    await context.close();
+  }
+
+  // On a wide screen "Jump to newest" shows over the tail and moves nothing under the log.
+  {
+    const { context, page } = await signedIn(sizes[0]);
+    await page.goto(new URL('/history?outcome=running', login).href);
+    const href = await page.locator('.history-table tbody th a').first().getAttribute('href');
+    await page.goto(new URL(href, login).href);
+    await page.waitForSelector('#log-lines > li');
+    await page.waitForTimeout(500);
+    const below = () => page.evaluate(() => Math.round(document.getElementById('metrics').getBoundingClientRect().top + scrollY));
+    await page.evaluate(() => document.getElementById('log-lines').scrollIntoView({ block: 'center' }));
+    await page.waitForTimeout(300);
+    const before = await below();
+    await page.evaluate(() => {
+      document.getElementById('log-lines').scrollTop -= 200;
+    });
+    await page.waitForTimeout(400);
+    const shown = await page.evaluate(() => !document.querySelector('[data-jump]').hidden);
+    const after = await below();
+    check(shown && before === after, `${sizes[0].name}: Jump to newest shows and the charts stay at ${before} (${after})`);
+    await context.close();
+  }
+
+  // Reseeding a snapshot asks first, as emptying a volume does; dismissed, nothing is sent.
+  for (const size of [sizes[0], sizes[1]]) {
+    const { context, page } = await signedIn(size);
+    const asked = [];
+    const sent = [];
+    page.on('dialog', (dialog) => {
+      asked.push(dialog.message());
+      dialog.dismiss();
+    });
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().includes('/reseed')) sent.push(request.url());
+    });
+    await page.goto(new URL('/caches', login).href);
+    const button = page.locator('.volume-action button', { hasText: 'Reseed from slot 1' }).first();
+    await (size.phone ? button.tap() : button.click());
+    await page.waitForTimeout(400);
+    check(
+      asked.length === 1 && asked[0].startsWith('Reseed') && sent.length === 0,
+      `${size.name}: Reseed asks "${asked[0]?.slice(0, 40)}…" and sends nothing when dismissed`,
     );
     await context.close();
   }

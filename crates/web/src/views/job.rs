@@ -30,6 +30,8 @@ use crate::format;
 
 /// Log lines the page shows; the full log is at `/jobs/{id}/log`.
 pub(crate) const LOG_TAIL: u64 = 1000;
+/// The newest lines of a running job's tail a phone shows inline; `style.css` hides the older ones by this count.
+const PHONE_TAIL: u64 = 200;
 /// Runs of the same job the page compares.
 const RUNS: u32 = 30;
 /// The most lines of a finished job's log the page outlines, its last; the full log has the rest.
@@ -1059,7 +1061,8 @@ fn record(view: &JobView) -> Markup {
 pub(crate) fn log(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     html! {
-        section #log .log aria-labelledby="log-title" {
+        // A running job's live tail is `live-log`: on a phone it comes last and shows its newest lines.
+        section #log class=(if matches!(view.outlined, Outlined::Live) { "log live-log" } else { "log" }) aria-labelledby="log-title" {
             div.section-head {
                 h2 #log-title { "Log" }
                 p.muted {
@@ -1091,9 +1094,17 @@ pub(crate) fn log(view: &JobView) -> Markup {
                         input type="checkbox" data-follow="log-lines" checked;
                         " Follow"
                     }
-                    (tail(view))
-                    // Shown by the follow script while the reader is scrolled up from the newest line.
-                    button.button.jump-newest type="button" data-jump="log-lines" hidden { "Jump to newest" }
+                    // On a phone the page shows the newest lines only; the full log has the rest.
+                    p.muted.older-lines {
+                        "Showing the newest " (PHONE_TAIL) " lines; the "
+                        a href=(format!("/jobs/{}/log", summary.id)) { "full log" } " has the rest."
+                    }
+                    div.tail-wrap {
+                        (tail(view))
+                        // Shown by the follow script while the reader is scrolled up from the newest line; out of
+                        // the flow, so showing it moves nothing.
+                        button.button.jump-newest type="button" data-jump="log-lines" hidden { "Jump to newest" }
+                    }
                 }
             }
         }
@@ -1105,7 +1116,7 @@ fn tail(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     html! {
         @if view.log_from > 0 {
-            p.muted { "Showing the last " (view.log.len()) " lines." }
+            p.muted.tail-count { "Showing the last " (view.log.len()) " lines." }
         }
         @if view.log.is_empty() && summary.log.lines > 0 {
             p.muted { "The log's lines are past " code { "history.logs" } " and were deleted." }

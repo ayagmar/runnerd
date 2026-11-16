@@ -2644,6 +2644,24 @@ fn selected(page: &str) -> String {
 }
 
 #[tokio::test]
+async fn auto_sizing_on_without_a_plan_offers_no_change_to_make_by_hand() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut sizing = fake::sizing(&fixtures);
+        sizing.auto = true;
+        sizing.auto_plan = None;
+        fixtures.sizing = Some(sizing);
+    }
+    let page = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(
+        page.contains("3.25G × 4") && !page.contains("/config?resize="),
+        "node's advice shows, with nothing to review by hand while auto sizing makes it: {page}"
+    );
+}
+
+#[tokio::test]
 async fn a_profile_no_job_ran_on_stays_on_the_sizing_page_as_a_chip_not_a_lane() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
@@ -3233,7 +3251,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let off = dashboard.page(&cookie, "/sizing").await.body;
     assert!(off.contains("Auto sizing is off"), "{off}");
     assert!(
-        off.contains("<dt>Warm starts</dt><dd>310 of 400</dd>")
+        off.contains(r#"<dt>Warm starts</dt><dd>310<span class="muted"> of 400</span></dd>"#)
             && off.contains("Warm starts p50 2s, others 21s"),
         "{off}"
     );

@@ -8,6 +8,7 @@ use runnerd_core::api::{
 };
 use runnerd_core::client::{Client, ClientError};
 
+use super::insights::figure_list;
 use super::{Page, Parts, heading, page, profile_class, time_ago};
 use crate::chart::{Base, Limit, Series, TimeChart, nice_top, ratio};
 use crate::format;
@@ -45,7 +46,7 @@ fn action(volume: &CacheVolume) -> Markup {
     if let CacheKind::Snapshot { profile } = &volume.kind {
         html! {
             button.button-quiet type="button"
-                data-on:click=(format!("@post('/v1/profiles/{profile}/reseed')"))
+                data-on:click=(format!("confirm('Reseed {profile}\\'s snapshot from slot 1? Slot 1\\'s changes become the snapshot, and every slot\\'s own changes are dropped.') && @post('/v1/profiles/{profile}/reseed')"))
                 aria-label=(format!("Reseed {profile}'s snapshot from slot 1")) { "Reseed from slot 1" }
         }
     } else {
@@ -81,15 +82,23 @@ pub(crate) fn render(view: &CachesView) -> Markup {
 /// its size over 30 days against its bound, and its action; the shared build cache's week as figures.
 pub(crate) fn volumes(view: &CachesView) -> Markup {
     let start = view.now.saturating_sub(WINDOW);
-    let scale = view
+    // A volume with a bound fills its own track, as far as its bound or past it, so one large volume does not make
+    // the others slivers; the volumes without one share a scale, the largest of them.
+    let unbound = view
         .caches
         .volumes
         .iter()
-        .map(|volume| volume.bytes.max(volume.limit.unwrap_or(0)))
+        .filter(|volume| volume.limit.is_none())
+        .map(|volume| volume.bytes)
         .max()
         .unwrap_or(1)
         .max(1);
-    let at = |bytes: u64| format!("{:.2}%", ratio(bytes, scale) * 100.0);
+    let scale_of = |volume: &CacheVolume| {
+        volume
+            .limit
+            .map_or(unbound, |limit| limit.max(volume.bytes))
+            .max(1)
+    };
     html! {
         div #volumes {
             @if view.caches.volumes.is_empty() {
@@ -102,6 +111,8 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
                         @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
                         @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes).max(volume.limit.unwrap_or(0));
+                        @let scale = scale_of(volume);
+                        @let at = |bytes: u64| format!("{:.2}%", ratio(bytes, scale) * 100.0);
                         li class=(format!("volume {class}")) {
                             div.volume-name {
                                 span.swatch aria-hidden="true" {}
@@ -162,22 +173,9 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
 
 /// The shared build cache's last 7 days as figures, with what it is for and how GitHub Actions' cache goes through it.
 fn build_cache(build: &BuildCacheStats) -> Markup {
-    let week = &build.week;
     html! {
         div.build-cache {
-            dl.build-figures {
-                div { dt { "Entries" } dd { (build.entries) } }
-                @if let Some(percent) = week.hit_percent() {
-                    div { dt { "Lookups hit, 7 days" } dd { (percent) "%" span.muted { " of " (week.lookups()) } } }
-                    div { dt { "Served" } dd { (format::bytes(week.read_bytes)) } }
-                } @else {
-                    div { dt { "Lookups, 7 days" } dd { "0" } }
-                }
-                div { dt { "Stored" } dd { (format::bytes(week.written_bytes)) } }
-                @if week.refused > 0 {
-                    div { dt { "Uploads refused" } dd { (week.refused) } }
-                }
-            }
+            (figure_list("build-figures", &build.figures()))
             p.muted { "For " (BUILD_CACHE_TOOLS) ". " (format::sentence(&build.actions_cache_line())) "." }
         }
     }

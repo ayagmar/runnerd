@@ -6,7 +6,9 @@ use super::{
     Advice, AutoPlan, JobSizing, MemoryBound, MemoryHold, PAGE_CACHE_ROOM, Peaks, ProfileSizing,
     Sizing, SizingChange, SizingHold, SizingRefused, Starts,
 };
-use crate::api::{Check, CheckStatus, Tone, Toned};
+use crate::api::{
+    Check, CheckStatus, JOBS_HEADING, LabelledFigure, Tone, Toned, cores_used, duration,
+};
 use crate::config::ByteSize;
 
 /// Advice rounds memory up to a multiple of this: 256M.
@@ -218,6 +220,34 @@ impl ProfileSizing {
                 && hold.by != MemoryBound::MinMemory
                 && self.memory >= hold.bound
         })
+    }
+
+    /// Its figures, in the order they show: its jobs, how busy its slots were, its jobs' p50 and p95 wait, its warm
+    /// starts out of all, and its jobs' CPU p99 out of its `cpus`; `–` where no job took one.
+    pub fn figures(&self) -> Vec<LabelledFigure> {
+        let starts = &self.starts;
+        let warm = if starts.warm > 0 {
+            LabelledFigure::new("Warm starts", starts.warm.to_string())
+                .of(format!("of {}", starts.total()))
+        } else {
+            LabelledFigure::new("Warm starts", "–")
+        };
+        let cpu = match self.peaks.cpu_p99() {
+            Some(p99) => {
+                LabelledFigure::new("CPU p99", cores_used(p99)).of(format!("of {}", self.cpus))
+            }
+            None => LabelledFigure::new("CPU p99", "–"),
+        };
+        vec![
+            LabelledFigure::new(JOBS_HEADING, starts.total().to_string()),
+            LabelledFigure::new("Slots busy", format!("{}%", self.busy)),
+            LabelledFigure::new(
+                "Waited p50 / p95",
+                format!("{} / {}", duration(self.wait.p50), duration(self.wait.p95)),
+            ),
+            warm,
+            cpu,
+        ]
     }
 
     /// Its advice in a word or two, for a table cell: `Advice::word`, or `at ceiling` or `at max_memory` while that

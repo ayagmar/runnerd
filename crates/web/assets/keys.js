@@ -208,8 +208,10 @@ else openLine();
 
 // Follow while running: the newest line stays in view as lines arrive, while the reader is at it. A wide screen
 // scrolls the tail in its own box; on a phone the tail is part of the page, and the page scrolls, only while the
-// tail's end is at the foot of the screen. Scrolled up to read an earlier line, nothing moves and "Jump to newest"
-// shows; unticked, it never moves.
+// tail's end is at the foot of the screen. Any scroll up the reader makes stops following, and "Jump to newest"
+// shows over the lines; scrolling back down to the end follows again. Unticked, it never moves. While not following,
+// the line the reader is on stays where it is on the screen as lines above it are dropped or hidden: the browser's
+// own scroll anchoring is off for the tail (Safari has none), so this is the one place that holds it.
 for (const toggle of document.querySelectorAll('[data-follow]')) {
   const id = toggle.dataset.follow;
   const jump = document.querySelector(`[data-jump="${id}"]`);
@@ -221,18 +223,61 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
     const top = bar && getComputedStyle(bar).position === 'fixed' ? bar.getBoundingClientRect().top : innerHeight;
     return Math.min(innerHeight, top);
   };
+  // The scroller the tail is read in: its own box, or the page.
+  const position = (tail) => (ownBox(tail) ? tail.scrollTop : scrollY);
+  const moveBy = (tail, by) => {
+    if (ownBox(tail)) tail.scrollTop += by;
+    else scrollTo({ top: scrollY + by, behavior: 'instant' });
+  };
   const atEnd = (tail) => {
     if (ownBox(tail)) return tail.scrollHeight - tail.clientHeight - tail.scrollTop < 8;
     const past = tail.getBoundingClientRect().bottom - foot();
     return past < 48 && past > -160;
   };
+  // A scroll this script makes, told apart from the reader's by where it left the scroller.
+  let ours = null;
+  let last = 0;
+  const scrolled = (tail) => {
+    ours = position(tail);
+    last = ours;
+  };
   const toEnd = (tail) => {
     if (ownBox(tail)) tail.scrollTop = tail.scrollHeight;
-    else scrollBy(0, tail.getBoundingClientRect().bottom - foot() + 16);
+    else moveBy(tail, tail.getBoundingClientRect().bottom - foot() + 16);
+    scrolled(tail);
+  };
+  // The first line on screen, by its number, and where it is.
+  let anchor = null;
+  // The first shown line from number `from` on; with `onScreen`, the first whose foot is past the scroller's top.
+  const lineAt = (tail, from, onScreen) => {
+    const top = ownBox(tail) ? tail.getBoundingClientRect().top : 0;
+    for (const line of tail.children) {
+      if (line.value < from || line.getClientRects().length === 0) continue;
+      if (!onScreen || line.getBoundingClientRect().bottom > top) return line;
+    }
+    return null;
+  };
+  const mark = (tail) => {
+    const line = lineAt(tail, 0, true);
+    anchor = line ? { value: line.value, top: line.getBoundingClientRect().top } : null;
+  };
+  const hold = (tail) => {
+    if (!anchor) return;
+    const line = lineAt(tail, anchor.value, false);
+    if (!line) return;
+    const by = line.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(by) >= 1) {
+      moveBy(tail, by);
+      scrolled(tail);
+    }
   };
   const tail = box();
   // The page opens on the failure and the timeline, not at the log's end.
   let following = tail ? ownBox(tail) || atEnd(tail) : true;
+  if (tail) {
+    last = position(tail);
+    mark(tail);
+  }
   // Offered only over the tail's lines, not over the log's heading while the lines are still below the screen.
   const inView = (tail) => {
     const rect = tail.getBoundingClientRect();
@@ -246,17 +291,27 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
     'scroll',
     (event) => {
       const tail = box();
-      if (!tail) return;
-      if (event.target === tail || (event.target === document && !ownBox(tail))) {
-        following = atEnd(tail);
-        show();
+      if (!tail || !(event.target === tail || (event.target === document && !ownBox(tail)))) return;
+      const at = position(tail);
+      if (ours !== null && Math.abs(at - ours) < 2) {
+        ours = null;
+      } else if (at < last - 1) {
+        following = false;
+      } else if (atEnd(tail)) {
+        following = true;
       }
+      last = at;
+      mark(tail);
+      show();
     },
     true,
   );
   const follow = () => {
     const tail = box();
-    if (toggle.checked && following && tail) toEnd(tail);
+    if (!tail) return;
+    if (toggle.checked && following) toEnd(tail);
+    else hold(tail);
+    mark(tail);
     show();
   };
   new MutationObserver(follow).observe(box()?.parentElement ?? document.body, { childList: true, subtree: true });

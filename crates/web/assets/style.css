@@ -2645,7 +2645,8 @@ dl.health-figures {
 }
 
 /* A line takes at most four rows, so one of 60K does not push the rest of its step out of view; a click on it, or
-   its number focused, shows it whole. The plain log has every line in full. */
+   its number followed, shows it whole. Focus alone does not: tabbing past a 60K line would grow it a page tall. The
+   plain log has every line in full. */
 .log-lines .text {
   padding-top: 0.1rem;
   display: -webkit-box;
@@ -2662,7 +2663,6 @@ dl.health-figures {
 }
 
 .log-lines li.open > .text,
-.log-lines li:focus-within > .text,
 .log-lines li:target > .text {
   display: block;
   -webkit-line-clamp: none;
@@ -2716,18 +2716,29 @@ dl.health-figures {
   font-family: var(--font);
 }
 
+/* The follow script holds the reader's line as lines come and go (`keys.js`), so the browser's anchoring stays out. */
 .log-lines.tail {
   max-height: 34rem;
   overflow: auto;
+  overflow-anchor: none;
 }
 
-/* Over the tail's foot while the reader is scrolled up from the newest line. */
+/* Over the tail's foot while the reader is scrolled up from the newest line: out of the flow, so showing it moves
+   nothing under the log. */
+.tail-wrap {
+  position: relative;
+}
+
 .jump-newest {
-  position: sticky;
+  position: absolute;
+  right: 1rem;
   bottom: 1rem;
   z-index: 2;
-  display: block;
-  margin: 0.5rem 0 0 auto;
+}
+
+/* The phone's note on the lines it leaves to the full log. */
+.older-lines {
+  display: none;
 }
 
 .jump-newest[hidden] {
@@ -2744,7 +2755,8 @@ dl.health-figures {
   scrollbar-color: var(--muted) var(--surface);
 }
 
-/* On a phone the log is part of the page's scroll, not a box scrolling inside it. */
+/* On a phone the log is part of the page's scroll, not a box scrolling inside it. A running job's tail comes last,
+   after the charts and the latest runs, and shows its newest 200 lines (`PHONE_TAIL`); the full log has the rest. */
 @media (max-width: 40rem) {
   .log-lines.tail,
   .log-view {
@@ -2752,7 +2764,25 @@ dl.health-figures {
     overflow: visible;
   }
 
+  main > .live-log {
+    order: 1;
+  }
+
+  .log-lines.tail > li:nth-last-child(n + 201) {
+    display: none;
+  }
+
+  .tail-count {
+    display: none;
+  }
+
+  .older-lines:has(+ .tail-wrap .log-lines > li:nth-last-child(201)) {
+    display: block;
+  }
+
   .jump-newest {
+    position: fixed;
+    right: max(var(--gutter), env(safe-area-inset-right, 0px));
     bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0px) + 0.75rem);
   }
 }
@@ -3179,17 +3209,21 @@ dl.health-figures {
 }
 
 .filters .clear {
-  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  padding-inline: 0.5rem;
   color: var(--muted);
   font-size: 0.875rem;
 }
 
-/* A sortable column's header: a link, its direction marked once it sorts. */
-/* Its target (`hit`) reaches the header row's height without making the row taller. */
+/* A sortable column's header: a link, its direction marked once it sorts. Its target is 40px tall; `hit` takes the
+   room past the header row's own height back out of the row. */
 th a.sort {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
+  min-height: 2.5rem;
   color: inherit;
   text-decoration: none;
 }
@@ -3455,12 +3489,12 @@ th a.sort:hover {
     font-size: 1.25rem;
   }
 
+  /* Each chart keeps its name, small: three unnamed lines under the figures would say nothing. */
   .mini h3 {
-    position: absolute;
-    width: 1px;
-    height: 1px;
+    font-size: 0.6875rem;
+    white-space: nowrap;
     overflow: hidden;
-    clip-path: inset(50%);
+    text-overflow: ellipsis;
   }
 }
 
@@ -3555,6 +3589,18 @@ th a.sort:hover {
   content: '';
   position: absolute;
   inset: 0;
+}
+
+/* A long name or branch wraps in its column rather than push the figures past the page's edge. */
+.history-table tbody th {
+  min-width: 12rem;
+  max-width: 28rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.history-table tbody th :is(a, .record-job) {
+  grid-template-columns: auto minmax(0, 1fr);
 }
 
 .job-table abbr {
@@ -3834,6 +3880,11 @@ th a.sort:hover {
   color: var(--muted);
 }
 
+.peak-scale .cap.short span {
+  right: auto;
+  left: 0;
+}
+
 .peak-scale .spread {
   position: absolute;
   top: 0.6rem;
@@ -4106,6 +4157,7 @@ th a.sort:hover {
   display: inline-flex;
   align-items: center;
   min-height: 2.5rem;
+  padding-inline-end: 0.5rem;
   color: var(--muted);
   font-size: 0.875rem;
   cursor: pointer;
@@ -4933,6 +4985,17 @@ html:has(.editor-frame) {
   --hit-pad: 0.6rem;
 }
 
+/* A finger's height on a touch screen for the Jobs list's and Insights' controls that are 40px on a desktop. */
+@media (pointer: coarse) {
+  .filters .clear,
+  th a.sort,
+  .more-filters > summary,
+  .summary-more,
+  .in-words > summary {
+    min-height: 2.75rem;
+  }
+}
+
 /* Links that stand on their own get a finger's height on a touch screen; links inside a sentence stay text. */
 @media (pointer: coarse) {
   .repo-name a,
@@ -5297,6 +5360,12 @@ html:has(.editor-frame) {
 .volume-fill:has(.over-limit) .volume-used,
 .volume:has(.over-limit) .volume-used {
   background: var(--wait);
+}
+
+/* Past its bound the fill runs on beyond it: the bound's end is marked over the fill. */
+.volume:has(.over-limit) .volume-bound {
+  z-index: 1;
+  box-shadow: inset -2px 0 0 var(--ink);
 }
 
 .volume-trend {

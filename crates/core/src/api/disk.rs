@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Tone, duration};
+use super::{JOBS_HEADING, LabelledFigure, Tone, duration};
 use crate::config::ByteSize;
 
 /// What a job's runner container wrote to the disks under Docker's root, from its cgroup's `io.stat`: what its
@@ -180,13 +180,32 @@ pub struct Commits {
     pub watched: u64,
 }
 
-/// `part` of `whole` in whole percent, rounded, at most 100.
-fn percent(part: u64, whole: u64) -> u64 {
+/// Sets each part's `percent` of `whole`, whose bytes they add up to, so that the percents add up to 100: each its
+/// share rounded down, and the points left over to the parts with the largest remainders, the first of equal ones.
+/// Rounding each alone could show 1%, 1%, 1% and 99%.
+fn largest_remainder(parts: &mut [DriveShare], whole: u64) {
     if whole == 0 {
-        return 0;
+        return;
     }
-    let share = (u128::from(part) * 100 + u128::from(whole) / 2) / u128::from(whole);
-    u64::try_from(share.min(100)).unwrap_or(100)
+    let whole = u128::from(whole);
+    let mut left = 100u128;
+    let mut remainders = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter_mut().enumerate() {
+        let scaled = u128::from(part.bytes) * 100;
+        let floor = scaled / whole;
+        part.percent = u64::try_from(floor).unwrap_or(100);
+        left = left.saturating_sub(floor);
+        remainders.push((scaled % whole, index));
+    }
+    remainders.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    for (_, index) in remainders
+        .into_iter()
+        .take(usize::try_from(left).unwrap_or(0))
+    {
+        if let Some(part) = parts.get_mut(index) {
+            part.percent += 1;
+        }
+    }
 }
 
 impl JobWrites {
@@ -235,15 +254,19 @@ impl WriteTop {
         self.total / u64::from(self.jobs.max(1))
     }
 
+    /// What its total is over, beside it: `31 jobs, 410M a job`.
+    pub fn note(&self) -> String {
+        let jobs = if self.jobs == 1 { "job" } else { "jobs" };
+        format!("{} {jobs}, {} a job", self.jobs, ByteSize(self.per_job()))
+    }
+
     /// It in a line: `halyard/api CI / build: 12.4G over 31 jobs, 410M a job`; a workflow's without the job.
     pub fn line(&self) -> String {
-        let jobs = if self.jobs == 1 { "job" } else { "jobs" };
         format!(
-            "{}: {} over {} {jobs}, {} a job",
+            "{}: {} over {}",
             self.name(),
             ByteSize(self.total),
-            self.jobs,
-            ByteSize(self.per_job())
+            self.note()
         )
     }
 }
@@ -327,7 +350,7 @@ pub struct DriveShare {
     pub owner: ShareOwner,
     /// Its bytes.
     pub bytes: u64,
-    /// Its part of the whole, in whole percent.
+    /// Its part of the whole, in whole percent; the parts' add up to 100.
     pub percent: u64,
 }
 
@@ -340,7 +363,7 @@ impl DriveShares {
         let share = |owner, bytes| DriveShare {
             owner,
             bytes,
-            percent: percent(bytes, whole),
+            percent: 0,
         };
         let counted = self.jobs.min(whole);
         let mut parts = vec![share(ShareOwner::Jobs, counted)];
@@ -360,6 +383,7 @@ impl DriveShares {
             ShareOwner::Unknown,
             whole - owned - daemon.unwrap_or(0),
         ));
+        largest_remainder(&mut parts, whole);
         parts
     }
 
@@ -402,7 +426,7 @@ impl DriveShares {
 /// A part of the disk-writes section, under its title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteSection {
-    /// `Jobs`, `Drive`, `Workflows that wrote most`, `Jobs that wrote most`.
+    /// `Jobs`, `Drive`, [`DiskWrites::WORKFLOWS_TITLE`], [`DiskWrites::TOP_JOBS_TITLE`].
     pub title: &'static str,
     /// Its lines, in order.
     pub lines: Vec<String>,
@@ -411,6 +435,44 @@ pub struct WriteSection {
 impl DiskWrites {
     /// The section's title: `Disk writes`.
     pub const TITLE: &'static str = "Disk writes";
+    /// What the drive's shares are called over them.
+    pub const SHARES_TITLE: &'static str = "Who wrote to the drive";
+    /// What the workflows that wrote most are called.
+    pub const WORKFLOWS_TITLE: &'static str = "Workflows that wrote most";
+    /// What the jobs that wrote most are called.
+    pub const TOP_JOBS_TITLE: &'static str = "Jobs that wrote most";
+
+    /// Its figures, in the order they show: the jobs' bytes, count, median and p90 when a job was measured; the
+    /// drive's bytes, daily rate and btrfs commits when it was read.
+    pub fn figures(&self) -> Vec<LabelledFigure> {
+        let mut figures = Vec::new();
+        let jobs = &self.jobs;
+        if jobs.measured > 0 {
+            figures.extend([
+                LabelledFigure::new("Jobs wrote", ByteSize(jobs.total).to_string()),
+                LabelledFigure::new(JOBS_HEADING, jobs.measured.to_string()),
+                LabelledFigure::new("Median a job", ByteSize(jobs.median).to_string()),
+                LabelledFigure::new("p90 a job", ByteSize(jobs.p90).to_string()),
+            ]);
+        }
+        if let Some(drive) = &self.drive {
+            figures.push(LabelledFigure::new(
+                format!("{} wrote", drive.device),
+                ByteSize(drive.written).to_string(),
+            ));
+            figures.push(LabelledFigure::new(
+                "A day at this rate",
+                ByteSize(drive.per_day()).to_string(),
+            ));
+            if let Some(commits) = drive.commits {
+                figures.push(LabelledFigure::new(
+                    "btrfs commits a second",
+                    commits.per_second(),
+                ));
+            }
+        }
+        figures
+    }
 
     /// Its parts in order, each with what it says, none empty: the jobs' figures, the drive's, and the workflows and
     /// the jobs that wrote most.
@@ -429,8 +491,8 @@ impl DiskWrites {
             });
         }
         for (title, top) in [
-            ("Workflows that wrote most", &self.workflows),
-            ("Jobs that wrote most", &self.top_jobs),
+            (Self::WORKFLOWS_TITLE, &self.workflows),
+            (Self::TOP_JOBS_TITLE, &self.top_jobs),
         ] {
             if !top.is_empty() {
                 sections.push(WriteSection {
@@ -569,6 +631,110 @@ mod tests {
             shares.line(3600),
             "Runner jobs 100%; the rest of the runner slice 0% (seeds, the mirror, runners before and after their \
              jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0%"
+        );
+    }
+
+    /// A key under the share bar reads as a whole: rounding each share alone showed 1%, 1%, 1% and 99%.
+    #[test]
+    fn the_drive_s_shares_add_up_to_100_percent_by_their_largest_remainders() {
+        let percents = |shares: DriveShares| -> Vec<u64> {
+            shares.parts().iter().map(|part| part.percent).collect()
+        };
+        let halves = DriveShares {
+            watched: 3600,
+            written: 1000,
+            jobs: 5,
+            slice: Some(10),
+            daemon: Some(5),
+        };
+        assert_eq!(
+            percents(halves),
+            [1, 1, 0, 98],
+            "the first of equal remainders take the points left"
+        );
+        let thirds = DriveShares {
+            watched: 3600,
+            written: 3,
+            jobs: 1,
+            slice: Some(2),
+            daemon: Some(1),
+        };
+        assert_eq!(percents(thirds), [34, 33, 33, 0]);
+        let none = DriveShares {
+            watched: 3600,
+            written: 0,
+            jobs: 0,
+            slice: None,
+            daemon: None,
+        };
+        assert_eq!(percents(none), [0, 0]);
+    }
+
+    /// The figures every client shows of the section, worded once: a client that worded its own would drift.
+    #[test]
+    fn disk_writes_read_as_labelled_figures_and_each_top_as_its_note() {
+        let top = WriteTop {
+            repository: "halyard/ledger".to_owned(),
+            workflow: Some("CI".to_owned()),
+            job: None,
+            jobs: 1,
+            total: 410 * M,
+        };
+        assert_eq!(top.note(), "1 job, 410M a job");
+        assert_eq!(top.line(), "halyard/ledger CI: 410M over 1 job, 410M a job");
+        let disk = DiskWrites {
+            jobs: JobWrites {
+                measured: 31,
+                partial: 0,
+                total: 12 * G,
+                median: 120 * M,
+                p90: 780 * M,
+                dirty: 0,
+            },
+            workflows: vec![top],
+            top_jobs: Vec::new(),
+            drive: Some(DriveWrites {
+                device: "nvme0n1".to_owned(),
+                watched: 43_200,
+                written: 40 * G,
+                shares: DriveShares {
+                    watched: 43_200,
+                    written: 40 * G,
+                    jobs: 12 * G,
+                    slice: None,
+                    daemon: None,
+                },
+                commits: Some(Commits {
+                    count: 112_320,
+                    watched: 43_200,
+                }),
+                store: None,
+            }),
+        };
+        let shown: Vec<(String, String)> = disk
+            .figures()
+            .into_iter()
+            .map(|figure| (figure.label, figure.value))
+            .collect();
+        let expected = [
+            ("Jobs wrote", "12G"),
+            ("Jobs", "31"),
+            ("Median a job", "120M"),
+            ("p90 a job", "780M"),
+            ("nvme0n1 wrote", "40G"),
+            ("A day at this rate", "80G"),
+            ("btrfs commits a second", "2.6"),
+        ]
+        .map(|(label, value)| (label.to_owned(), value.to_owned()));
+        assert_eq!(shown, expected);
+        let unmeasured = DiskWrites {
+            jobs: JobWrites::default(),
+            drive: None,
+            ..disk
+        };
+        assert!(
+            unmeasured.figures().is_empty(),
+            "no figures without a measured job or a read drive"
         );
     }
 }

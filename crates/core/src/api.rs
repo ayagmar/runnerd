@@ -53,6 +53,7 @@ mod budget;
 mod control;
 mod disk;
 mod events;
+mod figure;
 mod insights;
 mod jobs;
 mod labels;
@@ -89,6 +90,7 @@ pub use disk::{
     ShareOwner, WriteSection, WriteTop,
 };
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
+pub use figure::LabelledFigure;
 pub use insights::{
     AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,
     InsightFigure, InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent,

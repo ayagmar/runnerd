@@ -6,11 +6,11 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Advice, AutoPlan, JOBS_HEADING, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone,
-    job_title,
+    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
 };
 use runnerd_core::client::{Client, ClientError};
 
+use super::insights::figure_list;
 use super::{Page, heading, page};
 use crate::chart::ratio;
 use crate::format;
@@ -162,25 +162,14 @@ fn lanes(view: &SizingView) -> Markup {
                         strong.advice-figure { (profile.advice_word()) }
                         @if let Some(plan) = plan {
                             span.advice-next { (plan.profile_plan(&profile.name, view.now).headline(plan)) }
-                        } @else if let Some(change) = profile.advice.change() {
+                        } @else if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
                             a.button href=(format!("/config?{}", serde_urlencoded::to_string([("resize", &profile.name)]).unwrap_or_default())) {
                                 "Review " (format::bytes(change.memory)) " × " (change.slots) " in the config"
                             }
                         }
                     }
                     p.profile-why { (format::sentence(&sizing.advice_line(profile))) }
-                    dl.profile-figures {
-                        div { dt { (JOBS_HEADING) } dd { (profile.starts.total()) } }
-                        div { dt { "Slots busy" } dd { (profile.busy) "%" } }
-                        div { dt { "Waited p50 / p95" } dd { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) } }
-                        div { dt { "Warm starts" } dd { @if profile.starts.warm > 0 { (profile.starts.warm) " of " (profile.starts.total()) } @else { "–" } } }
-                        div { dt { "CPU p99" } dd {
-                            @match profile.peaks.cpu_p99() {
-                                Some(p99) => { (format::cores_used(p99)) " of " (profile.cpus) }
-                                None => { "–" }
-                            }
-                        } }
-                    }
+                    (figure_list("profile-figures", &profile.figures()))
                 }
             }
         }
@@ -330,7 +319,10 @@ fn scale(sizing: &Sizing, profile: &ProfileSizing, whole: u64) -> Markup {
     );
     html! {
         div.peak-scale role="img" aria-label=(label) {
-            div.cap style=(format!("--to: {}", at(profile.memory))) { span { "cap " (format::bytes(profile.memory)) } }
+            // A cap too short for its label has the label start where the track does, reading on past the cap.
+            div class=(if ratio(profile.memory, whole) < 0.3 { "cap short" } else { "cap" }) style=(format!("--to: {}", at(profile.memory))) {
+                span { "cap " (format::bytes(profile.memory)) }
+            }
             div.spread style=(format!("--from: {}; --to: {}", at(memory.p50), at(memory.p99))) {}
             span.mark.p95 style=(format!("--at: {}", at(memory.p95))) title=(format!("p95 {}", format::bytes(memory.p95))) {}
             // Near the end of the track, the label goes to the mark's left.
