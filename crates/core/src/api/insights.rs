@@ -9,6 +9,7 @@ use super::jobs::JobSummary;
 
 mod shown;
 
+pub use shown::InsightFigure;
 pub use shown::WaitFigure;
 
 /// The window `GET /v1/insights` reads by default, in days.

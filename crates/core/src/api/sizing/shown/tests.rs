@@ -196,3 +196,59 @@ fn cpu_peaks_say_which_runs_they_are_over_and_none_reads_as_none_not_zero() {
     assert_eq!(peaks.cpu_p99(), Some(9160));
     assert_eq!(peaks.cpu_runs_line(9), "of the 4 at 9 CPUs");
 }
+
+/// A profile's figures are worded once for every client: its CPU p99 out of its CPUs, a dash where no run took one.
+#[test]
+fn a_profile_s_figures_read_as_labelled_figures_with_a_dash_where_none_was_taken() {
+    let shown = |profile: &ProfileSizing| -> Vec<(String, String, Option<String>)> {
+        profile
+            .figures()
+            .into_iter()
+            .map(|figure| (figure.label, figure.value, figure.of))
+            .collect()
+    };
+    let figure = |label: &str, value: &str, of: Option<&str>| {
+        (label.to_owned(), value.to_owned(), of.map(str::to_owned))
+    };
+    let mut busy = profile("jvm", 7 * G, Advice::Keep { memory: 9 * G });
+    busy.starts = Starts {
+        warm: 310,
+        cold: 90,
+        ..Starts::default()
+    };
+    busy.busy = 41;
+    busy.wait = Spread {
+        p50: 8,
+        p95: 35,
+        p99: 40,
+        max: 50,
+    };
+    busy.peaks.cpu = Spread {
+        p50: 2000,
+        p95: 6000,
+        p99: 7600,
+        max: 7900,
+    };
+    busy.peaks.cpu_runs = 12;
+    assert_eq!(
+        shown(&busy),
+        [
+            figure("Jobs", "400", None),
+            figure("Slots busy", "41%", None),
+            figure("Waited p50 / p95", "8s / 35s", None),
+            figure("Warm starts", "310", Some("of 400")),
+            figure("CPU p99", "7.6", Some("of 4")),
+        ]
+    );
+    let idle = profile("node", 0, Advice::TooFew { jobs: 0 });
+    assert_eq!(
+        shown(&idle),
+        [
+            figure("Jobs", "0", None),
+            figure("Slots busy", "0%", None),
+            figure("Waited p50 / p95", "0s / 0s", None),
+            figure("Warm starts", "–", None),
+            figure("CPU p99", "–", None),
+        ]
+    );
+}

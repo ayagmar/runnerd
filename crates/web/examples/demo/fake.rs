@@ -1095,9 +1095,9 @@ fn disk_writes() -> DiskWrites {
             top("halyard/ledger", "images", None, 52, 57 * G),
         ],
         top_jobs: vec![
-            top("halyard/ledger", "images", Some("image-api"), 26, 41 * G),
             top("halyard/ledger", "CI", Some("test"), 410, 118 * G),
             top("halyard/storefront", "CI", Some("e2e"), 270, 96 * G),
+            top("halyard/ledger", "images", Some("image-api"), 26, 41 * G),
         ],
         drive: Some(DriveWrites {
             device: "nvme0n1".to_owned(),
@@ -1189,7 +1189,7 @@ fn digest(fixtures: &Fixtures) -> Digest {
 /// What the history says of the config's profiles: jvm's tests peak at 7.8G of 9G, so 9G stays; node's builds
 /// peak at 2.1G of 7G and wait for a slot, so 3.25G caps, with 1G of page cache room, fit 4 in its 2 × 7G. The
 /// end-to-end job has too few runs.
-fn sizing(fixtures: &Fixtures) -> Sizing {
+pub fn sizing(fixtures: &Fixtures) -> Sizing {
     if let Some(sizing) = &fixtures.sizing {
         return sizing.clone();
     }

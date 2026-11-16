@@ -344,8 +344,9 @@ impl History {
             }
             Lens::List | Lens::Trends => None,
         };
+        // The list opens on the trends' numbers and small charts, so both lenses read the 30 days.
         let trends = match lens {
-            Lens::Trends => Some(
+            Lens::List | Lens::Trends => Some(
                 daemon
                     .get_query(
                         "/v1/stats",
@@ -358,7 +359,7 @@ impl History {
                     )
                     .await?,
             ),
-            Lens::List | Lens::Timeline => None,
+            Lens::Timeline => None,
         };
         let (workflows, branches) = match lens {
             Lens::List => {
@@ -421,6 +422,7 @@ pub(crate) fn render(history: &History) -> Markup {
         (heading(runnerd_core::api::View::Jobs.title(), Some(Page::History), Some(lenses(history))))
         @match history.filter.lens() {
             Lens::List => {
+                (summary(history))
                 (filters(history))
                 (jobs(history))
             }
@@ -486,7 +488,50 @@ fn select(
     }
 }
 
-/// The search and the filters, one GET form: a change submits it, and its button does without scripts.
+/// The most repositories offered as chips; past it they are a select in the filters.
+const REPOSITORY_CHIPS: usize = 6;
+
+/// The filters a page offers outside the form's selects: its outcome and its repository, as chips.
+struct Chips {
+    outcomes: Vec<(String, String)>,
+    /// The repositories as chips, or none when there are too many or only one.
+    repositories: Vec<(String, String)>,
+}
+
+/// A row of chips that each set one filter: `None` is the first, `all`. Each is a link to the page with its filter
+/// set, so it works without scripts.
+fn chip_row(
+    filter: &Filter,
+    label: &str,
+    all: &str,
+    current: Option<&str>,
+    options: &[(String, String)],
+    set: fn(&mut Filter, Option<String>),
+) -> Markup {
+    html! {
+        nav.lenses.chips aria-label=(label) {
+            a href=(filter.link(|next| set(next, None))) aria-current=[current.is_none().then_some("page")] { (all) }
+            @for (value, text) in options {
+                a href=(filter.link(|next| set(next, Some(value.clone()))))
+                    aria-current=[(current == Some(value.as_str())).then_some("page")] { (text) }
+            }
+        }
+    }
+}
+
+/// The outcome's and the repository's chips.
+fn chip_rows(filter: &Filter, chips: &Chips) -> Markup {
+    html! {
+        (chip_row(filter, "Outcome", "Any", filter.outcome.as_deref(), &chips.outcomes, |next, outcome| next.outcome = outcome))
+        @if !chips.repositories.is_empty() {
+            (chip_row(filter, "Repository", "All repositories", filter.repository.as_deref(), &chips.repositories, |next, repository| next.repository = repository))
+        }
+    }
+}
+
+/// The search, the outcome's and the repository's chips, and the rest of the filters folded under one "Filters"
+/// that counts how many are set. One GET form: a change submits it, and its button does without scripts. On a phone
+/// the chips fold under "Filters" too, so the rows start under the search.
 fn filters(history: &History) -> Markup {
     let filter = &history.filter;
     let named = |names: &[String]| -> Vec<(String, String)> {
@@ -504,10 +549,84 @@ fn filters(history: &History) -> Markup {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let outcomes: Vec<(String, String)> = OUTCOMES
-        .iter()
-        .map(|(value, label)| ((*value).to_owned(), (*label).to_owned()))
-        .collect();
+    let repository_chips = (2..=REPOSITORY_CHIPS).contains(&repositories.len());
+    let chips = Chips {
+        outcomes: OUTCOMES
+            .iter()
+            .map(|(value, label)| ((*value).to_owned(), (*label).to_owned()))
+            .collect(),
+        repositories: if repository_chips {
+            named(&repositories)
+        } else {
+            vec![]
+        },
+    };
+    let repository_select = !repository_chips && repositories.len() > 1;
+    let order = filter.order.filter(|order| !order.0.pages());
+    // What the fold holds everywhere, and what it holds on a phone besides: the chips.
+    let folded = [
+        filter.workflow.is_some(),
+        filter.branch.is_some(),
+        filter.range.is_some(),
+        filter.record.is_some(),
+        order.is_some(),
+        repository_select && filter.repository.is_some(),
+    ]
+    .into_iter()
+    .filter(|set| *set)
+    .count();
+    let chipped = [
+        filter.outcome.is_some(),
+        repository_chips && filter.repository.is_some(),
+    ]
+    .into_iter()
+    .filter(|set| *set)
+    .count();
+    html! {
+        form.filters method="get" action="/history" role="search" {
+            div.filter-bar {
+                label.field.search {
+                    span.visually-hidden { "Search job name, workflow, branch" }
+                    input type="search" name="q" value=[filter.q.as_deref()] data-search
+                        placeholder="Search job name, workflow, branch"
+                        autocomplete="off" spellcheck="false" maxlength="200";
+                }
+                div.wide-chips { (chip_rows(filter, &chips)) }
+                details.more-filters {
+                    summary {
+                        "Filters"
+                        @if folded > 0 { span.filter-count.wide { (folded) } }
+                        @if folded + chipped > 0 { span.filter-count.narrow { (folded + chipped) } }
+                    }
+                    div.filter-fields {
+                        div.narrow-chips { (chip_rows(filter, &chips)) }
+                        (folded_fields(history, repository_select.then_some(repositories.as_slice())))
+                        button.button-quiet type="submit" { "Apply" }
+                    }
+                }
+                @if *filter != Filter::default() {
+                    a.clear href="/history" { "Clear" }
+                }
+            }
+            // The chips are links; the search keeps what they set.
+            @if let Some(outcome) = &filter.outcome { input type="hidden" name="outcome" value=(outcome); }
+            @if !repository_select {
+                @if let Some(repository) = &filter.repository { input type="hidden" name="repository" value=(repository); }
+            }
+        }
+    }
+}
+
+/// The selects the "Filters" fold holds: the repository's, when there are too many for chips, the workflow's and the
+/// branch's when there is a choice, the time range's, the record's and the sort's.
+fn folded_fields(history: &History, repositories: Option<&[String]>) -> Markup {
+    let filter = &history.filter;
+    let named = |names: &[String]| -> Vec<(String, String)> {
+        names
+            .iter()
+            .map(|name| (name.clone(), name.clone()))
+            .collect()
+    };
     let ranges: Vec<(String, String)> = JobRange::ALL
         .iter()
         .filter_map(|range| {
@@ -534,28 +653,18 @@ fn filters(history: &History) -> Markup {
         .filter(|order| !order.0.pages())
         .map(|order| Order::slug(order.0));
     html! {
-        form.filters method="get" action="/history" role="search" {
-            label.field.search {
-                span.field-name { "Search job name, workflow, branch" }
-                input type="search" name="q" value=[filter.q.as_deref()] data-search
-                    autocomplete="off" spellcheck="false" maxlength="200";
-            }
-            (select("repository", "Repository", "All", filter.repository.as_deref(), &named(&repositories)))
-            @if history.workflows.len() > 1 || filter.workflow.is_some() {
-                (select("workflow", "Workflow", "All", filter.workflow.as_deref(), &named(&history.workflows)))
-            }
-            @if history.branches.len() > 1 || filter.branch.is_some() {
-                (select("branch", "Branch", "All", filter.branch.as_deref(), &named(&history.branches)))
-            }
-            (select("outcome", "Outcome", "Any", filter.outcome.as_deref(), &outcomes))
-            (select("range", "Queued", &format::sentence(JobRange::All.words()), filter.range.and_then(|range| Range::slug(range.0)), &ranges))
-            (select("record", "Record", "Any job", record.as_deref(), &records))
-            (select("order", "Sort", &format::sentence(JobOrder::NEWEST.words()), order.as_deref(), &orders))
-            button.button-quiet type="submit" { "Search" }
-            @if *filter != Filter::default() {
-                a.clear href="/history" { "Clear" }
-            }
-        }
+                        @if let Some(repositories) = repositories {
+                            (select("repository", "Repository", "All", filter.repository.as_deref(), &named(repositories)))
+                        }
+                        @if history.workflows.len() > 1 || filter.workflow.is_some() {
+                            (select("workflow", "Workflow", "All", filter.workflow.as_deref(), &named(&history.workflows)))
+                        }
+                        @if history.branches.len() > 1 || filter.branch.is_some() {
+                            (select("branch", "Branch", "All", filter.branch.as_deref(), &named(&history.branches)))
+                        }
+                        (select("range", "Queued", &format::sentence(JobRange::All.words()), filter.range.and_then(|range| Range::slug(range.0)), &ranges))
+                        (select("record", "Record", "Any job", record.as_deref(), &records))
+                        (select("order", "Sort", &format::sentence(JobOrder::NEWEST.words()), order.as_deref(), &orders))
     }
 }
 
@@ -575,6 +684,100 @@ const DAY_KEYS: &str = "if (evt.key == 'ArrowLeft') { $_day = Math.max(0, ($_day
     else if (evt.key == 'ArrowRight') { $_day = Math.min(29, $_day + 1); evt.preventDefault() } \
     else if (evt.key == 'Escape') { $_day = -1 }";
 
+/// The 30 days' three charts: jobs per day by conclusion, run time and wait, and memory peak.
+struct DayCharts {
+    bars: Vec<Bar>,
+    times: TimeChart,
+    time_top: u64,
+    memory: TimeChart,
+    memory_top: u64,
+}
+
+impl DayCharts {
+    fn of(days: &[StatsSummary]) -> DayCharts {
+        let peak = StatsSummary::of(days).memory_peak.unwrap_or(0);
+        let bars = days
+            .iter()
+            .map(|day| Bar {
+                label: format::short_date(day.start),
+                parts: vec![day.succeeded, day.failed, day.cancelled, day.other()],
+            })
+            .collect();
+        let durations = daily(days, StatsSummary::average_run);
+        let waits = daily(days, StatsSummary::average_wait);
+        let peaks = daily(days, |day| day.memory_peak);
+        let time_top = nice_top(
+            durations
+                .iter()
+                .chain(&waits)
+                .map(|point| point.1)
+                .max()
+                .unwrap_or(0),
+            Base::Decimal,
+        );
+        DayCharts {
+            bars,
+            times: per_day(
+                "Average run time and wait per day",
+                vec![
+                    Series::line("run time", "run", durations),
+                    Series::line("wait", "wait", waits),
+                ],
+                format::duration,
+                days,
+            ),
+            time_top,
+            memory: per_day(
+                "Highest sampled memory peak per day",
+                vec![Series::line("memory peak", "memory", peaks)],
+                format::bytes,
+                days,
+            ),
+            memory_top: nice_top(peak, Base::Binary),
+        }
+    }
+
+    fn jobs(&self, bands: &[Band]) -> Markup {
+        stacked_bars(
+            "Jobs per day by conclusion",
+            &["success", "failure", "neutral", "other"],
+            &self.bars,
+            |n| n.to_string(),
+            bands,
+        )
+    }
+}
+
+/// The list's head: the 30 days' numbers and their charts, small, with a link to the trends that draw them in full.
+fn summary(history: &History) -> Markup {
+    let Some(stats) = &history.stats else {
+        return html! {};
+    };
+    let days = days(stats, history.now);
+    // Without a job in the 30 days there is no shape to show: the list says there are none.
+    if StatsSummary::of(&days).jobs == 0 {
+        return html! {};
+    }
+    let charts = DayCharts::of(&days);
+    html! {
+        section.summary aria-labelledby="summary-title" {
+            div.summary-head {
+                h2 #summary-title {
+                    "Last 30 days"
+                    @if let Some(repository) = &history.filter.repository { " " span.muted { (repository) } }
+                }
+                a.summary-more href=(lens_link(&history.filter, Lens::Trends)) { "Trends" }
+            }
+            (headline(&days, Picking::Whole))
+            div.mini-charts {
+                div.mini { h3 { "Jobs per day" } (charts.jobs(&[])) }
+                div.mini { h3 { "Run and wait" } (charts.times.render(charts.time_top, &Parts::default())) }
+                div.mini { h3 { "Memory peak" } (charts.memory.render(charts.memory_top, &Parts::default())) }
+            }
+        }
+    }
+}
+
 /// The last 30 days as three charts on one day axis. Pointing at a day, or stepping to it with the arrow keys, marks
 /// it on every chart and puts its numbers in the headline.
 fn trends(history: &History) -> Markup {
@@ -582,41 +785,7 @@ fn trends(history: &History) -> Markup {
         return html! {};
     };
     let days = days(stats, history.now);
-    let peak = StatsSummary::of(&days).memory_peak.unwrap_or(0);
-    let bars: Vec<Bar> = days
-        .iter()
-        .map(|day| Bar {
-            label: format::short_date(day.start),
-            parts: vec![day.succeeded, day.failed, day.cancelled, day.other()],
-        })
-        .collect();
-    let durations = daily(&days, StatsSummary::average_run);
-    let waits = daily(&days, StatsSummary::average_wait);
-    let peaks = daily(&days, |day| day.memory_peak);
-    let time_top = nice_top(
-        durations
-            .iter()
-            .chain(&waits)
-            .map(|point| point.1)
-            .max()
-            .unwrap_or(0),
-        Base::Decimal,
-    );
-    let times = per_day(
-        "Average run time and wait per day",
-        vec![
-            Series::line("run time", "run", durations),
-            Series::line("wait", "wait", waits),
-        ],
-        format::duration,
-        &days,
-    );
-    let memory = per_day(
-        "Highest sampled memory peak per day",
-        vec![Series::line("memory peak", "memory", peaks)],
-        format::bytes,
-        &days,
-    );
+    let charts = DayCharts::of(&days);
     // One band per chart, a day wide, which the stylesheet moves to the picked day by `--day`.
     let mark = |from, to| {
         [Band {
@@ -639,13 +808,13 @@ fn trends(history: &History) -> Markup {
             h2 #trends-title data-text=(day_lens("Last 30 days", &dates)) { "Last 30 days" }
             p.visually-hidden { "Jobs that finished, by the day they were queued (UTC). Arrow keys step through the days." }
             @if let Some(repository) = &history.filter.repository { p.muted { "Jobs of " (repository) "." } }
-            (headline(&days))
+            (headline(&days, Picking::Days))
             div.charts.three tabindex="0" role="group" aria-label="Charts per day"
                 data-on:pointermove=(DAY_UNDER_POINTER) data-on:pointerdown=(DAY_UNDER_POINTER)
                 data-on:pointerleave="evt.pointerType == 'mouse' && ($_day = -1)" data-on:keydown=(DAY_KEYS) data-on:blur="$_day = -1" {
                 div.chart-card {
                     h3 { "Jobs per day" }
-                    (stacked_bars("Jobs per day by conclusion", &["success", "failure", "neutral", "other"], &bars, |n| n.to_string(), &bar_marks))
+                    (charts.jobs(&bar_marks))
                     ul.legend {
                         li.success { span.swatch {} "succeeded" }
                         li.failure { span.swatch {} "failed or lost" }
@@ -654,7 +823,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Run time and wait" }
-                    (times.render_with(time_top, &day_marks, &Parts::default()))
+                    (charts.times.render_with(charts.time_top, &day_marks, &Parts::default()))
                     ul.legend {
                         li.run { span.swatch {} "average run" }
                         li.wait { span.swatch {} "average wait for a runner" }
@@ -662,7 +831,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Memory peak" }
-                    (memory.render_with(nice_top(peak, Base::Binary), &day_marks, &Parts::default()))
+                    (charts.memory.render_with(charts.memory_top, &day_marks, &Parts::default()))
                 }
             }
         }
@@ -706,8 +875,17 @@ fn per_day(
     }
 }
 
+/// Whether a headline follows the day picked on the trends' charts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Picking {
+    /// The 30 days' totals, always.
+    Whole,
+    /// The picked day's, and the totals with none picked.
+    Days,
+}
+
 /// The 30 days' totals, or the picked day's.
-fn headline(days: &[StatsSummary]) -> Markup {
+fn headline(days: &[StatsSummary], picking: Picking) -> Markup {
     let total = StatsSummary::of(days);
     let peak = |peak: Option<u64>| peak.map_or("–".to_owned(), format::bytes);
     let share = |summary: &StatsSummary| {
@@ -743,7 +921,13 @@ fn headline(days: &[StatsSummary]) -> Markup {
     html! {
         dl.headline aria-live="polite" {
             @for (label, whole, per_day) in &figures {
-                div { dt { (label) } dd data-text=(day_lens(whole, per_day)) { (whole) } }
+                div {
+                    dt { (label) }
+                    @match picking {
+                        Picking::Days => dd data-text=(day_lens(whole, per_day)) { (whole) },
+                        Picking::Whole => dd { (whole) },
+                    }
+                }
             }
         }
     }
@@ -780,7 +964,7 @@ fn sort_header(filter: &Filter, column: Column, sort: JobSort, align: Align) -> 
     });
     html! {
         th scope="col" class=[(align == Align::Number).then_some("number")] aria-sort=[aria] {
-            a.sort href=(href) {
+            a.sort.hit href=(href) {
                 (column.title())
                 span.sort-mark aria-hidden="true" {
                     @if sorted { @if order == SortOrder::Asc { "↑" } @else { "↓" } }
