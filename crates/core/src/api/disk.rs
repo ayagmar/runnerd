@@ -216,8 +216,8 @@ impl JobWrites {
 }
 
 impl WriteTop {
-    /// It in a line: `halyard/api CI / build: 12.4G over 31 jobs, 410M a job`; a workflow's without the job.
-    pub fn line(&self) -> String {
+    /// Its name: `halyard/api CI / build`; a workflow's without the job.
+    pub fn name(&self) -> String {
         let mut name = self.repository.clone();
         if let Some(workflow) = &self.workflow {
             name.push(' ');
@@ -227,12 +227,23 @@ impl WriteTop {
             name.push_str(if self.workflow.is_some() { " / " } else { " " });
             name.push_str(job);
         }
+        name
+    }
+
+    /// What one of its jobs wrote on average, in bytes.
+    pub fn per_job(&self) -> u64 {
+        self.total / u64::from(self.jobs.max(1))
+    }
+
+    /// It in a line: `halyard/api CI / build: 12.4G over 31 jobs, 410M a job`; a workflow's without the job.
+    pub fn line(&self) -> String {
         let jobs = if self.jobs == 1 { "job" } else { "jobs" };
         format!(
-            "{name}: {} over {} {jobs}, {} a job",
+            "{}: {} over {} {jobs}, {} a job",
+            self.name(),
             ByteSize(self.total),
             self.jobs,
-            ByteSize(self.total / u64::from(self.jobs.max(1)))
+            ByteSize(self.per_job())
         )
     }
 }
@@ -265,60 +276,126 @@ impl DriveWrites {
         }
         lines.push(self.shares.line(self.watched));
         if let Some(commits) = self.commits {
-            let tenths = u128::from(commits.count) * 10 / u128::from(commits.watched.max(1));
             lines.push(format!(
-                "btrfs committed {}.{} times a second",
-                tenths / 10,
-                tenths % 10
+                "btrfs committed {} times a second",
+                commits.per_second()
             ));
         }
         lines
     }
 }
 
+impl Commits {
+    /// Commits a second, to a tenth: `2.6`.
+    pub fn per_second(&self) -> String {
+        let tenths = u128::from(self.count) * 10 / u128::from(self.watched.max(1));
+        format!("{}.{}", tenths / 10, tenths % 10)
+    }
+}
+
+/// Whose a share of what the drive wrote was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareOwner {
+    /// The runner jobs that ended then: what their containers wrote.
+    Jobs,
+    /// The rest of the runner slice: seeds, the mirror, runners before and after their jobs, write-back after a
+    /// container ended.
+    Slice,
+    /// runnerd itself.
+    Daemon,
+    /// No owner runnerd knows.
+    Unknown,
+}
+
+impl ShareOwner {
+    /// Its name, lower case: `runner jobs`, `the rest of the runner slice`, `runnerd itself`, `no owner runnerd
+    /// knows`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ShareOwner::Jobs => "runner jobs",
+            ShareOwner::Slice => "the rest of the runner slice",
+            ShareOwner::Daemon => "runnerd itself",
+            ShareOwner::Unknown => "no owner runnerd knows",
+        }
+    }
+}
+
+/// One owner's share of what the drive wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriveShare {
+    /// Whose.
+    pub owner: ShareOwner,
+    /// Its bytes.
+    pub bytes: u64,
+    /// Its part of the whole, in whole percent.
+    pub percent: u64,
+}
+
 impl DriveShares {
-    /// Them in a line, saying the stretch they cover when it is shorter than the `watched` seconds the drive was
-    /// read: `Runner jobs 25%; the rest of the runner slice 8% (...); runnerd itself 1%; no owner runnerd knows 66%`.
-    /// No share passes the whole.
-    pub fn line(&self, watched: u64) -> String {
+    /// Whose the bytes were, in the order the line says them: runner jobs', the rest of the runner slice's when its
+    /// `io.stat` was read, runnerd's own when read, and the rest, no owner runnerd knows. Their bytes add up to the
+    /// whole; jobs that ended in the stretch may count what they wrote before it, so no share passes the whole.
+    pub fn parts(&self) -> Vec<DriveShare> {
         let whole = self.written;
-        // Jobs that ended in the stretch may count what they wrote before it: never past the whole.
-        let counted = self.jobs.min(whole);
-        let mut line = if self.watched < watched {
-            format!(
-                "Over the {} runnerd read the runner slice: runner jobs",
-                duration(self.watched)
-            )
-        } else {
-            "Runner jobs".to_owned()
+        let share = |owner, bytes| DriveShare {
+            owner,
+            bytes,
+            percent: percent(bytes, whole),
         };
-        let _ = write!(line, " {}%", percent(counted, whole));
+        let counted = self.jobs.min(whole);
+        let mut parts = vec![share(ShareOwner::Jobs, counted)];
         let owned = match self.slice {
             Some(slice) => {
                 let slice = slice.clamp(counted, whole);
-                let _ = write!(
-                    line,
-                    "; the rest of the runner slice {}% (seeds, the mirror, runners before and after their jobs, \
-                     write-back after a container ended)",
-                    percent(slice - counted, whole)
-                );
+                parts.push(share(ShareOwner::Slice, slice - counted));
                 slice
             }
             None => counted,
         };
         let daemon = self.daemon.map(|daemon| daemon.min(whole - owned));
         if let Some(daemon) = daemon {
-            let _ = write!(line, "; runnerd itself {}%", percent(daemon, whole));
+            parts.push(share(ShareOwner::Daemon, daemon));
         }
-        let _ = write!(
-            line,
-            "; no owner runnerd knows {}%",
-            percent(whole - owned - daemon.unwrap_or(0), whole)
-        );
+        parts.push(share(
+            ShareOwner::Unknown,
+            whole - owned - daemon.unwrap_or(0),
+        ));
+        parts
+    }
+
+    /// Them in a line, saying the stretch they cover when it is shorter than the `watched` seconds the drive was
+    /// read: `Runner jobs 25%; the rest of the runner slice 8% (...); runnerd itself 1%; no owner runnerd knows 66%`.
+    /// No share passes the whole.
+    pub fn line(&self, watched: u64) -> String {
+        let mut line = if self.watched < watched {
+            format!(
+                "Over the {} runnerd read the runner slice: ",
+                duration(self.watched)
+            )
+        } else {
+            String::new()
+        };
+        let said: Vec<String> = self
+            .parts()
+            .iter()
+            .map(|part| {
+                let note = if part.owner == ShareOwner::Slice {
+                    " (seeds, the mirror, runners before and after their jobs, write-back after a container ended)"
+                } else {
+                    ""
+                };
+                format!("{} {}%{note}", part.owner.label(), part.percent)
+            })
+            .collect();
+        line.push_str(&said.join("; "));
         if self.slice.is_none() {
             line.push_str(", the runner slice's share unread");
         }
-        line
+        // The line starts as a sentence does.
+        let mut chars = line.chars();
+        chars.next().map_or_else(String::new, |first| {
+            first.to_uppercase().chain(chars).collect()
+        })
     }
 }
 
@@ -465,6 +542,33 @@ mod tests {
             "Over the 1h 00m runnerd read the runner slice: runner jobs 50%; the rest of the runner slice 10% (seeds, \
              the mirror, runners before and after their jobs, write-back after a container ended); no owner runnerd \
              knows 40%"
+        );
+    }
+
+    /// A client draws the shares as one bar: a share whose bytes ran past the whole, or that left a gap, would draw
+    /// a bar longer or shorter than the drive's.
+    #[test]
+    fn the_drive_s_shares_as_parts_fill_the_whole_and_match_its_line() {
+        let shares = DriveShares {
+            watched: 3600,
+            written: 100 * G,
+            // Jobs that ended in the stretch count what they wrote before it.
+            jobs: 150 * G,
+            slice: Some(90 * G),
+            daemon: Some(G),
+        };
+        let parts = shares.parts();
+        assert_eq!(
+            parts.iter().map(|part| part.bytes).sum::<u64>(),
+            100 * G,
+            "{parts:?}"
+        );
+        assert_eq!(parts[0].owner, ShareOwner::Jobs);
+        assert_eq!(parts[0].percent, 100);
+        assert_eq!(
+            shares.line(3600),
+            "Runner jobs 100%; the rest of the runner slice 0% (seeds, the mirror, runners before and after their \
+             jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0%"
         );
     }
 }

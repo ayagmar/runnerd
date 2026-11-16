@@ -261,9 +261,30 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
 
 #[tokio::test]
 async fn the_build_cache_states_its_week_and_tools_as_core_does() {
-    let (dashboard, cookie, _, facts) = dashboard().await;
+    let (dashboard, cookie, daemon, facts) = dashboard().await;
     let shown = text(&dashboard.page(&cookie, "/caches").await.body);
-    assert!(shown.contains(&facts.build_cache_week), "{shown}");
+    // The week as figures, each core's.
+    let build = daemon
+        .caches
+        .build
+        .as_ref()
+        .expect("the build cache's stats");
+    let week = &build.week;
+    let lookups = match week.hit_percent() {
+        Some(percent) => format!("{percent}% of {}", week.lookups()),
+        None => "Lookups, 7 days 0".to_owned(),
+    };
+    for figure in [
+        format!("Entries {}", build.entries),
+        lookups,
+        format!(
+            "Stored {}",
+            runnerd_core::config::ByteSize(week.written_bytes)
+        ),
+        format!("Uploads refused {}", week.refused),
+    ] {
+        assert!(shown.contains(&figure), "{figure}: {shown}");
+    }
     assert!(shown.contains(&facts.actions_cache), "{shown}");
     assert!(
         shown.contains(runnerd_core::api::BUILD_CACHE_TOOLS),
@@ -308,8 +329,13 @@ async fn sizing_states_each_profile_s_advice_and_need_as_core_does() {
     let shown = text(&page);
     for profile in &sizing.profiles {
         assert!(
-            shown.contains(&sizing.advice_line(profile)),
+            shown.contains(&sentence(&sizing.advice_line(profile))),
             "{}: {shown}",
+            profile.name
+        );
+        assert!(
+            shown.contains(&profile.advice_word()),
+            "{} shows its advice as a figure: {shown}",
             profile.name
         );
         // A profile a bound holds shows what its jobs need, not the bound.
@@ -340,13 +366,20 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
         let card = &page[page[..at].rfind("<li").unwrap()..at];
         assert!(card.contains(insight.kind.label()), "{card}");
         assert!(
-            card.contains(&format!(
-                "{} {}",
-                insight.severity.label(),
-                insight.kind.word()
-            )),
-            "classed by its severity and kind: {card}"
+            card.contains(&format!("insight {}", insight.kind.word())),
+            "classed by its kind: {card}"
         );
+        assert_eq!(
+            card.contains(" warn\""),
+            insight.tone() == runnerd_core::api::Tone::Warn,
+            "a warning stands out exactly when core's tone warns: {card}"
+        );
+        if let Some(figure) = insight.figure() {
+            assert!(
+                text(card).contains(&format!("{} {}", figure.value, figure.label)),
+                "the card shows core's figure: {card}"
+            );
+        }
     }
     let shown = text(&page);
     for day in &insights.host {
@@ -356,10 +389,26 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
             day.dated_line()
         );
     }
-    for section in insights.disk.as_ref().unwrap().sections() {
+    let disk = insights.disk.as_ref().unwrap();
+    for section in disk.sections() {
         assert!(shown.contains(section.title), "{}: {shown}", section.title);
         for line in &section.lines {
             assert!(shown.contains(line.as_str()), "{line}: {shown}");
+        }
+    }
+    // The figures beside the sentences are core's.
+    for top in disk.workflows.iter().chain(&disk.top_jobs) {
+        let row = format!(
+            "{} {}",
+            top.name(),
+            runnerd_core::config::ByteSize(top.total)
+        );
+        assert!(shown.contains(&row), "{row}: {shown}");
+    }
+    if let Some(drive) = &disk.drive {
+        for part in drive.shares.parts() {
+            let share = format!("{}% {}", part.percent, part.owner.label());
+            assert!(shown.contains(&share), "{share}: {shown}");
         }
     }
 }

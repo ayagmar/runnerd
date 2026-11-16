@@ -84,3 +84,40 @@ fn the_digest_names_each_long_wait_with_its_workflow_and_a_readable_time() {
         "halyard/api CI / test waited 1m 30s"
     );
 }
+
+/// A card shows an insight's figure big and its sentence under it: a figure that disagreed with the sentence, or a
+/// share past 100%, would contradict it.
+#[test]
+fn an_insights_figure_is_the_number_its_sentence_is_about() {
+    let slower = insight(
+        Severity::Warning,
+        InsightKind::Slower {
+            branch: None,
+            before: 280,
+            now: 370,
+            since: None,
+        },
+    );
+    let figure = slower.figure().expect("a figure");
+    assert_eq!(
+        (figure.value.as_str(), figure.label.as_str()),
+        ("6m 10s", "from 4m 40s")
+    );
+    let cold = insight(
+        Severity::Notice,
+        InsightKind::ColdCache {
+            branch: None,
+            hits: 2,
+            lookups: 1,
+        },
+    );
+    assert_eq!(
+        cold.figure().expect("a figure").value,
+        "100%",
+        "never past the whole"
+    );
+    assert_eq!(
+        insight(Severity::Notice, InsightKind::Unknown).figure(),
+        None
+    );
+}

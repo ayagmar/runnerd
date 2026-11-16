@@ -1095,9 +1095,9 @@ fn disk_writes() -> DiskWrites {
             top("halyard/ledger", "images", None, 52, 57 * G),
         ],
         top_jobs: vec![
-            top("halyard/ledger", "images", Some("image-api"), 26, 41 * G),
             top("halyard/ledger", "CI", Some("test"), 410, 118 * G),
             top("halyard/storefront", "CI", Some("e2e"), 270, 96 * G),
+            top("halyard/ledger", "images", Some("image-api"), 26, 41 * G),
         ],
         drive: Some(DriveWrites {
             device: "nvme0n1".to_owned(),

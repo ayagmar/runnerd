@@ -784,7 +784,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                 p.muted { "This record lacks its container's caps: the lines marked “" (profile) " now” are its limits in the config now, which may not be the ones the job ran with." }
             }
             @if samples.is_empty() {
-                p.muted { "No samples: the runner's container never ran, or its samples are past `history.samples`." }
+                p.muted { "No samples: the runner's container never ran, or its samples are past " code { "history.samples" } "." }
             } @else {
                 div.charts {
                     div.chart-card {
@@ -866,7 +866,7 @@ fn runs(view: &JobView) -> Markup {
                 p.run-scale aria-hidden="true" { "Wait and run, up to " (format::duration(longest)) }
                 // On a narrow screen the runs scroll sideways, and start scrolled to the latest.
                 div.run-scroll {
-                    ol.run-bars style=(format!("--runs: {}", runs.len())) {
+                    ol class=(if peak == 0 { "run-bars no-peaks" } else { "run-bars" }) style=(format!("--runs: {}", runs.len())) {
                         @for run in runs {
                             @let waited = run.waited(view.now).unwrap_or(0);
                             @let ran = run.ran(view.now).unwrap_or(0);
@@ -879,8 +879,10 @@ fn runs(view: &JobView) -> Markup {
                                         span class=(format!("ran {}", outcome_class(run))) style=(format!("--h: {}", ratio(ran, longest))) {}
                                         span.waited style=(format!("--h: {}", ratio(waited, longest))) {}
                                     }
-                                    span.run-peak aria-hidden="true" {
-                                        span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                                    @if peak > 0 {
+                                        span.run-peak aria-hidden="true" {
+                                            span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                                        }
                                     }
                                 }
                             }
@@ -891,7 +893,7 @@ fn runs(view: &JobView) -> Markup {
                     li.success { span.swatch {} "ran, succeeded" }
                     li.failure { span.swatch {} "ran, failed" }
                     li.wait { span.swatch {} "waited for a runner" }
-                    li.peak { span.swatch {} "memory peak" }
+                    @if peak > 0 { li.peak { span.swatch {} "memory peak" } }
                 }
             }
         } @else {
@@ -1119,8 +1121,9 @@ fn search_form(view: &JobView) -> Markup {
     html! {
         form.log-search-form method="get" role="search" {
             label.field.search {
-                span.field-name { "Search each line's message, not its time or command" }
-                input type="search" name="q" value=[query] data-search autocomplete="off" spellcheck="false" maxlength="200";
+                span.visually-hidden { "Search each line's message, not its time or command" }
+                input type="search" name="q" value=[query] data-search autocomplete="off" spellcheck="false" maxlength="200"
+                    placeholder="Search each line's message";
             }
             button.button-quiet type="submit" { "Search" }
             @if query.is_some() { a.clear href="?" { "Clear" } }
@@ -1290,12 +1293,20 @@ fn styled_line(line: &StyledLine, target: Option<u64>, place: Place) -> Markup {
         LineKind::Command => "command",
         _ => "",
     };
+    // A line the page cuts takes one row, its cut said under it; opened, it shows what the page has of it.
+    let omitted = line.omitted_words();
+    let class = match (class.is_empty(), omitted.is_some()) {
+        (true, false) => None,
+        (true, true) => Some("long".to_owned()),
+        (false, false) => Some(class.to_owned()),
+        (false, true) => Some(format!("{class} long")),
+    };
     html! {
-        li id=[(place == Place::Log).then(|| format!("L{}", line.line + 1))] class=[(!class.is_empty()).then_some(class)]
+        li id=[(place == Place::Log).then(|| format!("L{}", line.line + 1))] class=[class]
             aria-current=[(place == Place::Log && target == Some(line.line)).then_some("true")] {
             (line_number(line))
             span.text { (styled_runs(line)) }
-            @if let Some(omitted) = line.omitted_words() { " " span.omitted { "(" (omitted) ")" } }
+            @if let Some(omitted) = omitted { " " span.omitted { "(" (omitted) ")" } }
         }
     }
 }

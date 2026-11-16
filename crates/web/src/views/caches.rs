@@ -1,13 +1,15 @@
-//! `/caches`: every cache volume with its size against its bound, and each one's size over the last 30 days.
+//! `/caches`: every cache volume as a lane, its size filling it against its bound, each one's size over the last 30
+//! days, its action, and the shared build cache's week as figures.
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    BUILD_CACHE_TOOLS, CacheHistory, CacheKind, CacheVolume, Caches, Section, Status,
+    BUILD_CACHE_TOOLS, BuildCacheStats, CacheHistory, CacheKind, CacheVolume, Caches, Section,
+    Status,
 };
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, heading, page, profile_class, time_ago};
-use crate::chart::Sparkline;
+use crate::chart::{Base, Limit, Series, TimeChart, nice_top, ratio};
 use crate::format;
 
 const WINDOW: u64 = 30 * 86_400;
@@ -37,10 +39,10 @@ impl CachesView {
     }
 }
 
-/// Reseed for a snapshot, empty for the rest, folded under a quiet toggle until chosen; the daemon refuses either
-/// while a runner uses the volume.
+/// Its action, a labelled button: reseed for a snapshot, empty for the rest. The daemon refuses either while a
+/// runner uses the volume.
 fn action(volume: &CacheVolume) -> Markup {
-    let button = if let CacheKind::Snapshot { profile } = &volume.kind {
+    if let CacheKind::Snapshot { profile } = &volume.kind {
         html! {
             button.button-quiet type="button"
                 data-on:click=(format!("@post('/v1/profiles/{profile}/reseed')"))
@@ -48,15 +50,9 @@ fn action(volume: &CacheVolume) -> Markup {
         }
     } else {
         html! {
-            button.button-danger type="button"
+            button.button-quiet.empty-volume type="button"
                 data-on:click=(format!("confirm('Empty {}? Its next job starts cold.') && @post('/v1/caches/{}/clean')", volume.name, volume.name))
-                aria-label=(format!("Empty {}", volume.name)) { "Empty it" }
-        }
-    };
-    html! {
-        details.volume-action {
-            summary aria-label=(format!("Actions for {}", volume.name)) { "…" }
-            div.volume-action-menu { (button) }
+                aria-label=(format!("Empty {}", volume.name)) { "Empty" }
         }
     }
 }
@@ -81,71 +77,108 @@ pub(crate) fn render(view: &CachesView) -> Markup {
     page(Section::Caches.title(), Some(Page::Caches), None, &main)
 }
 
-/// One table of every volume: what it caches, its size against its bound, its size over 30 days as a sparkline, and
-/// its action folded away until chosen.
+/// Every volume as a lane: what it is, its size as a fill against its bound on one scale for all, so lanes compare,
+/// its size over 30 days against its bound, and its action; the shared build cache's week as figures.
 pub(crate) fn volumes(view: &CachesView) -> Markup {
     let start = view.now.saturating_sub(WINDOW);
+    let scale = view
+        .caches
+        .volumes
+        .iter()
+        .map(|volume| volume.bytes.max(volume.limit.unwrap_or(0)))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let at = |bytes: u64| format!("{:.2}%", ratio(bytes, scale) * 100.0);
     html! {
         div #volumes {
             @if view.caches.volumes.is_empty() {
-                p.muted { "No volumes yet: runnerd creates them when a profile's first runner starts." }
+                p.empty { "No volumes yet: runnerd creates them when a profile's first runner starts." }
             } @else {
-                div.table-wrap {
-                    table.job-table.cache-table {
-                        thead {
-                            tr {
-                                th scope="col" { "Volume" }
-                                th scope="col" .number { "Size" }
-                                th scope="col" { "Bound" }
-                                th scope="col" { "30 days" }
-                                th scope="col" { span.visually-hidden { "Action" } }
-                            }
-                        }
-                        tbody {
-                            @for volume in &view.caches.volumes {
-                                @let limit = volume.limit_status();
-                                @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
-                                @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
-                                @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes).max(volume.limit.unwrap_or(0));
-                                tr class=(class) data-row {
-                                    th scope="row" {
-                                        span.record-job {
-                                            span.swatch aria-hidden="true" {}
-                                            span.job-name { (volume.kind.description()) }
-                                            span.repo { code { (volume.name) } }
-                                            @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
-                                                span.repo.cache-note { "For " (BUILD_CACHE_TOOLS) ". " (format::sentence(&build.week_line())) ". " (format::sentence(&build.actions_cache_line())) }
-                                            }
-                                        }
-                                    }
-                                    td.number data-label="size" {
-                                        span class=[limit.as_ref().filter(|limit| limit.over).map(|_| "over-limit")] { (format::bytes(volume.bytes)) }
-                                    }
-                                    td.muted data-label="bound" {
-                                        @if let Some(limit) = &limit { (format::bytes(limit.limit)) ", " (limit.label) } @else { "–" }
-                                    }
-                                    td.spark {
-                                        @if points.len() > 1 {
-                                            (Sparkline {
-                                                points: &points,
-                                                start,
-                                                end: view.now,
-                                                window: WINDOW,
-                                                top: peak,
-                                                class: "memory",
-                                                live: None,
-                                            }.render(&Parts::default()))
-                                        } @else {
-                                            span.muted { "one reading" }
-                                        }
-                                    }
-                                    td.action { (action(volume)) }
+                ol.volumes aria-label="Volumes" {
+                    @for volume in &view.caches.volumes {
+                        @let limit = volume.limit_status();
+                        @let over = limit.as_ref().is_some_and(|limit| limit.over);
+                        @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
+                        @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
+                        @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes).max(volume.limit.unwrap_or(0));
+                        li class=(format!("volume {class}")) {
+                            div.volume-name {
+                                span.swatch aria-hidden="true" {}
+                                span {
+                                    strong { (volume.kind.description()) }
+                                    " " code { (volume.name) }
                                 }
+                            }
+                            div.volume-size {
+                                strong class=[over.then_some("over-limit")] { (format::bytes(volume.bytes)) }
+                                span.muted {
+                                    @if let Some(limit) = &limit { " of " (format::bytes(limit.limit)) ", " (limit.label) } @else { " no bound" }
+                                }
+                            }
+                            div.volume-fill role="img" aria-label=(match &limit {
+                                Some(limit) => format!("{} of {}, {}", format::bytes(volume.bytes), format::bytes(limit.limit), limit.label),
+                                None => format!("{}, no bound", format::bytes(volume.bytes)),
+                            }) {
+                                @if let Some(limit) = &limit {
+                                    span.volume-bound style=(format!("width: {}", at(limit.limit))) {}
+                                }
+                                span.volume-used style=(format!("width: {}", at(volume.bytes))) {}
+                            }
+                            div.volume-trend {
+                                @if points.len() > 1 {
+                                    (TimeChart {
+                                        title: format!("{} over 30 days", volume.kind.description()),
+                                        start,
+                                        end: view.now,
+                                        window: None,
+                                        live: None,
+                                        series: vec![Series {
+                                            label: String::new(),
+                                            class: "memory",
+                                            points,
+                                            area: true,
+                                        }],
+                                        limits: limit.iter().map(|limit| Limit { value: limit.limit, label: String::new(), class: "" }).collect(),
+                                        value: format::bytes,
+                                        time: format::short_date,
+                                        gap: WINDOW,
+                                    }.render(nice_top(peak, Base::Binary), &Parts::default()))
+                                } @else {
+                                    span.muted { "One reading so far" }
+                                }
+                            }
+                            div.volume-action { (action(volume)) }
+                            @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
+                                (build_cache(build))
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/// The shared build cache's last 7 days as figures, with what it is for and how GitHub Actions' cache goes through it.
+fn build_cache(build: &BuildCacheStats) -> Markup {
+    let week = &build.week;
+    html! {
+        div.build-cache {
+            dl.build-figures {
+                div { dt { "Entries" } dd { (build.entries) } }
+                @if let Some(percent) = week.hit_percent() {
+                    div { dt { "Lookups hit, 7 days" } dd { (percent) "%" span.muted { " of " (week.lookups()) } } }
+                    div { dt { "Served" } dd { (format::bytes(week.read_bytes)) } }
+                } @else {
+                    div { dt { "Lookups, 7 days" } dd { "0" } }
+                }
+                div { dt { "Stored" } dd { (format::bytes(week.written_bytes)) } }
+                @if week.refused > 0 {
+                    div { dt { "Uploads refused" } dd { (week.refused) } }
+                }
+            }
+            p.muted { "For " (BUILD_CACHE_TOOLS) ". " (format::sentence(&build.actions_cache_line())) "." }
         }
     }
 }

@@ -38,13 +38,7 @@ async fn main() {
     let socket = dir.join("runnerd.sock");
     let _ = std::fs::remove_file(&socket);
     let fake = fake::Fake::new(fake::Fixtures::new(now()));
-    burst(&fake);
-    warm(&fake);
-    auto_sizing(&fake);
-    small_pool(&fake);
-    measured(&fake);
-    downtime(&fake);
-    busy_desktop(&fake);
+    scenes(&fake);
     // About what the doctor's reads of the host take with a few repositories.
     fake.fixtures.lock().unwrap().doctor_delay = Duration::from_millis(700);
     fake::serve(&socket, fake.clone());
@@ -416,4 +410,48 @@ fn busy_desktop(fake: &fake::Fake) {
         stalled: false,
         credit: None,
     });
+}
+
+/// The demo's scenes; with `RUNNERD_DEMO_EMPTY=1`, a daemon that has run no job yet, for the pages' empty states.
+fn scenes(fake: &fake::Fake) {
+    if std::env::var_os("RUNNERD_DEMO_EMPTY").is_some() {
+        empty(fake);
+        return;
+    }
+    burst(fake);
+    warm(fake);
+    auto_sizing(fake);
+    small_pool(fake);
+    measured(fake);
+    downtime(fake);
+    busy_desktop(fake);
+}
+
+/// A daemon that has run no job yet: no history, no insights, no caches measured.
+fn empty(fake: &fake::Fake) {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let at = fixtures.now;
+    fixtures.jobs.clear();
+    fixtures.samples.clear();
+    fixtures.logs.clear();
+    fixtures.stats.clear();
+    fixtures.cache_history.clear();
+    fixtures.caches = runnerd_core::api::Caches {
+        measured_at: None,
+        volumes: vec![],
+        build: None,
+    };
+    fixtures.insights = Some(runnerd_core::api::Insights {
+        since: at - 14 * 86_400,
+        until: at,
+        insights: vec![],
+        waits: vec![],
+        host: vec![],
+        disk: None,
+    });
+    for profile in &mut fixtures.status.profiles {
+        for slot in &mut profile.slots {
+            slot.runner = None;
+        }
+    }
 }

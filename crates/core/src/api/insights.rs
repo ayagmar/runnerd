@@ -9,6 +9,8 @@ use super::jobs::JobSummary;
 
 mod shown;
 
+pub use shown::InsightFigure;
+
 /// The window `GET /v1/insights` reads by default, in days.
 pub const INSIGHT_DAYS: u32 = 14;
 

@@ -2611,10 +2611,10 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
     let sizing = dashboard.page(&cookie, "/sizing").await;
     assert_eq!(sizing.status, StatusCode::OK);
     for expected in [
-        "lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
-        "keep 9G: its largest peak + 15% is 9G",
+        "Lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
+        "Keep 9G: its largest peak + 15% is 9G",
         r#"href="/config?resize=node""#,
-        "Review memory 3.25G, 4 slots in the config",
+        "Review 3.25G × 4 in the config",
         "integration tests",
         "halyard/storefront · CI",
         "once a profile ran 10 jobs",
@@ -3109,8 +3109,16 @@ async fn the_history_form_keeps_the_filters_in_force_and_its_sorts_keep_them_too
     let filters = &page[page.find(r#"class="filters""#).unwrap()..];
     let filters = &filters[..filters.find("</form>").unwrap()];
     assert!(
-        filters.contains(r#"<option value="success" selected>"#),
-        "the outcome in force is selected: {filters}"
+        filters.contains(r#"<a href="/history?outcome=success" aria-current="page">Succeeded</a>"#),
+        "the outcome in force is the chip marked: {filters}"
+    );
+    assert!(
+        filters.contains(r#"<input type="hidden" name="outcome" value="success">"#),
+        "the search keeps the outcome a chip set: {filters}"
+    );
+    assert!(
+        filters.contains(r#"href="/history?repository=halyard%2Fledger&amp;outcome=success""#),
+        "a repository's chip keeps the outcome: {filters}"
     );
     assert!(
         filters.contains(r#"<option value="E2E">E2E</option>"#),
@@ -3154,7 +3162,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let off = dashboard.page(&cookie, "/sizing").await.body;
     assert!(off.contains("Auto sizing is off"), "{off}");
     assert!(
-        off.contains(r#"data-label="warm">310 of 400</td>"#)
+        off.contains("<dt>Warm starts</dt><dd>310 of 400</dd>")
             && off.contains("Warm starts p50 2s, others 21s"),
         "{off}"
     );

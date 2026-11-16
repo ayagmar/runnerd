@@ -72,6 +72,75 @@ impl Insight {
     }
 }
 
+/// The number an insight is about, short, for a figure beside its sentence: `6m 10s` over `from 4m 40s`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsightFigure {
+    /// The number: `6m 10s`, `2 of 31`, `8.1G`, `4%`.
+    pub value: String,
+    /// What it is, short and lower case: `from 4m 40s`, `runs passed on a re-run`.
+    pub label: String,
+}
+
+impl Insight {
+    /// The number it is about, with what it is; `None` for a kind from a later release. Its sentence says the rest.
+    pub fn figure(&self) -> Option<InsightFigure> {
+        let figure = |value: String, label: String| Some(InsightFigure { value, label });
+        let of = |part: u32, whole: u32| format!("{part} of {whole}");
+        match &self.kind {
+            InsightKind::Slower { before, now, .. } => {
+                figure(duration(*now), format!("from {}", duration(*before)))
+            }
+            InsightKind::Flaky { flaky, total } => {
+                figure(of(*flaky, *total), "runs passed on a re-run".to_owned())
+            }
+            InsightKind::NearCap {
+                profile, peak, cap, ..
+            } => figure(
+                ByteSize(*peak).to_string(),
+                format!("p95 peak, of {profile}'s {}", ByteSize(*cap)),
+            ),
+            InsightKind::ColdCache { hits, lookups, .. } => {
+                let percent = (u128::from(*hits) * 100 + u128::from(*lookups) / 2)
+                    / u128::from((*lookups).max(1));
+                figure(
+                    format!("{}%", percent.min(100)),
+                    format!("of {lookups} lookups hit"),
+                )
+            }
+            InsightKind::Throttled { throttled, total } => {
+                figure(of(*throttled, *total), "runs throttled".to_owned())
+            }
+            InsightKind::Waits { before, now } => figure(
+                duration(*now),
+                format!("p95 wait, from {}", duration(*before)),
+            ),
+            InsightKind::CpuHeld {
+                profile,
+                cpus,
+                held,
+                total,
+                ..
+            } => figure(
+                of(*held, *total),
+                format!("runs held back by {profile}'s {cpus} CPUs"),
+            ),
+            InsightKind::HostHeld { jobs, waited } => figure(
+                duration(*waited),
+                if *jobs == 1 {
+                    "1 job waits for the host's memory".to_owned()
+                } else {
+                    format!("longest of {jobs} waits for the host's memory")
+                },
+            ),
+            InsightKind::HostLow { lowest, .. } => figure(
+                ByteSize(*lowest).to_string(),
+                "least memory available".to_owned(),
+            ),
+            InsightKind::Unknown => None,
+        }
+    }
+}
+
 impl Severity {
     /// `warning` or `notice`.
     pub fn label(self) -> &'static str {

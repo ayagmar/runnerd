@@ -5,7 +5,7 @@
 use maud::{Markup, html};
 use runnerd_core::api::{
     Digest, DiskWrites, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits, RunLink,
-    Tone, View, WaitSpread,
+    ShareOwner, Tone, View, WaitSpread, WriteTop,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -73,10 +73,97 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             }
         }
         @if let Some(disk) = &insights.disk {
-            section aria-labelledby="disk-title" {
-                div.section-head {
-                    h2 #disk-title { (DiskWrites::TITLE) }
+            (disk_writes(disk))
+        }
+        @if !insights.waits.is_empty() {
+            (waits(&insights.waits))
+        }
+    };
+    page(View::Insights.title(), Some(Page::Insights), None, &main)
+}
+
+/// An insight as a row: its kind and the number it is about, then core's sentence and the runs that show it.
+fn card(insight: &Insight, now: u64) -> Markup {
+    let tone = match insight.tone() {
+        Tone::Warn => " warn",
+        Tone::Bad => " bad",
+        Tone::Good | Tone::Neutral | Tone::Quiet => "",
+    };
+    html! {
+        li class=(format!("insight {}{tone}", insight.kind.word())) {
+            div.insight-figure {
+                span.insight-kind { span.tone-mark aria-hidden="true" {} (insight.kind.label()) }
+                @if let Some(figure) = insight.figure() {
+                    strong.insight-value { (figure.value) }
+                    span.insight-label { (figure.label) }
                 }
+            }
+            div.insight-body {
+                p.sentence { (insight.sentence) }
+                @if let InsightKind::Slower { since: Some(since), .. } = &insight.kind {
+                    p.insight-run { "Since " (run_link(since, now)) }
+                }
+                @if let Some(latest) = insight.runs.first() {
+                    p.insight-run {
+                        @if insight.runs.len() == 1 { "Run " } @else { "Latest of " (insight.runs.len()) " runs " }
+                        (run_link(latest, now))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The disk writes as figures and ranked bars: what the jobs wrote, what the drive wrote and whose it was, and the
+/// workflows and jobs that wrote most; core's sentences, with what the figures leave out, folded under them.
+fn disk_writes(disk: &DiskWrites) -> Markup {
+    let jobs = &disk.jobs;
+    html! {
+        section.disk aria-labelledby="disk-title" {
+            div.section-head {
+                h2 #disk-title { (DiskWrites::TITLE) }
+            }
+            dl.headline.disk-figures {
+                @if jobs.measured > 0 {
+                    div { dt { "Jobs wrote" } dd { (format::bytes(jobs.total)) } }
+                    div { dt { (JOBS_HEADING) } dd { (jobs.measured) } }
+                    div { dt { "Median a job" } dd { (format::bytes(jobs.median)) } }
+                    div { dt { "p90 a job" } dd { (format::bytes(jobs.p90)) } }
+                }
+                @if let Some(drive) = &disk.drive {
+                    div { dt { (drive.device) " wrote" } dd { (format::bytes(drive.written)) } }
+                    div { dt { "A day at this rate" } dd { (format::bytes(drive.per_day())) } }
+                    @if let Some(commits) = drive.commits {
+                        div { dt { "btrfs commits a second" } dd { (commits.per_second()) } }
+                    }
+                }
+            }
+            @if let Some(drive) = &disk.drive {
+                @let parts = drive.shares.parts();
+                div.share {
+                    h3 { "Whose the drive's writes were" }
+                    div.share-bar role="img" aria-label=(drive.shares.line(drive.watched)) {
+                        @for part in parts.iter().filter(|part| part.bytes > 0) {
+                            span class=(format!("share-part {}", owner_class(part.owner))) style=(format!("flex-grow: {}", part.bytes)) {}
+                        }
+                    }
+                    ul.share-key aria-hidden="true" {
+                        @for part in &parts {
+                            li class=(owner_class(part.owner)) {
+                                span.swatch {}
+                                strong { (part.percent) "%" }
+                                " " (part.owner.label())
+                            }
+                        }
+                    }
+                }
+            }
+            div.write-tops {
+                (ranked("Workflows that wrote most", &disk.workflows))
+                (ranked("Jobs that wrote most", &disk.top_jobs))
+            }
+            details.in-words {
+                summary { "In sentences" }
                 @for part in disk.sections() {
                     h3 { (part.title) }
                     ul.host-days {
@@ -87,30 +174,38 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
                 }
             }
         }
-        @if !insights.waits.is_empty() {
-            (waits(&insights.waits))
-        }
-    };
-    page(View::Insights.title(), Some(Page::Insights), None, &main)
+    }
 }
 
-fn card(insight: &Insight, now: u64) -> Markup {
-    let tone = match insight.tone() {
-        Tone::Warn => " warn",
-        Tone::Bad => " bad",
-        Tone::Good | Tone::Neutral | Tone::Quiet => "",
-    };
+/// The class of a share's owner, which colours its part of the bar.
+fn owner_class(owner: ShareOwner) -> &'static str {
+    match owner {
+        ShareOwner::Jobs => "owner-jobs",
+        ShareOwner::Slice => "owner-slice",
+        ShareOwner::Daemon => "owner-daemon",
+        ShareOwner::Unknown => "owner-unknown",
+    }
+}
+
+/// The workflows or jobs that wrote most, each a bar as long as its share of the first's bytes.
+fn ranked(title: &str, tops: &[WriteTop]) -> Markup {
+    let most = tops.iter().map(|top| top.total).max().unwrap_or(0);
     html! {
-        li class=(format!("insight {} {}{tone}", insight.severity.label(), insight.kind.word())) {
-            span.badge { (insight.kind.label()) }
-            p.sentence { (insight.sentence) }
-            @if let InsightKind::Slower { since: Some(since), .. } = &insight.kind {
-                p.muted { "Since " (run_link(since, now)) }
-            }
-            @if let Some(latest) = insight.runs.first() {
-                p.muted {
-                    @if insight.runs.len() == 1 { "Run: " } @else { "Latest of " (insight.runs.len()) " runs: " }
-                    (run_link(latest, now))
+        @if !tops.is_empty() {
+            div.ranked {
+                h3 { (title) }
+                ol {
+                    @for top in tops {
+                        li style=(format!("--share: {:.4}", crate::chart::ratio(top.total, most))) {
+                            span.ranked-name { (top.name()) }
+                            span.ranked-value { (format::bytes(top.total)) }
+                            span.ranked-bar aria-hidden="true" {}
+                            span.ranked-note {
+                                (top.jobs) @if top.jobs == 1 { " job" } @else { " jobs" }
+                                ", " (format::bytes(top.per_job())) " a job"
+                            }
+                        }
+                    }
                 }
             }
         }
