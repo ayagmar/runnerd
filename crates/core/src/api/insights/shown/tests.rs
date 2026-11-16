@@ -1,8 +1,8 @@
 //! What every client says of insights and the digest.
 
 use crate::api::{
-    Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, Severity, Tone, WaitSpread,
-    WeekWaits,
+    AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, Severity, Tone,
+    WaitSpread, WeekWaits,
 };
 
 fn insight(severity: Severity, kind: InsightKind) -> Insight {
@@ -88,6 +88,43 @@ fn the_digest_names_each_long_wait_with_its_workflow_and_a_readable_time() {
     );
 }
 
+/// A card shows an insight's figure big and its sentence under it: a figure that disagreed with the sentence, or a
+/// share past 100%, would contradict it.
+#[test]
+fn an_insights_figure_is_the_number_its_sentence_is_about() {
+    let slower = insight(
+        Severity::Warning,
+        InsightKind::Slower {
+            branch: None,
+            before: 280,
+            now: 370,
+            since: None,
+        },
+    );
+    let figure = slower.figure().expect("a figure");
+    assert_eq!(
+        (figure.value.as_str(), figure.label.as_str()),
+        ("6m 10s", "from 4m 40s")
+    );
+    let cold = insight(
+        Severity::Notice,
+        InsightKind::ColdCache {
+            branch: None,
+            hits: 2,
+            lookups: 1,
+        },
+    );
+    assert_eq!(
+        cold.figure().expect("a figure").value,
+        "100%",
+        "never past the whole"
+    );
+    assert_eq!(
+        insight(Severity::Notice, InsightKind::Unknown).figure(),
+        None
+    );
+}
+
 #[test]
 fn a_repository_s_waits_read_as_figures_with_a_dash_where_no_job_took_them() {
     // A week without warm starts shows no warm median rather than a zero, and the week before without jobs no p95.
@@ -117,4 +154,103 @@ fn a_repository_s_waits_read_as_figures_with_a_dash_where_no_job_took_them() {
             ("p95 the week before", "–".to_owned()),
         ]
     );
+}
+
+/// Each kind's figure, the number its card shows big, with literal values: swapped arguments would put "20 of 13"
+/// over a sentence saying 13 of 20, and a test comparing a page with `figure()` itself would pass.
+#[test]
+fn each_kind_of_insight_shows_the_figure_its_sentence_is_about() {
+    const G: u64 = 1 << 30;
+    let cases = [
+        (
+            InsightKind::Flaky {
+                flaky: 2,
+                total: 31,
+            },
+            "2 of 31",
+            "runs passed on a re-run",
+        ),
+        (
+            InsightKind::NearCap {
+                profile: "jvm".to_owned(),
+                peak: 81 * G / 10,
+                cap: 9 * G,
+                auto: AutoNote::Off,
+            },
+            "8.1G",
+            "p95 peak, of jvm's 9G",
+        ),
+        (
+            InsightKind::ColdCache {
+                branch: None,
+                hits: 3,
+                lookups: 40,
+            },
+            "8%",
+            "of 40 lookups hit",
+        ),
+        (
+            InsightKind::Throttled {
+                throttled: 4,
+                total: 10,
+            },
+            "4 of 10",
+            "runs throttled",
+        ),
+        (
+            InsightKind::Waits {
+                before: 90,
+                now: 250,
+            },
+            "4m 10s",
+            "p95 wait, from 1m 30s",
+        ),
+        (
+            InsightKind::CpuHeld {
+                profile: "jvm".to_owned(),
+                cpus: 8,
+                held: 13,
+                total: 20,
+                raised_from: None,
+                set: None,
+            },
+            "13 of 20",
+            "runs held back by jvm's 8 CPUs",
+        ),
+        (
+            InsightKind::HostHeld {
+                jobs: 1,
+                waited: 59,
+            },
+            "59s",
+            "1 job waits for the host's memory",
+        ),
+        (
+            InsightKind::HostHeld {
+                jobs: 12,
+                waited: 7260,
+            },
+            "2h 01m",
+            "longest of 12 waits for the host's memory",
+        ),
+        (
+            InsightKind::HostLow {
+                day: 0,
+                seconds: 60,
+                lowest: 0,
+            },
+            "0B",
+            "least memory available",
+        ),
+    ];
+    for (kind, value, label) in cases {
+        let figure = insight(Severity::Warning, kind.clone()).figure();
+        assert_eq!(
+            figure
+                .as_ref()
+                .map(|figure| (figure.value.as_str(), figure.label.as_str())),
+            Some((value, label)),
+            "{kind:?}"
+        );
+    }
 }

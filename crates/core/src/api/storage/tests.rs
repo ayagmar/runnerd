@@ -84,6 +84,54 @@ fn a_week_without_lookups_still_says_what_was_stored_and_refused() {
     );
 }
 
+/// The week as figures says what `week_line` says, in the words every client shows.
+#[test]
+fn the_build_cache_s_week_reads_as_labelled_figures() {
+    let stats = |week| BuildCacheStats {
+        bytes: G,
+        entries: 120,
+        limit: 5 * G,
+        week,
+        actions_cache: true,
+    };
+    let shown = |stats: BuildCacheStats| -> Vec<(String, String, Option<String>)> {
+        stats
+            .figures()
+            .into_iter()
+            .map(|figure| (figure.label, figure.value, figure.of))
+            .collect()
+    };
+    let figure = |label: &str, value: &str, of: Option<&str>| {
+        (label.to_owned(), value.to_owned(), of.map(str::to_owned))
+    };
+    let busy = BuildCacheCounts {
+        hits: 300,
+        misses: 100,
+        read_bytes: 3 * G,
+        written_bytes: G,
+        refused: 2,
+        writer: true,
+    };
+    assert_eq!(
+        shown(stats(busy)),
+        [
+            figure("Entries", "120", None),
+            figure("Lookups hit, 7 days", "75%", Some("of 400")),
+            figure("Served", "3G", None),
+            figure("Stored", "1G", None),
+            figure("Uploads refused", "2", None),
+        ]
+    );
+    assert_eq!(
+        shown(stats(BuildCacheCounts::default())),
+        [
+            figure("Entries", "120", None),
+            figure("Lookups, 7 days", "0", None),
+        ],
+        "a week no job used it says so, with nothing stored"
+    );
+}
+
 #[test]
 fn records_near_max_total_say_so_wherever_they_are_listed() {
     assert!(records_near_full(8 * G, 10 * G), "80% is near");

@@ -3,8 +3,8 @@
 //! and how much of a job's log is stored. Plain derivations of the API's types; clients only lay them out.
 
 use super::{
-    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Check, CheckStatus, LogSummary,
-    RecordLimits, RecordNote, RecordRemoval, Records, Tone, period,
+    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Check, CheckStatus, LabelledFigure,
+    LogSummary, RecordLimits, RecordNote, RecordRemoval, Records, Tone, period,
 };
 use crate::config::ByteSize;
 
@@ -206,6 +206,40 @@ impl BuildCacheStats {
         } else {
             format!("{ACTIONS_CACHE}: {place}")
         }
+    }
+
+    /// Its entries and the last 7 days' jobs as figures, in the order they show: its entries; the share of lookups
+    /// that hit, out of how many, and what it served, or that nothing looked an entry up; what it stored, when a job
+    /// used it; the uploads it refused, when any. The same facts as [`BuildCacheStats::week_line`].
+    pub fn figures(&self) -> Vec<LabelledFigure> {
+        let week = &self.week;
+        let mut figures = vec![LabelledFigure::new("Entries", self.entries.to_string())];
+        match week.hit_percent() {
+            Some(percent) => {
+                figures.push(
+                    LabelledFigure::new("Lookups hit, 7 days", format!("{percent}%"))
+                        .of(format!("of {}", week.lookups())),
+                );
+                figures.push(LabelledFigure::new(
+                    "Served",
+                    ByteSize(week.read_bytes).to_string(),
+                ));
+            }
+            None => figures.push(LabelledFigure::new("Lookups, 7 days", "0")),
+        }
+        if week.activity().is_some() {
+            figures.push(LabelledFigure::new(
+                "Stored",
+                ByteSize(week.written_bytes).to_string(),
+            ));
+        }
+        if week.refused > 0 {
+            figures.push(LabelledFigure::new(
+                "Uploads refused",
+                week.refused.to_string(),
+            ));
+        }
+        figures
     }
 
     /// Its entries and the last 7 days' jobs: `120 entries; 75% of 400 lookups hit in 7 days, 3G served, 1G

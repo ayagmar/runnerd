@@ -421,7 +421,9 @@ fn busy_desktop(fake: &fake::Fake) {
 
 /// `RUNNERD_DEMO_SCENE`, for looking at states the default scene lacks: `idle`, no runner at all under measured
 /// admission, so every slot holds none of the budget; `many`, a profile of 18 more slots, each with a warm runner
-/// holding 1G, so the lanes no longer fit at their floor.
+/// holding 1G, so the lanes no longer fit at their floor; `profiles`, six caps from 1G to 64G on Capacity's scale;
+/// `long`, the first jobs' names and branches near 100 characters long; `bounds`, the Maven store past its bound
+/// beside a 900G mirror; `empty`, a daemon that has run no job yet, for the pages' empty states.
 fn scene(fake: &fake::Fake) {
     const GIB: u64 = 1 << 30;
     let Ok(scene) = std::env::var("RUNNERD_DEMO_SCENE") else {
@@ -476,6 +478,83 @@ fn scene(fake: &fake::Fake) {
             });
             status.budget.memory_in_use += 18 * GIB;
         }
+        "empty" => empty(&mut fixtures),
+        "bounds" => {
+            // The Maven store past its bound, and a mirror far larger than every other volume.
+            for volume in &mut fixtures.caches.volumes {
+                match volume.name.as_str() {
+                    "runnerd-maven" => volume.bytes = 6 * GIB + (512 << 20),
+                    "runnerd-mirror" => volume.bytes = 900 * GIB,
+                    _ => {}
+                }
+            }
+        }
+        "long" => {
+            // Names and branches as long as GitHub lets them be, in the first rows.
+            for job in fixtures.jobs.iter_mut().take(3) {
+                job.summary.name = format!("integration tests{}", " with a matrix entry".repeat(4));
+                job.summary.branch =
+                    Some(format!("feature/{}", "long-running-migration-".repeat(4)));
+            }
+        }
+        "profiles" => {
+            // Caps from 1G to 64G on one scale: a small cap's label has less room than itself.
+            let mut sizing = fake::sizing(&fixtures);
+            let template = sizing.profiles[0].clone();
+            sizing.profiles = [1, 2, 4, 9, 16, 64]
+                .into_iter()
+                .enumerate()
+                .map(|(index, gib)| {
+                    let mut profile = template.clone();
+                    profile.name = format!("p{index}-{gib}g");
+                    profile.memory = gib * GIB;
+                    profile
+                })
+                .collect();
+            fixtures.sizing = Some(sizing);
+        }
         other => println!("RUNNERD_DEMO_SCENE: no scene {other}, so the default one"),
     }
+}
+
+/// A daemon that has run no job yet: no history, no insights, no caches measured.
+fn empty(fixtures: &mut fake::Fixtures) {
+    let at = fixtures.now;
+    fixtures.jobs.clear();
+    fixtures.samples.clear();
+    fixtures.logs.clear();
+    fixtures.stats.clear();
+    fixtures.cache_history.clear();
+    fixtures.caches = runnerd_core::api::Caches {
+        measured_at: None,
+        volumes: vec![],
+        build: None,
+    };
+    fixtures.insights = Some(runnerd_core::api::Insights {
+        since: at - 14 * 86_400,
+        until: at,
+        insights: vec![],
+        waits: vec![],
+        host: vec![],
+        disk: None,
+    });
+    for profile in &mut fixtures.status.profiles {
+        for slot in &mut profile.slots {
+            slot.runner = None;
+        }
+    }
+    // No profile has run a job: each is a chip on Capacity, not a lane.
+    let mut sizing = fake::sizing(fixtures);
+    for profile in &mut sizing.profiles {
+        profile.peaks = runnerd_core::api::Peaks::default();
+        profile.wait = runnerd_core::api::Spread::default();
+        profile.slot_wait = runnerd_core::api::Spread::default();
+        profile.starts = runnerd_core::api::Starts::default();
+        profile.busy = 0;
+        profile.advice = runnerd_core::api::Advice::TooFew { jobs: 0 };
+        profile.revert = None;
+        profile.hold = None;
+        profile.jobs.clear();
+    }
+    fixtures.sizing = Some(sizing);
 }

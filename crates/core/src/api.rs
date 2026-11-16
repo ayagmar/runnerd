@@ -53,6 +53,7 @@ mod budget;
 mod control;
 mod disk;
 mod events;
+mod figure;
 mod insights;
 mod jobs;
 mod labels;
@@ -85,15 +86,16 @@ pub use control::{
     DoctorState, DoctorSummary, PauseQuery, Paused, ReplaceQuery, RunningJob,
 };
 pub use disk::{
-    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteSection,
-    WriteTop,
+    Commits, DiskWrites, DiskWritten, DriveShare, DriveShares, DriveWrites, JobWrites, Measure,
+    ShareOwner, WriteSection, WriteTop,
 };
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
+pub use figure::LabelledFigure;
 pub use insights::{
     AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,
-    InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest,
-    NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitFigure, WaitSpread,
-    WeekWaits,
+    InsightFigure, InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent,
+    NotifyTest, NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitFigure,
+    WaitSpread, WeekWaits,
 };
 #[cfg(feature = "host")]
 pub(crate) use jobs::SAMPLE_GAP_INTERVALS;

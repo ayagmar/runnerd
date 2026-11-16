@@ -30,6 +30,8 @@ use crate::format;
 
 /// Log lines the page shows; the full log is at `/jobs/{id}/log`.
 pub(crate) const LOG_TAIL: u64 = 1000;
+/// The newest lines of a running job's tail a phone shows inline; `style.css` hides the older ones by this count.
+const PHONE_TAIL: u64 = 200;
 /// Runs of the same job the page compares.
 const RUNS: u32 = 30;
 /// The most lines of a finished job's log the page outlines, its last; the full log has the rest.
@@ -353,7 +355,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
     html! {
         header #job-head .job-head {
             p.crumbs {
-                a href=(format!("/history?repository={}", summary.repository)) { (summary.repository) }
+                a.hit href=(format!("/history?repository={}", summary.repository)) { (summary.repository) }
                 @if let Some(workflow) = &summary.workflow { " · " (workflow) }
             }
             h1 { (summary.title().name) " " (badge(summary)) }
@@ -362,7 +364,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
                 @if let Some(branch) = &summary.branch { code { (branch) } }
                 @let run = html! { "run " (summary.run_id) @if summary.run_attempt > 1 { ", attempt " (summary.run_attempt) } };
                 @if let Some(url) = &summary.url {
-                    a.external href=(url) rel="noreferrer" aria-label=(format!("Run {} on GitHub", summary.run_id)) { (run) }
+                    a.external.hit href=(url) rel="noreferrer" aria-label=(format!("Run {} on GitHub", summary.run_id)) { (run) }
                 } @else {
                     span { (run) }
                 }
@@ -476,7 +478,7 @@ fn failure(view: &JobView) -> Markup {
                 }
             }
             @if let Some(step) = failure.step.and_then(|step| outline.step_lines(step)).filter(|range| !range.is_empty()) {
-                p { a href=(format!("#L{}", step.to)) { "The step in the log" } }
+                p { a.hit href=(format!("#L{}", step.to)) { "The step in the log" } }
             }
             @if let Some(shell) = &failure.shell { (copy_command(shell)) }
         }
@@ -784,7 +786,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                 p.muted { "This record lacks its container's caps: the lines marked “" (profile) " now” are its limits in the config now, which may not be the ones the job ran with." }
             }
             @if samples.is_empty() {
-                p.muted { "No samples: the runner's container never ran, or its samples are past `history.samples`." }
+                p.muted { "No samples: the runner's container never ran, or its samples are past " code { "history.samples" } "." }
             } @else {
                 div.charts {
                     div.chart-card {
@@ -855,7 +857,7 @@ fn runs(view: &JobView) -> Markup {
             section #runs class=(format!("runs {}", view.profile_class)) aria-labelledby="runs-title" {
                 div.section-head {
                     h2 #runs-title { "Latest " (runs.len()) " runs of this job" }
-                    a href=(format!("/history?repository={}", view.job.summary.repository)) { "History of " (view.job.summary.repository) }
+                    a.hit href=(format!("/history?repository={}", view.job.summary.repository)) { "History of " (view.job.summary.repository) }
                 }
                 dl.headline {
                     div { dt { "Median run" } dd { (compared.median_ran.map_or("–".to_owned(), format::duration)) } }
@@ -866,7 +868,7 @@ fn runs(view: &JobView) -> Markup {
                 p.run-scale aria-hidden="true" { "Wait and run, up to " (format::duration(longest)) }
                 // On a narrow screen the runs scroll sideways, and start scrolled to the latest.
                 div.run-scroll {
-                    ol.run-bars style=(format!("--runs: {}", runs.len())) {
+                    ol class=(if peak == 0 { "run-bars no-peaks" } else { "run-bars" }) style=(format!("--runs: {}", runs.len())) {
                         @for run in runs {
                             @let waited = run.waited(view.now).unwrap_or(0);
                             @let ran = run.ran(view.now).unwrap_or(0);
@@ -879,8 +881,10 @@ fn runs(view: &JobView) -> Markup {
                                         span class=(format!("ran {}", outcome_class(run))) style=(format!("--h: {}", ratio(ran, longest))) {}
                                         span.waited style=(format!("--h: {}", ratio(waited, longest))) {}
                                     }
-                                    span.run-peak aria-hidden="true" {
-                                        span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                                    @if peak > 0 {
+                                        span.run-peak aria-hidden="true" {
+                                            span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                                        }
                                     }
                                 }
                             }
@@ -891,7 +895,7 @@ fn runs(view: &JobView) -> Markup {
                     li.success { span.swatch {} "ran, succeeded" }
                     li.failure { span.swatch {} "ran, failed" }
                     li.wait { span.swatch {} "waited for a runner" }
-                    li.peak { span.swatch {} "memory peak" }
+                    @if peak > 0 { li.peak { span.swatch {} "memory peak" } }
                 }
             }
         } @else {
@@ -1057,11 +1061,12 @@ fn record(view: &JobView) -> Markup {
 pub(crate) fn log(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     html! {
-        section #log .log aria-labelledby="log-title" {
+        // A running job's live tail is `live-log`: on a phone it comes last and shows its newest lines.
+        section #log class=(if matches!(view.outlined, Outlined::Live) { "log live-log" } else { "log" }) aria-labelledby="log-title" {
             div.section-head {
                 h2 #log-title { "Log" }
                 p.muted {
-                    a href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
+                    a.hit href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
                     " · " (summary.log.description())
                 }
             }
@@ -1089,7 +1094,17 @@ pub(crate) fn log(view: &JobView) -> Markup {
                         input type="checkbox" data-follow="log-lines" checked;
                         " Follow"
                     }
-                    (tail(view))
+                    // On a phone the page shows the newest lines only; the full log has the rest.
+                    p.muted.older-lines {
+                        "Showing the newest " (PHONE_TAIL) " lines; the "
+                        a.hit href=(format!("/jobs/{}/log", summary.id)) { "full log" } " has the rest."
+                    }
+                    div.tail-wrap {
+                        (tail(view))
+                        // Shown by the follow script while the reader is scrolled up from the newest line; out of
+                        // the flow, so showing it moves nothing.
+                        button.button.jump-newest type="button" data-jump="log-lines" hidden { "Jump to newest" }
+                    }
                 }
             }
         }
@@ -1101,7 +1116,7 @@ fn tail(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     html! {
         @if view.log_from > 0 {
-            p.muted { "Showing the last " (view.log.len()) " lines." }
+            p.muted.tail-count { "Showing the last " (view.log.len()) " lines." }
         }
         @if view.log.is_empty() && summary.log.lines > 0 {
             p.muted { "The log's lines are past " code { "history.logs" } " and were deleted." }
@@ -1119,8 +1134,9 @@ fn search_form(view: &JobView) -> Markup {
     html! {
         form.log-search-form method="get" role="search" {
             label.field.search {
-                span.field-name { "Search each line's message, not its time or command" }
-                input type="search" name="q" value=[query] data-search autocomplete="off" spellcheck="false" maxlength="200";
+                span.visually-hidden { "Search each line's message, not its time or command" }
+                input type="search" name="q" value=[query] data-search autocomplete="off" spellcheck="false" maxlength="200"
+                    placeholder="Search each line's message";
             }
             button.button-quiet type="submit" { "Search" }
             @if query.is_some() { a.clear href="?" { "Clear" } }
@@ -1290,12 +1306,20 @@ fn styled_line(line: &StyledLine, target: Option<u64>, place: Place) -> Markup {
         LineKind::Command => "command",
         _ => "",
     };
+    // A line the page cuts takes one row, its cut said under it; opened, it shows what the page has of it.
+    let omitted = line.omitted_words();
+    let class = match (class.is_empty(), omitted.is_some()) {
+        (true, false) => None,
+        (true, true) => Some("long".to_owned()),
+        (false, false) => Some(class.to_owned()),
+        (false, true) => Some(format!("{class} long")),
+    };
     html! {
-        li id=[(place == Place::Log).then(|| format!("L{}", line.line + 1))] class=[(!class.is_empty()).then_some(class)]
+        li id=[(place == Place::Log).then(|| format!("L{}", line.line + 1))] class=[class]
             aria-current=[(place == Place::Log && target == Some(line.line)).then_some("true")] {
             (line_number(line))
             span.text { (styled_runs(line)) }
-            @if let Some(omitted) = line.omitted_words() { " " span.omitted { "(" (omitted) ")" } }
+            @if let Some(omitted) = omitted { " " span.omitted { "(" (omitted) ")" } }
         }
     }
 }

@@ -206,25 +206,127 @@ addEventListener('hashchange', openLine);
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', openLine);
 else openLine();
 
-// Follow while running: the live tail stays at its end as lines arrive while it is at its end. Scrolled up to read
-// an earlier line, it stays there until scrolled back to the end; unticked, it never moves.
+// Follow while running: the newest line stays in view as lines arrive, while the reader is at it. A wide screen
+// scrolls the tail in its own box; on a phone the tail is part of the page, and the page scrolls, only while the
+// tail's end is at the foot of the screen. Any scroll up the reader makes stops following, and "Jump to newest"
+// shows over the lines; scrolling back down to the end follows again. Unticked, it never moves. While not following,
+// the line the reader is on stays where it is on the screen as lines above it are dropped or hidden: the browser's
+// own scroll anchoring is off for the tail (Safari has none), so this is the one place that holds it.
 for (const toggle of document.querySelectorAll('[data-follow]')) {
   const id = toggle.dataset.follow;
-  const atEnd = (box) => box.scrollHeight - box.clientHeight - box.scrollTop < 8;
-  let following = true;
+  const jump = document.querySelector(`[data-jump="${id}"]`);
+  const box = () => document.getElementById(id);
+  const ownBox = (tail) => getComputedStyle(tail).overflowY !== 'visible';
+  // Where the screen ends for the reader: above the tab bar where there is one.
+  const foot = () => {
+    const bar = document.querySelector('.top nav');
+    const top = bar && getComputedStyle(bar).position === 'fixed' ? bar.getBoundingClientRect().top : innerHeight;
+    return Math.min(innerHeight, top);
+  };
+  // The scroller the tail is read in: its own box, or the page.
+  const position = (tail) => (ownBox(tail) ? tail.scrollTop : scrollY);
+  const moveBy = (tail, by) => {
+    if (ownBox(tail)) tail.scrollTop += by;
+    else scrollTo({ top: scrollY + by, behavior: 'instant' });
+  };
+  const atEnd = (tail) => {
+    if (ownBox(tail)) return tail.scrollHeight - tail.clientHeight - tail.scrollTop < 8;
+    const past = tail.getBoundingClientRect().bottom - foot();
+    return past < 48 && past > -160;
+  };
+  // A scroll this script makes, told apart from the reader's by where it left the scroller.
+  let ours = null;
+  let last = 0;
+  const scrolled = (tail) => {
+    ours = position(tail);
+    last = ours;
+  };
+  const toEnd = (tail) => {
+    if (ownBox(tail)) tail.scrollTop = tail.scrollHeight;
+    else moveBy(tail, tail.getBoundingClientRect().bottom - foot() + 16);
+    scrolled(tail);
+  };
+  // The first line on screen, by its number, and where it is.
+  let anchor = null;
+  // The first shown line from number `from` on; with `onScreen`, the first whose foot is past the scroller's top.
+  // Where the scroller's top is on screen: the box's for a tail with its own, the page's (0) for the page. An anchor
+  // is measured from it, so the page scrolling a box up or down the screen does not read as its lines moving.
+  const origin = (tail) => (ownBox(tail) ? tail.getBoundingClientRect().top : 0);
+  const lineAt = (tail, from, onScreen) => {
+    const top = origin(tail);
+    for (const line of tail.children) {
+      if (line.value < from || line.getClientRects().length === 0) continue;
+      if (!onScreen || line.getBoundingClientRect().bottom > top) return line;
+    }
+    return null;
+  };
+  // A line to hold only while the reader is in the tail: it spans its scroller's top. A page whose log is below the
+  // screen holds nothing, so what grows above the log moves no reader who is not in it.
+  const mark = (tail) => {
+    const box = tail.getBoundingClientRect();
+    const spans = ownBox(tail) || (box.top < 1 && box.bottom > 0);
+    const line = spans ? lineAt(tail, 0, true) : null;
+    anchor = line ? { value: line.value, top: line.getBoundingClientRect().top - origin(tail) } : null;
+  };
+  const hold = (tail) => {
+    if (!anchor) return;
+    const line = lineAt(tail, anchor.value, false);
+    if (!line) return;
+    const by = line.getBoundingClientRect().top - origin(tail) - anchor.top;
+    if (Math.abs(by) >= 1) {
+      moveBy(tail, by);
+      scrolled(tail);
+    }
+  };
+  const tail = box();
+  // The page opens on the failure and the timeline, not at the log's end.
+  let following = tail ? ownBox(tail) || atEnd(tail) : true;
+  if (tail) {
+    last = position(tail);
+    mark(tail);
+  }
+  // Offered only over the tail's lines, not over the log's heading while the lines are still below the screen.
+  const inView = (tail) => {
+    const rect = tail.getBoundingClientRect();
+    return rect.top < foot() - 120 && rect.bottom > 0;
+  };
+  const show = () => {
+    const tail = box();
+    if (jump) jump.hidden = following || !toggle.checked || !tail || !inView(tail);
+  };
   document.addEventListener(
     'scroll',
     (event) => {
-      if (event.target instanceof Element && event.target.id === id) following = atEnd(event.target);
+      const tail = box();
+      if (!tail || !(event.target === tail || (event.target === document && !ownBox(tail)))) return;
+      const at = position(tail);
+      if (ours !== null && Math.abs(at - ours) < 2) {
+        ours = null;
+      } else if (at < last - 1) {
+        following = false;
+      } else if (atEnd(tail)) {
+        following = true;
+      }
+      last = at;
+      mark(tail);
+      show();
     },
     true,
   );
   const follow = () => {
-    const box = document.getElementById(id);
-    if (toggle.checked && following && box) box.scrollTop = box.scrollHeight;
+    const tail = box();
+    if (!tail) return;
+    if (toggle.checked && following) toEnd(tail);
+    else hold(tail);
+    mark(tail);
+    show();
   };
-  new MutationObserver(follow).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver(follow).observe(box()?.parentElement ?? document.body, { childList: true, subtree: true });
   toggle.addEventListener('change', () => {
+    following = true;
+    follow();
+  });
+  jump?.addEventListener('click', () => {
     following = true;
     follow();
   });

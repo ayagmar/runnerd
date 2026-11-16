@@ -6,11 +6,11 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Advice, AutoPlan, JOBS_HEADING, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone,
-    job_title,
+    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
 };
 use runnerd_core::client::{Client, ClientError};
 
+use super::insights::figure_list;
 use super::{Page, heading, page};
 use crate::chart::ratio;
 use crate::format;
@@ -42,7 +42,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
     let since = html! { p.page-figure { strong { (jobs) " jobs" } span.muted { " since " (format::date(sizing.since)) } } };
     let main = html! {
         (heading(runnerd_core::api::View::Capacity.title(), Some(Page::Sizing), Some(since)))
-        (profiles_table(sizing))
+        (lanes(view))
         (auto_plan(view))
         @for (index, profile) in sizing.profiles.iter().enumerate() {
             (profile_section(sizing, profile, index))
@@ -52,38 +52,40 @@ pub(crate) fn render(view: &SizingView) -> Markup {
     page(Section::Sizing.title(), Some(Page::Sizing), None, &main)
 }
 
-/// Whether auto sizing is on, its rules in words, and per profile what its next look changes, or until when a recent
-/// change holds it, or that the advice asks for nothing.
+/// Whether auto sizing is on, in one line that opens to its rules and, per profile, what its next look changes, or
+/// until when a recent change holds it, and why.
 fn auto_plan(view: &SizingView) -> Markup {
     let sizing = &view.sizing;
     let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) else {
         if sizing.auto {
             // A daemon that does not say what it does next.
             return html! {
-                section.auto-plan aria-labelledby="auto-title" {
-                    h2 #auto-title { "Auto sizing is on" }
+                details.auto-plan {
+                    summary { span.auto-state.on { "Auto sizing is on" } }
                     p { "runnerd writes the advice into the config itself, a step at a time." }
                 }
             };
         }
         return html! {
-            section.auto-plan.off aria-labelledby="auto-title" {
-                h2 #auto-title { "Auto sizing is off" }
+            details.auto-plan.off {
+                summary {
+                    span.auto-state { "Auto sizing is off" }
+                    span.muted { "The advice changes nothing until you review it in the config." }
+                }
                 p {
-                    "The advice below changes nothing until you review it in the config. With "
-                    code { "auto = true" } " under " code { "[sizing]" }
-                    ", runnerd applies it itself, a step at a time."
+                    "With " code { "auto = true" } " under " code { "[sizing]" }
+                    ", runnerd applies the advice itself, a step at a time."
                 }
             }
         };
     };
     html! {
-        section.auto-plan aria-labelledby="auto-title" {
-            h2 #auto-title { "Auto sizing is on" }
-            p { "runnerd " (plan.rules()) "." }
-            @if let Some(blocked) = plan.blocked_line() {
-                p.notice.tone-warn { (blocked) "." }
+        details.auto-plan open[plan.blocked_line().is_some()] {
+            summary {
+                span.auto-state.on { "Auto sizing is on" }
+                @if let Some(blocked) = plan.blocked_line() { span.over-limit { (blocked) } }
             }
+            p { "runnerd " (plan.rules()) "." }
             ul.plan-list {
                 @for (index, profile) in sizing.profiles.iter().enumerate() {
                     li class=(format!("p{}", index % 6)) {
@@ -127,42 +129,60 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
     }
 }
 
-/// Every profile in one table: its size, its jobs, how busy and how long waited, and core's advice, plain.
-fn profiles_table(sizing: &Sizing) -> Markup {
+/// Every profile as a lane: its cap as a track, as long beside the others as its memory is, its jobs' peaks from
+/// p50 to p99 on it and what they need as a mark; then core's advice as a figure with what to do about it, and the
+/// profile's figures. With auto sizing on, the lane says what its next look does instead of offering the change.
+fn lanes(view: &SizingView) -> Markup {
+    let sizing = &view.sizing;
+    // One scale for every lane, so a lane's length compares with the others'.
+    let whole = sizing
+        .profiles
+        .iter()
+        .map(|profile| {
+            profile
+                .memory
+                .max(sizing.need(profile).memory)
+                .max(profile.peaks.memory.max)
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let plan = sizing.auto_plan.as_ref().filter(|_| sizing.auto);
     html! {
-        div.table-wrap {
-            table.job-table.profiles-table {
-                thead {
-                    tr {
-                        th scope="col" { "Profile" }
-                        th scope="col" .number { "Memory" }
-                        th scope="col" .number { (JOBS_HEADING) }
-                        th scope="col" .number { "Slots busy" }
-                        th scope="col" .number { "Waited p50 / p95" }
-                        th scope="col" .number { "Warm starts" }
-                        th scope="col" .number { "CPU p99" }
-                        th scope="col" { "Advice" }
+        @if sizing.profiles.iter().any(|profile| profile.peaks.jobs > 0) {
+        ol.sizing-lanes aria-label="Profiles" {
+            @for (index, profile) in sizing.profiles.iter().enumerate().filter(|(_, profile)| profile.peaks.jobs > 0) {
+                li class=(format!("sizing-lane p{}", index % 6)) {
+                    div.profile-head {
+                        p.profile-name { a.hit href=(format!("#sizing-{index}")) { span.swatch aria-hidden="true" {} (profile.name) } }
+                        span.profile-size { (format::bytes(profile.memory)) " × " (profile.slots) }
                     }
-                }
-                tbody {
-                    @for (index, profile) in sizing.profiles.iter().enumerate() {
-                        tr class=(format!("p{}", index % 6)) data-row {
-                            th scope="row" { a href=(format!("#sizing-{index}")) { span.swatch aria-hidden="true" {} (profile.name) } }
-                            td.number data-label="memory" { (format::bytes(profile.memory)) " × " (profile.slots) }
-                            td.number data-label="jobs" { (profile.starts.total()) }
-                            td.number data-label="busy" { (profile.busy) "%" }
-                            td.number data-label="waited" { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) }
-                            td.number data-label="warm" {
-                                @if profile.starts.warm > 0 { (profile.starts.warm) " of " (profile.starts.total()) } @else { "–" }
+                    div.profile-scale { (scale(sizing, profile, whole)) }
+                    div class=(format!("profile-advice {}", advice_class(profile.advice))) {
+                        strong.advice-figure { (profile.advice_word()) }
+                        @if let Some(plan) = plan {
+                            span.advice-next { (plan.profile_plan(&profile.name, view.now).headline(plan)) }
+                        } @else if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
+                            a.button href=(format!("/config?{}", serde_urlencoded::to_string([("resize", &profile.name)]).unwrap_or_default())) {
+                                "Review " (format::bytes(change.memory)) " × " (change.slots) " in the config"
                             }
-                            td.number data-label="CPU p99" {
-                                @match profile.peaks.cpu_p99() {
-                                    Some(p99) => { (format::cores_used(p99)) " of " (profile.cpus) }
-                                    None => { "–" }
-                                }
-                            }
-                            td { span class=(advice_class(profile.advice)) { (sizing.advice_line(profile)) } }
                         }
+                    }
+                    p.profile-why { (format::sentence(&sizing.advice_line(profile))) }
+                    (figure_list("profile-figures", &profile.figures()))
+                }
+            }
+        }
+        }
+        // A profile no job has run on yet is no lane: a chip under them, as an idle slot is under the overview's bar.
+        @if sizing.profiles.iter().any(|profile| profile.peaks.jobs == 0) {
+            ul.profile-chips aria-label="Profiles without jobs" {
+                @for (index, profile) in sizing.profiles.iter().enumerate().filter(|(_, profile)| profile.peaks.jobs == 0) {
+                    li class=(format!("profile-chip p{}", index % 6)) {
+                        span.swatch aria-hidden="true" {}
+                        a.hit href=(format!("#sizing-{index}")) { (profile.name) }
+                        span.profile-size { (format::bytes(profile.memory)) " × " (profile.slots) }
+                        span.muted { (profile.advice_word()) }
                     }
                 }
             }
@@ -205,14 +225,6 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                         "Warm starts p50 " (format::duration(profile.starts.warm_p50)) ", others " (format::duration(profile.starts.cold_p50))
                     }
                     @if peaks.cpu_p99().is_none() { " " (peaks.cpu_runs_line(profile.cpus)) }
-                }
-            }
-            @if peaks.jobs > 0 { (scale(sizing, profile)) }
-            div class=(format!("advice-row {}", advice_class(profile.advice))) {
-                @if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
-                    a.button href=(format!("/config?{}", serde_urlencoded::to_string([("resize", &profile.name)]).unwrap_or_default())) {
-                        "Review memory " (format::bytes(change.memory)) ", " (change.slots) " slots in the config"
-                    }
                 }
             }
             (changes(sizing, profile))
@@ -289,12 +301,12 @@ fn changes(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
 
 /// The cap as a track, the jobs' peaks from p50 to p99 on it, and what the advice sizes for as a mark: the memory
 /// it advises, or with too few jobs, what it would size for (`Sizing::need`).
-fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
+/// `whole` is the memory the track's full length stands for, the same for every profile's.
+fn scale(sizing: &Sizing, profile: &ProfileSizing, whole: u64) -> Markup {
     let memory = &profile.peaks.memory;
     let need = sizing.need(profile);
     let reason = need.reason;
     let need = need.memory;
-    let whole = profile.memory.max(need).max(memory.max).max(1);
     let at = |bytes: u64| format!("{:.2}%", ratio(bytes, whole) * 100.0);
     let label = format!(
         "Memory peaks: p50 {}, p95 {}, p99 {}, largest {}; {reason}, rounded up, is {}; the cap is {}",
@@ -307,11 +319,14 @@ fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
     );
     html! {
         div.peak-scale role="img" aria-label=(label) {
-            div.cap style=(format!("--to: {}", at(profile.memory))) { span { "cap " (format::bytes(profile.memory)) } }
+            // A cap too short for its label has the label start where the track does, reading on past the cap.
+            div class=(if ratio(profile.memory, whole) < 0.3 { "cap short" } else { "cap" }) style=(format!("--to: {}", at(profile.memory))) {
+                span { "cap " (format::bytes(profile.memory)) }
+            }
             div.spread style=(format!("--from: {}; --to: {}", at(memory.p50), at(memory.p99))) {}
             span.mark.p95 style=(format!("--at: {}", at(memory.p95))) title=(format!("p95 {}", format::bytes(memory.p95))) {}
             // Near the end of the track, the label goes to the mark's left.
-            span class=(if ratio(need, whole) > 0.7 { "mark need end" } else { "mark need" }) style=(format!("--at: {}", at(need))) {
+            span class=(if ratio(need, whole) > 0.6 { "mark need end" } else { "mark need" }) style=(format!("--at: {}", at(need))) {
                 span { "needs " (format::bytes(need)) }
             }
         }

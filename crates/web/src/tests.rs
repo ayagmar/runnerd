@@ -2644,16 +2644,66 @@ fn selected(page: &str) -> String {
 }
 
 #[tokio::test]
+async fn auto_sizing_on_without_a_plan_offers_no_change_to_make_by_hand() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut sizing = fake::sizing(&fixtures);
+        sizing.auto = true;
+        sizing.auto_plan = None;
+        fixtures.sizing = Some(sizing);
+    }
+    let page = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(
+        page.contains("3.25G × 4") && !page.contains("/config?resize="),
+        "node's advice shows, with nothing to review by hand while auto sizing makes it: {page}"
+    );
+}
+
+#[tokio::test]
+async fn a_profile_no_job_ran_on_stays_on_the_sizing_page_as_a_chip_not_a_lane() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut sizing = fake::sizing(&fixtures);
+        let node = sizing
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == "node")
+            .unwrap();
+        node.peaks = runnerd_core::api::Peaks::default();
+        node.jobs.clear();
+        node.advice = runnerd_core::api::Advice::TooFew { jobs: 0 };
+        fixtures.sizing = Some(sizing);
+    }
+    let page = dashboard.page(&cookie, "/sizing").await.body;
+    let lanes = &page[page.find(r#"class="sizing-lanes""#).unwrap()..];
+    let lanes = &lanes[..lanes.find("</ol>").unwrap()];
+    assert!(
+        lanes.contains(">jvm<") && !lanes.contains(">node<"),
+        "only jvm, which ran jobs, is a lane: {lanes}"
+    );
+    let chips = &page[page.find(r#"class="profile-chips""#).unwrap()..];
+    let chips = &chips[..chips.find("</ul>").unwrap()];
+    assert!(
+        chips.contains(r##"href="#sizing-1">node</a>"##) && chips.contains("too few"),
+        "node is a chip with core's word for its advice: {chips}"
+    );
+}
+
+#[tokio::test]
 async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let sizing = dashboard.page(&cookie, "/sizing").await;
     assert_eq!(sizing.status, StatusCode::OK);
     for expected in [
-        "lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
-        "keep 9G: its largest peak + 15% is 9G",
+        "Lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
+        "Keep 9G: its largest peak + 15% is 9G",
         r#"href="/config?resize=node""#,
-        "Review memory 3.25G, 4 slots in the config",
+        "Review 3.25G × 4 in the config",
         "integration tests",
         "halyard/storefront · CI",
         "once a profile ran 10 jobs",
@@ -3148,8 +3198,16 @@ async fn the_history_form_keeps_the_filters_in_force_and_its_sorts_keep_them_too
     let filters = &page[page.find(r#"class="filters""#).unwrap()..];
     let filters = &filters[..filters.find("</form>").unwrap()];
     assert!(
-        filters.contains(r#"<option value="success" selected>"#),
-        "the outcome in force is selected: {filters}"
+        filters.contains(r#"<a href="/history?outcome=success" aria-current="page">Succeeded</a>"#),
+        "the outcome in force is the chip marked: {filters}"
+    );
+    assert!(
+        filters.contains(r#"<input type="hidden" name="outcome" value="success">"#),
+        "the search keeps the outcome a chip set: {filters}"
+    );
+    assert!(
+        filters.contains(r#"href="/history?repository=halyard%2Fledger&amp;outcome=success""#),
+        "a repository's chip keeps the outcome: {filters}"
     );
     assert!(
         filters.contains(r#"<option value="E2E">E2E</option>"#),
@@ -3193,7 +3251,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let off = dashboard.page(&cookie, "/sizing").await.body;
     assert!(off.contains("Auto sizing is off"), "{off}");
     assert!(
-        off.contains(r#"data-label="warm">310 of 400</td>"#)
+        off.contains(r#"<dt>Warm starts</dt><dd>310<span class="muted"> of 400</span></dd>"#)
             && off.contains("Warm starts p50 2s, others 21s"),
         "{off}"
     );
@@ -4050,5 +4108,30 @@ async fn a_job_action_s_preview_gives_focus_back_to_the_button_that_asked_for_it
     assert!(
         preview.contains(r#"data-dismiss-to="[data-asks=&quot;rerun-failed&quot;]""#),
         "the re-run of failed jobs points back at its own button, not the first: {preview}"
+    );
+}
+
+/// The bug: volumes without a bound filled a track on one scale, the largest of them, so a 14G snapshot beside a
+/// 900G mirror read as empty. Such a volume has no fill, only its size and its trend; one with a bound keeps its fill.
+#[tokio::test]
+async fn a_volume_without_a_bound_shows_its_size_without_a_fill() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/caches").await.body;
+    let lanes: Vec<&str> = page.split(r#"<li class="volume "#).skip(1).collect();
+    let lane = |name: &str| {
+        *lanes
+            .iter()
+            .find(|lane| lane.contains(&format!("<code>{name}</code>")))
+            .unwrap_or_else(|| panic!("no lane for {name}"))
+    };
+    let unbound = lane("runnerd-jvm-base");
+    assert!(
+        unbound.contains("unbound") && unbound.contains("14G") && !unbound.contains("volume-fill"),
+        "a volume without a bound has its size and no fill: {unbound}"
+    );
+    assert!(
+        lane("runnerd-pnpm").contains("volume-fill"),
+        "a volume with a bound fills against it"
     );
 }
