@@ -4110,3 +4110,28 @@ async fn a_job_action_s_preview_gives_focus_back_to_the_button_that_asked_for_it
         "the re-run of failed jobs points back at its own button, not the first: {preview}"
     );
 }
+
+/// The bug: volumes without a bound filled a track on one scale, the largest of them, so a 14G snapshot beside a
+/// 900G mirror read as empty. Such a volume has no fill, only its size and its trend; one with a bound keeps its fill.
+#[tokio::test]
+async fn a_volume_without_a_bound_shows_its_size_without_a_fill() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/caches").await.body;
+    let lanes: Vec<&str> = page.split(r#"<li class="volume "#).skip(1).collect();
+    let lane = |name: &str| {
+        *lanes
+            .iter()
+            .find(|lane| lane.contains(&format!("<code>{name}</code>")))
+            .unwrap_or_else(|| panic!("no lane for {name}"))
+    };
+    let unbound = lane("runnerd-jvm-base");
+    assert!(
+        unbound.contains("unbound") && unbound.contains("14G") && !unbound.contains("volume-fill"),
+        "a volume without a bound has its size and no fill: {unbound}"
+    );
+    assert!(
+        lane("runnerd-pnpm").contains("volume-fill"),
+        "a volume with a bound fills against it"
+    );
+}

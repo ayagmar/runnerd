@@ -1,5 +1,5 @@
-//! `/caches`: every cache volume as a lane, its size filling it against its bound, each one's size over the last 30
-//! days, its action, and the shared build cache's week as figures.
+//! `/caches`: every cache volume as a lane, its size, filling it against its bound where it has one, each one's size
+//! over the last 30 days, its action, and the shared build cache's week as figures.
 
 use maud::{Markup, html};
 use runnerd_core::api::{
@@ -78,27 +78,10 @@ pub(crate) fn render(view: &CachesView) -> Markup {
     page(Section::Caches.title(), Some(Page::Caches), None, &main)
 }
 
-/// Every volume as a lane: what it is, its size as a fill against its bound on one scale for all, so lanes compare,
-/// its size over 30 days against its bound, and its action; the shared build cache's week as figures.
+/// Every volume as a lane: what it is, its size, as a fill against its bound when it has one, its size over 30 days
+/// against its bound, and its action; the shared build cache's week as figures.
 pub(crate) fn volumes(view: &CachesView) -> Markup {
     let start = view.now.saturating_sub(WINDOW);
-    // A volume with a bound fills its own track, as far as its bound or past it, so one large volume does not make
-    // the others slivers; the volumes without one share a scale, the largest of them.
-    let unbound = view
-        .caches
-        .volumes
-        .iter()
-        .filter(|volume| volume.limit.is_none())
-        .map(|volume| volume.bytes)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let scale_of = |volume: &CacheVolume| {
-        volume
-            .limit
-            .map_or(unbound, |limit| limit.max(volume.bytes))
-            .max(1)
-    };
     html! {
         div #volumes {
             @if view.caches.volumes.is_empty() {
@@ -111,9 +94,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
                         @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
                         @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes).max(volume.limit.unwrap_or(0));
-                        @let scale = scale_of(volume);
-                        @let at = |bytes: u64| format!("{:.2}%", ratio(bytes, scale) * 100.0);
-                        li class=(format!("volume {class}")) {
+                        li class=(format!("volume {class}{}", if limit.is_none() { " unbound" } else { "" })) {
                             div.volume-name {
                                 span.swatch aria-hidden="true" {}
                                 span {
@@ -127,14 +108,16 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                                     @if let Some(limit) = &limit { " of " (format::bytes(limit.limit)) ", " (limit.label) } @else { " no bound" }
                                 }
                             }
-                            div.volume-fill role="img" aria-label=(match &limit {
-                                Some(limit) => format!("{} of {}, {}", format::bytes(volume.bytes), format::bytes(limit.limit), limit.label),
-                                None => format!("{}, no bound", format::bytes(volume.bytes)),
-                            }) {
-                                @if let Some(limit) = &limit {
+                            // A volume with a bound fills its own track, as far as its bound or past it. One without
+                            // has nothing to fill: on a shared scale a small volume beside a large one would read as
+                            // empty, so its size is the figure above and its trend the chart beside it.
+                            @if let Some(limit) = &limit {
+                                @let scale = limit.limit.max(volume.bytes).max(1);
+                                @let at = |bytes: u64| format!("{:.2}%", ratio(bytes, scale) * 100.0);
+                                div.volume-fill role="img" aria-label=(format!("{} of {}, {}", format::bytes(volume.bytes), format::bytes(limit.limit), limit.label)) {
                                     span.volume-bound style=(format!("width: {}", at(limit.limit))) {}
+                                    span.volume-used style=(format!("width: {}", at(volume.bytes))) {}
                                 }
-                                span.volume-used style=(format!("width: {}", at(volume.bytes))) {}
                             }
                             div.volume-trend {
                                 @if points.len() > 1 {
