@@ -30,11 +30,11 @@ pub(super) fn height(bar: u16) -> u16 {
 }
 
 /// The budget's heading: what is reserved of what, how runners are admitted, and what the slice uses, each with its
-/// rank for [`fit_details`]. The names of segments too narrow to label themselves rank [`NAMED_RANK`], so they
-/// outlive the host's long sentence.
+/// rank for [`fit_details`]. The names of segments too narrow to label themselves rank [`NAMED_RANK`], after what is
+/// reserved and before the host's long sentence.
 pub(super) fn budget_note(app: &App) -> Vec<(u8, String)> {
     let budget = &app.live.status.budget;
-    let mut parts = vec![(1, budget.memory_reading().line())];
+    let mut parts = vec![(0, budget.memory_reading().line())];
     if let Some(cpu) = budget.cpu {
         parts.push((2, cpu.line()));
     }
@@ -47,9 +47,8 @@ pub(super) fn budget_note(app: &App) -> Vec<(u8, String)> {
     parts
 }
 
-/// The rank of a segment's name in the heading: the last to go, as nothing else names it, though it follows what is
-/// reserved.
-const NAMED_RANK: u8 = 0;
+/// The rank of a segment's name in the heading: the last to go after what is reserved, as nothing else names it.
+const NAMED_RANK: u8 = 1;
 
 /// One segment of the strip.
 struct Segment {
@@ -156,7 +155,17 @@ pub(super) fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
         figures_area,
     );
     let room = usize::from(title.width).saturating_sub("Budget".width() + 2);
-    heading(frame, title, "Budget", fit_details(note, room), theme);
+    // What is reserved comes first; the names show alone only where it does not fit even alone.
+    let names_alone: Vec<(u8, String)> = note
+        .iter()
+        .filter(|(rank, _)| *rank == NAMED_RANK)
+        .cloned()
+        .collect();
+    let mut text = fit_details(note, room);
+    if text.is_empty() {
+        text = fit_details(names_alone, room);
+    }
+    heading(frame, title, "Budget", text, theme);
 }
 
 /// A row of labels, each at its segment's first cell: in the terminal's own foreground, which reads on a dark and a

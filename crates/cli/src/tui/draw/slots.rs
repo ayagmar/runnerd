@@ -9,7 +9,7 @@ use runnerd_core::api::{Job, ProfileStatus, Sample, SlotStatus, Status};
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
-use super::{bold, fit, picked, spark};
+use super::{Window, bold, fit, picked, spark};
 use crate::human::{self, bytes, cores_used, duration};
 use crate::tui::app::{App, Pane};
 use crate::tui::mouse::{Hits, List};
@@ -88,19 +88,13 @@ pub(super) fn lanes(
     let focused = app.pane == Pane::Slots;
     let width = usize::from(area.width);
     let slots: Vec<_> = app.slots().collect();
-    let rows = usize::from(area.height);
-    // Short of a row per slot, the last row says how many more there are.
-    let shown = if slots.len() > rows {
-        rows.saturating_sub(1)
-    } else {
-        slots.len()
-    };
-    // The selected slot stays in sight.
-    let first = if focused {
-        app.slot.saturating_sub(shown.saturating_sub(1))
-    } else {
-        0
-    };
+    // The selected slot stays in sight; short of a row per slot, the last row says how many more there are.
+    let window = Window::of(
+        slots.len(),
+        usize::from(area.height),
+        Some(if focused { app.slot } else { 0 }),
+    );
+    let (first, shown) = (window.first, window.shown);
     // A long profile name takes a third of the row at most, cut before its slot's number, which always shows.
     let name_width = slots
         .iter()
@@ -163,17 +157,7 @@ pub(super) fn lanes(
         })
         .collect();
     let mut lines = lines;
-    let hidden = slots.len() - shown;
-    if hidden > 0 && rows > 0 {
-        let below = slots.len() - first - shown;
-        let more = [(first, "above"), (below, "below")]
-            .iter()
-            .filter(|(count, _)| *count > 0)
-            .map(|(count, side)| format!("{count} more {side}"))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        lines.push(Line::styled(format!("  {more}"), theme.dim()));
-    }
+    lines.extend(window.more_line(theme));
     hits.rows(area, List::Slots, first, shown);
     frame.render_widget(Paragraph::new(lines), area);
 }

@@ -1405,6 +1405,88 @@ fn after_a_reconnect_the_open_job_its_comparison_and_the_jobs_list_are_read_agai
 }
 
 #[test]
+fn a_short_settings_view_folds_only_a_config_with_nothing_to_say() {
+    // Folded to `✓ ok  … N more lines`, a config's warnings were hidden under a pass mark, and an invalid one's
+    // reason was out of reach while a check was selected.
+    use runnerd_core::api::{AdmissionPolicy, ConfigCheck, ConfigFile};
+    let config = |valid: bool, message: &str, warnings: &[&str]| super::super::app::ConfigRead {
+        file: ConfigFile {
+            path: "/home/forge/.config/runnerd/runnerd.toml".to_owned(),
+            text: String::new(),
+            revision: String::new(),
+        },
+        check: ConfigCheck {
+            valid,
+            message: message.to_owned(),
+            warnings: warnings
+                .iter()
+                .map(|warning| (*warning).to_owned())
+                .collect(),
+            admission: AdmissionPolicy::Caps,
+            memory_caps: None,
+            memory_needed: None,
+            memory_max: None,
+            revision: None,
+        },
+    };
+    let cases = [
+        (
+            config(false, "memory caps sum to 40G, past the 33G MemoryMax", &[]),
+            "past the 33G MemoryMax",
+        ),
+        (
+            config(true, "valid", &["[records] max_total is under one record"]),
+            "max_total is under one record",
+        ),
+    ];
+    for (read, expected) in cases {
+        let mut app = app(&daemon());
+        app.update(super::tab(View::Settings));
+        app.update(Msg::Doctor(Ok(runnerd_fixtures::doctor())));
+        app.update(Msg::Config(Ok(read)));
+        for (width, height) in [(60, 16), (66, 24), (72, 24), (80, 24)] {
+            let (rows, _) = frame_of(&app, width, height);
+            assert!(
+                rows.join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(expected),
+                "at {width}x{height} {expected} shows:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+}
+
+#[test]
+fn a_scrolled_checks_list_counts_the_checks_out_of_sight() {
+    // With the passing checks open and the last one selected, the problems above scrolled out with nothing to say so.
+    let mut app = app(&daemon());
+    app.update(super::tab(View::Settings));
+    app.update(Msg::Doctor(Ok(runnerd_fixtures::doctor())));
+    let passing = app
+        .check_rows()
+        .iter()
+        .position(|row| matches!(row, CheckRow::Passing(_)))
+        .unwrap();
+    for _ in 0..passing {
+        app.update(key(KeyCode::Char('j')));
+    }
+    app.update(key(KeyCode::Enter));
+    for _ in 0..app.check_rows().len() {
+        app.update(key(KeyCode::Char('j')));
+    }
+    let (rows, _) = frame_of(&app, 60, 12);
+    let above = app.check;
+    assert!(
+        shows(&rows, "more above"),
+        "{above} checks above the last are counted:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn settings_state_each_doctor_check_and_the_state_of_its_run_as_core_does() {
     let doctors =
         std::iter::once(runnerd_fixtures::doctor()).chain(runnerd_fixtures::doctor_not_current());

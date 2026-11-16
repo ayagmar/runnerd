@@ -787,6 +787,55 @@ fn spark(values: impl DoubleEndedIterator<Item = u64>, max: u64, width: usize) -
     bars.into_iter().collect()
 }
 
+/// Which of a list's `count` items show in `rows` with the selected one in sight. Short of a row for each, the last row
+/// is kept for [`Window::more_line`]; a single row shows the selected item instead.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    /// The first item shown.
+    first: usize,
+    /// How many show.
+    shown: usize,
+    count: usize,
+    rows: usize,
+}
+
+impl Window {
+    fn of(count: usize, rows: usize, selected: Option<usize>) -> Window {
+        let shown = if count > rows && rows > 1 {
+            rows - 1
+        } else {
+            count.min(rows)
+        };
+        let first = selected.map_or(0, |selected| {
+            selected
+                .min(count.saturating_sub(1))
+                .saturating_sub(shown.saturating_sub(1))
+        });
+        Window {
+            first,
+            shown,
+            count,
+            rows,
+        }
+    }
+
+    /// The dim row under those shown that counts the items not shown, `2 more above · 1 more below`; `None` when all
+    /// show or no row is left for it.
+    fn more_line(&self, theme: Theme) -> Option<Line<'static>> {
+        let below = self.count.saturating_sub(self.first + self.shown);
+        if self.shown >= self.rows || (self.first == 0 && below == 0) {
+            return None;
+        }
+        let more = [(self.first, "above"), (below, "below")]
+            .iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, side)| format!("{count} more {side}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        Some(Line::styled(format!("  {more}"), theme.dim()))
+    }
+}
+
 /// `lines` in `rows`: whole when they fit, else as many as leave a row for a dim `… N more lines`, so a cut is never
 /// silent.
 fn clip(mut lines: Vec<Line<'static>>, rows: usize, theme: Theme) -> Vec<Line<'static>> {

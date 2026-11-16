@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use runnerd_core::api::{self, Check, CheckStatus, Doctor};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Theme, beside, bold, clip, fit, heading, length, picked, wrap};
+use super::{Theme, Window, beside, bold, clip, fit, heading, length, picked, wrap};
 use crate::human::Tone;
 use crate::tui::app::{App, CheckRow, ConfigRead, Fold};
 use crate::tui::mouse::{Hits, List};
@@ -43,7 +43,13 @@ pub(super) fn settings(
     let height = usize::from(main.height);
     let list = rows.len().max(1);
     let under_wanted = if under.is_empty() { 0 } else { under.len() + 1 };
-    let config_least = config.len().min(2);
+    // A config with something to say, why it is invalid or what to fix, keeps every line; a clean one folds to
+    // its path and mark.
+    let config_least = if config_problem(&app.config) {
+        config.len()
+    } else {
+        config.len().min(2)
+    };
     let config_rows = config
         .len()
         .min(height.saturating_sub(1 + list + under_wanted))
@@ -132,16 +138,25 @@ fn check_lines(check: &Check, width: usize, theme: Theme) -> Vec<Line<'static>> 
     lines
 }
 
-/// The config's lines in `rows` short of room for them all: its path, then its check's mark and word with how many
-/// lines do not fit, so whether it is valid still shows.
+/// Whether the config's check says something to act on: it is invalid, or valid with warnings.
+fn config_problem(config: &Reading<ConfigRead>) -> bool {
+    match config {
+        Reading::Read(read) => !read.check.valid || !read.check.warnings.is_empty(),
+        Reading::Unread(_) => false,
+    }
+}
+
+/// The config's lines in `rows` short of room for them all. A valid config without warnings in two rows keeps its path
+/// and its mark with how many lines do not fit; any other is cut by [`clip`], which keeps as many of its lines as fit.
 fn config_short(
     config: &Reading<ConfigRead>,
     lines: Vec<Line<'static>>,
     rows: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let Reading::Read(read) = config else {
-        return clip(lines, rows, theme);
+    let read = match config {
+        Reading::Read(read) if rows <= 2 && !config_problem(config) => read,
+        _ => return clip(lines, rows, theme),
     };
     if rows < 2 {
         return lines.into_iter().take(rows).collect();
@@ -237,8 +252,8 @@ fn checks(
         .unwrap_or(0)
         .min(width / 3);
     let label_width = 2 + 5;
-    let shown = usize::from(area.height);
-    let first = app.check.saturating_sub(shown.saturating_sub(1));
+    let window = Window::of(rows.len(), usize::from(area.height), Some(app.check));
+    let (first, shown) = (window.first, window.shown);
     let rest = width.saturating_sub(label_width + 1 + name_width + 2);
     let lines: Vec<Line<'_>> = rows
         .iter()
@@ -309,11 +324,8 @@ fn checks(
             if at == app.check { picked(line) } else { line }
         })
         .collect();
-    hits.rows(
-        area,
-        List::Checks,
-        first,
-        rows.len() - first.min(rows.len()),
-    );
+    let mut lines = lines;
+    lines.extend(window.more_line(theme));
+    hits.rows(area, List::Checks, first, shown);
     frame.render_widget(Paragraph::new(lines), area);
 }

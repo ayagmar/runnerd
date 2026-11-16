@@ -1112,6 +1112,38 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
             "at {width}: {shown}"
         );
     }
+    // What is reserved outranks the mirror's name: where both do not fit, the reading stays, and the name shows
+    // alone only where the reading does not fit even alone. At 72 columns under measured admission the name took
+    // the heading from a reading that fit.
+    for admission in [AdmissionPolicy::Caps, AdmissionPolicy::Measured] {
+        app.live.status.budget.admission = admission;
+        let reading = app.live.status.budget.memory_reading().line();
+        for width in 40..=200_u16 {
+            let shown = screen(&app, width, 40, false);
+            let heading = Strip::of(&shown).heading;
+            let room = usize::from(width) - "Budget  ".len();
+            if reading.width() <= room {
+                assert!(
+                    heading.contains(&reading),
+                    "{admission:?} at {width} the reading shows: {shown}"
+                );
+            } else if "mirror 512M".width() <= room {
+                assert!(
+                    heading.contains("mirror 512M"),
+                    "{admission:?} at {width} the name shows alone: {shown}"
+                );
+            }
+        }
+    }
+    app.live.status.budget.admission = AdmissionPolicy::Measured;
+    let shown = screen(&app, 72, 24, false);
+    assert!(
+        Strip::of(&shown)
+            .heading
+            .contains(&app.live.status.budget.memory_reading().line()),
+        "at 72 columns the reading shows: {shown}"
+    );
+    app.live.status.budget.admission = AdmissionPolicy::Caps;
 
     // Without a MemoryMax the bar's whole is every block together, so the seed container still has its block.
     app.live.status.budget.memory_max = None;
@@ -1415,6 +1447,41 @@ fn a_short_overview_draws_the_list_its_keys_move_in() {
             );
         }
     }
+}
+
+#[test]
+fn a_single_row_of_lanes_shows_the_selected_slot_rather_than_a_count() {
+    // With one row for the lanes, "N more below" took it and no slot showed.
+    let mut app = app();
+    app.update(key(KeyCode::Char('j')));
+    let mut single = false;
+    for height in 6..=16 {
+        let shown = screen(&app, 60, height, false);
+        let lines: Vec<&str> = shown.lines().collect();
+        let Some(figures) = lines.iter().position(|line| line.starts_with("Budget")) else {
+            continue;
+        };
+        let bars = lines[figures + 1..]
+            .iter()
+            .take_while(|line| **line == lines[figures + 1])
+            .count();
+        // The row under the strip's figures is the first lane, never a bare count.
+        let Some(under) = lines.get(figures + bars + 3) else {
+            continue;
+        };
+        assert!(
+            !(under.starts_with("  ") && under.contains(" more ")),
+            "at 60x{height} a count with no lane above it: {shown}"
+        );
+        if under.starts_with("■ ") {
+            single |= !lines[figures + bars + 4].starts_with("■ ");
+            assert!(
+                shown.contains("■ jvm 2"),
+                "at 60x{height} the selected slot shows: {shown}"
+            );
+        }
+    }
+    assert!(single, "some height leaves the lanes one row");
 }
 
 #[test]
