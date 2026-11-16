@@ -78,7 +78,7 @@ pub use attention::{
 };
 pub use budget::{
     BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, HostFigure, Reading,
-    SlotPart,
+    SlotForm, SlotPart, SlotReading,
 };
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,

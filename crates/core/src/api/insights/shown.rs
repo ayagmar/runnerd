@@ -153,6 +153,9 @@ impl Insight {
 }
 
 impl HostHazard {
+    /// What the host's memory while CI ran is called where it shows, as a heading or before its line.
+    pub const TITLE: &'static str = "Host memory while CI ran";
+
     /// The window in a line: `CI ran 9h 12m, 6h 10m of it on a host credit; under 19.4G available for 1h 04m (41m on
     /// a credit); under 6.2G available for 34s (34s on a credit); lowest 4.1G (4.5G on a credit); swap free at least
     /// 8.2G`.
@@ -218,7 +221,7 @@ impl Digest {
     pub fn host_line(&self) -> Option<String> {
         self.host
             .as_ref()
-            .map(|host| format!("Host memory while CI ran: {}.", host.line()))
+            .map(|host| format!("{}: {}.", HostHazard::TITLE, host.line()))
     }
 }
 

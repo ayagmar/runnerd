@@ -530,23 +530,68 @@ fn the_hosts_line_as_figures_says_each_clause_once_and_leaves_free_to_the_bar() 
 
 #[test]
 fn a_closed_part_has_a_word_for_a_block_too_narrow_for_its_name() {
-    // A strip of 80 cells gives the host's few gigabytes a block of a handful of cells: its name must still tell
-    // the three apart there.
+    // A strip of 80 cells gives the host's few gigabytes a block of a handful of cells: its word must still say which
+    // of the three closes it.
     let kinds = [ClosedKind::Host, ClosedKind::Held, ClosedKind::Stalled];
     let shorts: Vec<&str> = kinds.iter().map(|kind| kind.short()).collect();
-    for (kind, short) in kinds.iter().zip(&shorts) {
-        assert!(
-            short.len() <= 7 && short.len() < kind.name().len(),
-            "{short} is shorter than {}",
-            kind.name()
-        );
-    }
+    assert_eq!(shorts, ["host", "closed", "stalled"]);
+}
+
+fn texts(forms: &[crate::api::SlotForm]) -> Vec<&str> {
+    forms.iter().map(|form| form.text.as_str()).collect()
+}
+
+#[test]
+fn a_slot_block_reads_what_its_job_uses_of_its_cap_or_of_what_its_runner_reserves() {
+    // Under caps the block is the slot's cap.
+    let caps = status(AdmissionPolicy::Caps, Some(24 * G));
+    let parts = caps.budget_parts();
+    let running = caps.slot_reading(&parts.slots[0], Some(4_420_000_000));
     assert_eq!(
-        shorts
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        kinds.len(),
-        "each kind has its own word: {shorts:?}"
+        texts(&running.forms()),
+        ["4.12G of 8G cap", "4.1G of 8G cap", "4.12G", "4.1G"]
     );
+    // Under measured admission the block is the reservation, which a job past its predicted peak outgrows: the
+    // reading says so rather than calling the reservation a cap.
+    let mut measured = status(AdmissionPolicy::Measured, Some(24 * G));
+    if let Some(runner) = measured.profiles[0].slots[0].runner.as_mut() {
+        runner.reserved = 7_750 * (1 << 20);
+    }
+    let parts = measured.budget_parts();
+    let past = measured.slot_reading(&parts.slots[0], Some(8_800_000_000));
+    assert_eq!(texts(&past.forms())[0], "8.2G of 7.57G reserved");
+}
+
+#[test]
+fn a_slot_block_without_a_sample_reads_what_the_slot_does_as_core_names_it() {
+    // Slot 1 of a reseeding profile has no runner and is not idle: it becomes the snapshot.
+    let mut status = status(AdmissionPolicy::Caps, Some(24 * G));
+    status.profiles[0].reseeding = true;
+    status.profiles[0].slots[0].runner = None;
+    let parts = status.budget_parts();
+    let reseeding = status.slot_reading(&parts.slots[0], Some(G));
+    assert_eq!(
+        texts(&reseeding.forms()),
+        ["reseeding 8G cap", "reseeding 8G", "reseeding"],
+        "a sample of a slot with no runner is not its reading"
+    );
+    let idle = status.slot_reading(&parts.slots[1], None);
+    assert_eq!(texts(&idle.forms())[0], "idle 8G cap");
+}
+
+#[test]
+fn a_slot_reading_takes_the_same_room_whatever_its_job_uses_now() {
+    // A label fitted by its text flips between forms as a sample goes from 4.3G to 4.37G; by its room it does not.
+    let status = status(AdmissionPolicy::Caps, Some(24 * G));
+    let parts = status.budget_parts();
+    let rooms = |used: u64| -> Vec<usize> {
+        status
+            .slot_reading(&parts.slots[0], Some(used))
+            .forms()
+            .iter()
+            .map(|form| form.room)
+            .collect()
+    };
+    assert_eq!(rooms(4 * G), rooms(4_690_000_000));
+    assert_eq!(rooms(4 * G), rooms(512 << 20));
 }
