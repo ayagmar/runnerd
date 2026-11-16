@@ -89,6 +89,10 @@ name = "cache_reseed"
 required-features = ["host"]
 
 [[test]]
+name = "mirror_repair"
+required-features = ["host"]
+
+[[test]]
 name = "build_cache_gradle"
 required-features = ["host"]
 

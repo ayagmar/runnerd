@@ -68,6 +68,7 @@ fn ready_host(os_release: &str) -> Host {
             })
             .into(),
         records: Some(Ok(0)),
+        mirror: None,
         sizing: None,
         os_release: os_release.to_owned(),
         slice: Some(Ok(Slice {
@@ -1016,6 +1017,40 @@ fn an_amd64_only_image_fails_on_an_arm64_docker_with_the_local_build() {
     assert!(
         jvm.fix.as_deref().unwrap().contains("docker build"),
         "{jvm}"
+    );
+}
+
+#[test]
+fn a_running_mirror_that_serves_a_layer_with_no_data_fails_with_the_fix() {
+    use runnerd_core::cache::mirror::{Dangling, Fault, Found, Links};
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.mirror = Some(Found::Read {
+        links: Links {
+            count: 499,
+            dangling: vec![Dangling {
+                fault: Fault::Gone,
+                repository: "library/caddy".to_owned(),
+                digest: Some(format!("sha256:{}", "8".repeat(64))),
+                link: format!(
+                    "repositories/library/caddy/_layers/sha256/{}/link",
+                    "8".repeat(64)
+                ),
+            }],
+        },
+        cached: true,
+    });
+    let mirror = checks(&host, Some(&config))
+        .into_iter()
+        .find(|check| check.name == "mirror")
+        .unwrap();
+    assert_eq!(mirror.status, Status::Fail, "{mirror}");
+    assert!(
+        mirror
+            .fix
+            .unwrap()
+            .contains("docker exec runnerd-mirror rm -f "),
+        "the fix removes the link"
     );
 }
 

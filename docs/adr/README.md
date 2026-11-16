@@ -150,3 +150,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0141](0141-runners-answer-sync-calls-without-syncing.md) | Runners answer sync calls without syncing, and a host crash empties what they wrote | Accepted |
 | [0142](0142-a-runners-layers-skip-their-unmount-sync.md) | A runner's layers skip their unmount sync; its Docker Engine's cannot | Accepted |
 | [0143](0143-a-jobs-disk-writes-are-its-containers-io-counters.md) | A job's disk writes are its runner container's io counters, read to its end | Accepted |
+| [0144](0144-the-mirror-keeps-no-blob-descriptor-cache.md) | The mirror keeps no blob descriptor cache, and its storage is repaired before it starts | Accepted |

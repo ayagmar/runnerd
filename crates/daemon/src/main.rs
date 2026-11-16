@@ -875,7 +875,7 @@ async fn serve(
         github,
         docker,
         Setup {
-            names: Names::new("runnerd"),
+            names: Names::new(runnerd_core::cache::PREFIX),
             identity,
             memory_max: memory_max.map(|max| max.0),
             cpus,

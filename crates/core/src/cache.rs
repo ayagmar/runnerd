@@ -14,6 +14,11 @@ use crate::config::{self, ByteSize};
 use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found};
 use crate::isolation::Isolation;
 
+pub mod mirror;
+
+/// The prefix of the names of what the daemon makes in Docker (`Names`).
+pub const PREFIX: &str = "runnerd";
+
 /// The Docker Hub pull-through cache (`registry` 3.1.2, multi-platform index).
 pub const MIRROR_IMAGE: &str =
     "registry:3.1.2@sha256:01cd312e67026f06f5d89c3e133a4a9adc7cb9eeb9b1194e0b2954dfd770efd2";
@@ -109,6 +114,11 @@ impl Names {
         format!("{}-mirror", self.prefix)
     }
 
+    /// The container that repairs the mirror's storage before the mirror starts.
+    pub fn mirror_repair(&self) -> String {
+        format!("{}-mirror-repair", self.prefix)
+    }
+
     /// What `GET /v1/caches` and `runnerctl caches clean` call the shared build cache: a directory of the daemon's,
     /// not a Docker volume.
     pub fn build_cache(&self) -> String {
@@ -137,7 +147,9 @@ pub fn runner_mounts(names: &Names, profile: &str, slot: usize) -> Vec<Mount> {
 }
 
 /// The mirror container: Docker Hub through a proxy registry, which refuses pushes, so a job can only make it
-/// fetch what Docker Hub serves. Content not pulled again within the TTL expires. No published port.
+/// fetch what Docker Hub serves. Content not pulled again within the TTL expires. No published port. It keeps no
+/// blob descriptor cache: the proxy's expiry of one repository's copy of a blob deletes the blob other repositories
+/// still link to, and the cache would go on answering their pulls with no data (docs/adr/0144).
 pub fn mirror_body(names: &Names, mirror: &config::Mirror, slice: &str) -> ContainerCreateBody {
     let memory = i64::try_from(mirror.memory.0).unwrap_or(i64::MAX);
     ContainerCreateBody {
@@ -147,6 +159,7 @@ pub fn mirror_body(names: &Names, mirror: &config::Mirror, slice: &str) -> Conta
             format!("REGISTRY_PROXY_TTL={}s", mirror.ttl.as_secs()),
             // Expiry deletes content.
             "REGISTRY_STORAGE_DELETE_ENABLED=true".to_owned(),
+            format!("{}=", mirror::DESCRIPTOR_CACHE_ENV),
         ]),
         labels: Some(HashMap::from([(
             "runnerd.mirror".to_owned(),
@@ -196,15 +209,16 @@ pub async fn prepare(
     Ok(())
 }
 
-/// Starts the mirror unless it runs.
+/// Starts the mirror unless it runs, after removing the links in its storage whose blob is gone (`mirror::Repair`),
+/// which a failed repair does not hold back.
 pub async fn mirror_up(
     docker: &impl DockerApi,
     names: &Names,
     mirror: &config::Mirror,
     slice: &str,
-) -> Result<(), Error> {
+) -> Result<mirror::MirrorUp, Error> {
     match docker.inspect(&names.mirror()).await {
-        Ok(state) if state.running => return Ok(()),
+        Ok(state) if state.running => return Ok(mirror::MirrorUp::Running),
         // Stopped on its own: started again from scratch, its storage is the volume.
         Ok(_) => docker.remove(&names.mirror()).await?,
         Err(error) if is_not_found(&error) => {}
@@ -214,18 +228,23 @@ pub async fn mirror_up(
     if !docker.image_present(MIRROR_IMAGE).await? {
         docker.pull(MIRROR_IMAGE).await?;
     }
+    let repair = mirror::repair(docker, names, slice).await;
     docker
         .run(&names.mirror(), mirror_body(names, mirror, slice))
         .await?;
-    Ok(())
+    Ok(mirror::MirrorUp::Started(repair))
 }
 
-/// Stops the mirror; its storage stays.
+/// Stops the mirror, and removes a repair container a killed daemon left on its storage, which would keep the
+/// volume from being removed; its storage stays.
 pub async fn mirror_down(docker: &impl DockerApi, names: &Names) -> Result<(), Error> {
-    match docker.remove(&names.mirror()).await {
-        Err(error) if is_not_found(&error) => Ok(()),
-        other => other,
+    for name in [names.mirror(), names.mirror_repair()] {
+        match docker.remove(&name).await {
+            Err(error) if !is_not_found(&error) => return Err(error),
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 /// Whether the mirror's container is down, so its storage can be removed.

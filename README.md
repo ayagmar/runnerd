@@ -53,6 +53,12 @@ docker build --target base -t runnerd-runner:base image
 cargo test -p runnerd-core --test docker_smoke --test cache_reseed --test slot_docker_store -- --ignored
 ```
 
+The mirror's repair test needs only Docker, and pulls the pinned `registry` image:
+
+```sh
+cargo test -p runnerd-core --test mirror_repair -- --ignored
+```
+
 The Gradle build cache test also needs the network:
 
 ```sh
