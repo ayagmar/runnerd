@@ -45,6 +45,7 @@ async fn main() {
     measured(&fake);
     downtime(&fake);
     busy_desktop(&fake);
+    scene(&fake);
     // About what the doctor's reads of the host take with a few repositories.
     fake.fixtures.lock().unwrap().doctor_delay = Duration::from_millis(700);
     fake::serve(&socket, fake.clone());
@@ -416,4 +417,65 @@ fn busy_desktop(fake: &fake::Fake) {
         stalled: false,
         credit: None,
     });
+}
+
+/// `RUNNERD_DEMO_SCENE`, for looking at states the default scene lacks: `idle`, no runner at all under measured
+/// admission, so every slot holds none of the budget; `many`, a profile of 18 more slots, each with a warm runner
+/// holding 1G, so the lanes no longer fit at their floor.
+fn scene(fake: &fake::Fake) {
+    const GIB: u64 = 1 << 30;
+    let Ok(scene) = std::env::var("RUNNERD_DEMO_SCENE") else {
+        return;
+    };
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let at = now();
+    let status = &mut fixtures.status;
+    match scene.as_str() {
+        "idle" => {
+            for slot in status
+                .profiles
+                .iter_mut()
+                .flat_map(|profile| &mut profile.slots)
+            {
+                slot.runner = None;
+            }
+            status.queued.clear();
+            for repository in &mut status.repositories {
+                repository.queued_jobs = 0;
+            }
+            status.budget.memory_in_use = status.budget.mirror_memory;
+            for job in &mut fixtures.jobs {
+                if job.summary.state == JobState::Running {
+                    job.summary.state = JobState::Completed;
+                }
+            }
+        }
+        "many" => {
+            let slots = (1..=18)
+                .map(|slot| SlotStatus {
+                    slot,
+                    runner: Some(RunnerStatus {
+                        repository: "halyard/ledger".to_owned(),
+                        name: format!("runnerd-3f9a-forge-matrix-{slot}-{at}"),
+                        runner_id: 5000 + u64::from(u32::try_from(slot).unwrap()),
+                        container: format!("{at:x}{slot}"),
+                        busy: false,
+                        started_at: at - 60 * slot as u64,
+                        reserved: GIB,
+                        warm: true,
+                    }),
+                })
+                .collect();
+            status.profiles.push(ProfileStatus {
+                name: "matrix".to_owned(),
+                image: "runnerd-runner:node".to_owned(),
+                cpus: 1,
+                memory: GIB,
+                reseeding: false,
+                slots,
+            });
+            status.budget.memory_in_use += 18 * GIB;
+        }
+        other => println!("RUNNERD_DEMO_SCENE: no scene {other}, so the default one"),
+    }
 }

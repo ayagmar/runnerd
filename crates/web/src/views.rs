@@ -83,10 +83,10 @@ impl Page {
 
 const MARK: &str = include_str!("../assets/mark.svg");
 
-/// Speculation rules: a page this dashboard links to is fetched while a pointer rests on its link, or as a finger
-/// lands on it, so the page is there by the time the click is. Never a login link, which works once, or a live
-/// stream.
-const SPECULATION: &str = r#"{"prefetch":[{"where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":"/login*"}},{"not":{"href_matches":"/live/*"}},{"not":{"href_matches":"/assets/*"}}]},"eagerness":"moderate"}]}"#;
+/// Speculation rules: a page this dashboard links to is fetched as a pointer presses its link or a finger lands on it,
+/// and used by that click only, so a page is never shown older than the click. Never a login link, which works once,
+/// or a live stream.
+const SPECULATION: &str = r#"{"prefetch":[{"where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":"/login*"}},{"not":{"href_matches":"/live/*"}},{"not":{"href_matches":"/assets/*"}}]},"eagerness":"conservative"}]}"#;
 
 /// The pieces of a live region that change on their own, such as a reading or the latest stretch of a chart. When
 /// the rest of a region is unchanged, its stream sends only the pieces that changed. Rendering records them here; a
