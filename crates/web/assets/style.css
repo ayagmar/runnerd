@@ -2220,6 +2220,14 @@ dl.health-figures {
   background: var(--surface);
 }
 
+/* A finger's width per run on a touch screen; more runs than fit scroll sideways, newest first. */
+@media (pointer: coarse) {
+  .run-bars {
+    grid-template-columns: repeat(var(--runs), minmax(2.75rem, 5rem));
+    min-width: calc(var(--runs) * 2.75rem + (var(--runs) - 1) * 4px);
+  }
+}
+
 .run-bars.no-peaks a {
   grid-template-rows: 7rem;
 }
@@ -2719,6 +2727,7 @@ dl.health-figures {
 
 /* Links that stand alone on the job page: a target as tall as a row, without making the row taller. */
 .job-head .crumbs a,
+.job-facts a,
 .failure-summary p > a,
 .log .section-head a,
 .runs .section-head > a {
@@ -3832,15 +3841,15 @@ th a.sort:hover {
   color: var(--muted);
 }
 
-.tone-mark {
+.insight-kind .tone-mark {
   width: 0.6rem;
   height: 0.6rem;
   flex: none;
   background: var(--line);
 }
 
-.insight.warn .tone-mark { background: var(--wait); }
-.insight.bad .tone-mark { background: var(--failure-ink); }
+.insight.warn .insight-kind .tone-mark { background: var(--wait); }
+.insight.bad .insight-kind .tone-mark { background: var(--failure-ink); }
 .insight.warn .insight-kind { color: var(--wait-ink); }
 .insight.bad .insight-kind { color: var(--failure-ink); }
 
@@ -4603,6 +4612,63 @@ th a.sort:hover {
     height: 5.5rem;
   }
 
+  /* A repository's waits a row: its name and this week's p95, then each other figure named. */
+  .waits-table thead {
+    display: none;
+  }
+
+  .waits-table,
+  .waits-table tbody {
+    display: block;
+  }
+
+  .waits-table tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.9rem;
+    margin-bottom: 2px;
+    padding: 0.7rem 0.75rem;
+  }
+
+  .waits-table tbody :is(th, td),
+  .waits-table tbody td:is(:nth-child(4), :nth-child(7)) {
+    display: block;
+    padding: 0;
+    white-space: normal;
+    text-align: left;
+  }
+
+  .waits-table tbody th {
+    flex: 1 1 calc(100% - 8rem);
+    font-weight: 600;
+  }
+
+  /* This week's p95 is the figure the page is about: beside the name. */
+  .waits-table tbody td:nth-child(4) {
+    order: -1;
+    flex: none;
+    margin-left: auto;
+    font-weight: 700;
+  }
+
+  .waits-table tbody th {
+    order: -2;
+  }
+
+  .waits-table tbody td {
+    font-size: 0.875rem;
+    color: var(--muted);
+  }
+
+  .waits-table tbody td::before {
+    content: attr(data-label) ' ';
+  }
+
+}
+
+/* Below a tablet's width a job is a row, not a table's line: eight columns do not fit. */
+@media (max-width: 48rem) {
   /* A job is a row a thumb reads: its name and outcome, its repository, then when, how long it ran and its peak. */
   .history-table thead {
     display: none;
@@ -4660,60 +4726,6 @@ th a.sort:hover {
   .history-table tbody td:is(:nth-child(5), :nth-child(6))::before {
     content: attr(data-label) ' ';
   }
-
-  /* A repository's waits a row: its name and this week's p95, then each other figure named. */
-  .waits-table thead {
-    display: none;
-  }
-
-  .waits-table,
-  .waits-table tbody {
-    display: block;
-  }
-
-  .waits-table tbody tr {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.2rem 0.9rem;
-    margin-bottom: 2px;
-    padding: 0.7rem 0.75rem;
-  }
-
-  .waits-table tbody :is(th, td),
-  .waits-table tbody td:is(:nth-child(4), :nth-child(7)) {
-    display: block;
-    padding: 0;
-    white-space: normal;
-    text-align: left;
-  }
-
-  .waits-table tbody th {
-    flex: 1 1 calc(100% - 8rem);
-    font-weight: 600;
-  }
-
-  /* This week's p95 is the figure the page is about: beside the name. */
-  .waits-table tbody td:nth-child(4) {
-    order: -1;
-    flex: none;
-    margin-left: auto;
-    font-weight: 700;
-  }
-
-  .waits-table tbody th {
-    order: -2;
-  }
-
-  .waits-table tbody td {
-    font-size: 0.875rem;
-    color: var(--muted);
-  }
-
-  .waits-table tbody td::before {
-    content: attr(data-label) ' ';
-  }
-
 }
 
 /* Hit areas: a link that stands for a whole card or row reaches the card's edges; one that stands alone gets 40px,
@@ -4978,8 +4990,8 @@ a.attention-title {
 .admission {
   padding: 0.75rem 1rem;
   background: var(--surface);
-  border-left: 4px solid var(--profile, var(--muted));
   font-size: 0.9375rem;
+  text-wrap: pretty;
 }
 
 /* The overview on a phone: the figures two by two, the charts without their axes, the latest jobs fewer. */
