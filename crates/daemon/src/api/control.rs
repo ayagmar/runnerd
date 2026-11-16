@@ -385,7 +385,7 @@ fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Op
 }
 
 /// `GET /v1/doctor`: the doctor's checks of the config running, from its last run when that is recent, else from one
-/// run for the request (ADR 0132). With `recent`, a run as old as the worker's own refresh is recent (ADR 0145).
+/// run for the request (ADR 0132). With `recent`, a run as old as the worker's own refresh is recent (ADR 0146).
 /// 503 while no run has finished, or the last failed.
 pub(super) async fn doctor(
     _: Authenticated,

@@ -1,4 +1,4 @@
-# 0144. The dashboard leads with the lanes
+# 0145. The dashboard leads with the lanes
 
 Status: **Accepted** (2026-11-16). Amends the overview and the config page of
 [0136](0136-the-dashboard-is-laid-out-by-task.md). Adds `FreePart::name` to core, speculation rules to the dashboard's
@@ -29,7 +29,7 @@ floor, stacks the same lanes as rows, each over a strip of the slice with its bl
 
 **Settings puts problems first.** The doctor comes before the editor; a check that fails or warns stands with its
 fix; the rest fold into one line that counts them by core's label and names them. The page waits 50 ms for the
-doctor, which a recent run answers within (0145); otherwise the region asks once the page shows, and keeps the box
+doctor, which a recent run answers within (0146); otherwise the region asks once the page shows, and keeps the box
 the checks took on the last visit at that width and layout. The editor has a row per line
 and one to spare: the gutter and the text are one height, the page is the only thing that scrolls up and down, a
 long line scrolls sideways in the text alone, and the buttons ride the bottom of the screen while the editor is in
@@ -49,5 +49,5 @@ stream to the daemon for a page that may never be shown.
 
 - `check-boundaries.sh` and the parity tests are unchanged; the attention parity test now reads the one-line form.
 - A browser without view transitions or speculation rules navigates as before.
-- The doctor's box: see [0145](0145-the-dashboard-paints-the-doctors-last-run.md), which puts a recent run in the
+- The doctor's box: see [0146](0146-the-dashboard-paints-the-doctors-last-run.md), which puts a recent run in the
   first response.

@@ -149,11 +149,17 @@ body {
   overflow-x: clip;
 }
 
+/* Below 60rem the tab bar is fixed along the bottom edge: every page ends that far, its safe area and a gap above it,
+   so its last row is never under the bar. */
+:root {
+  --tab-bar: 3.25rem;
+}
+
 main {
   width: 100%;
   min-height: calc(100vh - 3.5rem);
-  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0)) calc(6rem + env(safe-area-inset-bottom, 0))
-    max(var(--gutter), env(safe-area-inset-left, 0));
+  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0))
+    calc(var(--tab-bar) + 2.75rem + env(safe-area-inset-bottom, 0)) max(var(--gutter), env(safe-area-inset-left, 0));
   background: var(--bg);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -296,7 +302,7 @@ html {
 .top nav a {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 3.25rem;
+  min-height: var(--tab-bar);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3504,7 +3510,7 @@ th a.sort:hover {
 /* The buttons ride along the bottom of the screen, over the tab bar, while the editor is in view. */
 .editor > .editor-actions {
   position: sticky;
-  bottom: calc(3.25rem + env(safe-area-inset-bottom, 0));
+  bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0));
   z-index: 2;
   padding-block: 0.6rem;
   background: var(--bg);
@@ -3521,7 +3527,7 @@ th a.sort:hover {
    short of the buttons' bar (44px and its padding) and, on a phone, the tab bar under it, so the line typed on is
    never under them. */
 html:has(.editor-frame) {
-  scroll-padding-bottom: calc(5rem + 3.25rem + env(safe-area-inset-bottom, 0px));
+  scroll-padding-bottom: calc(5rem + var(--tab-bar) + env(safe-area-inset-bottom, 0px));
 }
 
 @media (min-width: 60rem) {
@@ -3592,8 +3598,11 @@ html:has(.editor-frame) {
   padding: 0.5rem 0.55rem;
 }
 
-.lanes-check .lane.part .lane-size {
-  font-size: min(1.25rem, 30cqi);
+/* Upright only: a figure turned on its side measures `cqi` along the wrong axis, and takes the narrow lane's size. */
+@container lane (width >= 2.75rem) {
+  .lanes-check .lane.part .lane-size {
+    font-size: min(1.25rem, 30cqi);
+  }
 }
 
 .budget-lanes:has(.max-mark) {
@@ -3909,7 +3918,7 @@ html:has(.editor-frame) {
 #notice {
   position: fixed;
   right: var(--gutter);
-  bottom: calc(3.25rem + env(safe-area-inset-bottom, 0) + 0.75rem);
+  bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0) + 0.75rem);
   max-width: min(28rem, calc(100vw - 2 * var(--gutter)));
   z-index: 5;
 }

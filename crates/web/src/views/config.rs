@@ -13,7 +13,7 @@ use std::time::Duration;
 use maud::{Markup, html};
 use qrcode::QrCode;
 use runnerd_core::api::{
-    Check, ConfigCheck, ConfigFile, Doctor, DoctorQuery, Resize, Section, Sizing, Tone,
+    Check, ConfigCheck, ConfigFile, Doctor, DoctorQuery, FreePart, Resize, Section, Sizing, Tone,
 };
 use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::{BudgetBlock, Config, profile_sizes, resize_profile, resized_at};
@@ -42,7 +42,7 @@ pub(crate) struct ConfigView {
     pub(crate) resized: Option<Resized>,
     pub(crate) check: ConfigCheck,
     /// The doctor's checks when the daemon gave them within `DOCTOR_WAIT`, as it does its last run up to its refresh
-    /// old (ADR 0145); `None` leaves the page to ask for them once it shows.
+    /// old (ADR 0146); `None` leaves the page to ask for them once it shows.
     pub(crate) doctor: Option<Result<Doctor, ClientError>>,
     pub(crate) now: u64,
 }
@@ -361,7 +361,7 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
                             li.lane.part.free style=(format!("--from: {:.4}; --share: {:.4}", ratio(needed, whole), ratio(max - needed, whole))) {
                                 span.lane-block {}
                                 span.lane-size { (super::block_size(max - needed)) }
-                                span.lane-name { "free" }
+                                span.lane-name { (FreePart::NAME) }
                             }
                         }
                     }
