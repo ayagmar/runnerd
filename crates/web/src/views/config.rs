@@ -1,17 +1,22 @@
 //! `/config`: the daemon's `runnerd.toml` in an editor, checked against the slice's `MemoryMax` as it is typed and
 //! drawn as the budget it asks for; saving writes it and has the daemon reload it. From the sizing page, the editor
 //! starts with a profile's advised memory and slots in the file, or those an auto sizing change replaced,
-//! unsaved. Also the doctor's checks, which the page asks for once it shows, since the doctor takes a while; and a
-//! QR code that signs another device in. The editor numbers its lines and marks the one a parse error is on;
-//! "Review changes" shows what the text changes in the file, line by line, before "Save and reload" writes it.
+//! unsaved. Also the doctor's checks, problems first and the passing ones folded into one line: in the page when the
+//! daemon has a recent run, else asked for once the page shows, since a fresh run takes a while; and a QR code that
+//! signs another device in. The editor is as tall as its text, so the page is the only thing that scrolls up and
+//! down, numbers its lines and marks the one a parse error is on; "Review changes" shows what the text changes in the
+//! file, line by line, before "Save and reload" writes it.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use maud::{Markup, html};
 use qrcode::QrCode;
-use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Section, Sizing, Tone};
+use runnerd_core::api::{
+    Check, ConfigCheck, ConfigFile, Doctor, DoctorQuery, FreePart, Resize, Section, Sizing, Tone,
+};
 use runnerd_core::client::{Client, ClientError};
-use runnerd_core::config::{Config, profile_sizes, resize_profile, resized_at};
+use runnerd_core::config::{BudgetBlock, Config, profile_sizes, resize_profile, resized_at};
 use serde::Deserialize;
 
 use super::{Page, heading, page};
@@ -28,7 +33,7 @@ pub(crate) struct ConfigQuery {
 }
 
 /// Everything the config page shows.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ConfigView {
     pub(crate) file: ConfigFile,
     /// What the editor holds: the file, or the file with a profile's sizing advice in it.
@@ -36,7 +41,16 @@ pub(crate) struct ConfigView {
     /// The advice the editor holds, or why it holds none.
     pub(crate) resized: Option<Resized>,
     pub(crate) check: ConfigCheck,
+    /// The doctor's checks when the daemon gave them within `DOCTOR_WAIT`, as it does its last run up to its refresh
+    /// old (ADR 0146); `None` leaves the page to ask for them once it shows.
+    pub(crate) doctor: Option<Result<Doctor, ClientError>>,
+    pub(crate) now: u64,
 }
+
+/// How long the page waits for the doctor's checks before it renders without them. The daemon answers its last run at
+/// once while it is no older than its refresh; a fresh run of the host takes longer, and the page asks for it once it
+/// shows.
+const DOCTOR_WAIT: Duration = Duration::from_millis(50);
 
 /// A profile's advised `memory` and `slots`, written into the editor's text and not saved yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +67,7 @@ impl ConfigView {
     pub(crate) async fn load(
         daemon: &Client,
         query: ConfigQuery,
+        now: u64,
     ) -> Result<ConfigView, ClientError> {
         let sizing = async {
             match (&query.resize, &query.undo) {
@@ -60,7 +75,17 @@ impl ConfigView {
                 _ => daemon.get::<Sizing>("/v1/sizing").await.map(Some),
             }
         };
-        let (file, sizing) = tokio::join!(daemon.get::<ConfigFile>("/v1/config"), sizing);
+        let doctor = async {
+            let recent = DoctorQuery { recent: true };
+            tokio::time::timeout(
+                DOCTOR_WAIT,
+                daemon.get_query::<Doctor>("/v1/doctor", &recent),
+            )
+            .await
+            .ok()
+        };
+        let (file, sizing, doctor) =
+            tokio::join!(daemon.get::<ConfigFile>("/v1/config"), sizing, doctor);
         let (file, sizing) = (file?, sizing?);
         let (text, resized) = match (query.resize, query.undo, sizing) {
             (_, Some(profile), Some(sizing)) => {
@@ -118,6 +143,8 @@ impl ConfigView {
             text,
             resized,
             check,
+            doctor,
+            now,
         })
     }
 }
@@ -161,15 +188,16 @@ fn notice(resized: &Resized, file: &str, text: &str) -> Markup {
     }
 }
 
-/// Selects `start..end`, in UTF-16 units, in the editor and scrolls it there, which setting a selection does not. A
-/// hidden textarea as wide as the editor, holding the text before the selection, measures how far down it starts,
-/// wrapped lines included.
+/// Selects `start..end`, in UTF-16 units, in the editor and scrolls the page there, which setting a selection does
+/// not. A hidden textarea as wide as the editor, holding the text before the selection, measures how far down it
+/// starts.
 fn select_in_editor(start: usize, end: usize) -> String {
     format!(
         "const t = document.getElementById('toml'); const m = document.createElement('textarea'); \
          m.style.cssText = 'position: absolute; visibility: hidden; height: 0; min-height: 0; width: ' + t.offsetWidth + 'px'; \
          t.after(m); m.value = t.value.slice(0, {start}); const top = m.scrollHeight; m.remove(); \
-         t.focus(); t.setSelectionRange({start}, {end}); t.scrollTop = top - t.clientHeight / 3"
+         t.focus({{preventScroll: true}}); t.setSelectionRange({start}, {end}); \
+         scrollTo({{top: scrollY + t.getBoundingClientRect().top + top - innerHeight / 3}})"
     )
 }
 
@@ -195,25 +223,36 @@ fn quoted(revision: &str) -> Option<String> {
         .then(|| format!("'{revision}'"))
 }
 
-/// The whole page; `proxies` are `[web] origins`, where another device can be signed in.
+/// The whole page; `proxies` are `[web] origins`, where another device can be signed in. The doctor comes first, so
+/// a problem is read before the file; then the editor, the verdict on its text, and signing in a device.
 pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
-    let path = html! { p.muted { code { (view.file.path) } } };
+    let path = html! { p.muted.config-path { code { (view.file.path) } } };
+    let lines = line_count(&view.text);
     let main = html! {
         (heading(runnerd_core::api::View::Settings.title(), Some(Page::Config), Some(path)))
         div.config-layout {
+            @match &view.doctor {
+                Some(found) => (doctor(found, view.now)),
+                None => (doctor_pending(None)),
+            }
             section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)]
                 "data-signals:_edited"="false" {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
                 // Before the editor, so it is read and reached before the text it describes.
                 @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
+                // What the text shows in place of a secret, read before the text.
+                @if view.text.contains(runnerd_core::config::SECRET_SHOWN) {
+                    p.muted.editor-note { "Notification URLs and header values show as " code { "<secret>" } "; saving keeps them." }
+                }
                 label.visually-hidden for="toml" { "runnerd.toml" }
-                // Line numbers beside the text, which the page's script keeps in step with it; lines do not wrap, so
-                // a number stays beside its line.
+                // Line numbers beside the text, as tall as it: the editor has a row per line and one to spare, so it
+                // never scrolls up and down inside the page. Lines do not wrap, so a number stays beside its line,
+                // and a long one scrolls sideways inside the text alone. The page's script keeps both in step.
                 div.editor-frame {
                     pre.gutter #toml-gutter aria-hidden="true" { (gutter(&view.text)) }
                     // The parser drops a line break right after the tag: this one, so the text's own first line stays.
-                    textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28" wrap="off"
-                        data-gutter="toml-gutter"
+                    textarea #toml name="toml" spellcheck="false" autocomplete="off" autocapitalize="off"
+                        rows=(lines + 1) wrap="off" data-gutter="toml-gutter"
                         data-bind:toml="" data-indicator:_checking="" data-on:input="$_edited = true; document.getElementById('config-diff')?.replaceChildren()"
                         "data-on:input__debounce.400ms"="@post('/config/check')" { "\n" (view.text) }
                 }
@@ -224,16 +263,11 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                         data-on:click="!$_reviewing && @post('/config/diff')" { "Review changes" }
                     button.button-quiet type="button" data-indicator:_checking=""
                         data-on:click="@post('/config/check')" { "Check" }
-                    p.muted { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
-                    @if view.text.contains(runnerd_core::config::SECRET_SHOWN) {
-                        p.muted { "Notification URLs and header values show as " code { "<secret>" } "; saving keeps them." }
-                    }
                 }
             }
             div.config-side {
                 (result(&view.check, &view.text, &Outcome::Checked))
                 (devices(proxies))
-                (doctor_pending(None))
             }
         }
     };
@@ -260,6 +294,15 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
         Tone::Bad | Tone::Neutral | Tone::Quiet => "check-result invalid",
     };
     let needed_name = budget.map_or("", |budget| budget.needed_label());
+    // Each block's start on the slice, the blocks laid end to end.
+    let placed: Vec<(&BudgetBlock, f64)> = blocks
+        .iter()
+        .scan(0u64, |at, block| {
+            let from = ratio(*at, whole);
+            *at = at.saturating_add(block.memory);
+            Some((block, from))
+        })
+        .collect();
     html! {
         // Dimmed while the daemon checks or saves newer text: what it shows is of the text before.
         section #config-result class=(class) aria-labelledby="result-title" aria-live="polite"
@@ -300,18 +343,26 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
                     p.muted { (note) }
                 }
             }
+            // The budget as the overview's lanes: a lane per profile and the mirror, each as wide as its share of
+            // MemoryMax, then what is free; past MemoryMax, a mark where it falls.
             @if !blocks.is_empty() {
-                div.bar.bar-small role="img" aria-label=(format!("{needed_name} {} of {}: {}", format::bytes(needed), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.memory))).collect::<Vec<_>>().join(", "))) {
-                    @for block in &blocks {
-                        div class=(format!("block {}", block.profile.map_or("mirror".to_owned(), |index| format!("p{}", index % 6)))) style=(format!("--size: {:.4}", ratio(block.memory, whole))) title=(format!("{}: {}", block.label, format::bytes(block.memory))) {
-                            (super::block_size(block.memory))
-                            span.name { (block.label) }
+                div.budget-lanes {
+                    ol.lanes.lanes-check role="img" aria-label=(format!("{needed_name} {} of {}: {}", format::bytes(needed), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.memory))).collect::<Vec<_>>().join(", "))) {
+                        @for (block, from) in &placed {
+                            li class=(format!("lane part {}", block.profile.map_or("mirror".to_owned(), |index| format!("p{}", index % 6))))
+                                style=(format!("--from: {from:.4}; --share: {:.4}", ratio(block.memory, whole)))
+                                title=(format!("{}: {}", block.label, format::bytes(block.memory))) {
+                                span.lane-block {}
+                                span.lane-size { (super::block_size(block.memory)) }
+                                span.lane-name { (block.label) }
+                            }
                         }
-                    }
-                    @if let Some(max) = check.memory_max.filter(|max| *max > needed) {
-                        div.free style=(format!("--size: {:.4}", ratio(max - needed, whole))) {
-                            (super::block_size(max - needed))
-                            span.name { "free" }
+                        @if let Some(max) = check.memory_max.filter(|max| *max > needed) {
+                            li.lane.part.free style=(format!("--from: {:.4}; --share: {:.4}", ratio(needed, whole), ratio(max - needed, whole))) {
+                                span.lane-block {}
+                                span.lane-size { (super::block_size(max - needed)) }
+                                span.lane-name { (FreePart::NAME) }
+                            }
                         }
                     }
                     @if over {
@@ -330,22 +381,27 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
     }
 }
 
+/// The editor's lines: as the page's script counts them, a final line break starts one more.
+fn line_count(text: &str) -> usize {
+    text.split('\n').count()
+}
+
 /// The editor's line numbers for `text`.
 fn gutter(text: &str) -> String {
-    let lines = text.lines().count().max(1);
-    (1..=lines)
+    (1..=line_count(text))
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Selects line `line`, counted from 1, in the editor and scrolls to it.
+/// Selects line `line`, counted from 1, in the editor and scrolls the page to it, a third of the way down.
 fn go_to_line(line: usize) -> String {
     format!(
         "const t = document.getElementById('toml'); const lines = t.value.split('\\n'); \
          const start = lines.slice(0, {index}).reduce((sum, each) => sum + each.length + 1, 0); \
-         const end = start + (lines[{index}] ?? '').length; t.focus(); t.setSelectionRange(start, end); \
-         t.scrollTop = Math.max(0, {index} * parseFloat(getComputedStyle(t).lineHeight) - t.clientHeight / 3)",
+         const end = start + (lines[{index}] ?? '').length; t.focus({{preventScroll: true}}); t.setSelectionRange(start, end); \
+         const style = getComputedStyle(t); \
+         scrollTo({{top: scrollY + t.getBoundingClientRect().top + parseFloat(style.paddingTop) + {index} * parseFloat(style.lineHeight) - innerHeight / 3}})",
         index = line.saturating_sub(1)
     )
 }
@@ -458,6 +514,8 @@ pub(crate) fn diff(file: &str, text: &str) -> Markup {
                         }
                     }
                 }
+                // What saving does to the runners, beside the button that saves.
+                p.muted.editor-note { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
                         data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
@@ -545,9 +603,10 @@ fn qr_svg(text: &str) -> Markup {
     }
 }
 
-/// The doctor's region before its checks arrive: it asks for them as soon as it shows. After a save, `saved` is the
-/// revision saved and goes in a header: the attribute differs from the page's, so Datastar asks again, and the address
-/// stays the same, since Datastar cancels a request still out only for a new one with the same method and address.
+/// The doctor's region before its checks arrive: it asks for them as soon as it shows, and keeps the box of the line
+/// the passing checks fold into, the runner mark filling bar by bar meanwhile. After a save, `saved` is the revision
+/// saved and goes in a header: the attribute differs from the page's, so Datastar asks again, and the address stays
+/// the same, since Datastar cancels a request still out only for a new one with the same method and address.
 pub(crate) fn doctor_pending(saved: Option<&str>) -> Markup {
     let after = saved
         .filter(|revision| quoted(revision).is_some())
@@ -556,8 +615,9 @@ pub(crate) fn doctor_pending(saved: Option<&str>) -> Markup {
         section #doctor .doctor aria-labelledby="doctor-title" aria-busy="true"
             data-init=(doctor_get(after.as_deref().unwrap_or_default())) {
             h2 #doctor-title { "Doctor" }
-            ul.check-list.pending aria-hidden="true" {
-                @for _ in 0..4 { li {} }
+            div.check-fold.pending {
+                span.check-mark aria-hidden="true" { span {} span {} span {} span {} }
+                span.check-names { (Doctor::CHECKING) }
             }
         }
     }
@@ -570,53 +630,83 @@ fn doctor_get(options: &str) -> String {
 }
 
 /// The doctor's checks for the config the daemon runs with at `now`, or why there are none; in place of
-/// `doctor_pending`. Checks that are not current, such as a stale run's, follow core's line saying so, none of them
-/// painted as passing or needing a fix.
+/// `doctor_pending`. A check that needs the reader (core's bad or warning tone) stands first with its fix; the rest
+/// fold into one line that counts them by core's label and names them, and opens to the list. Checks that are not
+/// current, such as a stale run's, follow core's line saying so, all folded, none painted as passing or needing a
+/// fix.
 pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>, now: u64) -> Markup {
-    let label = |check: &Check, current: bool| {
-        let class = match check.status.tone() {
-            _ if !current => "neutral",
-            Tone::Good => "success",
-            Tone::Bad => "failure",
-            Tone::Warn => "warn",
-            Tone::Neutral | Tone::Quiet => "neutral",
-        };
-        (check.status.label(), class)
+    let class = |check: &Check, current: bool| match check.status.tone() {
+        _ if !current => "neutral",
+        Tone::Good => "success",
+        Tone::Bad => "failure",
+        Tone::Warn => "warn",
+        Tone::Neutral | Tone::Quiet => "neutral",
     };
-    let run_again = html! {
-        button.button-quiet type="button" data-indicator:_doctoring=""
-            data-attr:aria-busy="$_doctoring && 'true'"
-            data-on:click=(doctor_get("")) { "Run the doctor again" }
+    let run_again = |label: &str| {
+        html! {
+            button.button-quiet type="button" data-indicator:_doctoring=""
+                data-attr:aria-busy="$_doctoring && 'true'"
+                data-on:click=(doctor_get("")) { (label) }
+        }
     };
+    let row = |check: &Check, current: bool, needs: bool| {
+        html! {
+            li class=[needs.then_some("needs")] {
+                span class=(format!("badge {}", class(check, current))) { (check.status.label()) }
+                div {
+                    p { strong { (check.name) } " " (check.detail) }
+                    @if let Some(fix) = &check.fix { pre.fix { code { (fix) } } }
+                }
+            }
+        }
+    };
+    let checked = doctor
+        .as_ref()
+        .ok()
+        .and_then(|doctor| doctor.state.as_ref())
+        .and_then(|state| state.checked(now));
     html! {
-        section #doctor .doctor aria-labelledby="doctor-title" {
-            h2 #doctor-title { "Doctor" }
+        // `data-checked` marks checks that stand, whose height the page's script keeps for the next visit.
+        section #doctor .doctor aria-labelledby="doctor-title" data-checked[checked.is_some()] {
+            div.doctor-head {
+                h2 #doctor-title { "Doctor" }
+                @if let Some(checked) = &checked {
+                    span.doctor-age.muted { (checked) }
+                    (run_again("Run again"))
+                }
+            }
             @match doctor {
                 Ok(doctor) => {
-                    @let not_current = doctor.state.as_ref().and_then(|state| state.line(now));
-                    @let current = not_current.is_none();
-                    @if let Some(line) = &not_current {
+                    @let summary = doctor.summary(now);
+                    @let current = summary.not_current.is_none();
+                    @if let Some(line) = &summary.not_current {
                         p.check-message #doctor-state { (line) }
-                        (run_again)
+                        (run_again("Run the doctor again"))
                     }
-                    ul.check-list aria-describedby=[(!current).then_some("doctor-state")] {
-                        @for check in &doctor.checks {
-                            @let (text, class) = label(check, current);
-                            // A check that needs nothing from the reader steps back; one that does keeps its fix.
-                            li class=[(current && matches!(check.status.tone(), Tone::Bad | Tone::Warn))
-                                .then_some("needs")] {
-                                span class=(format!("badge {class}")) { (text) }
-                                div {
-                                    p { strong { (check.name) } " " (check.detail) }
-                                    @if let Some(fix) = &check.fix { pre.fix { code { (fix) } } }
+                    @if !summary.problems.is_empty() {
+                        ul.check-list.problems {
+                            @for check in &summary.problems { (row(check, current, true)) }
+                        }
+                    }
+                    @if !summary.rest.is_empty() {
+                        details.check-fold aria-describedby=[(!current).then_some("doctor-state")] {
+                            summary {
+                                span.check-counts {
+                                    @for count in &summary.counts {
+                                        span { strong { (count.count) } " " (count.label) }
+                                    }
                                 }
+                                span.check-names { (summary.rest.iter().map(|check| check.name.as_str()).collect::<Vec<_>>().join(" · ")) }
+                            }
+                            ul.check-list {
+                                @for check in &summary.rest { (row(check, current, false)) }
                             }
                         }
                     }
                 }
                 Err(error) => {
                     p.check-message { (error) }
-                    (run_again)
+                    (run_again("Run the doctor again"))
                 }
             }
         }

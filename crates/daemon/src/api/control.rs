@@ -11,7 +11,9 @@ use axum::Json;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, DoctorState, PauseQuery, ReplaceQuery};
+use runnerd_core::api::{
+    Busy, ConfigCheck, ConfigFile, DoctorQuery, DoctorState, PauseQuery, ReplaceQuery,
+};
 use runnerd_core::config::{Config, keep_secrets, mask_secrets, revision};
 use runnerd_core::scheduler::engine::{
     Author, Commit, ControlError, RunningJobs, RunningSlots, Target, same_slice,
@@ -383,10 +385,21 @@ fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Op
 }
 
 /// `GET /v1/doctor`: the doctor's checks of the config running, from its last run when that is recent, else from one
-/// run for the request (ADR 0132). 503 while no run has finished, or the last failed.
-pub(super) async fn doctor(_: Authenticated, State(state): State<AppState>) -> Response {
+/// run for the request (ADR 0132). With `recent`, a run as old as the worker's own refresh is recent (ADR 0146).
+/// 503 while no run has finished, or the last failed.
+pub(super) async fn doctor(
+    _: Authenticated,
+    State(state): State<AppState>,
+    query: Query<DoctorQuery>,
+) -> Response {
     let revision = || state.config_revision.borrow().clone();
-    let report = state.doctors.current(revision).await;
+    let timing = state.doctors.timing();
+    let recent = if query.recent {
+        timing.refresh
+    } else {
+        timing.fresh
+    };
+    let report = state.doctors.current(revision, recent).await;
     match report.state.as_ref() {
         Some(unavailable @ (DoctorState::NotRun | DoctorState::Failed { .. })) => error(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -231,12 +231,14 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
   follow();
 }
 
-// The config editor's line numbers: as many as its lines, scrolled with it, the line a parse error is on marked.
+// The config editor: a row per line and one to spare, so it never scrolls up and down inside the page; its line
+// numbers as many as its lines, the line a parse error is on marked. Long lines scroll sideways in the text alone.
 for (const editor of document.querySelectorAll('textarea[data-gutter]')) {
   const gutter = document.getElementById(editor.dataset.gutter);
   if (!gutter) continue;
   const draw = () => {
     const count = editor.value.split('\n').length;
+    if (editor.rows !== count + 1) editor.rows = count + 1;
     const marked = Number(document.querySelector('[data-error-line]')?.dataset.errorLine ?? 0);
     gutter.replaceChildren(
       ...Array.from({ length: count }, (_, index) => {
@@ -246,12 +248,8 @@ for (const editor of document.querySelectorAll('textarea[data-gutter]')) {
         return line;
       }),
     );
-    gutter.scrollTop = editor.scrollTop;
   };
   editor.addEventListener('input', draw);
-  editor.addEventListener('scroll', () => {
-    gutter.scrollTop = editor.scrollTop;
-  });
   const result = document.getElementById('config-result')?.parentElement;
   if (result) new MutationObserver(draw).observe(result, { childList: true, subtree: true });
   draw();
@@ -292,3 +290,24 @@ document.addEventListener('click', (event) => {
   const line = text.closest('li');
   if (line && (line.classList.contains('open') || text.scrollHeight > text.clientHeight + 1)) line.classList.toggle('open');
 });
+
+// The doctor's checks, once they land: their height at this width and layout, for theme.js to reserve on the next
+// visit. Only checks that stand are recorded, folded as they land: an error or a timeout is shorter than they are.
+const doctorLayout = document.querySelector('.config-layout');
+if (doctorLayout && document.getElementById('doctor')) {
+  const record = () => {
+    const doctor = document.getElementById('doctor');
+    if (!doctor?.hasAttribute('data-checked')) return;
+    const height = Math.round(doctor.getBoundingClientRect().height);
+    const wide = matchMedia('(min-width: 72rem)').matches;
+    localStorage.setItem('runnerd-doctor-box', JSON.stringify({ width: innerWidth, wide, height }));
+  };
+  // Datastar morphs the pending region into the checks, or replaces it: either changes these attributes or the
+  // layout's children. Opening the fold changes neither.
+  new MutationObserver(record).observe(doctorLayout, { childList: true });
+  new MutationObserver(record).observe(doctorLayout, {
+    subtree: true,
+    attributeFilter: ['data-checked', 'aria-busy'],
+  });
+  record();
+}

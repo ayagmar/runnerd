@@ -23,6 +23,7 @@ typos
 taplo fmt --check
 cargo deny check
 pnpm -C site build   # once: pnpm -C site install --frozen-lockfile
+cargo build --locked -p runnerd-web --example demo && node crates/web/tests/browser.mjs target/debug/examples/demo
 ```
 
 Workflow changes also go through `actionlint` and `zizmor`, shell scripts through `shellcheck`.

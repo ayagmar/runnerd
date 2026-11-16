@@ -81,8 +81,8 @@ pub use budget::{
     SlotForm, SlotPart, SlotReading,
 };
 pub use control::{
-    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
-    ReplaceQuery, RunningJob,
+    Busy, Check, CheckCount, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorQuery,
+    DoctorState, DoctorSummary, PauseQuery, Paused, ReplaceQuery, RunningJob,
 };
 pub use disk::{
     Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteSection,

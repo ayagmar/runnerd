@@ -39,8 +39,8 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
-    Admission, AdmissionPolicy, Basis, CpuAdmission, Event, EventEnvelope, HostSample, JobPeak,
-    JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
+    Admission, AdmissionPolicy, Basis, CpuAdmission, Doctor, Event, EventEnvelope, HostSample,
+    JobPeak, JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -881,22 +881,22 @@ async fn a_job_waiting_for_cpu_never_reads_as_needing_what_is_free() {
 
 #[tokio::test]
 async fn the_overviews_regions_come_in_the_order_a_narrow_screen_shows_them() {
-    // The keyboard and a screen reader follow the markup, which a narrow screen shows as it is: health, then what
-    // needs attention, then the machine, then the work. A wide screen's two columns come from the grid, never from
-    // reordering.
+    // The keyboard and a screen reader follow the markup, which a narrow screen shows as it is: what needs attention
+    // beside the title, the health figures, the lanes, then the work. A wide screen's columns come from the grid,
+    // never from reordering.
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
     let at = |id: &str| body.find(&format!(r#"id="{id}""#)).unwrap();
     let regions = [
-        "health",
         "attention",
+        "health",
         "budget",
         "slots",
-        "host",
         "queue",
         "recent",
         "repositories",
+        "host",
     ];
     assert!(
         regions.windows(2).all(|pair| at(pair[0]) < at(pair[1])),
@@ -1041,8 +1041,7 @@ async fn the_health_figures_count_the_24_hours_up_to_now_by_when_jobs_started_an
     }
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
-    let health =
-        &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="attention""#).unwrap()];
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="budget""#).unwrap()];
     let failed = &health[health.find("Failed, 24 h").unwrap()..];
     assert!(
         failed.contains(r#"href="/history?outcome=failure">1</a>"#)
@@ -1103,7 +1102,7 @@ async fn the_budget_names_the_mirror_and_each_seed_container() {
     for expected in [
         r#"aria-label="512M held by the mirror""#,
         r#"aria-label="9G held by jvm's seed container""#,
-        r#"<span class="lane-what">jvm seed</span>"#,
+        r#"<span class="lane-name">jvm seed</span>"#,
     ] {
         assert!(
             overview.body.contains(expected),
@@ -1227,8 +1226,7 @@ async fn a_job_whose_own_steps_failed_does_not_turn_the_failed_figure_red() {
     }
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
-    let health =
-        &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="attention""#).unwrap()];
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="budget""#).unwrap()];
     assert!(
         health.contains(
             r#"Failed, 24 h</dt><dd><a class="figure-main" href="/history?outcome=failure">1</a>"#
@@ -2343,6 +2341,7 @@ async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
     assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, toml);
     // Datastar cancels a request still out only for a new one with the same method and address: the doctor's
     // answer for the config before the save must not land after the one for the config saved.
+    old_doctor(&dashboard, Duration::from_secs(1));
     let page = dashboard.page(&cookie, "/config").await.body;
     assert_eq!(
         doctor_request(&saved.body).address,
@@ -2387,10 +2386,27 @@ fn doctor_request(html: &str) -> DoctorRequest<'_> {
     }
 }
 
+/// A doctor whose last run is 15 minutes old, past what the page takes as it stands, and whose new run takes `delay`.
+fn old_doctor(dashboard: &Dashboard, delay: Duration) {
+    let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+    fixtures.doctor_delay = delay;
+    fixtures.doctor = Some(Doctor {
+        checks: vec![runnerd_core::api::Check {
+            name: "records".to_owned(),
+            status: runnerd_core::api::CheckStatus::Pass,
+            detail: "[records] max_total = 20G".to_owned(),
+            fix: None,
+        }],
+        state: Some(runnerd_core::api::DoctorState::Ready {
+            at: fixtures.now - 900,
+        }),
+    });
+}
+
 #[tokio::test]
 async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_checks_after() {
     let dashboard = Dashboard::start().await;
-    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::from_secs(10);
+    old_doctor(&dashboard, Duration::from_secs(10));
     let cookie = dashboard.sign_in().await;
     for path in ["/config", "/config?resize=node", "/config?undo=jvm"] {
         let page = tokio::time::timeout(Duration::from_secs(5), dashboard.page(&cookie, path))
@@ -2412,12 +2428,54 @@ async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_c
         );
     }
     let page = dashboard.page(&cookie, "/config").await;
+    // The editor is as tall as the text, so it never scrolls up and down inside the page and its line numbers end
+    // where its lines do (the owner's phone showed 92 numbers beside a box 22 rows tall).
+    let lines = dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .config
+        .split('\n')
+        .count();
+    assert!(
+        page.body.contains(&format!(r#"rows="{}""#, lines + 1)),
+        "a row per line of the {lines} and one to spare"
+    );
     for expected in ["Fits the budget", "jvm ×2 18G, node ×2 14G, mirror 512M"] {
         assert!(
             page.body.contains(expected),
             "the budget draws without the doctor: lacks {expected:?}"
         );
     }
+    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::ZERO;
+    let page = dashboard.page(&cookie, "/config").await;
+    assert!(
+        page.body.contains("[records] max_total = 20G") && !page.body.contains("Checking the host"),
+        "a doctor that answers at once is in the page, with no box left to fill: {}",
+        page.body
+    );
+    // The daemon's last run, 3 minutes old by its clock, is in the first response however long a new run would take, with its
+    // age and a way to run the checks again (the first visit moved the page by 510px when they landed later).
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.doctor = None;
+        fixtures.doctor_delay = Duration::from_secs(10);
+    }
+    let page = tokio::time::timeout(Duration::from_secs(5), dashboard.page(&cookie, "/config"))
+        .await
+        .expect("a recent run answers at once");
+    for expected in ["Checked ", "Run again", "data-checked"] {
+        assert!(
+            page.body.contains(expected),
+            "lacks {expected:?}: {}",
+            page.body
+        );
+    }
+    assert!(
+        !page.body.contains(Doctor::CHECKING),
+        "no box waits for checks the page has"
+    );
     dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::ZERO;
     let doctor = dashboard.page(&cookie, "/config/doctor").await;
     assert_eq!(doctor.status, StatusCode::OK);

@@ -394,6 +394,51 @@ async fn a_run_past_its_deadline_is_the_only_one_until_it_ends_and_none_starts_a
 }
 
 #[tokio::test]
+async fn a_request_for_a_recent_run_takes_one_as_old_as_the_refresh_and_a_plain_one_runs_again() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    // A run answers a plain request for a second, and one asking for a recent run for the refresh's hour.
+    let (daemon, _dir) = serving(slow_doctor(
+        Duration::from_millis(100),
+        &runs,
+        DOCTOR_TIMING,
+    ))
+    .await;
+    until(&daemon, |shown| shown.items.len() == 2).await;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let asked = tokio::time::Instant::now();
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/doctor?recent=true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let recent: Doctor = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(
+        matches!(recent.state, Some(DoctorState::Ready { .. })),
+        "the last run stands: {recent:?}"
+    );
+    assert!(
+        asked.elapsed() < Duration::from_millis(100),
+        "answered without waiting for a run: {:?}",
+        asked.elapsed()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "a recent run asks for no new one"
+    );
+    let (status, _, _) = doctor(&daemon).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "a plain request ran the checks again"
+    );
+}
+
+#[tokio::test]
 async fn a_request_waits_for_a_run_at_most_its_bound_and_then_answers_the_last_run_as_it_stands() {
     let runs = Arc::new(AtomicUsize::new(0));
     // Each run takes 1.5 s; a request waits 200 ms; a run is stale 2 s after it ended.

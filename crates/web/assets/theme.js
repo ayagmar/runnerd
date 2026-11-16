@@ -20,3 +20,15 @@ document.addEventListener('click', (event) => {
   localStorage.setItem('runnerd-theme', root.dataset.theme);
   paintBar();
 });
+
+// The doctor's box on the settings page keeps the height its checks took on the last visit at this width and layout,
+// so they land without moving the page; keys.js records it. This runs before the page is drawn.
+try {
+  const box = JSON.parse(localStorage.getItem('runnerd-doctor-box') ?? 'null');
+  const wide = matchMedia('(min-width: 72rem)').matches;
+  if (box && box.wide === wide && Math.abs(box.width - innerWidth) < 40) {
+    root.style.setProperty('--doctor-height', `${box.height}px`);
+  }
+} catch {
+  // A box not recorded, or written by something else: the doctor takes the height it needs.
+}

@@ -4,8 +4,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, DiskWrites, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits, RunLink,
-    Tone, View, WaitSpread,
+    Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits,
+    RunLink, Tone, View, WaitSpread,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -62,7 +62,7 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
         @if !insights.host.is_empty() {
             section aria-labelledby="host-title" {
                 div.section-head {
-                    h2 #host-title { "Host memory while CI ran" }
+                    h2 #host-title { (HostHazard::TITLE) }
                     span.muted { "Each UTC day, and how much of it ran on a host credit." }
                 }
                 ul.host-days {
@@ -140,7 +140,7 @@ fn waits(waits: &[RepositoryWaits]) -> Markup {
     html! {
         section aria-labelledby="waits-title" {
             div.section-head {
-                h2 #waits-title { "Waits this week" }
+                h2 #waits-title { (RepositoryWaits::TITLE) }
                 span.muted { "From queued to started, against the 7 days before. Warm: a runner was already up." }
             }
             div.table-wrap {

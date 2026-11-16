@@ -660,9 +660,12 @@ pub struct FreePart {
 }
 
 impl FreePart {
+    /// [`FreePart::name`], for a client that draws free memory it computed no part for, such as a config check's.
+    pub const NAME: &'static str = "free";
+
     /// Its name under its figure, where a block or a lane has no room for `reading`'s words: `free`.
     pub fn name(&self) -> &'static str {
-        "free"
+        Self::NAME
     }
 }
 

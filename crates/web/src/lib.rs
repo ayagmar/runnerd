@@ -184,14 +184,15 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
 
 /// No framing, no sniffing, no referrer, and a policy that lets the page load only what this server serves.
 /// Datastar evaluates its attributes with `Function`, hence `'unsafe-eval'`; regions size their blocks with
-/// `style` attributes.
+/// `style` attributes. `'inline-speculation-rules'` lets the page's speculation rules prefetch the pages it links to
+/// and runs no script.
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; \
+            "default-src 'none'; script-src 'self' 'unsafe-eval' 'inline-speculation-rules'; style-src 'self' 'unsafe-inline'; \
              img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; form-action 'self'; \
              base-uri 'none'; frame-ancestors 'none'",
         ),
@@ -301,7 +302,7 @@ async fn config(
 ) -> Response {
     let query = lenient(query);
     page(
-        ConfigView::load(&app.daemon, query)
+        ConfigView::load(&app.daemon, query, now())
             .await
             .map(|config| views::config::render(&config, &app.proxies)),
     )

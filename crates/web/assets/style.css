@@ -149,11 +149,17 @@ body {
   overflow-x: clip;
 }
 
+/* Below 60rem the tab bar is fixed along the bottom edge: every page ends that far, its safe area and a gap above it,
+   so its last row is never under the bar. */
+:root {
+  --tab-bar: 3.25rem;
+}
+
 main {
   width: 100%;
   min-height: calc(100vh - 3.5rem);
-  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0)) calc(6rem + env(safe-area-inset-bottom, 0))
-    max(var(--gutter), env(safe-area-inset-left, 0));
+  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0))
+    calc(var(--tab-bar) + 2.75rem + env(safe-area-inset-bottom, 0)) max(var(--gutter), env(safe-area-inset-left, 0));
   background: var(--bg);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -296,7 +302,7 @@ html {
 .top nav a {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 3.25rem;
+  min-height: var(--tab-bar);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -310,10 +316,16 @@ html {
   text-decoration: underline;
 }
 
+.top nav a:active {
+  background: var(--surface-2);
+}
+
+/* The view shown: a mint block, which slides from the view left to the view opened (`@view-transition` below). */
 .top nav a[aria-current='page'] {
   background: var(--p0);
   color: var(--block-ink);
   font-weight: 700;
+  view-transition-name: view-shown;
 }
 
 .connection {
@@ -374,6 +386,54 @@ html {
 
 .tool:hover {
   background: var(--surface-2);
+}
+
+.tool:active,
+.button:active,
+.button-quiet:active,
+.button-danger:active {
+  transform: scale(0.97);
+}
+
+.tool,
+.button,
+.button-quiet,
+.button-danger {
+  transition: transform 100ms var(--ease), background-color 120ms;
+}
+
+/* Moving between pages: the browser keeps the page shown until the next one paints, then crossfades, quickly, as an
+   action repeated all day should; the shell stays still and the view's mark slides to the view opened. */
+@view-transition {
+  navigation: auto;
+}
+
+.top {
+  view-transition-name: shell;
+}
+
+.top nav {
+  view-transition-name: views;
+}
+
+::view-transition-group(*) {
+  animation-duration: 160ms;
+  animation-timing-function: var(--ease);
+}
+
+::view-transition-old(root) {
+  animation-duration: 90ms;
+}
+
+::view-transition-new(root) {
+  animation-duration: 140ms;
+}
+
+::view-transition-old(shell),
+::view-transition-new(shell),
+::view-transition-old(views),
+::view-transition-new(views) {
+  animation: none;
 }
 
 /* A view's digit, the key that opens it: shown where a keyboard is likely, beside the label it opens. */
@@ -484,7 +544,7 @@ html {
 }
 
 .page-aside {
-  flex: 1 1 auto;
+  flex: 1 1 18rem;
   display: flex;
   justify-content: flex-end;
   min-width: 0;
@@ -526,12 +586,102 @@ nav.sections a[aria-current='page'] {
   }
 }
 
-/* What needs attention: a row per item, its tone a square beside core's title, then its fix and since when. Nothing
-   at all when nothing does. */
+/* What needs attention: one line beside the page's title, its count in the worst item's tone, that item's title and
+   core's count of the rest; it opens to every item, a row each, its tone a square beside core's title, then its fix
+   and since when. Nothing at all when nothing needs attention. */
+.attention {
+  min-width: 0;
+  width: min(100%, 44rem);
+  background: var(--surface);
+}
+
+.attention > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 44px;
+  padding: 0.3rem 0.75rem 0.3rem 0.5rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.attention > summary::-webkit-details-marker {
+  display: none;
+}
+
+.attention > summary::after {
+  content: '';
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-inline: 0.2rem;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-25%) rotate(45deg);
+  transition: transform 160ms var(--ease);
+}
+
+.attention[open] > summary::after {
+  transform: translateY(25%) rotate(225deg);
+}
+
+.attention > summary:hover {
+  background: var(--surface-2);
+}
+
+.attention-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 2.75rem;
+  padding: 0.2rem 0.5rem;
+  font-weight: 700;
+  font-size: 1.125rem;
+  line-height: 1.2;
+  background: color-mix(in srgb, var(--wait) 18%, var(--surface));
+  color: var(--wait-ink);
+}
+
+.attention.tone-bad .attention-count {
+  background: var(--failure-bg);
+  color: var(--failure-ink);
+}
+
+.attention.tone-good .attention-count,
+.attention.tone-neutral .attention-count,
+.attention.tone-quiet .attention-count {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.attention-count .tone-mark {
+  width: 0.6rem;
+  height: 0.6rem;
+  background: currentColor;
+}
+
+.attention-worst {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.attention-rest {
+  font-size: 0.875rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.attention.unsupported {
+  background: none;
+}
+
 .attention-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 0 2px;
   display: grid;
   gap: 2px;
 }
@@ -544,28 +694,15 @@ nav.sections a[aria-current='page'] {
     '. fix fix';
   align-items: baseline;
   gap: 0.1rem 0.75rem;
-  padding: 0.55rem 1rem;
-  background: var(--surface);
-}
-
-@media (min-width: 40.01rem) {
-  .queue .narrow-only,
-  .attention :is(.attention-item.narrow, summary .narrow, details.narrow-only) {
-    display: none;
-  }
-}
-
-@media (min-width: 80rem) {
-  .attention > .attention-list,
-  .attention-more > .attention-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  padding: 0.55rem 0.75rem;
+  background: var(--bg);
+  margin-inline: 2px;
 }
 
 .attention-item .tone-mark {
   grid-area: mark;
-  width: 0.75rem;
-  height: 0.75rem;
+  width: 0.65rem;
+  height: 0.65rem;
   align-self: center;
   background: var(--muted);
 }
@@ -574,8 +711,8 @@ nav.sections a[aria-current='page'] {
 .attention-item.tone-warn .tone-mark { background: var(--wait); }
 .attention-item.tone-good .tone-mark { background: var(--accent); }
 
-.attention-item.tone-bad {
-  background: color-mix(in srgb, var(--failure-bg) 55%, var(--surface));
+.attention-item:focus {
+  outline: none;
 }
 
 .attention-title {
@@ -583,52 +720,6 @@ nav.sections a[aria-current='page'] {
   font-weight: 600;
   text-wrap: pretty;
   overflow-wrap: anywhere;
-}
-
-@media (max-width: 40rem) {
-  .attention-item {
-    grid-template-columns: 0.75rem minmax(0, 1fr);
-    grid-template-areas:
-      'mark title'
-      '. fix'
-      '. since';
-    padding: 0.55rem 0.75rem;
-  }
-
-  .attention-title {
-    font-size: 0.9375rem;
-  }
-
-  /* A phone shows the first two items and folds the rest under the count it says. */
-  .attention :is(.attention-item.wide, summary .wide) {
-    display: none;
-  }
-
-  /* On a phone an item reads in three lines and its fix in one; a tap on the item opens it whole. */
-  .attention-item:not(:focus-within) :is(.attention-title, .attention-fix) {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    overflow: hidden;
-  }
-
-  .attention-item:not(:focus-within) .attention-fix {
-    -webkit-line-clamp: 1;
-  }
-
-  .attention-item:focus {
-    outline: none;
-  }
-
-
-  .readout .cpu-reserved {
-    grid-column: 1 / -1;
-  }
-
-  dl.health-figures .figure-note,
-  dl.health-figures .wait-hours {
-    display: none;
-  }
 }
 
 a.attention-title {
@@ -657,14 +748,22 @@ a.attention-title:hover {
   white-space: nowrap;
 }
 
-.attention-more summary {
-  display: flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 0 1rem;
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 0.875rem;
+@media (max-width: 40rem) {
+  .attention > summary {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .attention-rest {
+    display: none;
+  }
+
+  .attention-item {
+    grid-template-columns: 0.75rem minmax(0, 1fr);
+    grid-template-areas:
+      'mark title'
+      '. fix'
+      '. since';
+  }
 }
 
 /* The keys and the command palette: sheets over the page. */
@@ -789,70 +888,7 @@ dialog.palette {
   line-height: 1;
 }
 
-/* The budget: the slice is the ground, each slot a block sized by its memory cap. */
-.bar {
-  display: flex;
-  gap: var(--gap);
-  height: clamp(7rem, 17vh, 10rem);
-  background: var(--surface);
-}
-
-.block,
-.free {
-  position: relative;
-  flex: var(--size) 1 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  padding: clamp(0.45rem, 1vw, 0.9rem);
-  overflow: hidden;
-  text-decoration: none;
-  transition: flex-grow 300ms var(--ease), background-color 200ms;
-}
-
-.block {
-  color: var(--block-ink);
-  background: var(--profile, var(--surface-2));
-}
-
-.block.mirror {
-  --profile: var(--ink);
-  color: var(--bg);
-  flex-basis: 3px;
-}
-
-.block > span,
-.free > span {
-  position: relative;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* A size never loses its end: in a narrow block it gets smaller, down to a third of the block's width. */
-.block .size,
-.free .size {
-  font-size: min(clamp(1.1rem, 0.6rem + 2.4vw, 2.75rem), 30cqi);
-  font-weight: 700;
-  letter-spacing: -0.05em;
-  line-height: 0.95;
-}
-
-.block .name,
-.free .name {
-  font-size: 0.875rem;
-  font-weight: 600;
-  margin-top: 0.3rem;
-}
-
-/* A block too narrow for its labels shows none: its size is in the bar's accessible name and its title. */
-.block,
-.free {
-  container-type: inline-size;
-}
-
-/* A block too narrow for its size's full figure shows the shorter one. */
+/* A size in a lane too narrow for its full figure shows the shorter one. */
 .size .short {
   display: none;
 }
@@ -865,17 +901,6 @@ dialog.palette {
   .size .short {
     display: inline;
   }
-}
-
-@container (max-width: 2.25rem) {
-  .block > span,
-  .free > span {
-    display: none;
-  }
-}
-
-.free {
-  color: var(--muted);
 }
 
 /* The budget's head: what is reserved of the slice as its heading, then what is in use, of the CPUs and of the host
@@ -978,81 +1003,118 @@ dialog.palette {
   background: var(--profile, var(--muted));
 }
 
-/* Lanes: the machine's budget bar, a row per part. Each row's strip is the whole slice, and its block sits where its
-   memory does, so the blocks read down the rows as the bar would read across: solid while a job runs (filled to its
-   last sampled memory), pale while a runner waits, an outline while idle; then the mirror, seeds and shells in ink,
-   what is free as an outline, and what is closed hatched. A running lane carries its job, step, time and its memory
-   and CPU; any other row is one compact line. */
+/* Lanes: the budget bar, whose blocks are the slots themselves. Each lane is as wide as its share of the slice (a
+   floor keeps a name legible), in its profile's colour: solid while a job runs, filled from the bottom to what the job
+   uses now; pale while a runner waits; an outline while idle. The mirror, seeds and shells are ink, what is free the
+   slice's ground, what is closed hatched. A lane shows what its width has room for: the job's name, step, time,
+   memory and CPU, then less, down to its name on its side. A slot that holds none of the budget, as an idle one does
+   under measured admission, is not a sliver in the bar: it is a chip in one row under it. In a container under 44rem
+   the lanes are rows instead, each over a strip of the slice with its block where it sits, so the blocks read down
+   the rows as the bar reads across. So that rows come where the bar's lanes at their floor no longer fit, the server
+   sets `--fit`, the share of the width the container query sees (1 while they fit in 44rem at 2.5rem each); the list itself takes
+   the whole width. */
+.lanes-fit {
+  container: slots / inline-size;
+  width: calc(100% * var(--fit, 1));
+}
+
+.lanes-fit > .lanes {
+  width: calc(100% / var(--fit, 1));
+}
+
 .lanes {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
+  display: flex;
   gap: 2px;
 }
 
 .lane {
+  container: lane / inline-size;
+  position: relative;
+  isolation: isolate;
+  flex: var(--share) 1 0%;
+  min-width: 1.75rem;
+  min-height: 13rem;
   display: grid;
-  grid-template-columns: 6rem 4.25rem minmax(0, 1fr) auto;
-  grid-template-areas: 'share name what since';
-  align-items: center;
-  gap: 0.1rem 0.85rem;
-  min-height: 2.5rem;
-  padding: 0.3rem 0.85rem 0.3rem 0;
-  background: var(--surface);
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'name size'
+    'caps caps'
+    'what what'
+    'step step'
+    '. .'
+    'memory memory'
+    'cpu cpu';
+  align-items: baseline;
+  gap: 0.1rem 0.5rem;
+  padding: 0.65rem 0.7rem 0.6rem;
+  overflow: hidden;
   scroll-margin-top: 1rem;
 }
 
-/* A running lane: its name and job, its caps and step under them, and its memory and CPU beside both. */
-.lane.running {
-  grid-template-columns: 6rem 4.25rem minmax(0, 1fr) minmax(6rem, 9rem) minmax(6rem, 9rem) auto;
+.lane.slot:not(.running) {
   grid-template-areas:
-    'share name what what what since'
-    'share caps step memory cpu since';
-  padding-block: 0.45rem;
+    'name size'
+    'caps caps'
+    'what what'
+    'since since'
+    '. .'
+    '. .'
+    '. .';
 }
 
-.lane-share {
-  grid-area: share;
-  align-self: stretch;
-  position: relative;
-  margin-block: -0.3rem;
-  background: color-mix(in srgb, var(--line) 35%, transparent);
+.lane.running {
+  grid-template-areas:
+    'name size'
+    'caps since'
+    'what what'
+    'step step'
+    '. .'
+    'memory memory'
+    'cpu cpu';
 }
 
-.lane.running .lane-share {
-  margin-block: -0.45rem;
+/* A part beside the slots: its figure over its name, at the foot of the lane, as the site's blocks are. */
+.lane.part {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-areas: '.' 'size' 'name';
 }
 
 .lane-block {
   position: absolute;
-  inset-block: 0;
-  left: calc(var(--from) * 100%);
-  width: max(3px, calc(var(--share) * 100%));
+  inset: 0;
+  z-index: -1;
   overflow: hidden;
-  background: var(--profile);
+  background: var(--profile, var(--surface));
 }
 
-/* What the job's last sample uses of its block, from the left: a new sample animates a transform, not the layout. */
+/* What the job's last sample uses of its block: a new sample animates a transform, never the layout. */
 .lane-block .fill {
   position: absolute;
   inset: 0;
-  transform: scaleX(var(--fill));
-  transform-origin: left;
-  background: color-mix(in srgb, var(--block-ink) 22%, transparent);
+  transform: scaleY(var(--fill));
+  transform-origin: bottom;
+  background: color-mix(in srgb, var(--block-ink) 16%, transparent);
   transition: transform 600ms var(--ease);
 }
 
 .lane.warm .lane-block,
 .lane.starting .lane-block {
-  background: color-mix(in srgb, var(--profile) 45%, var(--surface));
+  background: color-mix(in srgb, var(--profile) 38%, var(--surface));
 }
 
 .lane.idle .lane-block,
-.lane.reseeding .lane-block,
-.lane.free .lane-block {
+.lane.reseeding .lane-block {
   background: transparent;
   box-shadow: inset 0 0 0 2px var(--profile, var(--muted));
+}
+
+.lane.free .lane-block {
+  background: var(--surface);
 }
 
 .lane.mirror .lane-block,
@@ -1067,48 +1129,173 @@ dialog.palette {
 
 /* Room no runner may take while the host holds it back or the slice is held: hatched. */
 .lane.closed .lane-block {
-  background: repeating-linear-gradient(-45deg, var(--muted) 0 2px, transparent 2px 6px);
+  background: repeating-linear-gradient(-45deg, var(--line) 0 2px, transparent 2px 7px);
 }
 
-/* A part beside the slots: its size, then what it is, across the rest of the row and wrapped rather than cut. */
-.lane.part .lane-what {
-  grid-column: 3 / -1;
-  white-space: normal;
+/* In the bar, text sits on the block: a pastel takes the blocks' ink in both themes, the mirror's ink the page's
+   ground. In rows it sits on the row, and the block is the strip under it. */
+@container slots (width >= 44rem) {
+  .lane.running {
+    color: var(--block-ink);
+  }
+
+  .lane:is(.mirror, .shell, .seed) {
+    color: var(--bg);
+  }
+
+  .lane.free {
+    color: var(--muted);
+  }
+
+  /* A waiting runner's pale block keeps its text at full ink: dimmed it falls under AA in the dark theme. */
+  .lane:is(.warm, .starting) :is(.lane-caps, .lane-state, .repo, .lane-since) {
+    opacity: 1;
+  }
+
+  /* Slots that hold none of the budget: chips in one row under the bar, in slot order, each its profile's swatch,
+     its name and its state. The bar's lanes fill the first line; the list's `::after` ends it. */
+  .lanes {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+
+  .lanes::after {
+    content: '';
+    order: 1;
+    flex: 0 0 100%;
+  }
+
+  .lane.empty {
+    order: 2;
+    container-type: normal;
+    flex: none;
+    min-width: 0;
+    min-height: 2.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.5rem 0.5rem 0 0;
+    padding: 0.35rem 0.75rem;
+    background: var(--surface);
+  }
+
+  .lane.empty .lane-block {
+    position: static;
+    flex: none;
+    width: 0.75rem;
+    height: 0.75rem;
+    background: var(--profile);
+    box-shadow: none;
+  }
+
+  .lane.empty :is(.lane-caps, .lane-since, .repo) {
+    display: none;
+  }
+
+  .lane.empty .lane-what {
+    margin: 0;
+    color: var(--muted);
+  }
+
+  .lane.empty .lane-state {
+    opacity: 1;
+  }
+}
+
+.lanes-check .lane:is(.p0, .p1, .p2, .p3, .p4, .p5) {
+  color: var(--block-ink);
+}
+
+.lanes-check .lane.mirror {
+  color: var(--bg);
+}
+
+.lanes-check .lane.free {
+  color: var(--muted);
 }
 
 .lane-name {
   grid-area: name;
+  min-width: 0;
+  font-weight: 700;
+  font-size: 0.9375rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lane-size {
+  grid-area: size;
   font-weight: 700;
   font-size: 0.9375rem;
   white-space: nowrap;
 }
 
-.lane-caps {
-  grid-area: caps;
-  display: none;
-  color: var(--muted);
-  font-size: 0.8125rem;
-  white-space: nowrap;
+/* Sized to its lane, so "7.09G" fits a lane of 75px whole rather than cut to read as another number. */
+.lane.part .lane-size {
+  font-size: clamp(0.875rem, 30cqi - 0.5rem, 1.75rem);
+  letter-spacing: -0.04em;
+  line-height: 1;
 }
 
-.lane.running .lane-caps {
-  display: block;
+.lane.part .lane-name {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* On hatching, a label keeps a ground of its own. */
+.lane.closed :is(.lane-size, .lane-name) {
+  justify-self: start;
+  padding: 0 0.2rem;
+  background: var(--bg);
+}
+
+.lane-caps {
+  grid-area: caps;
+  min-width: 0;
+  font-size: 0.8125rem;
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .lane-what {
   grid-area: what;
   min-width: 0;
+  margin-top: 0.35rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.lane .repo {
+  color: inherit;
+  opacity: 0.78;
 }
 
 .lane-job {
   text-decoration: none;
 }
 
+/* A running job's name takes two lines before it is cut: the lane has rows to spare. */
+@container lane (width >= 6rem) {
+  .lane.running .lane-job {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
 .lane-job .job-name {
   font-weight: 700;
+  font-size: 1.0625rem;
 }
 
 .lane-job:hover .job-name {
@@ -1116,20 +1303,21 @@ dialog.palette {
 }
 
 .lane-state {
-  color: var(--muted);
-}
-
-.lane:not(.running) .lane-what .repo {
-  font-size: inherit;
+  opacity: 0.78;
 }
 
 .lane-since {
   grid-area: since;
-  color: var(--muted);
+  min-width: 0;
+  justify-self: end;
+  text-align: end;
   font-size: 0.875rem;
   white-space: nowrap;
-  text-align: end;
-  min-width: 7.5ch;
+  opacity: 0.78;
+}
+
+.lane.slot:not(.running) .lane-since {
+  justify-self: start;
 }
 
 .lane-step {
@@ -1141,10 +1329,12 @@ dialog.palette {
   white-space: nowrap;
 }
 
+/* A figure keeps a box wider than its text, so a new sample's figure never moves its sparkline. */
 .lane-figure {
-  display: flex;
+  display: grid;
+  grid-template-columns: 5.25rem minmax(0, 1fr);
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
   min-width: 0;
   font-weight: 600;
   font-size: 0.875rem;
@@ -1155,37 +1345,244 @@ dialog.palette {
 .lane-figure.cpu { grid-area: cpu; }
 
 .lane-figure .sparkline {
-  flex: 1;
-  min-width: 2rem;
-  height: 1rem;
+  min-width: 0;
+  height: 1.25rem;
   margin: 0;
 }
 
-@media (max-width: 48rem) {
-  .lane {
-    grid-template-columns: 4rem 3.75rem minmax(0, 1fr) auto;
-    gap: 0.1rem 0.6rem;
+/* On a running lane's pastel the sparklines take its ink. */
+.lane.running .lane-figure .line {
+  stroke: currentColor;
+}
+
+.lane.running .lane-figure .area {
+  fill: currentColor;
+}
+
+.lane.running .step-count {
+  background: color-mix(in srgb, var(--block-ink) 14%, transparent);
+  color: inherit;
+}
+
+/* Narrower lanes show less: first the sparklines and the caps, then all but the name, which turns on its side. */
+@container lane (width < 9.5rem) {
+  .lane-figure {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The name keeps the first line; the reserved size goes under it. */
+  .lane.slot > .lane-name {
+    grid-column: 1 / -1;
+  }
+
+  .lane.slot > .lane-size {
+    grid-area: caps;
+    justify-self: start;
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+
+  /* A running lane keeps its time there instead: its width already says its size. */
+  .lane.running > .lane-size {
+    display: none;
+  }
+
+  .lane.running > .lane-since {
+    grid-column: 1 / -1;
+    justify-self: start;
+    text-align: start;
+  }
+
+  .lane-figure .sparkline,
+  .lane-caps {
+    display: none;
+  }
+}
+
+/* Narrower still, a waiting runner's age goes, and a running job's time wraps at its space rather than being cut. */
+@container lane (width < 6rem) {
+  .lane.slot:not(.running) > .lane-since {
+    display: none;
+  }
+
+  .lane.running > :is(.lane-since, .lane-figure) {
+    white-space: normal;
+  }
+}
+
+@container lane (width < 2.75rem) {
+  .lane > :not(.lane-block, .lane-name, .lane-size) {
+    display: none;
+  }
+
+  .lane.slot > .lane-size {
+    display: none;
+  }
+
+  .lane-name,
+  .lane.part > .lane-name,
+  .lane.part .lane-size {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    justify-self: start;
+    font-size: 0.8125rem;
+    letter-spacing: 0;
+    white-space: nowrap;
+  }
+
+  .lane.slot > .lane-name {
+    grid-area: auto;
+    grid-column: 1 / -1;
+    grid-row: 1 / -1;
+    align-self: end;
+  }
+
+  /* A part's figure and name side by side, each on its side, reading up from the foot. */
+  .lane.part {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: 'name size .';
+    align-items: end;
+    gap: 0.15rem;
+  }
+}
+
+/* Too narrow for both, a part keeps its figure. */
+@container lane (width < 1.6rem) {
+  .lane.part > .lane-name {
+    display: none;
+  }
+}
+
+/* Rows: a lane per row over its strip of the slice. */
+@container slots (width < 44rem) {
+  .lanes {
+    flex-direction: column;
+  }
+
+  .lane,
+  .lane.slot:not(.running),
+  .lane.part {
+    flex: none;
+    min-width: 0;
+    min-height: 2.75rem;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-rows: none;
+    grid-template-areas: 'name size what since';
+    align-items: baseline;
+    column-gap: 0.65rem;
+    padding: 0.55rem 0.75rem 1.05rem;
+    background: var(--surface);
+    color: var(--ink);
   }
 
   .lane.running {
-    grid-template-columns: 4rem auto minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto;
     grid-template-areas:
-      'share name what what since'
-      'share step step step step'
-      'share memory memory cpu cpu';
-    padding-block: 0.35rem;
+      'name size size since'
+      'what what what what'
+      'step step step step'
+      'memory memory cpu cpu';
+    row-gap: 0.2rem;
+  }
+
+  .lane.part {
+    grid-template-areas: 'size name name name';
+  }
+
+  .lane.part .lane-size {
+    font-size: 1rem;
+    letter-spacing: -0.02em;
+  }
+
+  .lane.part .lane-name {
+    font-size: 0.9375rem;
+    font-weight: 500;
+    color: var(--muted);
+  }
+
+  .lane-caps {
+    display: none;
   }
 
   .lane-what {
-    grid-column: 3 / -2;
+    margin: 0;
   }
 
-  .lane.running .lane-what {
-    grid-area: what;
+  .lane.slot:not(.running) .lane-since {
+    justify-self: end;
   }
 
-  .lane.running .lane-caps {
-    display: none;
+  .lane.closed :is(.lane-size, .lane-name) {
+    padding: 0;
+    background: none;
+  }
+
+  /* The slice under the row, and the lane's block on it where it sits. */
+  .lane::before {
+    content: '';
+    position: absolute;
+    inset: auto 0 0;
+    z-index: -2;
+    height: 0.4rem;
+    background: color-mix(in srgb, var(--line) 45%, transparent);
+  }
+
+  .lane-block {
+    inset: auto auto 0 calc(var(--from) * 100%);
+    width: max(3px, calc(var(--share) * 100%));
+    height: 0.4rem;
+  }
+
+  .lane-block .fill {
+    transform: scaleX(var(--fill));
+    transform-origin: left;
+    background: color-mix(in srgb, var(--block-ink) 30%, transparent);
+  }
+
+  .lane.idle .lane-block,
+  .lane.reseeding .lane-block {
+    box-shadow: inset 0 0 0 1px var(--profile, var(--muted));
+  }
+
+  .lane.free .lane-block {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--muted);
+  }
+
+  /* A strip is thin: a waiting runner's block needs more of its colour to read on it. */
+  .lane.warm .lane-block,
+  .lane.starting .lane-block {
+    background: color-mix(in srgb, var(--profile) 70%, var(--surface));
+  }
+
+  .lane.running .lane-figure .line {
+    stroke: var(--memory);
+  }
+
+  .lane.running .lane-figure.cpu .line {
+    stroke: var(--cpu);
+  }
+
+  .lane.running .lane-figure .area {
+    fill: var(--memory);
+  }
+
+  .lane.running .lane-figure.cpu .area {
+    fill: var(--cpu);
+  }
+
+  .lane.running .step-count {
+    background: var(--running-bg);
+    color: var(--running-ink);
+  }
+
+  .lane-figure {
+    grid-template-columns: 5.25rem minmax(0, 1fr);
+  }
+
+  .lane-figure .sparkline {
+    display: block;
   }
 }
 
@@ -1382,19 +1779,20 @@ dialog.palette {
 .legend .run { --profile: var(--memory); }
 .legend .wait { --profile: var(--wait); }
 
-/* The overview: what needs attention across the top, then the machine (budget, lanes, the slice's charts) beside the
-   work (the queue, the latest jobs, the repositories) on a wide screen; one column, in that order, on a narrow one. */
+/* The overview: the headline figures, then the budget as lanes across the page, then the work: on a wide screen the
+   queue beside the latest jobs and the repositories beside the slice's charts; one column, in that order, on a narrow
+   one. */
 .overview {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: clamp(2rem, 4vw, 2.75rem);
+  gap: clamp(1.75rem, 3.5vw, 2.5rem);
 }
 
 .machine,
 .work {
   display: grid;
   align-content: start;
-  gap: 1.25rem;
+  gap: 0.85rem;
   min-width: 0;
 }
 
@@ -1415,18 +1813,24 @@ dialog.palette {
   margin-bottom: 0;
 }
 
-.machine .charts {
+.host .charts {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-
-.machine .chart-area {
-  height: 5rem;
+@media (min-width: 40.01rem) {
+  .queue .narrow-only {
+    display: none;
+  }
 }
 
-@media (min-width: 80rem) {
-  .overview {
-    grid-template-columns: minmax(0, 1.7fr) minmax(22rem, 1fr);
+.host .chart-area {
+  height: 6rem;
+}
+
+@media (min-width: 72rem) {
+  .work {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: clamp(1.5rem, 3vw, 2.5rem);
     align-items: start;
   }
 }
@@ -1483,23 +1887,42 @@ dialog.palette {
   grid-row: 1 / span 2;
 }
 
-/* Pause and resume of every repository: under the rows' buttons, quieter than they are. */
-.repo-list .all {
+/* What needs attention about the repository, on its row. */
+.repo-note {
+  grid-column: 1 / -1;
   display: flex;
-  justify-content: flex-end;
+  align-items: baseline;
   gap: 0.5rem;
-  padding: 0.25rem 1rem 0 0;
+  padding: 0.3rem 0 0.4rem;
+  font-size: 0.875rem;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
 }
 
-.repo-list .all .button-quiet {
+.repo-note .tone-mark {
+  flex: none;
+  width: 0.6rem;
+  height: 0.6rem;
+  background: var(--muted);
+}
+
+.repo-note.tone-warn .tone-mark { background: var(--wait); }
+.repo-note.tone-bad .tone-mark { background: var(--failure-ink); }
+
+/* Pause and resume of every repository: the section's own actions, by its title, quieter than a row's. */
+.repositories .section-head .all {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.repositories .section-head .all .button-quiet {
   background: none;
-  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--line);
   font-weight: 500;
 }
 
-.repo-list .all .button-quiet:hover {
+.repositories .section-head .all .button-quiet:hover {
   background: var(--surface-2);
-  color: var(--ink);
 }
 
 .button,
@@ -1534,10 +1957,6 @@ dialog.palette {
   background: var(--line);
 }
 
-.button:active,
-.button-quiet:active {
-  transform: translateY(1px);
-}
 
 [aria-busy='true'] {
   cursor: progress;
@@ -1650,30 +2069,36 @@ dialog.palette {
   animation: beat 1.6s var(--ease) infinite;
 }
 
-/* Health: whether CI keeps up, as one row of figures beside the page's title. A figure that needs a look takes the
-   colour of what it counts; the rest stay ink. */
+/* Health: whether CI keeps up, as four figures at the head of the page, large enough to read from across a desk. A
+   figure that needs a look takes the colour of what it counts; the rest stay ink. */
 .health {
   display: grid;
   gap: 0.5rem;
 }
 
 dl.health-figures {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem clamp(1.25rem, 3vw, 2.5rem);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
   margin: 0;
 }
 
 .health-figures > div {
   display: grid;
-  grid-template-columns: auto auto;
-  justify-content: start;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: start;
   align-items: baseline;
-  column-gap: 0.5rem;
+  column-gap: 0.45rem;
+  min-height: 7.5rem;
+  padding: 0.85rem 1rem 0.9rem;
+  background: var(--surface);
 }
 
 .health-figures dt {
   grid-column: 1 / -1;
+  font-size: 0.875rem;
+  color: var(--muted);
+  font-weight: 500;
 }
 
 .health-figures dd {
@@ -1681,30 +2106,41 @@ dl.health-figures {
 }
 
 .health-figures .figure-main {
-  font-size: 1.5rem;
+  font-size: clamp(2.25rem, 1.6rem + 1.6vw, 3rem);
   font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1.1;
+  letter-spacing: -0.045em;
+  line-height: 1.05;
   text-decoration: none;
 }
 
 .health-figures a.figure-main:hover {
   text-decoration: underline;
+  text-decoration-thickness: 2px;
 }
 
-.health-figures .figure-of,
+.health-figures .figure-of {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
 .health-figures .figure-note {
+  grid-column: 1 / -1;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--muted);
 }
 
-.health-figures .figure-note {
-  grid-column: 1 / -1;
+.health-figures .tone-warn {
+  background: color-mix(in srgb, var(--wait) 12%, var(--surface));
 }
 
 .health-figures .tone-warn .figure-main {
   color: var(--wait-ink);
+}
+
+.health-figures .tone-bad {
+  background: color-mix(in srgb, var(--failure-bg) 55%, var(--surface));
 }
 
 .health-figures .tone-bad .figure-main,
@@ -1718,9 +2154,9 @@ dl.health-figures {
   display: flex;
   align-items: flex-end;
   gap: 1px;
-  width: 7rem;
-  height: 0.9rem;
-  margin: 0.2rem 0 0;
+  width: min(100%, 9rem);
+  height: 1.1rem;
+  margin: 0.35rem 0 0;
 }
 
 .wait-hours span {
@@ -2529,15 +2965,16 @@ th a.sort:hover {
 .record-mark.tone-warn { color: var(--wait-ink); }
 .record-mark:is(.tone-neutral, .tone-quiet) { color: var(--muted); }
 
+/* A notice: a rule along its top in its tone, as the job page's failure summary has. */
 .notice {
   margin-bottom: 1rem;
   padding: 0.6rem 0.9rem;
   background: var(--surface);
-  box-shadow: inset 3px 0 0 var(--muted);
+  box-shadow: inset 0 3px 0 var(--muted);
 }
 
-.notice.tone-warn { box-shadow: inset 3px 0 0 var(--wait); }
-.notice.tone-bad { box-shadow: inset 3px 0 0 var(--failure-ink); }
+.notice.tone-warn { box-shadow: inset 0 3px 0 var(--wait); }
+.notice.tone-bad { box-shadow: inset 0 3px 0 var(--failure-ink); }
 
 /* The timeline: a lane per slot, its jobs as bars across the window, what the history cannot say hatched. */
 .tl-key {
@@ -3037,12 +3474,32 @@ th a.sort:hover {
   text-wrap: pretty;
 }
 
-/* The config editor: the file on the left, what it asks of the budget on the right. */
+/* Settings: the doctor first, then the editor, the verdict on its text and signing in a device, in one column; from
+   72rem the editor on the left and the rest beside it, in the same order. */
 .config-layout {
   display: grid;
-  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
-  gap: clamp(1.5rem, 4vw, 3rem);
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(1.5rem, 4vw, 2.5rem);
   align-items: start;
+}
+
+@media (min-width: 72rem) {
+  .config-layout {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      'editor doctor'
+      'editor side';
+    column-gap: clamp(1.5rem, 3vw, 3rem);
+  }
+
+  .config-layout > .doctor { grid-area: doctor; }
+  .config-layout > .editor { grid-area: editor; }
+  .config-layout > .config-side { grid-area: side; }
+}
+
+.config-path code {
+  overflow-wrap: anywhere;
 }
 
 .editor {
@@ -3050,30 +3507,45 @@ th a.sort:hover {
   gap: 0.5rem;
 }
 
-.editor textarea {
-  width: 100%;
-  min-height: 32rem;
-  padding: 0.85rem 1rem;
-  font-family: var(--mono);
-  font-size: 0.875rem;
-  line-height: 1.55;
-  color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  resize: vertical;
-  tab-size: 2;
+/* The buttons ride along the bottom of the screen, over the tab bar, while the editor is in view. */
+.editor > .editor-actions {
+  position: sticky;
+  bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0));
+  z-index: 2;
+  padding-block: 0.6rem;
+  background: var(--bg);
+  box-shadow: 0 -1px 0 var(--line);
+}
+
+@media (min-width: 60rem) {
+  .editor > .editor-actions {
+    bottom: 0;
+  }
+}
+
+/* The editor never scrolls inside itself, so the browser brings the caret into view by scrolling the page: it stops
+   short of the buttons' bar (44px and its padding) and, on a phone, the tab bar under it, so the line typed on is
+   never under them. */
+html:has(.editor-frame) {
+  scroll-padding-bottom: calc(5rem + var(--tab-bar) + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 60rem) {
+  html:has(.editor-frame) {
+    scroll-padding-bottom: 5rem;
+  }
 }
 
 .editor-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem 1rem;
+  gap: 0.5rem;
 }
 
-.editor-actions p {
-  flex: 1 1 18rem;
+.editor-note {
   font-size: 0.875rem;
+  text-wrap: pretty;
 }
 
 .config-side {
@@ -3114,43 +3586,26 @@ th a.sort:hover {
   transition-delay: 150ms;
 }
 
-.bar-small {
+/* The check's lanes: the overview's, shorter, with a mark where MemoryMax falls when the blocks pass it. Exact widths,
+   so the mark lands where it says: no floor under a lane here. */
+.budget-lanes {
   position: relative;
-  height: 6rem;
-  background: var(--bg);
 }
 
-/* Exact widths: a block's share of the bar is its share of the budget, so the MemoryMax mark lands where it says.
-   No gap and no side padding on the blocks, which a narrow block could not shrink below; the labels carry it. */
-.bar-small {
-  gap: 0;
+.lanes-check .lane {
+  min-width: 0;
+  min-height: 5.5rem;
+  padding: 0.5rem 0.55rem;
 }
 
-.bar-small > .block,
-.bar-small > .free {
-  flex: 0 0 calc(var(--size) * 100%);
-  padding-inline: 0;
-  box-shadow: inset -2px 0 var(--bg);
+/* Upright only: a figure turned on its side measures `cqi` along the wrong axis, and takes the narrow lane's size. */
+@container lane (width >= 2.75rem) {
+  .lanes-check .lane.part .lane-size {
+    font-size: min(1.25rem, 30cqi);
+  }
 }
 
-.bar-small > :is(.block, .free) > span {
-  padding-inline: 0.45rem;
-}
-
-.bar-small .block .size,
-.bar-small .free .size {
-  font-size: min(1.125rem, 30cqi);
-}
-
-/* A narrow block's name wraps rather than losing its end. */
-.bar-small .block > .name {
-  font-size: 0.8125rem;
-  line-height: 1.15;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.bar:has(.max-mark) {
+.budget-lanes:has(.max-mark) {
   margin-top: 1.6rem;
 }
 
@@ -3221,20 +3676,102 @@ th a.sort:hover {
   overflow-wrap: anywhere;
 }
 
-/* The doctor's checks before they arrive: rows where they will be, breathing while the daemon reads the host. */
-.check-list.pending li {
-  height: 2.25rem;
+/* The checks that pass, folded into one line: their count by label, then their names, which open to the list. Before
+   the checks arrive the line keeps its box, the runner mark filling bar by bar while the daemon reads the host. */
+.check-fold {
+  justify-self: stretch;
   background: var(--surface);
-  animation: waiting 1.4s ease-in-out infinite alternate;
 }
 
-.check-list.pending li:nth-child(2) { animation-delay: 0.15s; }
-.check-list.pending li:nth-child(3) { animation-delay: 0.3s; }
-.check-list.pending li:nth-child(4) { animation-delay: 0.45s; }
+.check-fold > summary,
+.check-fold.pending {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.85rem;
+  min-height: 3rem;
+  padding: 0.4rem 0.85rem;
+  font-size: 0.9375rem;
+}
 
-@keyframes waiting {
-  to {
-    opacity: 0.4;
+.check-fold > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.check-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A chevron that turns as the fold opens. */
+.check-fold > summary::after {
+  content: '';
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-inline: 0.25rem;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-25%) rotate(45deg);
+  transition: transform 160ms var(--ease);
+}
+
+.check-fold[open] > summary::after {
+  transform: translateY(25%) rotate(225deg);
+}
+
+.check-fold > summary:hover {
+  background: var(--surface-2);
+}
+
+.check-counts {
+  display: flex;
+  gap: 0.75rem;
+  white-space: nowrap;
+}
+
+.check-counts strong {
+  font-size: 1.125rem;
+}
+
+.check-names {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.check-fold > .check-list {
+  margin: 0;
+  padding-bottom: 0.5rem;
+}
+
+.check-mark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 1.1rem;
+}
+
+.check-mark span {
+  width: 0.3rem;
+  height: 100%;
+  background: var(--line);
+  animation: fill-bar 1.2s steps(1, end) infinite;
+}
+
+.check-mark span:nth-child(1) { --on: var(--p0); }
+.check-mark span:nth-child(2) { --on: var(--p1); animation-delay: 0.3s; }
+.check-mark span:nth-child(3) { --on: var(--p2); animation-delay: 0.6s; }
+.check-mark span:nth-child(4) { --on: var(--p3); animation-delay: 0.9s; }
+
+@keyframes fill-bar {
+  0% {
+    background: var(--on);
+  }
+
+  25% {
+    background: var(--line);
   }
 }
 
@@ -3244,9 +3781,42 @@ th a.sort:hover {
   justify-items: start;
 }
 
+/* Before its checks land, the box they took on the last visit (theme.js). */
+.doctor[aria-busy='true'] {
+  min-height: var(--doctor-height, auto);
+  align-content: start;
+}
+
 .doctor h2,
 .doctor .check-message {
   margin: 0;
+}
+
+/* Its title, how old the checks are, as core says it, and a quiet button that runs them again. */
+.doctor-head {
+  justify-self: stretch;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+
+.doctor-head h2 {
+  margin-right: auto;
+}
+
+.doctor-age {
+  font-size: 0.875rem;
+}
+
+.doctor-head .button-quiet {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-weight: 500;
+}
+
+.doctor-head .button-quiet:hover {
+  background: var(--surface-2);
 }
 
 .doctor .check-list {
@@ -3348,7 +3918,7 @@ th a.sort:hover {
 #notice {
   position: fixed;
   right: var(--gutter);
-  bottom: calc(3.25rem + env(safe-area-inset-bottom, 0) + 0.75rem);
+  bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0) + 0.75rem);
   max-width: min(28rem, calc(100vw - 2 * var(--gutter)));
   z-index: 5;
 }
@@ -3406,18 +3976,6 @@ th a.sort:hover {
   gap: 1rem;
 }
 
-@media (max-width: 60rem) {
-  .config-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  /* The verdict and the buttons stay within a thumb's reach of the text. */
-  .editor textarea {
-    min-height: 16rem;
-    height: 62svh;
-  }
-}
-
 @media (max-width: 30rem) {
   h1 {
     font-size: 1.5rem;
@@ -3441,33 +3999,15 @@ th a.sort:hover {
     padding: 0.75rem 0.85rem;
   }
 
-  /* Narrow blocks keep their labels: less padding and gap, and a name that may wrap. */
-  .bar {
-    --gap: 4px;
-  }
-
-  .block,
-  .free {
-    padding: 0.45rem 0.4rem;
-  }
-
-  .block > span.name {
-    font-size: 0.8125rem;
-    line-height: 1.15;
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-
   .step-list li {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: 'name time' 'track track';
     gap: 0.3rem 0.75rem;
   }
 
-  .job-table th:nth-child(4),
-  .job-table td:nth-child(4),
-  .job-table th:nth-child(7),
-  .job-table td:nth-child(7) {
+  /* The jobs list and Capacity's tables drop their fourth and seventh columns; each other table says what it
+     drops. */
+  :is(.history-table, .sizing-table, .profiles-table) :is(th, td):is(:nth-child(4), :nth-child(7)) {
     display: none;
   }
 
@@ -3595,6 +4135,60 @@ th a.sort:hover {
 
 }
 
+/* Hit areas: a link that stands for a whole card or row reaches the card's edges; one that stands alone gets 40px,
+   a finger's 44px on a touch screen (below); links inside a sentence stay text. */
+.health-figures > div,
+.lane.running {
+  position: relative;
+}
+
+.health-figures a.figure-main::after,
+.lane-job::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+.lane-job:focus-visible {
+  outline: none;
+}
+
+.lane.running:has(.lane-job:focus-visible) {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.health-figures > div:has(a.figure-main:hover) {
+  background: var(--surface-2);
+}
+
+.section-head > a,
+.repo-name a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+}
+
+.overview .section-head {
+  align-items: center;
+}
+
+.job-list a {
+  min-height: 40px;
+}
+
+/* A link or button that stands alone in a line of text: a target 40px tall (44 on a touch screen, below) that does
+   not make its line taller. Shared by every page: put `hit` on the element. */
+.hit {
+  display: inline-block;
+  padding-block: var(--hit-pad);
+  margin-block: calc(-1 * var(--hit-pad));
+}
+
+:root {
+  --hit-pad: 0.6rem;
+}
+
 /* Links that stand on their own get a finger's height on a touch screen; links inside a sentence stay text. */
 @media (pointer: coarse) {
   .repo-name a,
@@ -3640,11 +4234,12 @@ th a.sort:hover {
     height: 1.25rem;
   }
 
-  /* A compact row's link reaches the row's height without making the row taller. */
-  .lane-job,
-  .attention-title {
-    padding-block: 0.65rem;
-    margin-block: -0.65rem;
+  .job-list a {
+    min-height: 44px;
+  }
+
+  :root {
+    --hit-pad: 0.75rem;
   }
 }
 
@@ -3654,6 +4249,10 @@ th a.sort:hover {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+
+  @view-transition {
+    navigation: none;
   }
 }
 
@@ -3753,7 +4352,7 @@ th a.sort:hover {
   font-size: 0.9375rem;
 }
 
-/* The overview on a phone: the figures and charts tighter, the latest jobs fewer. */
+/* The overview on a phone: the figures two by two, the charts without their axes, the latest jobs fewer. */
 @media (max-width: 40rem) {
   .budget h2 {
     font-size: 0.9375rem;
@@ -3761,12 +4360,6 @@ th a.sort:hover {
 
   .budget h2 .big {
     font-size: 1.5rem;
-  }
-
-  /* Nothing in the machine widens it past the screen. */
-  .machine > *,
-  .budget > * {
-    min-width: 0;
   }
 
   .readout {
@@ -3779,6 +4372,7 @@ th a.sort:hover {
     min-width: 0;
   }
 
+  .readout .cpu-reserved,
   .readout > div:last-child {
     grid-column: 1 / -1;
   }
@@ -3788,56 +4382,45 @@ th a.sort:hover {
     display: none;
   }
 
-  .overview {
-    gap: 1.5rem;
-  }
-
   dl.health-figures {
-    display: grid;
-    grid-template-columns: repeat(4, auto);
-    justify-content: space-between;
-    column-gap: 0.75rem;
-  }
-
-  .health-figures > div {
-    grid-template-columns: auto;
-  }
-
-  .health-figures .figure-main {
-    font-size: 1.25rem;
-  }
-
-  .bar {
-    height: 6.5rem;
-  }
-
-  .machine .charts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .machine .chart-card {
+  .health-figures > div {
+    min-height: 6.25rem;
+    padding: 0.65rem 0.75rem;
+  }
+
+  .health-figures .figure-main {
+    font-size: 2.25rem;
+  }
+
+  .health-figures .figure-of {
+    font-size: 0.9375rem;
+  }
+
+  .host .chart-card {
     padding: 0.6rem;
   }
 
-  .machine .chart-card h3 {
+  .host .chart-card h3 {
     flex-direction: column;
     gap: 0;
   }
 
-  .machine .reading {
+  .host .reading {
     min-width: 0;
     text-align: start;
     font-size: 0.8125rem;
   }
 
-  .machine .chart {
+  .host .chart {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .machine :is(.chart-y, .chart-x) {
+  .host :is(.chart-y, .chart-x) {
     display: none;
   }
-
 }
 
 /* The caches: a row per volume, its action folded away under a quiet toggle until chosen. */
@@ -3937,7 +4520,9 @@ th a.sort:hover {
   }
 }
 
-/* The config editor: line numbers in a gutter that scrolls with the text, a parse error's line marked. */
+/* The config editor: line numbers and the text in one frame, one height: the text has a row per line and one to
+   spare, so neither scrolls up and down and the page is the only thing that does. A long line scrolls sideways in the
+   text alone; the numbers stay. */
 .editor-frame {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3945,25 +4530,51 @@ th a.sort:hover {
   background: var(--surface);
 }
 
-.editor-frame textarea {
-  border: 0;
-  padding-left: 0.75rem;
-  white-space: pre;
-  overflow-x: auto;
-}
-
+.editor-frame textarea,
 .gutter {
   margin: 0;
-  min-width: 3rem;
-  padding: 0.85rem 0.5rem 0.85rem 0.75rem;
-  overflow: hidden;
+  padding-block: 0.85rem;
   font-family: var(--mono);
   font-size: 0.875rem;
   line-height: 1.55;
+}
+
+.editor-frame textarea {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding-inline: 0.75rem 1rem;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  resize: none;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  tab-size: 2;
+}
+
+.editor-frame textarea:focus-visible {
+  outline-offset: -3px;
+}
+
+.gutter {
+  min-width: 3rem;
+  padding-inline: 0.75rem 0.5rem;
+  overflow: hidden;
   text-align: right;
   color: var(--muted);
   background: var(--bg);
   user-select: none;
+}
+
+/* iOS zooms into a field whose text is under 16px when it takes focus. */
+@supports (-webkit-touch-callout: none) {
+  .editor-frame textarea,
+  .gutter {
+    font-size: 1rem;
+  }
 }
 
 .gutter .error {

@@ -75,6 +75,11 @@ fn a_free_slot_under_caps_is_drawn_but_stays_free_beside_what_runs() {
     let free = parts.free.expect("8G past both slots");
     assert_eq!(free.memory, 8 * G);
     assert_eq!(
+        (free.reading.figure.as_str(), free.name()),
+        ("8G", "free"),
+        "a lane too narrow for the sentence reads its figure over its name"
+    );
+    assert_eq!(
         free.reading.line(),
         "8G of 24G free past every slot's cap; 16G is free beside what runs"
     );

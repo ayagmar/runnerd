@@ -11,6 +11,7 @@ starts only the jobs those paths can affect:
 |---|---|
 | `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, the wire check against the previous release, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh`, `.github/scripts/check-wire-compat.sh`, `site/src/content/docs/reference/configuration*.md` (a core test reads its defaults) |
 | `docs-commands`: builds `runnerd` and `runnerctl`, checks every command and option the docs show against their `--help`, that the CLI reference pages are what `--help` prints (`python3 site/scripts/reference/cli.py target/debug` rewrites them), and that the configuration reference lists every key the config accepts | `README.md`, `site/src/content/docs/**`, `crates/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/scripts/check-docs-commands.sh`, `site/scripts/reference/**` |
+| `dashboard-browser`: builds the dashboard's demo and runs `crates/web/tests/browser.mjs` in the runner image's Chrome: the attention strip opens and closes, the editor's caret stays clear of its bars, a first visit to Settings shifts nothing | the same paths as `rust` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build, then a check that every internal link and `#anchor` of the built pages resolves | `site/**`, `.github/scripts/check-site-links.py` |
@@ -31,7 +32,7 @@ run's job timings to the run summary.
 Caches:
 
 - Rust: `Swatinem/rust-cache` keeps the cargo registry and `target/`, keyed on `Cargo.lock` and the toolchain. Only
-  `main`'s `rust` job saves it; pull requests and `docs-commands` restore that copy.
+  `main`'s `rust` job saves it; pull requests, `docs-commands` and `dashboard-browser` restore that copy.
 - Image: build layers go to the Actions cache, one scope per stage.
 - Site: `actions/setup-node` caches the pnpm store.
 
