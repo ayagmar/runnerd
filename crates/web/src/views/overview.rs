@@ -1,11 +1,13 @@
-//! `/`: what needs attention first, when anything does; whether CI keeps up as one row of figures; then the machine,
-//! one region: the host's reading as figures, then the memory budget as lanes (a lane per slot whose block sits where
-//! its memory does on the slice, a running slot's job, step, memory and CPU, a warm or idle slot one compact row, then
-//! a row each for the mirror, seeds, shells, what is free and what is closed) and the slice's CPU and memory over the
-//! last half hour; and beside it the work: every queued job with why it waits, the latest jobs, and the repositories
-//! with pause and resume. Hovering, focusing or tapping a slot's lane, job row or repository lights up the others
-//! that are the same slot. That is the order for reading and for the keyboard; a wide screen
-//! places the machine beside the work with the grid, not a different order.
+//! `/`: the four figures that say whether CI keeps up, at a size that reads from across a desk, with what needs
+//! attention as one line beside the title that opens to the list; then the budget as lanes, which are the slots
+//! themselves: a lane per slot as wide as its share of the slice, filled to what its job uses now and carrying the
+//! job's name, step, time and sparklines when wide enough, then a lane each for the mirror, seeds, shells, what is free
+//! and what the host holds, each labelled with its figure. Under them the work: every queued job with why it waits,
+//! the latest jobs, the repositories with pause and resume, and the slice's CPU and memory over the last half hour.
+//! A wide container lays the lanes side by side as one bar; a narrow one stacks them as rows, each over a strip of
+//! the slice with its block where it sits, so the blocks read down the rows as the bar reads across. Hovering,
+//! focusing or tapping a slot's lane, job row or repository lights up the others that are the same slot. That is the
+//! order for reading and for the keyboard on every screen.
 
 use std::collections::BTreeMap;
 
@@ -42,48 +44,6 @@ const QUEUED_SHOWN: usize = 6;
 const QUEUED_SHOWN_NARROW: usize = 3;
 /// How far back the health figures look: the 24 hours up to now.
 const DAY: u64 = 24 * 3600;
-/// Attention items listed before the rest fold under core's "and N more".
-const ATTENTION_SHOWN: usize = 4;
-
-/// How many attention items a phone shows before the rest fold.
-const ATTENTION_SHOWN_NARROW: usize = 2;
-
-/// Where an attention item shows: on every screen, shown on a wide one and folded on a narrow one, or folded on all.
-#[derive(Debug, Clone, Copy)]
-enum Fold {
-    Always,
-    Wide,
-    Narrow,
-}
-
-impl Fold {
-    /// An item of the shown list, at its place in the whole list.
-    fn shown(at: usize) -> Self {
-        if at < ATTENTION_SHOWN_NARROW {
-            Self::Always
-        } else {
-            Self::Wide
-        }
-    }
-
-    /// An item of the folded list, at its place in the whole list.
-    fn folded(at: usize) -> Self {
-        if at < ATTENTION_SHOWN {
-            Self::Narrow
-        } else {
-            Self::Always
-        }
-    }
-
-    fn class(self) -> &'static str {
-        match self {
-            Self::Always => "",
-            Self::Wide => "wide",
-            Self::Narrow => "narrow",
-        }
-    }
-}
-
 /// Everything the overview shows.
 #[derive(Debug, Clone)]
 pub(crate) struct Overview {
@@ -230,7 +190,9 @@ pub(crate) fn regions(overview: &Overview) -> [(&'static str, Markup, Parts); 8]
         region("host", &|parts| host(overview, parts)),
         region("queue", &|_| queue(overview)),
         region("recent", &|_| recent(overview)),
-        region("repositories", &|_| repositories(&overview.status)),
+        region("repositories", &|_| {
+            repositories_noting(&overview.status, overview.attention.as_ref())
+        }),
     ]
 }
 
@@ -257,22 +219,21 @@ pub(crate) fn render(overview: &Overview) -> Markup {
         repositories,
     ] = regions;
     let main = html! {
-        (heading(View::Overview.title(), Some(Page::Overview), Some(health.1)))
-        (attention.1)
-        div.overview {
-            section.machine aria-labelledby="budget-title"
-                "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''" {
+        (heading(View::Overview.title(), Some(Page::Overview), Some(attention.1)))
+        div.overview "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''" {
+            (health.1)
+            section.machine aria-labelledby="budget-title" {
                 (budget.1)
                 (slots.1)
-                (host.1)
             }
             div.work {
                 (queue.1)
                 (recent.1)
                 (repositories.1)
-                @if let Some(savings) = &overview.savings {
-                    p.savings { (savings.month.headline()) }
-                }
+                (host.1)
+            }
+            @if let Some(savings) = &overview.savings {
+                p.savings { (savings.month.headline()) }
             }
         }
     };
@@ -313,10 +274,10 @@ fn fix(fix: &Fix) -> Markup {
     }
 }
 
-fn attention_item(item: &AttentionItem, now: u64, fold: Fold) -> Markup {
+fn attention_item(item: &AttentionItem, now: u64) -> Markup {
     let href = subject_href(&item.subject);
     html! {
-        li class=(format!("attention-item {} {}", tone_class(item.tone), fold.class())) data-row tabindex="-1" {
+        li class=(format!("attention-item {}", tone_class(item.tone))) data-row tabindex="-1" {
             span.tone-mark aria-hidden="true" {}
             @if let Some(href) = &href {
                 a.attention-title href=(href) { (item.title) }
@@ -329,8 +290,8 @@ fn attention_item(item: &AttentionItem, now: u64, fold: Fold) -> Markup {
     }
 }
 
-/// What needs attention now, most urgent first, as core orders and words it; nothing at all when nothing does. The
-/// first few show, the rest fold under core's count of them.
+/// What needs attention now, as one line: how many items, the most urgent one's title, and core's count of the
+/// rest; it opens to every item, most urgent first, as core orders and words them. Nothing at all when nothing does.
 pub(crate) fn attention(overview: &Overview) -> Markup {
     html! {
         @match &overview.attention {
@@ -339,24 +300,23 @@ pub(crate) fn attention(overview: &Overview) -> Markup {
                     p.muted { (format::sentence(&Feature::Attention.unsupported())) "." }
                 }
             }
-            Some(attention) if attention.items.is_empty() => { div #attention hidden {} }
             Some(attention) => {
-                section #attention .attention aria-label="Needs attention" {
-                    ul.attention-list {
-                        @for (at, item) in attention.items.iter().take(ATTENTION_SHOWN).enumerate() {
-                            (attention_item(item, overview.now, Fold::shown(at)))
-                        }
-                    }
-                    @if let Some(narrow) = attention.more(ATTENTION_SHOWN_NARROW) {
-                        @let wide = attention.more(ATTENTION_SHOWN);
-                        details.attention-more.narrow-only[wide.is_none()] {
-                            summary {
-                                span.narrow { (narrow) }
-                                @if let Some(wide) = &wide { span.wide { (wide) } }
+                @match attention.items.first() {
+                    None => { div #attention hidden {} }
+                    Some(worst) => {
+                        @let count = attention.items.len() as u64 + attention.omitted;
+                        // Kept open across live updates, which replace the region without the attribute.
+                        details #attention class=(format!("attention {}", tone_class(worst.tone)))
+                            "data-signals:_attention__ifmissing"="false" data-attr:open="$_attention"
+                            data-on:toggle="$_attention = el.open" {
+                            summary aria-label=(format!("Needs attention: {count}")) {
+                                span.attention-count { span.tone-mark aria-hidden="true" {} (count) }
+                                span.attention-worst { (worst.title) }
+                                @if let Some(more) = attention.more(1) { span.attention-rest { (more) } }
                             }
                             ul.attention-list {
-                                @for (at, item) in attention.items.iter().enumerate().skip(ATTENTION_SHOWN_NARROW) {
-                                    (attention_item(item, overview.now, Fold::folded(at)))
+                                @for item in &attention.items {
+                                    (attention_item(item, overview.now))
                                 }
                             }
                         }
@@ -393,8 +353,8 @@ fn link(key: &str, repository: Option<&str>) -> Link {
     }
 }
 
-/// The budget's head: what is reserved of the slice as its heading, then what is in use, of the CPUs and of the host,
-/// as figures. The lanes under it are the bar.
+/// The budget's head: what is reserved of the slice as its heading, then the CPUs reserved and the host's figures,
+/// small. The lanes under it are the bar.
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let budget = &overview.status.budget;
     let reading = budget.memory_reading();
@@ -430,7 +390,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     }
 }
 
-/// Where a part of the budget sits on the slice: from where, and how much of it, each a share of the whole.
+/// Where a lane sits on the slice: from where, and how much of it, each a share of the whole.
 #[derive(Debug, Clone, Copy)]
 struct Share {
     from: f64,
@@ -438,15 +398,19 @@ struct Share {
 }
 
 impl Share {
-    /// Its block in the lane's strip of the slice, filled to `fill` of it when a job's memory is sampled.
-    fn block(self, fill: Option<(&str, f64)>, parts: &Parts) -> Markup {
-        html! {
-            span.lane-share aria-hidden="true" {
-                span.lane-block style=(format!("--from: {:.4}; --share: {:.4}", self.from, self.size)) {
-                    @if let Some((id, fill)) = fill {
-                        (parts.html(id, html! { span.fill #(id) style=(format!("--fill: {fill:.3}")) {} }))
-                    }
-                }
+    /// The lane's style: where its block starts on the slice and how much of it the block takes.
+    fn style(self) -> String {
+        format!("--from: {:.4}; --share: {:.4}", self.from, self.size)
+    }
+}
+
+/// The lane's block, filled to `fill` of it when a job's memory is sampled: a new sample animates a transform, never
+/// the layout.
+fn block(fill: Option<(&str, f64)>, parts: &Parts) -> Markup {
+    html! {
+        span.lane-block aria-hidden="true" {
+            @if let Some((id, fill)) = fill {
+                (parts.html(id, html! { span.fill #(id) style=(format!("--fill: {fill:.3}")) {} }))
             }
         }
     }
@@ -470,10 +434,11 @@ impl Strip {
     }
 }
 
-/// The machine's lanes, which are its budget bar: a lane per slot, in config order and its profile's colour, whose
-/// block sits where the slot's memory sits on the slice; then a row for the mirror, each seed container and shell,
-/// what is free, and what no runner may start in. A running lane carries its job, its step, its memory and CPU over
-/// the last minutes and a fill to its last sampled memory; any other row is one compact line.
+/// The machine's lanes, which are its budget bar: a lane per slot, in config order and its profile's colour, as wide
+/// as the slot's memory on the slice; then a lane for the mirror, each seed container and shell, what is free, and
+/// what no runner may start in, each its figure over its short name, core's whole sentence in its title. A running
+/// lane carries its job, its step, its time and its memory and CPU over the last minutes, and fills to its last
+/// sampled memory; a lane too narrow for that shows less, down to its name alone.
 pub(crate) fn slots(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
     let bar = status.budget_parts();
@@ -524,24 +489,25 @@ pub(crate) fn slots(overview: &Overview, parts: &Parts) -> Markup {
                         HeldKind::Seed { profile } => format!("seed {}", profile_class(status, profile)),
                         HeldKind::Shell { .. } => "shell".to_owned(),
                     };
-                    li class=(format!("lane part {class}")) aria-label=(format!("{} {}", format::bytes(part.memory), part.holder())) {
-                        (share.block(None, parts))
-                        span.lane-name { (format::bytes(part.memory)) }
-                        span.lane-what { (part.name()) }
+                    @let line = format!("{} {}", format::bytes(part.memory), part.holder());
+                    li class=(format!("lane part {class}")) style=(share.style()) aria-label=(line) title=(line) {
+                        (block(None, parts))
+                        span.lane-size { (super::block_size(part.memory)) }
+                        span.lane-name { (part.name()) }
                     }
                 }
                 @if let Some((part, share)) = free {
-                    li.lane.part.free aria-label=(part.reading.line()) {
-                        (share.block(None, parts))
-                        span.lane-name { (part.reading.figure) }
-                        span.lane-what.lane-state { (part.reading.text) }
+                    li.lane.part.free style=(share.style()) aria-label=(part.reading.line()) title=(part.reading.line()) {
+                        (block(None, parts))
+                        span.lane-size { (part.reading.figure) }
+                        span.lane-name { (part.name()) }
                     }
                 }
                 @if let Some((part, share)) = closed {
-                    li.lane.part.closed aria-label=(part.reading.line()) {
-                        (share.block(None, parts))
-                        span.lane-name { (part.reading.figure) }
-                        span.lane-what.lane-state { (part.reading.text) }
+                    li.lane.part.closed style=(share.style()) aria-label=(part.reading.line()) title=(part.reading.line()) {
+                        (block(None, parts))
+                        span.lane-size { (part.reading.figure) }
+                        span.lane-name { (part.kind.name()) }
                     }
                 }
             }
@@ -571,18 +537,33 @@ fn lane(
         .and_then(|samples| samples.last())
         .map(|sample| sample.memory);
     let fill_id = format!("fill-{key}");
+    // A slot that holds none of the budget, such as an idle one under measured admission, is a lane of no width.
+    let style = share.map_or_else(
+        || {
+            Share {
+                from: 1.0,
+                size: 0.0,
+            }
+            .style()
+        },
+        |(share, _)| share.style(),
+    );
+    let fill = share.and_then(|(_, reserved)| {
+        memory.map(|used| {
+            (
+                fill_id.as_str(),
+                crate::chart::ratio(used, reserved).min(1.0),
+            )
+        })
+    });
     html! {
-        li #(key) class=(format!("lane {class} {state}")) data-row
+        li #(key) class=(format!("lane slot {class} {state}")) style=(style) data-row
             aria-label=(format!("{} {}: {}", profile.name, slot.slot, slot_state.line()))
             data-on:pointerenter=(link.enter) data-on:focusin=(link.enter)
             data-on:pointerleave=(link.pointer_leave) data-on:focusout=(link.leave) data-class:linked=(link.linked) {
-            @match share {
-                Some((share, reserved)) => {
-                    (share.block(memory.map(|used| (fill_id.as_str(), crate::chart::ratio(used, reserved).min(1.0))), parts))
-                }
-                None => { span.lane-share aria-hidden="true" {} }
-            }
+            (block(fill, parts))
             span.lane-name { (profile.name) " " (slot.slot) }
+            @if let Some((_, reserved)) = share { span.lane-size { (super::block_size(reserved)) } }
             span.lane-caps { (slot_caps(profile, job)) }
             @match (&slot.runner, job) {
                 (Some(_), Some(job)) if slot_state.is_running() => { (running_job(overview, profile, job, &key, parts)) }
@@ -814,6 +795,11 @@ fn relative_clock(at: u64) -> String {
 /// The configured repositories, with their queue and a pause or resume button, and below them a pause and a resume
 /// of every one, each while some repository is not yet in that state. A single repository has only its own button.
 pub(crate) fn repositories(status: &Status) -> Markup {
+    repositories_noting(status, None)
+}
+
+/// `repositories`, each row with what of `attention` concerns its repository, in core's words.
+fn repositories_noting(status: &Status, attention: Option<&Attention>) -> Markup {
     let paused = status
         .repositories
         .iter()
@@ -836,7 +822,7 @@ pub(crate) fn repositories(status: &Status) -> Markup {
             }
             ul.repo-list {
                 @for repository in &status.repositories {
-                    (repository_row(status, repository))
+                    (repository_row_noting(status, repository, attention))
                 }
                 @if !every.is_empty() {
                     li.all {
@@ -859,6 +845,24 @@ pub(crate) fn repositories(status: &Status) -> Markup {
 /// One repository's row; a pause or resume replaces it. Hovering it lights up the slots its runners hold and its
 /// latest jobs.
 pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> Markup {
+    repository_row_noting(status, repository, None)
+}
+
+/// `repository_row`, with the items of `attention` about the repository under its name.
+fn repository_row_noting(
+    status: &Status,
+    repository: &RepositoryStatus,
+    attention: Option<&Attention>,
+) -> Markup {
+    let notes: Vec<&AttentionItem> = attention
+        .map(|attention| {
+            attention
+                .items
+                .iter()
+                .filter(|item| matches!(&item.subject, Subject::Repository { name } if *name == repository.name))
+                .collect()
+        })
+        .unwrap_or_default();
     // Coloured as its first pool's profile.
     let class = profile_class(status, repository.first_profile());
     let (action, label) = if repository.paused {
@@ -896,6 +900,11 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
                 span { (repository.profiles()) }
                 @if repository.queued_jobs > 0 { span { (repository.queued_jobs) " queued" } }
                 @if repository.paused { span.badge.neutral { "paused" } }
+            }
+            @for item in &notes {
+                p class=(format!("repo-note {}", tone_class(item.tone))) {
+                    span.tone-mark aria-hidden="true" {} (item.title)
+                }
             }
             // One busy signal per row, so a pending pause greys out only its own button.
             @let busy = format!("_busy_{}", repository_id(&repository.name).replace('-', "_"));

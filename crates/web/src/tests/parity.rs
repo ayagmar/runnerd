@@ -501,8 +501,12 @@ async fn attention_states_each_item_its_fix_and_the_rest_as_core_does() {
     let region =
         &html[html.find(r#"id="attention""#).unwrap()..html.find(r#"id="budget-title""#).unwrap()];
     let shown = text(region);
-    let facts = runnerd_fixtures::attention_facts(&attention, 4);
-    assert!(facts.items.len() > 2, "the fixtures fold some on a phone");
+    // One line names the most urgent item and counts the rest; it opens to every item.
+    let facts = runnerd_fixtures::attention_facts(&attention, 1);
+    assert!(
+        facts.items.len() > 2,
+        "the fixtures fold some under the line"
+    );
     for (fact, item) in facts.items.iter().zip(&attention.items) {
         assert!(shown.contains(&fact.title), "{}: {shown}", fact.title);
         assert!(
@@ -522,7 +526,7 @@ async fn attention_states_each_item_its_fix_and_the_rest_as_core_does() {
             assert!(shown.contains(&fix), "{fix}: {shown}");
         }
     }
-    for more in [attention.more(2), facts.more].into_iter().flatten() {
+    for more in [attention.more(1), facts.more].into_iter().flatten() {
         assert!(shown.contains(&more), "{more}: {shown}");
     }
 }

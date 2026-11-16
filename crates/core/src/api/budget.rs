@@ -574,6 +574,13 @@ pub struct FreePart {
     pub reading: Reading,
 }
 
+impl FreePart {
+    /// Its name under its figure, where a block or a lane has no room for `reading`'s words: `free`.
+    pub fn name(&self) -> &'static str {
+        "free"
+    }
+}
+
 /// Room past the bar's blocks that no runner may start in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedPart {

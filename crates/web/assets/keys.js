@@ -231,12 +231,14 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
   follow();
 }
 
-// The config editor's line numbers: as many as its lines, scrolled with it, the line a parse error is on marked.
+// The config editor: a row per line and one to spare, so it never scrolls up and down inside the page; its line
+// numbers as many as its lines, the line a parse error is on marked. Long lines scroll sideways in the text alone.
 for (const editor of document.querySelectorAll('textarea[data-gutter]')) {
   const gutter = document.getElementById(editor.dataset.gutter);
   if (!gutter) continue;
   const draw = () => {
     const count = editor.value.split('\n').length;
+    if (editor.rows !== count + 1) editor.rows = count + 1;
     const marked = Number(document.querySelector('[data-error-line]')?.dataset.errorLine ?? 0);
     gutter.replaceChildren(
       ...Array.from({ length: count }, (_, index) => {
@@ -246,12 +248,8 @@ for (const editor of document.querySelectorAll('textarea[data-gutter]')) {
         return line;
       }),
     );
-    gutter.scrollTop = editor.scrollTop;
   };
   editor.addEventListener('input', draw);
-  editor.addEventListener('scroll', () => {
-    gutter.scrollTop = editor.scrollTop;
-  });
   const result = document.getElementById('config-result')?.parentElement;
   if (result) new MutationObserver(draw).observe(result, { childList: true, subtree: true });
   draw();
@@ -292,3 +290,29 @@ document.addEventListener('click', (event) => {
   const line = text.closest('li');
   if (line && (line.classList.contains('open') || text.scrollHeight > text.clientHeight + 1)) line.classList.toggle('open');
 });
+
+// The doctor's checks, once they land: their height at this width, for theme.js to reserve on the next visit.
+// Recorded as they land, folded, not after a fold is opened.
+const doctorLayout = document.querySelector('.config-layout');
+if (doctorLayout && document.getElementById('doctor')) {
+  let waiting = document.getElementById('doctor').getAttribute('aria-busy') === 'true';
+  const record = () => {
+    const doctor = document.getElementById('doctor');
+    const busy = doctor?.getAttribute('aria-busy') === 'true';
+    if (doctor && !busy && waiting) {
+      const height = Math.round(doctor.getBoundingClientRect().height);
+      localStorage.setItem('runnerd-doctor-box', JSON.stringify({ width: innerWidth, height }));
+    }
+    waiting = busy;
+  };
+  new MutationObserver(record).observe(doctorLayout, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['aria-busy'],
+  });
+  if (!waiting) {
+    waiting = true;
+    record();
+  }
+}
