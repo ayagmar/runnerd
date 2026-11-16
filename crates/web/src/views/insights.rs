@@ -5,7 +5,7 @@
 use maud::{Markup, html};
 use runnerd_core::api::{
     Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, JOBS_HEADING, RepositoryWaits,
-    RunLink, ShareOwner, Tone, View, WaitSpread, WriteTop,
+    RunLink, ShareOwner, Tone, View, WriteTop,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -215,20 +215,14 @@ fn ranked(title: &str, tops: &[WriteTop]) -> Markup {
 /// A run in the history, with its page on GitHub.
 fn run_link(run: &RunLink, now: u64) -> Markup {
     html! {
-        a href=(format!("/jobs/{}", run.job)) {
+        a.hit href=(format!("/jobs/{}", run.job)) {
             "job " (run.job) @if run.run_attempt > 1 { ", attempt " (run.run_attempt) }
         }
         ", " (time_ago(run.at, now))
         @if let Some(url) = &run.url {
-            " · " a href=(url) rel="noopener" target="_blank" { "on GitHub" }
+            " · " a.hit href=(url) rel="noopener" target="_blank" { "on GitHub" }
         }
     }
-}
-
-fn wait(spread: &WaitSpread, value: Option<u64>) -> String {
-    spread
-        .reading(value)
-        .map_or_else(|| "–".to_owned(), format::duration)
 }
 
 fn waits(waits: &[RepositoryWaits]) -> Markup {
@@ -243,25 +237,18 @@ fn waits(waits: &[RepositoryWaits]) -> Markup {
                     thead {
                         tr {
                             th scope="col" { "Repository" }
-                            th scope="col" .number { (JOBS_HEADING) }
-                            th scope="col" .number { "Median" }
-                            th scope="col" .number { "p95" }
-                            th scope="col" .number { "Warm median" }
-                            th scope="col" .number { "Cold median" }
-                            th scope="col" .number { "p95 the week before" }
+                            @for figure in waits.first().map(RepositoryWaits::figures).unwrap_or_default() {
+                                th scope="col" .number { (figure.label) }
+                            }
                         }
                     }
                     tbody {
                         @for repository in waits {
-                            @let now = &repository.now;
                             tr {
                                 th scope="row" { (repository.repository) }
-                                td.number data-label="jobs" { (now.all.jobs) }
-                                td.number data-label="median" { (wait(&now.all, now.all.p50)) }
-                                td.number data-label="p95" { (wait(&now.all, now.all.p95)) }
-                                td.number data-label="warm" { (wait(&now.warm, now.warm.p50)) }
-                                td.number data-label="cold" { (wait(&now.cold, now.cold.p50)) }
-                                td.number data-label="week before" { (wait(&repository.before.all, repository.before.all.p95)) }
+                                @for figure in repository.figures() {
+                                    td.number data-label=(figure.label) { (figure.value) }
+                                }
                             }
                         }
                     }

@@ -353,7 +353,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
     html! {
         header #job-head .job-head {
             p.crumbs {
-                a href=(format!("/history?repository={}", summary.repository)) { (summary.repository) }
+                a.hit href=(format!("/history?repository={}", summary.repository)) { (summary.repository) }
                 @if let Some(workflow) = &summary.workflow { " · " (workflow) }
             }
             h1 { (summary.title().name) " " (badge(summary)) }
@@ -362,7 +362,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
                 @if let Some(branch) = &summary.branch { code { (branch) } }
                 @let run = html! { "run " (summary.run_id) @if summary.run_attempt > 1 { ", attempt " (summary.run_attempt) } };
                 @if let Some(url) = &summary.url {
-                    a.external href=(url) rel="noreferrer" aria-label=(format!("Run {} on GitHub", summary.run_id)) { (run) }
+                    a.external.hit href=(url) rel="noreferrer" aria-label=(format!("Run {} on GitHub", summary.run_id)) { (run) }
                 } @else {
                     span { (run) }
                 }
@@ -476,7 +476,7 @@ fn failure(view: &JobView) -> Markup {
                 }
             }
             @if let Some(step) = failure.step.and_then(|step| outline.step_lines(step)).filter(|range| !range.is_empty()) {
-                p { a href=(format!("#L{}", step.to)) { "The step in the log" } }
+                p { a.hit href=(format!("#L{}", step.to)) { "The step in the log" } }
             }
             @if let Some(shell) = &failure.shell { (copy_command(shell)) }
         }
@@ -855,7 +855,7 @@ fn runs(view: &JobView) -> Markup {
             section #runs class=(format!("runs {}", view.profile_class)) aria-labelledby="runs-title" {
                 div.section-head {
                     h2 #runs-title { "Latest " (runs.len()) " runs of this job" }
-                    a href=(format!("/history?repository={}", view.job.summary.repository)) { "History of " (view.job.summary.repository) }
+                    a.hit href=(format!("/history?repository={}", view.job.summary.repository)) { "History of " (view.job.summary.repository) }
                 }
                 dl.headline {
                     div { dt { "Median run" } dd { (compared.median_ran.map_or("–".to_owned(), format::duration)) } }
@@ -1063,7 +1063,7 @@ pub(crate) fn log(view: &JobView) -> Markup {
             div.section-head {
                 h2 #log-title { "Log" }
                 p.muted {
-                    a href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
+                    a.hit href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
                     " · " (summary.log.description())
                 }
             }
@@ -1092,6 +1092,8 @@ pub(crate) fn log(view: &JobView) -> Markup {
                         " Follow"
                     }
                     (tail(view))
+                    // Shown by the follow script while the reader is scrolled up from the newest line.
+                    button.button.jump-newest type="button" data-jump="log-lines" hidden { "Jump to newest" }
                 }
             }
         }

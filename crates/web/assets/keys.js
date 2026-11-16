@@ -206,25 +206,59 @@ addEventListener('hashchange', openLine);
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', openLine);
 else openLine();
 
-// Follow while running: the live tail stays at its end as lines arrive while it is at its end. Scrolled up to read
-// an earlier line, it stays there until scrolled back to the end; unticked, it never moves.
+// Follow while running: the newest line stays in view as lines arrive, while the reader is at it. A wide screen
+// scrolls the tail in its own box; on a phone the tail is part of the page, and the page scrolls, only while the
+// tail's end is at the foot of the screen. Scrolled up to read an earlier line, nothing moves and "Jump to newest"
+// shows; unticked, it never moves.
 for (const toggle of document.querySelectorAll('[data-follow]')) {
   const id = toggle.dataset.follow;
-  const atEnd = (box) => box.scrollHeight - box.clientHeight - box.scrollTop < 8;
-  let following = true;
+  const jump = document.querySelector(`[data-jump="${id}"]`);
+  const box = () => document.getElementById(id);
+  const ownBox = (tail) => getComputedStyle(tail).overflowY !== 'visible';
+  // Where the screen ends for the reader: above the tab bar where there is one.
+  const foot = () => {
+    const bar = document.querySelector('.top nav');
+    const top = bar && getComputedStyle(bar).position === 'fixed' ? bar.getBoundingClientRect().top : innerHeight;
+    return Math.min(innerHeight, top);
+  };
+  const atEnd = (tail) => {
+    if (ownBox(tail)) return tail.scrollHeight - tail.clientHeight - tail.scrollTop < 8;
+    const past = tail.getBoundingClientRect().bottom - foot();
+    return past < 48 && past > -160;
+  };
+  const toEnd = (tail) => {
+    if (ownBox(tail)) tail.scrollTop = tail.scrollHeight;
+    else scrollBy(0, tail.getBoundingClientRect().bottom - foot() + 16);
+  };
+  const tail = box();
+  // The page opens on the failure and the timeline, not at the log's end.
+  let following = tail ? ownBox(tail) || atEnd(tail) : true;
+  const show = () => {
+    if (jump) jump.hidden = following || !toggle.checked;
+  };
   document.addEventListener(
     'scroll',
     (event) => {
-      if (event.target instanceof Element && event.target.id === id) following = atEnd(event.target);
+      const tail = box();
+      if (!tail) return;
+      if (event.target === tail || (event.target === document && !ownBox(tail))) {
+        following = atEnd(tail);
+        show();
+      }
     },
     true,
   );
   const follow = () => {
-    const box = document.getElementById(id);
-    if (toggle.checked && following && box) box.scrollTop = box.scrollHeight;
+    const tail = box();
+    if (toggle.checked && following && tail) toEnd(tail);
+    show();
   };
-  new MutationObserver(follow).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver(follow).observe(box()?.parentElement ?? document.body, { childList: true, subtree: true });
   toggle.addEventListener('change', () => {
+    following = true;
+    follow();
+  });
+  jump?.addEventListener('click', () => {
     following = true;
     follow();
   });

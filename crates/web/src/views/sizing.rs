@@ -149,16 +149,15 @@ fn lanes(view: &SizingView) -> Markup {
         .max(1);
     let plan = sizing.auto_plan.as_ref().filter(|_| sizing.auto);
     html! {
+        @if sizing.profiles.iter().any(|profile| profile.peaks.jobs > 0) {
         ol.sizing-lanes aria-label="Profiles" {
-            @for (index, profile) in sizing.profiles.iter().enumerate() {
+            @for (index, profile) in sizing.profiles.iter().enumerate().filter(|(_, profile)| profile.peaks.jobs > 0) {
                 li class=(format!("sizing-lane p{}", index % 6)) {
                     div.profile-head {
-                        p.profile-name { a href=(format!("#sizing-{index}")) { span.swatch aria-hidden="true" {} (profile.name) } }
+                        p.profile-name { a.hit href=(format!("#sizing-{index}")) { span.swatch aria-hidden="true" {} (profile.name) } }
                         span.profile-size { (format::bytes(profile.memory)) " × " (profile.slots) }
                     }
-                    div.profile-scale {
-                        @if profile.peaks.jobs > 0 { (scale(sizing, profile, whole)) } @else { div.peak-scale.empty {} }
-                    }
+                    div.profile-scale { (scale(sizing, profile, whole)) }
                     div class=(format!("profile-advice {}", advice_class(profile.advice))) {
                         strong.advice-figure { (profile.advice_word()) }
                         @if let Some(plan) = plan {
@@ -181,6 +180,20 @@ fn lanes(view: &SizingView) -> Markup {
                                 None => { "–" }
                             }
                         } }
+                    }
+                }
+            }
+        }
+        }
+        // A profile no job has run on yet is no lane: a chip under them, as an idle slot is under the overview's bar.
+        @if sizing.profiles.iter().any(|profile| profile.peaks.jobs == 0) {
+            ul.profile-chips aria-label="Profiles without jobs" {
+                @for (index, profile) in sizing.profiles.iter().enumerate().filter(|(_, profile)| profile.peaks.jobs == 0) {
+                    li class=(format!("profile-chip p{}", index % 6)) {
+                        span.swatch aria-hidden="true" {}
+                        a.hit href=(format!("#sizing-{index}")) { (profile.name) }
+                        span.profile-size { (format::bytes(profile.memory)) " × " (profile.slots) }
+                        span.muted { (profile.advice_word()) }
                     }
                 }
             }

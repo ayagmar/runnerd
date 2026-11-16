@@ -2644,6 +2644,38 @@ fn selected(page: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_profile_no_job_ran_on_stays_on_the_sizing_page_as_a_chip_not_a_lane() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut sizing = fake::sizing(&fixtures);
+        let node = sizing
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == "node")
+            .unwrap();
+        node.peaks = runnerd_core::api::Peaks::default();
+        node.jobs.clear();
+        node.advice = runnerd_core::api::Advice::TooFew { jobs: 0 };
+        fixtures.sizing = Some(sizing);
+    }
+    let page = dashboard.page(&cookie, "/sizing").await.body;
+    let lanes = &page[page.find(r#"class="sizing-lanes""#).unwrap()..];
+    let lanes = &lanes[..lanes.find("</ol>").unwrap()];
+    assert!(
+        lanes.contains(">jvm<") && !lanes.contains(">node<"),
+        "only jvm, which ran jobs, is a lane: {lanes}"
+    );
+    let chips = &page[page.find(r#"class="profile-chips""#).unwrap()..];
+    let chips = &chips[..chips.find("</ul>").unwrap()];
+    assert!(
+        chips.contains(r##"href="#sizing-1">node</a>"##) && chips.contains("too few"),
+        "node is a chip with core's word for its advice: {chips}"
+    );
+}
+
+#[tokio::test]
 async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

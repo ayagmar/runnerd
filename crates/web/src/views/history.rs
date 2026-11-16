@@ -964,7 +964,7 @@ fn sort_header(filter: &Filter, column: Column, sort: JobSort, align: Align) -> 
     });
     html! {
         th scope="col" class=[(align == Align::Number).then_some("number")] aria-sort=[aria] {
-            a.sort href=(href) {
+            a.sort.hit href=(href) {
                 (column.title())
                 span.sort-mark aria-hidden="true" {
                     @if sorted { @if order == SortOrder::Asc { "↑" } @else { "↓" } }

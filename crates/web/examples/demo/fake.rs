@@ -1189,7 +1189,7 @@ fn digest(fixtures: &Fixtures) -> Digest {
 /// What the history says of the config's profiles: jvm's tests peak at 7.8G of 9G, so 9G stays; node's builds
 /// peak at 2.1G of 7G and wait for a slot, so 3.25G caps, with 1G of page cache room, fit 4 in its 2 × 7G. The
 /// end-to-end job has too few runs.
-fn sizing(fixtures: &Fixtures) -> Sizing {
+pub fn sizing(fixtures: &Fixtures) -> Sizing {
     if let Some(sizing) = &fixtures.sizing {
         return sizing.clone();
     }

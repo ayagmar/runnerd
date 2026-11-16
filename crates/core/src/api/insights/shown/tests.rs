@@ -122,6 +122,9 @@ fn an_insights_figure_is_the_number_its_sentence_is_about() {
     assert_eq!(
         insight(Severity::Notice, InsightKind::Unknown).figure(),
         None
+    );
+}
+
 #[test]
 fn a_repository_s_waits_read_as_figures_with_a_dash_where_no_job_took_them() {
     // A week without warm starts shows no warm median rather than a zero, and the week before without jobs no p95.

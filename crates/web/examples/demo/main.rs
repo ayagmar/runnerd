@@ -508,4 +508,18 @@ fn empty(fixtures: &mut fake::Fixtures) {
             slot.runner = None;
         }
     }
+    // No profile has run a job: each is a chip on Capacity, not a lane.
+    let mut sizing = fake::sizing(fixtures);
+    for profile in &mut sizing.profiles {
+        profile.peaks = runnerd_core::api::Peaks::default();
+        profile.wait = runnerd_core::api::Spread::default();
+        profile.slot_wait = runnerd_core::api::Spread::default();
+        profile.starts = runnerd_core::api::Starts::default();
+        profile.busy = 0;
+        profile.advice = runnerd_core::api::Advice::TooFew { jobs: 0 };
+        profile.revert = None;
+        profile.hold = None;
+        profile.jobs.clear();
+    }
+    fixtures.sizing = Some(sizing);
 }

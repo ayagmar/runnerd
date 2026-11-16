@@ -1,6 +1,8 @@
 // What only a browser sees, against the demo: the attention strip opens and closes by mouse, finger and keyboard
 // with its script running; the line typed on in the settings editor stays above the buttons' bar and the tab bar;
-// and a first visit to Settings, the doctor's checks included, moves nothing once painted.
+// a first visit to Settings, the doctor's checks included, moves nothing once painted; the jobs list's chips sit in
+// the Filters fold on a phone and beside the search on a wide screen; and on a phone a running job's log is part of
+// the page, followed only while the reader is at its newest line.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -156,6 +158,61 @@ try {
     await page.waitForTimeout(2500);
     const shifted = await page.evaluate(() => window.shifted);
     check(shifted < 0.01, `${size.name}: a first visit to Settings shifts ${shifted.toFixed(4)}`);
+    await context.close();
+  }
+  // The jobs list: on a phone the chips are in the fold, which opens to them; on a wide screen they stand beside it.
+  for (const size of [sizes[0], sizes[1]]) {
+    const { context, page } = await signedIn(size);
+    await page.goto(new URL('/history', login).href);
+    await page.waitForSelector('.more-filters summary');
+    const failed = page.locator('.filters a', { hasText: /^Failed$/ }).filter({ visible: true });
+    if (size.phone) {
+      check((await failed.count()) === 0, `${size.name}: the outcome chips wait in the Filters fold`);
+      await page.locator('.more-filters summary').tap();
+      await page.waitForTimeout(200);
+      check((await failed.count()) === 1, `${size.name}: the Filters fold opens on the outcome chips`);
+    } else {
+      check((await failed.count()) === 1, `${size.name}: the outcome chips stand beside the search`);
+    }
+    await context.close();
+  }
+
+  // A running job's log on a phone: no box scrolling inside the page; the page keeps the reader's place while they
+  // read above the newest line, which "Jump to newest" brings back, and then follows the lines as they come.
+  {
+    const { context, page } = await signedIn(sizes[1]);
+    await page.goto(new URL('/history?outcome=running', login).href);
+    const href = await page.locator('.history-table tbody th a').first().getAttribute('href');
+    await page.goto(new URL(href, login).href);
+    await page.waitForSelector('#log-lines > li');
+    const state = () =>
+      page.evaluate(() => {
+        const tail = document.getElementById('log-lines');
+        const bar = document.querySelector('.top nav').getBoundingClientRect().top;
+        return {
+          own: getComputedStyle(tail).overflowY !== 'visible',
+          y: scrollY,
+          past: Math.round(tail.getBoundingClientRect().bottom - Math.min(innerHeight, bar)),
+          jump: !document.querySelector('[data-jump]').hidden,
+        };
+      });
+    check(!(await state()).own, `${sizes[1].name}: a running job's log scrolls with the page`);
+    await page.waitForTimeout(1500);
+    check((await state()).y === 0, `${sizes[1].name}: new lines leave a reader at the top where they are`);
+    await page.evaluate(() => document.getElementById('log-lines').scrollIntoView({ block: 'start' }));
+    await page.waitForTimeout(300);
+    const above = await state();
+    await page.waitForTimeout(1500);
+    const later = await state();
+    check(above.jump && later.y === above.y, `${sizes[1].name}: above the newest line, the page holds and offers a jump`);
+    await page.locator('[data-jump]').tap();
+    await page.waitForTimeout(300);
+    await page.waitForTimeout(1500);
+    const followed = await state();
+    check(
+      !followed.jump && followed.past < 48 && followed.past > -160,
+      `${sizes[1].name}: after the jump, the newest line stays at the foot (${followed.past}px)`,
+    );
     await context.close();
   }
 } finally {

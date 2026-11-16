@@ -2721,6 +2721,20 @@ dl.health-figures {
   overflow: auto;
 }
 
+/* Over the tail's foot while the reader is scrolled up from the newest line. */
+.jump-newest {
+  position: sticky;
+  bottom: 1rem;
+  z-index: 2;
+  display: block;
+  margin: 0.5rem 0 0 auto;
+}
+
+.jump-newest[hidden] {
+  display: none;
+}
+
+
 /* The outlined log: a fold per step, each group a fold inside; the whole scrolls in its own box. */
 .log-view {
   max-height: 75vh;
@@ -2728,6 +2742,19 @@ dl.health-figures {
   display: grid;
   gap: 2px;
   scrollbar-color: var(--muted) var(--surface);
+}
+
+/* On a phone the log is part of the page's scroll, not a box scrolling inside it. */
+@media (max-width: 40rem) {
+  .log-lines.tail,
+  .log-view {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .jump-newest {
+    bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom, 0px) + 0.75rem);
+  }
 }
 
 .log-step > summary,
@@ -2813,17 +2840,6 @@ dl.health-figures {
 
 .log-search-form input {
   width: 100%;
-}
-
-/* Links that stand alone on the job page: a target as tall as a row, without making the row taller. */
-.job-head .crumbs a,
-.job-facts a,
-.failure-summary p > a,
-.log .section-head a,
-.runs .section-head > a {
-  display: inline-block;
-  padding-block: 0.6rem;
-  margin-block: -0.6rem;
 }
 
 .log-results {
@@ -2994,7 +3010,7 @@ dl.health-figures {
   color: var(--muted);
 }
 
-.mini :is(.chart-y, .chart-x, .chart-labels, .limit-label) {
+.mini :is(.chart-y, .chart-x, .limit-label) {
   display: none;
 }
 
@@ -3169,13 +3185,11 @@ dl.health-figures {
 }
 
 /* A sortable column's header: a link, its direction marked once it sorts. */
-/* Its target reaches the header row's height without making the row taller. */
+/* Its target (`hit`) reaches the header row's height without making the row taller. */
 th a.sort {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  padding-block: 0.75rem;
-  margin-block: -0.75rem;
   color: inherit;
   text-decoration: none;
 }
@@ -3629,8 +3643,6 @@ th a.sort:hover {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  padding-block: 0.6rem;
-  margin-block: -0.6rem;
   text-decoration: none;
 }
 
@@ -3652,6 +3664,30 @@ th a.sort:hover {
   margin: 1.4rem 0 0;
   height: 2.25rem;
   background: var(--bg);
+}
+
+/* Profiles no job ran on: chips under the lanes, as idle slots are under the overview's bar. */
+.profile-chips {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.profile-chip {
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--surface);
+}
+
+.profile-chip a {
+  font-weight: 700;
+  text-decoration: none;
 }
 
 .profile-scale .scale-keys {
@@ -3726,23 +3762,23 @@ th a.sort:hover {
 }
 
 @media (max-width: 48rem) {
+  /* Stacked: the name, then the advice as a figure under it, then the scale; side by side they collided. */
   .sizing-lane {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
-      'head advice'
-      'scale scale'
-      'why why'
-      'figures figures';
+      'head'
+      'advice'
+      'scale'
+      'why'
+      'figures';
     padding: 0.8rem 0.85rem 0.9rem;
   }
 
   .profile-head {
-    align-content: center;
-  }
-
-  .profile-advice {
-    justify-items: end;
-    text-align: end;
+    grid-template-columns: auto auto;
+    justify-content: start;
+    align-items: baseline;
+    gap: 0.75rem;
   }
 
   .profile-advice .button {
@@ -3776,11 +3812,13 @@ th a.sort:hover {
   background: var(--surface);
 }
 
+/* In the overview's lane forms: the cap is the slot's pale block, as a waiting runner's is; the peaks, the solid
+   block a running job fills; past the cap, the slice's ground. */
 .peak-scale .cap {
   position: absolute;
   inset: 0 auto 0 0;
   width: var(--to);
-  box-shadow: inset 0 0 0 2px var(--profile);
+  background: color-mix(in srgb, var(--profile) 38%, var(--surface));
 }
 
 .peak-scale .cap span,
@@ -3803,7 +3841,8 @@ th a.sort:hover {
   left: var(--from);
   width: calc(var(--to) - var(--from));
   min-width: 3px;
-  background: var(--profile);
+  /* The profile's colour, darkened as a running lane's fill is, so it stands off the pale cap in both themes. */
+  background: color-mix(in srgb, var(--block-ink) 22%, var(--profile));
 }
 
 .peak-scale .mark {
@@ -3818,6 +3857,7 @@ th a.sort:hover {
 .peak-scale .mark.p95 {
   top: 0.6rem;
   bottom: 0.6rem;
+  background: var(--block-ink);
 }
 
 .peak-scale .mark.need {
@@ -3863,20 +3903,6 @@ th a.sort:hover {
 .advice.lower::before { background: var(--wait); }
 .advice.raise::before { background: var(--failure-ink); }
 .advice.keep::before { background: var(--memory); }
-
-.advice-row {
-  margin: 0.75rem 0;
-}
-
-.advice-row::before,
-.advice-row:empty {
-  display: none;
-}
-
-.profiles-table td:last-child {
-  white-space: normal;
-  min-width: 18rem;
-}
 
 .method {
   font-size: 0.8125rem;
@@ -3975,13 +4001,6 @@ th a.sort:hover {
 .insight-run {
   font-size: 0.875rem;
   color: var(--muted);
-}
-
-/* A run's links: a target as tall as a row without making the row taller. */
-.insight-run a {
-  display: inline-block;
-  padding-block: 0.6rem;
-  margin-block: -0.6rem;
 }
 
 /* Disk writes: the figures, whose the drive's bytes were as one bar, and what wrote most as ranked bars. */
@@ -4699,9 +4718,9 @@ html:has(.editor-frame) {
     display: block;
   }
 
-  /* The jobs list and Capacity's tables drop their fourth and seventh columns; each other table says what it
-     drops. */
-  :is(.history-table, .sizing-table, .profiles-table) :is(th, td):is(:nth-child(4), :nth-child(7)) {
+  /* The jobs list and a profile's jobs on Capacity drop their fourth and seventh columns; each other table says
+     what it drops. */
+  :is(.history-table, .sizing-table) :is(th, td):is(:nth-child(4), :nth-child(7)) {
     display: none;
   }
 
@@ -4764,8 +4783,7 @@ html:has(.editor-frame) {
     padding: 0.7rem 0.75rem;
   }
 
-  .waits-table tbody :is(th, td),
-  .waits-table tbody td:is(:nth-child(4), :nth-child(7)) {
+  .waits-table tbody :is(th, td) {
     display: block;
     padding: 0;
     white-space: normal;
@@ -5213,7 +5231,7 @@ html:has(.editor-frame) {
 
 .volume {
   display: grid;
-  grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr) 13rem 10rem;
+  grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr) 13rem 11.5rem;
   grid-template-areas:
     'name size trend action'
     'name fill trend action';
@@ -5286,7 +5304,7 @@ html:has(.editor-frame) {
   font-size: 0.8125rem;
 }
 
-.volume-trend :is(.chart-y, .chart-labels, .limit-label) {
+.volume-trend :is(.chart-y, .limit-label) {
   display: none;
 }
 
@@ -5310,6 +5328,7 @@ html:has(.editor-frame) {
 .volume-action {
   grid-area: action;
   justify-self: end;
+  white-space: nowrap;
 }
 
 /* The shared build cache's week, under its lane. */
