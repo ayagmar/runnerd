@@ -1097,7 +1097,7 @@ pub(crate) fn log(view: &JobView) -> Markup {
                     // On a phone the page shows the newest lines only; the full log has the rest.
                     p.muted.older-lines {
                         "Showing the newest " (PHONE_TAIL) " lines; the "
-                        a href=(format!("/jobs/{}/log", summary.id)) { "full log" } " has the rest."
+                        a.hit href=(format!("/jobs/{}/log", summary.id)) { "full log" } " has the rest."
                     }
                     div.tail-wrap {
                         (tail(view))
