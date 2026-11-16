@@ -78,7 +78,7 @@ pub use attention::{
 };
 pub use budget::{
     BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, HostFigure, Reading,
-    SlotPart,
+    SlotForm, SlotPart, SlotReading,
 };
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, DoctorState, PauseQuery, Paused,
@@ -92,7 +92,8 @@ pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use insights::{
     AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,
     InsightKind, Insights, InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest,
-    NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitSpread, WeekWaits,
+    NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity, WaitFigure, WaitSpread,
+    WeekWaits,
 };
 #[cfg(feature = "host")]
 pub(crate) use jobs::SAMPLE_GAP_INTERVALS;

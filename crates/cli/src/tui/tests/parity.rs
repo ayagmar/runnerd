@@ -8,10 +8,12 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{BuildCacheCounts, Column, JobAction, JobPage, JobState, Section, View};
+use runnerd_core::api::{
+    BuildCacheCounts, CheckStatus, Column, JobAction, JobPage, JobState, Section, View,
+};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
-use super::super::app::{App, Effect, Msg, View as AppView};
+use super::super::app::{App, CheckRow, Effect, Msg, Pane, View as AppView};
 use super::super::draw::{Theme, draw, view_keys};
 use super::super::prompts::Prompt;
 use super::{key, listed};
@@ -57,6 +59,12 @@ fn frame_of(app: &App, width: u16, height: u16) -> (Vec<String>, Buffer) {
     (rows, buffer)
 }
 
+/// Whether `cell` is in the selected row's band, which drops every tone so it reads as one block; its glyph and word
+/// still say what it is.
+fn in_band(cell: &ratatui::buffer::Cell) -> bool {
+    cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+}
+
 fn shows(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
@@ -78,9 +86,17 @@ fn assert_rows(rows: &[String], buffer: &Buffer, facts: &[JobRow]) {
             })
             .unwrap_or_else(|| panic!("no row says {fact:?}:\n{}", rows.join("\n")));
         let x = row[..row.find(&badge).unwrap()].chars().count();
-        let style = buffer[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())].style();
+        let cell = &buffer[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())];
+        if in_band(cell) {
+            continue;
+        }
         let expected = COLOUR.tone(human::outcome_tone(fact.kind));
-        assert_eq!(style.fg, expected.fg, "{badge} is {:?}: {row}", fact.kind);
+        assert_eq!(
+            cell.style().fg,
+            expected.fg,
+            "{badge} is {:?}: {row}",
+            fact.kind
+        );
     }
 }
 
@@ -150,9 +166,10 @@ fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_doe
     assert!(shows(&rows, &facts.host), "{all}");
     assert!(shows(&rows, facts.stopping), "{}: {all}", facts.stopping);
     assert!(shows(&rows, facts.github), "{}: {all}", facts.github);
+    let tiles = super::tiles(&all);
     for figure in &facts.figures {
         let line = format!("{}: {}", figure.label, figure.value);
-        assert!(shows(&rows, &line), "{line}: {all}");
+        assert!(tiles.contains(&line), "{line}: {tiles}");
         if let Some(of) = &figure.of {
             assert!(shows(&rows, of), "{of}: {all}");
         }
@@ -400,6 +417,17 @@ fn the_history_and_records_tables_are_headed_as_core_names_their_columns() {
             Column::Queued,
         ],
     );
+    // A job's CPU average shows in its row as core writes it.
+    for fact in facts(&daemon).rows {
+        let Some(cpu) = &fact.cpu else { continue };
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&fact.title) && row.contains(&format!(" {cpu} "))),
+            "job {} shows its CPU average {cpu}: {}",
+            fact.job,
+            rows.join("\n")
+        );
+    }
     // From the history, the Jobs key again opens its next section.
     app.update(key(KeyCode::Char('2')));
     app.update(Msg::Records(daemon.records.clone()));
@@ -506,6 +534,15 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
     let sizing = runnerd_fixtures::sizing(NOW);
     let plan = sizing.auto_plan.clone().unwrap();
     app.update(Msg::Sizing(sizing.clone()));
+    // What auto sizing refuses a profile is what its row means: shown once it is selected.
+    let node = sizing
+        .profiles
+        .iter()
+        .position(|profile| profile.name == "node")
+        .unwrap();
+    for _ in 0..node {
+        app.update(key(KeyCode::Char('j')));
+    }
     let (rows, _) = frame_of(&app, 120, 40);
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let shown = words(&rows.join(" "));
@@ -559,6 +596,9 @@ fn the_insights_view_states_each_insight_and_the_host_as_core_does() {
         let x = rows[row].find("● ").unwrap();
         let x = u16::try_from(rows[row][..x].chars().count()).unwrap();
         let y = u16::try_from(row).unwrap();
+        if in_band(&buffer[(x, y)]) {
+            continue;
+        }
         assert_eq!(
             Some(buffer[(x, y)].fg),
             COLOUR
@@ -616,14 +656,47 @@ fn cell_of<'buffer>(
 }
 
 #[test]
+fn closing_what_needs_attention_returns_to_the_pane_it_was_opened_from() {
+    // `!` and `esc` closed the list to the slots, wherever it was opened from.
+    let daemon = daemon();
+    let mut app = app(&daemon);
+    let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
+    app.update(Msg::Attention(Ok(attention)));
+    while app.pane != Pane::Latest {
+        app.update(key(KeyCode::Tab));
+    }
+    app.update(key(KeyCode::Char('!')));
+    assert_eq!(app.pane, Pane::Attention);
+    app.update(key(KeyCode::Char('!')));
+    assert_eq!(app.pane, Pane::Latest, "! closes it to the latest jobs");
+    app.update(key(KeyCode::Char('!')));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.pane, Pane::Latest, "esc closes it to the latest jobs");
+}
+
+#[test]
 fn the_overview_lists_what_needs_attention_in_core_s_words_and_tones() {
     let daemon = daemon();
     let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
     let mut app = app(&daemon);
     app.update(Msg::Attention(Ok(attention.clone())));
+    // Closed, one line: the count, the most urgent item and how many more, as core counts them.
+    let (rows, _) = frame(&app);
+    let strip = rows
+        .iter()
+        .find(|row| row.starts_with("▲ "))
+        .unwrap_or_else(|| panic!("{}", rows.join("\n")));
+    let first: String = attention.items[0].title.chars().take(40).collect();
+    let count = attention.items.len() as u64 + attention.omitted;
+    assert!(strip.starts_with(&format!("▲ {count}  {first}")), "{strip}");
+    if let Some(more) = attention.more(1) {
+        assert!(strip.contains(&more), "{more}: {strip}");
+    }
+    // `!` opens the list.
+    app.update(key(KeyCode::Char('!')));
     let (rows, buffer) = frame(&app);
     let all = rows.join("\n");
-    // The overview shows as many as its spare rows allow, at least five, and counts the rest as core does.
+    // The open list shows as many as its rows allow, at least five, and counts the rest as core does.
     let shown = rows.iter().filter(|row| row.starts_with("▲ ")).count();
     assert!(shown >= 5.min(attention.items.len()), "{all}");
     let facts = runnerd_fixtures::attention_facts(&attention, shown);
@@ -641,7 +714,7 @@ fn the_overview_lists_what_needs_attention_in_core_s_words_and_tones() {
                 "{fix}, what clears it: {all}"
             );
         }
-        if row.contains(&mark) {
+        if row.contains(&mark) && !in_band(cell_of(&rows, &buffer, &mark)) {
             assert_eq!(
                 Some(cell_of(&rows, &buffer, &mark).fg),
                 COLOUR
@@ -1229,13 +1302,44 @@ fn an_attention_item_leads_to_its_check_or_insight_once_that_view_is_read() {
         app.update(Msg::Doctor(Ok(doctor.clone())));
         app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
         let selected = match item.subject {
-            Subject::Check { .. } => (AppView::Settings, app.check),
+            Subject::Check { .. } => (
+                AppView::Settings,
+                match app.check_rows().get(app.check) {
+                    Some(CheckRow::Check(at)) => *at,
+                    _ => usize::MAX,
+                },
+            ),
             _ => (AppView::Insights, app.insight),
         };
         assert_eq!(selected, (app.view, wanted), "{} is selected", item.title);
         followed += 1;
     }
     assert!(followed >= 2, "the fixtures point at checks and insights");
+}
+
+#[test]
+fn enter_on_an_insight_opens_the_newest_run_that_shows_it() {
+    // Enter on the insights view used to do nothing, though each insight names the runs that show it.
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights(NOW);
+    app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
+    app.update(super::tab(View::Insights));
+    let at = insights
+        .insights
+        .iter()
+        .position(|insight| !insight.runs.is_empty())
+        .unwrap();
+    for _ in 0..at {
+        app.update(key(KeyCode::Char('j')));
+    }
+    let newest = insights.insights[at].runs[0].job;
+    assert!(
+        app.update(key(KeyCode::Enter))
+            .contains(&Effect::OpenJob(newest)),
+        "Enter opens job {newest}"
+    );
+    assert_eq!(app.view, AppView::Job);
 }
 
 #[test]
@@ -1301,6 +1405,88 @@ fn after_a_reconnect_the_open_job_its_comparison_and_the_jobs_list_are_read_agai
 }
 
 #[test]
+fn a_short_settings_view_folds_only_a_config_with_nothing_to_say() {
+    // Folded to `✓ ok  … N more lines`, a config's warnings were hidden under a pass mark, and an invalid one's
+    // reason was out of reach while a check was selected.
+    use runnerd_core::api::{AdmissionPolicy, ConfigCheck, ConfigFile};
+    let config = |valid: bool, message: &str, warnings: &[&str]| super::super::app::ConfigRead {
+        file: ConfigFile {
+            path: "/home/forge/.config/runnerd/runnerd.toml".to_owned(),
+            text: String::new(),
+            revision: String::new(),
+        },
+        check: ConfigCheck {
+            valid,
+            message: message.to_owned(),
+            warnings: warnings
+                .iter()
+                .map(|warning| (*warning).to_owned())
+                .collect(),
+            admission: AdmissionPolicy::Caps,
+            memory_caps: None,
+            memory_needed: None,
+            memory_max: None,
+            revision: None,
+        },
+    };
+    let cases = [
+        (
+            config(false, "memory caps sum to 40G, past the 33G MemoryMax", &[]),
+            "past the 33G MemoryMax",
+        ),
+        (
+            config(true, "valid", &["[records] max_total is under one record"]),
+            "max_total is under one record",
+        ),
+    ];
+    for (read, expected) in cases {
+        let mut app = app(&daemon());
+        app.update(super::tab(View::Settings));
+        app.update(Msg::Doctor(Ok(runnerd_fixtures::doctor())));
+        app.update(Msg::Config(Ok(read)));
+        for (width, height) in [(60, 16), (66, 24), (72, 24), (80, 24)] {
+            let (rows, _) = frame_of(&app, width, height);
+            assert!(
+                rows.join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(expected),
+                "at {width}x{height} {expected} shows:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+}
+
+#[test]
+fn a_scrolled_checks_list_counts_the_checks_out_of_sight() {
+    // With the passing checks open and the last one selected, the problems above scrolled out with nothing to say so.
+    let mut app = app(&daemon());
+    app.update(super::tab(View::Settings));
+    app.update(Msg::Doctor(Ok(runnerd_fixtures::doctor())));
+    let passing = app
+        .check_rows()
+        .iter()
+        .position(|row| matches!(row, CheckRow::Passing(_)))
+        .unwrap();
+    for _ in 0..passing {
+        app.update(key(KeyCode::Char('j')));
+    }
+    app.update(key(KeyCode::Enter));
+    for _ in 0..app.check_rows().len() {
+        app.update(key(KeyCode::Char('j')));
+    }
+    let (rows, _) = frame_of(&app, 60, 12);
+    let above = app.check;
+    assert!(
+        shows(&rows, "more above"),
+        "{above} checks above the last are counted:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn settings_state_each_doctor_check_and_the_state_of_its_run_as_core_does() {
     let doctors =
         std::iter::once(runnerd_fixtures::doctor()).chain(runnerd_fixtures::doctor_not_current());
@@ -1308,6 +1494,30 @@ fn settings_state_each_doctor_check_and_the_state_of_its_run_as_core_does() {
         let mut app = app(&daemon());
         app.update(super::tab(View::Settings));
         app.update(Msg::Doctor(Ok(doctor.clone())));
+        // Folded, the passing checks are one row naming them.
+        let passing: Vec<&str> = doctor
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Pass)
+            .map(|check| check.name.as_str())
+            .collect();
+        if !passing.is_empty() {
+            let (rows, _) = frame(&app);
+            assert!(
+                shows(&rows, &passing.join(", ")),
+                "{passing:?}: {}",
+                rows.join("\n")
+            );
+            let at = app
+                .check_rows()
+                .iter()
+                .position(|row| matches!(row, CheckRow::Passing(_)))
+                .unwrap();
+            for _ in 0..at {
+                app.update(key(KeyCode::Char('j')));
+            }
+            app.update(key(KeyCode::Enter));
+        }
         let (rows, buffer) = frame(&app);
         let all = rows.join("\n");
         if let Some(state) = doctor.state.as_ref().and_then(|state| state.line(NOW)) {
@@ -1606,7 +1816,8 @@ fn the_insights_view_says_what_jobs_and_the_drive_wrote_as_core_words_it() {
     app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
     app.update(super::tab(View::Insights));
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let (rows, _) = frame_of(&app, 300, 120);
+    // Narrower than a pane beside the list, so a wrapped line reads on across the rows.
+    let (rows, _) = frame_of(&app, 130, 120);
     let shown = words(&rows.join(" "));
     for section in insights.disk.unwrap().sections() {
         assert!(

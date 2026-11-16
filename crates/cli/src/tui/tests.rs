@@ -225,6 +225,50 @@ fn screen(app: &App, width: u16, height: u16, colour: bool) -> String {
     text
 }
 
+/// Whether `screen` says `text`, which may wrap across its rows.
+fn reads(screen: &str, text: &str) -> bool {
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    words(screen).contains(&words(text))
+}
+
+/// The overview's headline tiles as `label: value` each, joined by ` · `: the labels on the screen's second row, each
+/// figure under its label.
+pub(super) fn tiles(screen: &str) -> String {
+    let mut rows = screen.lines().skip(1);
+    let (labels, values) = (
+        rows.next().unwrap_or_default(),
+        rows.next().unwrap_or_default(),
+    );
+    let labels: Vec<char> = labels.chars().collect();
+    let values: Vec<char> = values.chars().collect();
+    // A label starts after two spaces or at the row's start.
+    let starts: Vec<usize> = (0..labels.len())
+        .filter(|&x| {
+            labels[x] != ' ' && (x == 0 || (x >= 2 && labels[x - 1] == ' ' && labels[x - 2] == ' '))
+        })
+        .collect();
+    let text = |cells: &[char], from: usize, to: usize| -> String {
+        cells[from.min(cells.len())..to.min(cells.len())]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    starts
+        .iter()
+        .enumerate()
+        .map(|(at, &start)| {
+            let end = starts.get(at + 1).copied().unwrap_or(labels.len());
+            format!(
+                "{}: {}",
+                text(&labels, start, end),
+                text(&values, start, end)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// A job of halyard/ledger queued, taken by jvm slot 1, through two steps of a three-step job, with samples.
 fn running_job(app: &mut App) {
     let steps = [
@@ -415,7 +459,7 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
 
 #[test]
 fn the_failed_figure_is_red_only_for_failures_of_the_runner() {
-    // The colour of the count's cell in "Failed, 24 h: 2" on the health line.
+    // The colour of the count's cell in the "Failed, 24 h" tile.
     let colour_of_failed = |runner_failed| {
         let mut app = app();
         app.activity = Some(runnerd_core::api::Activity {
@@ -429,12 +473,14 @@ fn the_failed_figure_is_red_only_for_failures_of_the_runner() {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
+        // The tile's label on the first row, its figure under it.
         let row: Vec<&str> = (0..160).map(|x| buffer[(x, 1)].symbol()).collect();
         let x = row
-            .windows(15)
-            .position(|cells| cells.concat() == "Failed, 24 h: 2")
+            .windows(12)
+            .position(|cells| cells.concat() == "Failed, 24 h")
             .unwrap();
-        buffer[(u16::try_from(x + 14).unwrap(), 1)].fg
+        assert_eq!(buffer[(u16::try_from(x).unwrap(), 2)].symbol(), "2");
+        buffer[(u16::try_from(x).unwrap(), 2)].fg
     };
     assert_ne!(
         colour_of_failed(0),
@@ -697,6 +743,34 @@ fn sizing() -> Sizing {
 }
 
 #[test]
+fn the_profile_s_jobs_table_never_shows_its_header_without_a_job() {
+    // At 80x24 the meaning took all but two rows: the table's header showed alone, which reads as a profile without
+    // jobs.
+    let mut app = app();
+    app.update(tab(runnerd_core::api::View::Capacity));
+    app.update(Msg::Sizing(sizing()));
+    for height in 8..=30 {
+        for width in [60, 80, 100] {
+            let shown = screen(&app, width, height, false);
+            let lines: Vec<&str> = shown.lines().collect();
+            if let Some(at) = lines.iter().position(|line| line.starts_with("REPOSITORY")) {
+                assert!(
+                    lines
+                        .get(at + 1)
+                        .is_some_and(|row| row.contains("halyard/storefront")),
+                    "at {width}x{height} a job follows the header: {shown}"
+                );
+            }
+        }
+    }
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        shown.contains("REPOSITORY"),
+        "the jobs show at 80x24: {shown}"
+    );
+}
+
+#[test]
 fn sizing_advice_is_written_into_the_config_only_after_y() {
     let mut app = app();
     assert_eq!(
@@ -714,12 +788,12 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     let shown = screen(&app, 120, 24, false);
     for expected in [
         "Sizing",
-        "node: lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
+        "lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
         "halyard/storefront",
         "CI / build",
         "a writes memory = \"3.25G\", slots = 4",
     ] {
-        assert!(shown.contains(expected), "{expected}: {shown}");
+        assert!(reads(&shown, expected), "{expected}: {shown}");
     }
 
     app.update(key(KeyCode::Char('a')));
@@ -840,7 +914,7 @@ fn the_queue_lists_each_waiting_job_oldest_first_with_why_and_opens_and_pauses_l
             "{rows:?}"
         );
         assert!(
-            shown.contains("Waiting: 2, oldest 59s"),
+            tiles(&shown).contains("Waiting: 2, oldest 59s"),
             "the health line counts them: {shown}"
         );
     }
@@ -947,6 +1021,45 @@ fn the_selected_job_stays_selected_when_jobs_above_it_start_or_finish() {
     );
 }
 
+/// The overview's budget strip on a screen: its heading, its bar's first row, and the rows of names and figures under
+/// the bar.
+struct Strip<'screen> {
+    heading: &'screen str,
+    bar: &'screen str,
+    names: &'screen str,
+    figures: &'screen str,
+}
+
+impl<'screen> Strip<'screen> {
+    fn of(screen: &'screen str) -> Strip<'screen> {
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with("Budget"))
+            .unwrap_or_else(|| panic!("no budget: {screen}"));
+        let bars = lines[at + 1..]
+            .iter()
+            .take_while(|line| **line == lines[at + 1])
+            .count();
+        Strip {
+            heading: lines[at],
+            bar: lines[at + 1],
+            names: lines[at + 1 + bars],
+            figures: lines[at + 2 + bars],
+        }
+    }
+
+    /// Whether `name` is under the bar with `figure` under it, starting in the same column.
+    fn labels(&self, name: &str, figure: &str) -> bool {
+        let column = |row: &str, text: &str| row.find(text).map(|at| row[..at].width());
+        column(self.names, name).is_some_and(|x| {
+            self.figures
+                .match_indices(figure)
+                .any(|(at, _)| self.figures[..at].width() == x)
+        })
+    }
+}
+
 #[test]
 fn the_budget_names_the_mirror_and_each_seed_container() {
     let mut app = app();
@@ -958,25 +1071,417 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     }];
     budget.memory_in_use = 13 << 30;
     let shown = screen(&app, 160, 40, false);
-    let names = shown.lines().nth(4).unwrap();
+    let strip = Strip::of(&shown);
     assert!(
-        names.contains("mirror 4G") && names.contains("jvm seed 9G"),
+        strip.labels("mirror", "4G") && strip.labels("jvm seed", "9G"),
         "{shown}"
     );
 
     // A 512M mirror is a cell or two at common widths: the heading names it.
     app.live.status.budget.mirror_memory = 512 << 20;
     let shown = screen(&app, 120, 40, false);
-    let mut lines = shown.lines().skip(2);
-    let (heading, bar) = (lines.next().unwrap(), lines.next().unwrap());
-    assert!(heading.ends_with("· mirror 512M"), "{shown}");
-    assert!(bar.contains("▒ "), "the mirror's block shows: {shown}");
+    let strip = Strip::of(&shown);
+    assert!(strip.heading.ends_with("· mirror 512M"), "{shown}");
+    assert!(
+        strip.bar.contains("▒ "),
+        "the mirror's block shows: {shown}"
+    );
+
+    // The host's sentence is longer than the heading; the mirror's name outlives it.
+    app.live.status.budget.host = Some(HostBudget {
+        memory: HostMemory {
+            at: NOW,
+            total: 64 << 30,
+            available: 20 << 30,
+            slice: 0,
+            some: None,
+            full: None,
+            holders: Vec::new(),
+            ceiling: None,
+            swap: None,
+        },
+        limit: 30 << 30,
+        spare: 4 << 30,
+        stalled: false,
+        credit: None,
+    });
+    for width in [80, 100, 140, 200] {
+        let shown = screen(&app, width, 40, false);
+        assert!(
+            Strip::of(&shown).heading.contains("mirror 512M"),
+            "at {width}: {shown}"
+        );
+    }
+    // What is reserved outranks the mirror's name: where both do not fit, the reading stays, and the name shows
+    // alone only where the reading does not fit even alone. At 72 columns under measured admission the name took
+    // the heading from a reading that fit.
+    for admission in [AdmissionPolicy::Caps, AdmissionPolicy::Measured] {
+        app.live.status.budget.admission = admission;
+        let reading = app.live.status.budget.memory_reading().line();
+        for width in 40..=200_u16 {
+            let shown = screen(&app, width, 40, false);
+            let heading = Strip::of(&shown).heading;
+            let room = usize::from(width) - "Budget  ".len();
+            if reading.width() <= room {
+                assert!(
+                    heading.contains(&reading),
+                    "{admission:?} at {width} the reading shows: {shown}"
+                );
+            } else if "mirror 512M".width() <= room {
+                assert!(
+                    heading.contains("mirror 512M"),
+                    "{admission:?} at {width} the name shows alone: {shown}"
+                );
+            }
+        }
+    }
+    app.live.status.budget.admission = AdmissionPolicy::Measured;
+    let shown = screen(&app, 72, 24, false);
+    assert!(
+        Strip::of(&shown)
+            .heading
+            .contains(&app.live.status.budget.memory_reading().line()),
+        "at 72 columns the reading shows: {shown}"
+    );
+    app.live.status.budget.admission = AdmissionPolicy::Caps;
 
     // Without a MemoryMax the bar's whole is every block together, so the seed container still has its block.
     app.live.status.budget.memory_max = None;
     let shown = screen(&app, 120, 40, false);
-    let names = shown.lines().nth(4).unwrap();
-    assert!(names.contains("jvm seed 9G"), "{shown}");
+    assert!(Strip::of(&shown).labels("jvm seed", "9G"), "{shown}");
+}
+
+#[test]
+fn every_budget_label_starts_under_its_own_segment_and_no_figure_shows_without_its_name() {
+    // The strip used to name its segments in one line that drifted from them, and a narrow mirror's figure could show
+    // with no name above it.
+    let mut app = app();
+    running_job(&mut app);
+    let budget = &mut app.live.status.budget;
+    budget.mirror_memory = 1 << 30;
+    budget.seed_memory = vec![SeedMemory {
+        profile: "jvm".to_owned(),
+        memory: 2 << 30,
+    }];
+    budget.memory_in_use = 3 << 30;
+    let labels = ["jvm 1", "jvm 2", "node 1", "mirror", "jvm seed", "free"];
+    for width in 60..=200 {
+        let shown = screen(&app, width, 40, false);
+        let strip = Strip::of(&shown);
+        let bar: Vec<char> = strip.bar.chars().collect();
+        let names: Vec<char> = strip.names.chars().collect();
+        let figures: Vec<char> = strip.figures.chars().collect();
+        let column = |row: &str, text: &str| {
+            row.match_indices(text)
+                .map(|(at, _)| row[..at].width())
+                .find(|x| *x == 0 || names.get(x - 1) == Some(&' '))
+        };
+        let mut placed: Vec<usize> = labels
+            .iter()
+            .filter_map(|label| column(strip.names, label))
+            .collect();
+        placed.sort_unstable();
+        assert!(!placed.is_empty(), "at {width} something is named: {shown}");
+        for (at, x) in placed.iter().enumerate() {
+            assert!(
+                *x == 0 || bar.get(x - 1) == Some(&' '),
+                "at {width} a name starts mid-segment, column {x}: {shown}"
+            );
+            let end = placed.get(at + 1).copied().unwrap_or(figures.len());
+            let figure: String = figures[*x..end.min(figures.len())].iter().collect();
+            assert!(
+                !figure.starts_with(' ') && !figure.trim_end().contains("  "),
+                "at {width} the figure under column {x} is its name's alone: {figure:?}: {shown}"
+            );
+        }
+        let first: String = figures[..placed[0]].iter().collect();
+        assert!(
+            first.trim().is_empty(),
+            "at {width} a figure before the first name: {shown}"
+        );
+    }
+}
+
+/// The overview's budgets a demo never shows, each by what makes it odd.
+fn odd_budgets() -> Vec<(&'static str, App)> {
+    const G: u64 = 1 << 30;
+    let with = |name: &'static str, change: &dyn Fn(&mut Status)| {
+        let mut app = app();
+        change(&mut app.live.status);
+        (name, app)
+    };
+    let host = |stalled: bool| HostBudget {
+        memory: HostMemory {
+            at: NOW,
+            total: 64 * G,
+            available: 2 * G,
+            slice: 0,
+            some: None,
+            full: None,
+            holders: Vec::new(),
+            ceiling: None,
+            swap: None,
+        },
+        limit: 4 * G,
+        spare: 0,
+        stalled,
+        credit: None,
+    };
+    vec![
+        with("one slot", &|status| {
+            status.profiles = vec![profile("solo", 1, 8 * G)];
+        }),
+        with("twelve slots", &|status| {
+            status.profiles = vec![profile("jvm", 8, 2 * G), profile("node", 4, 2 * G)];
+        }),
+        with("a 1% slot", &|status| {
+            status.profiles = vec![profile("big", 1, 30 * G), profile("tiny", 1, G / 3)];
+        }),
+        with("a running 1% slot", &|status| {
+            status.profiles = vec![profile("big", 1, 30 * G), profile("tiny", 1, G / 3)];
+            status.profiles[1].slots[0].runner = Some(RunnerStatus {
+                reserved: G / 3,
+                ..runner(true)
+            });
+        }),
+        with("closed past 90%", &|status| {
+            status.budget.admission = AdmissionPolicy::Measured;
+            status.budget.held = true;
+            status.profiles[0].slots[0].runner = Some(runner(true));
+        }),
+        with("the host stalls", &|status| {
+            status.budget.host = Some(host(true));
+        }),
+        with("the host holds the rest", &|status| {
+            status.budget.host = Some(host(false));
+        }),
+        with("nothing free", &|status| {
+            status.budget.memory_max = Some(25 * G);
+        }),
+        with("no mirror", &|status| {
+            status.budget.mirror_memory = 0;
+        }),
+        with("a small mirror", &|status| {
+            status.budget.mirror_memory = 512 << 20;
+        }),
+        with("no MemoryMax", &|status| {
+            status.budget.memory_max = None;
+        }),
+        with("long names", &|status| {
+            status.profiles = vec![
+                profile("gpu-runners-for-the-monorepo-integration-suite", 2, 9 * G),
+                profile("node", 1, 7 * G),
+            ];
+        }),
+        with("wide and combining characters", &|status| {
+            status.profiles = vec![
+                profile("ビルド", 2, 9 * G),
+                profile("cafe\u{301}", 1, 7 * G),
+                profile("❤️", 1, 4 * G),
+            ];
+        }),
+    ]
+}
+
+#[test]
+fn an_odd_budget_still_names_each_segment_under_itself_and_cuts_no_label() {
+    // Reasoned about but never drawn before: one slot, twelve, a slot under 2% of the slice (once drawn as a blank
+    // cell), the slice closed or held by the host, nothing free, no mirror, no MemoryMax, and names that are long,
+    // wide or combine.
+    for (case, app) in odd_budgets() {
+        let slots: Vec<(String, String)> = app
+            .live
+            .status
+            .profiles
+            .iter()
+            .flat_map(|profile| {
+                profile.slots.iter().map(move |slot| {
+                    (
+                        format!("{} {}", profile.name, slot.slot),
+                        format!("■ {}", profile.name.chars().take(4).collect::<String>()),
+                    )
+                })
+            })
+            .collect();
+        let names: Vec<String> = slots.iter().map(|(name, _)| name.clone()).collect();
+        for (width, height) in [
+            (40, 16),
+            (60, 16),
+            (80, 24),
+            (100, 30),
+            (140, 40),
+            (200, 50),
+        ] {
+            let shown = screen(&app, width, height, false);
+            let strip = Strip::of(&shown);
+            let at = |row: &str, x: usize| row.chars().nth(x);
+            assert!(
+                !strip.names.contains('…') && !strip.figures.contains('…'),
+                "{case} at {width}: a label is never cut: {shown}"
+            );
+            let bar: Vec<char> = strip.bar.chars().collect();
+            let mut first_name = None;
+            for name in &names {
+                let Some(found) = strip
+                    .names
+                    .match_indices(name.as_str())
+                    .map(|(found, _)| strip.names[..found].width())
+                    .find(|x| *x == 0 || at(strip.names, *x - 1) == Some(' '))
+                else {
+                    continue;
+                };
+                first_name = Some(first_name.map_or(found, |first: usize| first.min(found)));
+                assert!(
+                    found == 0 || bar.get(found - 1) == Some(&' '),
+                    "{case} at {width}: {name} starts under its own segment: {shown}"
+                );
+            }
+            // A slot short of a label of its own is named by its lane, its number whole, or counted below the lanes.
+            for ((name, lane), slot) in slots.iter().zip(
+                app.live
+                    .status
+                    .profiles
+                    .iter()
+                    .flat_map(|profile| profile.slots.iter().map(|slot| slot.slot)),
+            ) {
+                assert!(
+                    strip.names.contains(name.as_str())
+                        || shown.lines().any(|row| {
+                            row.starts_with(lane.as_str()) && row.contains(&format!(" {slot} "))
+                        })
+                        || shown.contains("more below"),
+                    "{case} at {width}: {name} shows somewhere: {shown}"
+                );
+            }
+            if let Some(first) = first_name {
+                let before: String = strip.figures.chars().take(first).collect();
+                assert!(
+                    before.trim().is_empty(),
+                    "{case} at {width}: no figure before the first name: {shown}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_slot_under_two_cells_of_the_strip_still_draws_a_cell_of_its_own() {
+    // A 1G slot of a 33G slice is under one cell at 60 columns: it was drawn as a gap alone, a blank.
+    let (_, app) = odd_budgets()
+        .into_iter()
+        .find(|(case, _)| *case == "a running 1% slot")
+        .unwrap();
+    for width in [40, 60, 80] {
+        let shown = screen(&app, width, 24, false);
+        let bar = Strip::of(&shown).bar;
+        assert!(
+            bar.contains(" ▓ ") || bar.contains(" █ "),
+            "at {width} the tiny slot has a cell between the big one and what follows: {shown}"
+        );
+    }
+}
+
+#[test]
+fn what_a_job_uses_and_what_its_slot_reserves_read_apart_without_their_colour() {
+    // In a light terminal a profile's colour is pale for both: what the job uses and the rest of its slot read as
+    // one block.
+    let mut app = app();
+    running_job(&mut app);
+    app.update(event(
+        None,
+        Event::JobSample {
+            job: 42,
+            sample: Sample {
+                at: 1096,
+                cpu: 3140,
+                memory: 4 << 30,
+                network_received: 0,
+                network_sent: 0,
+            },
+        },
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, &app, NOW, Theme { colour: true });
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = (0..40)
+        .find(|y| buffer[(0, *y)].symbol() == "█")
+        .expect("the strip's bar");
+    let dim = |symbol: &str| -> Vec<bool> {
+        (0..120)
+            .map(|x| &buffer[(x, row)])
+            .filter(|cell| cell.symbol() == symbol)
+            .map(|cell| cell.modifier.contains(ratatui::style::Modifier::DIM))
+            .collect()
+    };
+    let used = dim("█");
+    let reserved = dim("▓");
+    assert!(
+        !used.is_empty() && used.iter().all(|dim| !dim),
+        "what the job uses is full: {used:?}"
+    );
+    assert!(
+        !reserved.is_empty() && reserved.iter().any(|dim| *dim),
+        "the rest of its slot is dim: {reserved:?}"
+    );
+}
+
+#[test]
+fn a_short_overview_draws_the_list_its_keys_move_in() {
+    // At 60x16 the latest jobs got no rows, yet tab stopped on them: no row was selected and enter opened a job that
+    // was not shown.
+    let mut app = app();
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    while app.pane != Pane::Latest {
+        app.update(key(KeyCode::Tab));
+    }
+    for height in 10..=20 {
+        let shown = screen(&app, 60, height, false);
+        if shown.contains("Repositories") || shown.contains("Latest jobs") {
+            assert!(
+                shown.contains("Latest jobs"),
+                "at 60x{height} the focused list shows: {shown}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_single_row_of_lanes_shows_the_selected_slot_rather_than_a_count() {
+    // With one row for the lanes, "N more below" took it and no slot showed.
+    let mut app = app();
+    app.update(key(KeyCode::Char('j')));
+    let mut single = false;
+    for height in 6..=16 {
+        let shown = screen(&app, 60, height, false);
+        let lines: Vec<&str> = shown.lines().collect();
+        let Some(figures) = lines.iter().position(|line| line.starts_with("Budget")) else {
+            continue;
+        };
+        let bars = lines[figures + 1..]
+            .iter()
+            .take_while(|line| **line == lines[figures + 1])
+            .count();
+        // The row under the strip's figures is the first lane, never a bare count.
+        let Some(under) = lines.get(figures + bars + 3) else {
+            continue;
+        };
+        assert!(
+            !(under.starts_with("  ") && under.contains(" more ")),
+            "at 60x{height} a count with no lane above it: {shown}"
+        );
+        if under.starts_with("■ ") {
+            single |= !lines[figures + bars + 4].starts_with("■ ");
+            assert!(
+                shown.contains("■ jvm 2"),
+                "at 60x{height} the selected slot shows: {shown}"
+            );
+        }
+    }
+    assert!(single, "some height leaves the lanes one row");
 }
 
 #[test]
@@ -1002,7 +1507,7 @@ fn the_bar_shows_no_free_cell_when_core_says_nothing_is_free() {
     });
     assert_eq!(app.live.status.budget_parts().free, None);
     let shown = screen(&app, 80, 24, false);
-    let bar = shown.lines().nth(3).unwrap();
+    let bar = Strip::of(&shown).bar;
     assert!(!bar.contains('·'), "no free cell: {shown}");
     assert!(bar.ends_with('╱'), "the host's part ends the bar: {shown}");
 
@@ -1011,10 +1516,9 @@ fn the_bar_shows_no_free_cell_when_core_says_nothing_is_free() {
     budget.admission = AdmissionPolicy::Measured;
     budget.held = true;
     let shown = screen(&app, 80, 24, false);
-    let mut lines = shown.lines().skip(3);
-    let (bar, names) = (lines.next().unwrap(), lines.next().unwrap());
-    assert!(!bar.contains('·'), "no free cell while held: {shown}");
-    assert!(names.contains("closed past 90% 33G"), "{shown}");
+    let strip = Strip::of(&shown);
+    assert!(!strip.bar.contains('·'), "no free cell while held: {shown}");
+    assert!(strip.labels("closed past 90%", "33G"), "{shown}");
 }
 
 #[test]
@@ -1036,10 +1540,10 @@ fn a_budget_label_never_cuts_a_figure_at_any_width() {
     ));
     for width in 60..=160 {
         let shown = screen(&app, width, 40, false);
-        let names = shown.lines().nth(4).unwrap();
+        let strip = Strip::of(&shown);
         assert!(
-            !names.contains('…'),
-            "at {width} columns a label is cut: {names}"
+            !strip.names.contains('…') && !strip.figures.contains('…'),
+            "at {width} columns a label is cut: {shown}"
         );
     }
 }
@@ -1054,8 +1558,7 @@ fn the_budget_names_a_shell_open_in_a_record() {
     }];
     budget.memory_in_use += 9 << 30;
     let shown = screen(&app, 160, 40, false);
-    let names = shown.lines().nth(4).unwrap();
-    assert!(names.contains("job 42 shell 9G"), "{shown}");
+    assert!(Strip::of(&shown).labels("job 42 shell", "9G"), "{shown}");
 }
 
 #[test]
@@ -1799,26 +2302,27 @@ fn text_that_does_not_fit_ends_in_an_ellipsis_and_leaves_its_neighbour_a_space()
         storefront.contains("1 queued "),
         "a space before the latest jobs: {small}"
     );
-    let slot = rows_with(&small, "jvm 1  ")[0];
+    let narrow = screen(&app, 70, 24, false);
+    let slot = rows_with(&narrow, "■ jvm 1")[0];
     assert!(
-        slot.contains("… 16m 40s "),
-        "a space before the run time: {small}"
+        slot.contains("2/3 Integration tests (Test") && slot.contains("… 16m 40s "),
+        "the step's name ends in an ellipsis and a space before the run time: {narrow}"
     );
 
-    let wide = screen(&app, 136, 40, false);
-    let step = rows_with(&wide, "2/3 Integration tes")[0];
+    // With room for it, the step's name is whole.
+    let step = rows_with(&small, "2/3 Integration")[0];
     assert!(
-        step.contains("2/3 Integration tes… "),
-        "the step's name ends in an ellipsis and a space: {wide}"
+        step.contains("2/3 Integration tests (Testcontainers) 16m 40s "),
+        "the step's name is whole at 80 columns: {small}"
     );
 
     let mut feature = finished(7, 60);
-    feature.branch = Some("feat/checkout-flow".to_owned());
+    feature.branch = Some("feat/checkout-flow-with-a-long-name".to_owned());
     let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
     app.update(history_page(generation, vec![feature], None));
     let history = screen(&app, 120, 24, false);
     assert!(
-        history.contains(" feat/checkout… "),
+        history.contains(" feat/checkout-flow-with… "),
         "the branch ends in an ellipsis: {history}"
     );
 }
@@ -1875,10 +2379,15 @@ fn wide_characters_are_fitted_by_the_cells_they_take() {
     app.update(history_page(generation, vec![job], None));
     let history = screen(&app, 120, 24, false);
     let row = rows_with(&history, "SUCCESS")[0];
+    assert!(row.width() <= 120, "the row fits: {history}");
+    assert!(
+        row.contains(&format!("{wide} ")),
+        "the repository is whole: {history}"
+    );
     assert_eq!(
         row.matches("界…").count(),
-        2,
-        "the repository and the branch end in an ellipsis: {history}"
+        1,
+        "the branch ends in an ellipsis: {history}"
     );
 }
 
@@ -2033,6 +2542,32 @@ fn the_help_shows_every_key_in_an_80_by_24_terminal() {
 }
 
 #[test]
+fn a_terminal_too_short_for_the_help_turns_its_pages_to_every_key() {
+    // At 60x16 the help showed 12 of its 20 keys and could not scroll: quit, cancel and re-run were out of reach.
+    let mut app = app();
+    app.update(key(KeyCode::Char('?')));
+    let first = screen(&app, 60, 16, false);
+    app.update(key(KeyCode::Char('j')));
+    let second = screen(&app, 60, 16, false);
+    let both = format!("{first}{second}");
+    for expected in [
+        "overview",
+        "cancel, re-run",
+        "suspend; quit",
+        "write the advice",
+    ] {
+        assert!(both.contains(expected), "{expected}: {first}{second}");
+    }
+    assert!(first.contains("page 1 of 2"), "{first}");
+    app.update(key(KeyCode::Char('j')));
+    assert_eq!(
+        screen(&app, 60, 16, false),
+        first,
+        "past the last page the help comes back to the first"
+    );
+}
+
+#[test]
 fn an_empty_records_view_says_in_full_how_records_are_kept() {
     let mut app = app();
     open_records(&mut app);
@@ -2066,7 +2601,7 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
     app.activity = Some(day());
     app.live.status.queued = vec![queued(51, "halyard/storefront", "visual-diff", 1041)];
     let wide = screen(&app, 160, 40, false);
-    let health = wide.lines().nth(1).unwrap();
+    let health = tiles(&wide);
     for expected in [
         "Running: 0 of 3 slots",
         "Waiting: 1, oldest 59s",
@@ -2078,7 +2613,7 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
     assert!(health.contains('█'), "the longest hour's bar: {health}");
 
     let small = screen(&app, 80, 24, false);
-    let health = small.lines().nth(1).unwrap();
+    let health = tiles(&small);
     assert!(
         health.contains("Wait p95, 24 h: 5m 00s") && health.contains("Failed, 24 h: 2"),
         "at 80 columns the figures stay and the details go whole: {health}"
@@ -2369,6 +2904,10 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     );
     sizing.auto_plan = Some(plan);
     app.update(Msg::Sizing(sizing.clone()));
+    // What auto sizing refuses node is what its row means: shown once it is selected.
+    while sizing.profiles[app.sized].name != "node" {
+        app.update(key(KeyCode::Char('j')));
+    }
     let shown = screen(&app, 120, 40, false);
     assert!(
         rows_with(&shown, "■ node")[0].contains("Next look, within 5 minutes: memory 7G → 5.25G"),
@@ -2379,7 +2918,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     for refusal in &refusals {
         assert!(
             words(&shown).contains(&words(refusal)),
-            "the refusal shows beside it, wrapped, never cut: {shown}"
+            "the refusal shows with its profile selected, wrapped, never cut: {shown}"
         );
         assert!(printed.contains(refusal), "{printed}");
     }
@@ -2426,7 +2965,7 @@ fn an_activity_read_that_answers_after_a_newer_one_is_ignored() {
         generation: started,
         activity: day(),
     });
-    let health = screen(&app, 160, 40, false);
+    let health = tiles(&screen(&app, 160, 40, false));
     assert!(
         health.contains("Failed, 24 h: 3 of 31 finished"),
         "the older read does not take the failure back: {health}"
@@ -2761,7 +3300,7 @@ fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
         },
     ));
     let shown = screen(&app, 160, 40, false);
-    let health = shown.lines().nth(1).unwrap();
+    let health = tiles(&shown);
     assert!(
         health.contains("Running: 0 of 3 slots") && health.contains("1 warm, waiting for jobs"),
         "the warm runner runs nothing and is not starting: {health}"

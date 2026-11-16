@@ -1,6 +1,9 @@
 //! What every client says of insights and the digest.
 
-use crate::api::{Digest, Insight, InsightKind, Insights, LongWait, Severity, Tone, WaitSpread};
+use crate::api::{
+    Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, Severity, Tone, WaitSpread,
+    WeekWaits,
+};
 
 fn insight(severity: Severity, kind: InsightKind) -> Insight {
     Insight {
@@ -82,5 +85,36 @@ fn the_digest_names_each_long_wait_with_its_workflow_and_a_readable_time() {
     assert_eq!(
         digest.waits[0].line(),
         "halyard/api CI / test waited 1m 30s"
+    );
+}
+
+#[test]
+fn a_repository_s_waits_read_as_figures_with_a_dash_where_no_job_took_them() {
+    // A week without warm starts shows no warm median rather than a zero, and the week before without jobs no p95.
+    let spread = |jobs, p50, p95| WaitSpread { jobs, p50, p95 };
+    let waits = RepositoryWaits {
+        repository: "halyard/api".to_owned(),
+        now: WeekWaits {
+            all: spread(20, Some(30), Some(250)),
+            warm: spread(0, Some(0), Some(0)),
+            cold: spread(20, Some(30), Some(250)),
+        },
+        before: WeekWaits::default(),
+    };
+    let shown: Vec<(&str, String)> = waits
+        .figures()
+        .into_iter()
+        .map(|figure| (figure.label, figure.value))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Jobs", "20".to_owned()),
+            ("Median", "30s".to_owned()),
+            ("p95", "4m 10s".to_owned()),
+            ("Warm median", "–".to_owned()),
+            ("Cold median", "30s".to_owned()),
+            ("p95 the week before", "–".to_owned()),
+        ]
     );
 }

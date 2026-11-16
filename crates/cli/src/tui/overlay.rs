@@ -9,7 +9,11 @@ use runnerd_core::api::{JobOrder, JobRange, RecordFilter};
 pub(crate) enum Overlay {
     #[default]
     None,
-    Help,
+    /// The keys, at `page` of them for a terminal too short for all: the drawing takes it modulo the pages there
+    /// are, so `j` past the last page comes back to the first.
+    Help {
+        page: usize,
+    },
     Pick(Picker),
     Input(Input),
 }
