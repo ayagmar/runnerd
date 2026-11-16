@@ -528,6 +528,8 @@ fn jobs() -> Vec<Job> {
     );
     // Its end came while no daemon ran: what was read is a floor.
     succeeded.metrics.disk = Some(written(640 * MIB, None, api::Measure::Partial));
+    // A CPU average of a core and a half, as a table's CPU column shows it.
+    succeeded.metrics.cpu_average = Some(1500);
 
     vec![
         job(running),
@@ -1114,6 +1116,8 @@ pub struct JobRow {
     pub ran: Option<String>,
     /// What it wrote to disk, as a table cell writes it: `≥640M` for a partial figure; `None` when not measured.
     pub written: Option<String>,
+    /// Its CPU average in cores, as a table cell writes it: `1.5`; `None` when not measured.
+    pub cpu: Option<String>,
 }
 
 /// A step as core says it: its outcome and how long it took.
@@ -1239,6 +1243,7 @@ fn row(job: &JobSummary) -> JobRow {
         waited: job.waited(NOW).map(api::duration),
         ran: job.ran(NOW).map(api::duration),
         written: job.metrics.disk.map(|disk| disk.short()),
+        cpu: job.metrics.cpu_average.map(api::cores_used),
     }
 }
 

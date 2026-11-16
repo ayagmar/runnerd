@@ -65,7 +65,8 @@ pub(super) fn steps(frame: &mut Frame<'_>, area: Rect, job: &Job, now: u64, them
         .map(|step| step.name.width())
         .max()
         .unwrap_or(0)
-        .min(usize::from(rest.width) / 3)
+        // Whole while the bar keeps a third of the width.
+        .min((usize::from(rest.width) * 2 / 3).saturating_sub(12))
         .max(8);
     let bar_width = rest
         .width
