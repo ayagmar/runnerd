@@ -21,8 +21,13 @@ const LINKS_SCRIPT: &str = include_str!("mirror_links.sh");
 /// image's config keeps it in memory, where it goes on saying a blob is stored after the proxy deleted it.
 pub(super) const DESCRIPTOR_CACHE_ENV: &str = "REGISTRY_STORAGE_CACHE_BLOBDESCRIPTOR";
 
-/// How long the repair before a start may take: a few thousand links take well under a second.
-const REPAIR_DEADLINE: Duration = Duration::from_secs(60);
+/// How long the repair before a start may take. The engine waits for it, so it is short: a few thousand links take
+/// about a second and 100,000 about 8 seconds. Past it the mirror starts as it is, which only an empty blob a crash
+/// left can hurt, since the mirror keeps no blob descriptor cache.
+const REPAIR_DEADLINE: Duration = Duration::from_secs(15);
+
+/// How many paths the doctor's fix removes by name; past it, the fix has runnerd repair the storage.
+const FIX_PATHS: usize = 8;
 
 /// The memory the repair container may use: it only reads small files and removes some.
 const REPAIR_MEMORY: i64 = 64 << 20;
@@ -216,7 +221,7 @@ pub enum MirrorUp {
 /// Removes the mirror's links whose blob is gone or empty, in a container of the mirror's image that mounts its
 /// storage. Call only while no mirror runs. A repair container an earlier daemon left, as a restart while it ran
 /// leaves it, is removed first; the repair reads every link again, so one cut off is done over.
-pub(super) async fn repair(docker: &impl DockerApi, names: &Names, slice: &str) -> Repair {
+pub async fn repair(docker: &impl DockerApi, names: &Names, slice: &str) -> Repair {
     let name = names.mirror_repair();
     let repaired = tokio::time::timeout(REPAIR_DEADLINE, async {
         remove_left(docker, &name).await?;
@@ -244,7 +249,27 @@ pub(super) async fn repair(docker: &impl DockerApi, names: &Names, slice: &str) 
     match Links::parse(&output) {
         Some(links) if code == 0 && links.dangling.is_empty() => Repair::Clean,
         Some(links) if code == 0 => Repair::Removed(links),
-        _ => Repair::Failed(format!("it exited {code}: {}", output.trim())),
+        _ => Repair::Failed(failure(code, &output)),
+    }
+}
+
+/// Why a repair that exited `code` failed: how many faulty links it printed and its last other line, such as an error
+/// `rm` wrote, never its whole output, which names every link.
+fn failure(code: i64, output: &str) -> String {
+    let is_fault = |line: &str| {
+        ["gone ", "empty ", "garbled "]
+            .iter()
+            .any(|kind| line.starts_with(kind))
+    };
+    let faults = output.lines().filter(|line| is_fault(line)).count();
+    let said = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !is_fault(line) && !line.starts_with("links "));
+    match said {
+        Some(said) => format!("it exited {code} after {faults} faulty links: {said}"),
+        None => format!("it exited {code} after {faults} faulty links"),
     }
 }
 
@@ -365,19 +390,28 @@ pub fn mirror_check(names: &Names, found: &Found) -> Check {
                  it without that cache when its jobs have finished";
     if !broken.is_empty() {
         let removes: Vec<String> = all.iter().flat_map(|dangling| dangling.removes()).collect();
-        let restart = if cached {
+        let fix = if removes.len() > FIX_PATHS {
             format!(
-                "\ndocker restart {}   # empties the blob descriptor cache",
+                "remove the mirror; jobs pull from Docker Hub directly until runnerd starts it again for the first \
+                 job after none ran, with its storage repaired and without the blob descriptor cache:\n\
+                 docker rm -f {}",
                 names.mirror()
             )
         } else {
-            String::new()
+            let restart = if cached {
+                format!(
+                    "\ndocker restart {}   # empties the blob descriptor cache",
+                    names.mirror()
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "remove them, and the mirror fetches each again from Docker Hub:\ndocker exec {} rm -f {}{restart}",
+                names.mirror(),
+                removes.join(" ")
+            )
         };
-        let fix = format!(
-            "remove them, and the mirror fetches each again from Docker Hub:\ndocker exec {} rm -f {}{restart}",
-            names.mirror(),
-            removes.join(" ")
-        );
         return check(
             CheckStatus::Fail,
             format!(

@@ -235,12 +235,16 @@ pub async fn mirror_up(
     Ok(mirror::MirrorUp::Started(repair))
 }
 
-/// Stops the mirror; its storage stays.
+/// Stops the mirror, and removes a repair container a killed daemon left on its storage, which would keep the
+/// volume from being removed; its storage stays.
 pub async fn mirror_down(docker: &impl DockerApi, names: &Names) -> Result<(), Error> {
-    match docker.remove(&names.mirror()).await {
-        Err(error) if is_not_found(&error) => Ok(()),
-        other => other,
+    for name in [names.mirror(), names.mirror_repair()] {
+        match docker.remove(&name).await {
+            Err(error) if !is_not_found(&error) => return Err(error),
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 /// Whether the mirror's container is down, so its storage can be removed.

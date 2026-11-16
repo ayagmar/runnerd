@@ -31,7 +31,7 @@ description: Every check runnerd doctor makes, what each failure or warning mean
 
 | Check | Fails or warns when | Fix it prints |
 |---|---|---|
-| mirror | the running mirror has a layer whose data is empty, or gone while it still keeps the blob descriptor cache, as one an older runnerd started does; it warns about that cache alone | `docker exec runnerd-mirror rm -f` on those paths, then `docker restart runnerd-mirror` if it keeps the cache |
+| mirror | the running mirror would serve a layer with no data: one whose data is empty or gone | `docker exec runnerd-mirror rm -f` on those paths, or `docker rm -f runnerd-mirror` for more than a few |
 
 ## GitHub
 

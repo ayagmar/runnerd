@@ -43,19 +43,27 @@ streams the blob from Docker Hub, the second gets 0 bytes.
 - Before `cache::mirror_up` starts the mirror, `cache::mirror::repair` runs `mirror_links.sh repair` in a container
   of the mirror's image. That container mounts the mirror's volume, has no network, and removes every `_layers` and
   `_manifests` link whose blob data is missing or empty, along with the empty data. The digest of no bytes is
-  rightly empty and stays. The daemon logs one line with what it removed. The repair is bounded at 60 s; one that
+  rightly empty and stays. The daemon logs one line with what it removed. The engine waits for it, so it is bounded at 15 s; one that
   fails or times out is logged and the mirror starts anyway. A repair container a daemon restart left behind is
   removed first, and the repair reads every link again.
 - No pass runs while the mirror runs. Without the cache, a missing blob is fetched again by itself, and empty data
   comes from a crash, which a start follows.
 - `runnerd doctor` reads a running mirror's links with `mirror_links.sh check` through `docker exec`, changing
   nothing. It fails while a link answers with no data (empty data, or missing data under the cache) and gives the
-  `docker exec … rm -f` of those paths, and `docker restart` when the cache is on. It warns about a mirror that keeps
+  `docker exec … rm -f` of those paths, and `docker restart` when the cache is on. Past 8 paths, the fix is `docker rm -f` on the mirror, which runnerd
+  starts again, repaired, after it next goes idle. It warns about a mirror that keeps
   the cache, and only notes missing data without it.
 
 ## Consequences
 
-- The incident cannot recur from an expiry: the registry fetches the blob again instead of serving nothing.
-- Each mirror start runs one short container first: 5000 links take about a second, container start included.
+- The incident cannot recur from an expiry: the registry fetches the blob again instead of serving nothing, except
+  for a pull that races the expiry itself. Without the cache the registry still stats the data, then opens it
+  (`blobServer.ServeBlob`), and an expiry that deletes it between the two gives that one pull 200 with no bytes. The
+  next pull fetches it again.
+- Each mirror start runs one short container first, and the engine waits for it: 5000 links take about a second,
+  container start included, and 100,000 about 8 seconds. A repair that fails logs how many faulty links it printed
+  and its error, never every link.
+- A repair container a killed daemon left mounts the mirror's volume; `cache::mirror_down` removes it with the
+  mirror, so stopping, going idle and `runnerctl caches clean` can remove the volume.
 - An upgrade of the `registry` image needs this checked again: a layout other than `docker/registry/v2` is not read,
   and the cache setting is read through the image's own config.

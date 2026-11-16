@@ -3898,6 +3898,45 @@ async fn the_mirrors_storage_over_its_limit_is_emptied_once_the_mirror_is_down()
 }
 
 #[tokio::test]
+async fn a_repair_container_left_does_not_keep_the_mirrors_volume_from_being_removed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let names = Names::new("runnerd");
+    let left = Container {
+        id: names.mirror_repair(),
+        name: names.mirror_repair(),
+        running: false,
+        labels: HashMap::from([("runnerd.mirror-repair".to_owned(), String::new())]),
+    };
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.volume_sizes.insert(names.mirror(), 11 << 30);
+        // A daemon killed while the repair ran left its container, which mounts the mirror's volume.
+        state.containers.push(left.clone());
+        state.holders.insert(names.mirror(), vec![left]);
+    }
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_called(&mut engine, &docker, "remove volume runnerd-mirror").await;
+    let calls = docker.calls();
+    let repair = calls
+        .iter()
+        .position(|call| *call == format!("remove {}", names.mirror_repair()));
+    let emptied = calls
+        .iter()
+        .position(|call| call == "remove volume runnerd-mirror");
+    assert!(
+        repair.is_some() && repair < emptied,
+        "the repair's container goes with the mirror, before its volume: {calls:?}"
+    );
+    assert!(
+        docker.0.lock().unwrap().holders[&names.mirror()].is_empty(),
+        "nothing holds the mirror's volume"
+    );
+}
+
+#[tokio::test]
 async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_reseeds_its_profile() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, handle, _dir) = engine(&github, &docker);

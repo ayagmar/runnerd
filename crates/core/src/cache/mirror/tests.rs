@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::{DESCRIPTOR_CACHE_ENV, Dangling, Fault, Found, LINKS_SCRIPT, Links, mirror_check};
+use super::{
+    DESCRIPTOR_CACHE_ENV, Dangling, Fault, Found, LINKS_SCRIPT, Links, failure, mirror_check,
+};
 use crate::api::CheckStatus;
 use crate::cache::Names;
 use crate::testdir::TestDir;
@@ -62,7 +64,8 @@ impl Storage {
     }
 }
 
-/// Runs the script in `mode` on the storage at `root` with `sh`, as the image's busybox runs it; what it printed.
+/// Runs the script in `mode` on the storage at `root` with the host's `sh` (bash or dash), not the image's busybox,
+/// which `tests/mirror_repair.rs` runs it in; what it printed.
 fn run(mode: &str, root: &Path) -> String {
     let output = Command::new("sh")
         .arg("-c")
@@ -211,7 +214,7 @@ fn thousands_of_links_are_repaired_within_seconds() {
     let took = started.elapsed();
     assert_eq!(links.count, 5000);
     assert_eq!(links.dangling.len(), 5);
-    // About 0.3 s on a desktop, and in the image's busybox.
+    // About 0.3 s on a desktop with the host's `sh`.
     assert!(
         took < Duration::from_secs(10),
         "5000 links take {took:?}, under the repair's deadline"
@@ -320,4 +323,29 @@ fn the_doctor_notes_a_missing_blob_without_the_cache_and_warns_of_the_cache_alon
         mirror_check(&names, &Found::NotRunning).status,
         CheckStatus::Info
     );
+}
+
+#[test]
+fn many_faulty_links_get_a_fix_that_fits_on_one_line() {
+    let names = Names::new("runnerd");
+    let check = mirror_check(&names, &found(&[Fault::Empty; 9], false));
+    assert_eq!(check.status, CheckStatus::Fail);
+    let fix = check.fix.unwrap();
+    assert!(
+        fix.ends_with("\ndocker rm -f runnerd-mirror") && !fix.contains("/var/lib/registry"),
+        "18 paths are not named; the mirror goes and runnerd repairs it: {fix}"
+    );
+}
+
+#[test]
+fn a_failed_repair_says_its_error_and_counts_not_every_link() {
+    let link = "gone sha256:0 repositories/r/_layers/sha256/0/link\n";
+    let mut output = link.repeat(2000);
+    output.push_str("rm: can't remove 'x': Read-only file system\nlinks 2000\n");
+    let why = failure(1, &output);
+    assert_eq!(
+        why,
+        "it exited 1 after 2000 faulty links: rm: can't remove 'x': Read-only file system"
+    );
+    assert_eq!(failure(137, ""), "it exited 137 after 0 faulty links");
 }
