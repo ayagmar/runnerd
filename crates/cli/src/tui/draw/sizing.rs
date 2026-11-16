@@ -2,22 +2,25 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Paragraph, Table, TableState};
 use runnerd_core::api::{self, ProfileSizing, Sizing, job_title};
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
+use super::budget::scale;
 use super::job::fit_details;
-use super::{bold, fit, heading, length, selected, widths, wrap};
+use super::{TableColumn, beside, bold, fit, fitted_table, heading, length, wrap};
 use crate::human::{self, Tone, bytes, cores_used, duration};
 use crate::tui::app::App;
 use crate::tui::mouse::{Hits, List};
 
-/// What each profile's jobs use and what to set its memory and slots to; the selected profile's jobs below. Under
-/// 100 columns the medians, the jobs at their cap, the largest peaks and the waits of warm and cold starts are left
-/// out.
+/// What each profile's jobs use and what to set its memory and slots to, then the selected profile's jobs, and what
+/// the selected profile's advice and auto sizing mean for it: beside the tables on a wide terminal, between them on a
+/// narrow one. Under auto sizing, its rules and what its next look does to each profile follow the profiles. Columns are as wide as their content; short
+/// of room the medians, the jobs at their cap, the warm and cold starts and the p99s give way first.
 pub(super) fn sizing(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -26,9 +29,8 @@ pub(super) fn sizing(
     theme: Theme,
     hits: &mut Hits,
 ) {
+    let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let Some(sizing) = &app.sizing else {
-        let [title, rest] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         heading(
             frame,
             title,
@@ -36,22 +38,9 @@ pub(super) fn sizing(
             String::new(),
             theme,
         );
-        frame.render_widget(Line::styled("reading…", theme.dim()), rest);
+        frame.render_widget(Line::styled("reading…", theme.dim()), body);
         return;
     };
-    let wide = area.width >= 100;
-    let profiles = length(sizing.profiles.len());
-    let plan = auto_plan(sizing, usize::from(area.width), now, app, theme);
-    // The profiles and the selected one's advice first; what auto sizing does next under them, then the jobs.
-    let [title, profiles_area, advice_area, plan_area, jobs_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(profiles.saturating_add(1)),
-        Constraint::Length(3),
-        Constraint::Length(length(plan.len())),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-    frame.render_widget(Paragraph::new(plan), plan_area);
     heading(
         frame,
         title,
@@ -69,56 +58,187 @@ pub(super) fn sizing(
         ),
         theme,
     );
-    sizing_profiles(frame, profiles_area, app, sizing, theme);
-    super::table_hits(hits, profiles_area, List::Sizing, 0, sizing.profiles.len());
-    let Some(profile) = sizing.profiles.get(app.sized) else {
-        return;
+    let (main, pane) = beside(frame, body, theme);
+    let width = usize::from(main.width);
+    let profile = sizing.profiles.get(app.sized);
+    let under = match (profile, pane) {
+        (Some(profile), None) => meaning(sizing, profile, width, now, app, theme),
+        _ => Vec::new(),
     };
-    let width = usize::from(advice_area.width);
-    // The advice wraps onto a second line rather than lose its end; the hint below it is cut.
-    // The action plain: the table's advice word carries the tone.
+    let jobs = profile.map_or(0, |profile| profile.jobs.len());
+    let mut plan = rules(sizing, width, theme);
+    plan.extend(plan_rows(sizing, width, now, app, theme));
+    let profiles_height = length(sizing.profiles.len() + 1);
+    let plan_height = if plan.is_empty() {
+        0
+    } else {
+        length(plan.len() + 1)
+    };
+    let left = main.height.saturating_sub(profiles_height + plan_height);
+    let under_height = if under.is_empty() {
+        0
+    } else {
+        length(under.len() + 1).min(left)
+    };
+    let left = left.saturating_sub(under_height);
+    let jobs_height = if jobs == 0 {
+        0
+    } else {
+        length(jobs + 2).min(left)
+    };
+    let [profiles_area, plan_area, under_area, jobs_area] = Layout::vertical([
+        Constraint::Length(profiles_height),
+        Constraint::Length(plan_height),
+        Constraint::Length(under_height),
+        Constraint::Length(jobs_height),
+    ])
+    .areas(main);
+    let table = profiles_table(app, sizing, width, theme);
+    let mut state = TableState::default().with_selected(Some(app.sized));
+    frame.render_stateful_widget(table, profiles_area, &mut state);
+    super::table_hits(hits, profiles_area, List::Sizing, 0, sizing.profiles.len());
+    let mut lines = vec![Line::from("")];
+    lines.extend(plan);
+    frame.render_widget(Paragraph::new(lines), plan_area);
+    let mut lines = vec![Line::from("")];
+    lines.extend(under);
+    frame.render_widget(Paragraph::new(lines), under_area);
+    if let Some(profile) = profile {
+        if jobs_height > 0 {
+            let [_, table_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(jobs_area);
+            frame.render_widget(jobs_table(profile, width, theme), table_area);
+        }
+        if let Some(pane) = pane {
+            let pane_width = usize::from(pane.width);
+            let mut lines = meaning(sizing, profile, pane_width, now, app, theme);
+            lines.push(Line::from(""));
+            lines.extend(peaks(profile, pane_width, app, theme));
+            frame.render_widget(Paragraph::new(lines), pane);
+        }
+    }
+}
+
+/// What the advice and auto sizing mean for `profile`, whole: its advice, what `a` would write or what auto sizing
+/// last changed, and under auto sizing what its next look changes and why, and why a raise is refused.
+fn meaning(
+    sizing: &Sizing,
+    profile: &ProfileSizing,
+    width: usize,
+    now: u64,
+    app: &App,
+    theme: Theme,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{}: ", profile.name), bold()),
-        Span::raw(sizing.advice_line(profile)),
+        Span::styled(
+            profile.name.clone(),
+            theme
+                .profile(app.profile_index(&profile.name))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            profile.advice_word(),
+            theme.tone(profile.advice.tone().into()),
+        ),
     ])];
+    lines.extend(
+        wrap(&sizing.advice_line(profile), width)
+            .into_iter()
+            .map(Line::from),
+    );
     let last = sizing
         .changes
         .iter()
         .rfind(|change| change.profile == profile.name);
-    if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
-        lines.push(Line::styled(
-            fit(
-                &format!(
-                    "a writes memory = \"{}\", slots = {} into the config; the daemon checks it first",
-                    ByteSize(change.memory),
-                    change.slots
-                ),
-                width,
-            ),
-            theme.dim(),
-        ));
-    } else if let Some(change) = last {
-        lines.push(Line::styled(
-            fit(
-                &format!(
-                    "auto sizing {}: {}; runnerctl sizing undo {} writes it back",
-                    human::ago(change.at, now),
-                    change.line(),
-                    profile.name
-                ),
-                width,
-            ),
-            theme.dim(),
-        ));
+    let note = if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
+        Some(format!(
+            "a writes memory = \"{}\", slots = {} into the config; the daemon checks it first",
+            ByteSize(change.memory),
+            change.slots
+        ))
+    } else {
+        last.map(|change| {
+            format!(
+                "auto sizing {}: {}; runnerctl sizing undo {} writes it back",
+                human::ago(change.at, now),
+                change.line(),
+                profile.name
+            )
+        })
+    };
+    if let Some(note) = note {
+        lines.extend(
+            wrap(&note, width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.dim())),
+        );
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), advice_area);
-    sizing_jobs(frame, jobs_area, profile, wide, theme);
+    if let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) {
+        let (_, why) = human::plan_line(sizing, plan, profile, now);
+        lines.push(Line::from(""));
+        lines.extend(
+            wrap(&why, width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.dim())),
+        );
+        for refusal in plan.refusals(&profile.name) {
+            lines.extend(
+                wrap(&refusal, width)
+                    .into_iter()
+                    .map(|line| Line::styled(line, theme.dim())),
+            );
+        }
+    }
+    lines
 }
 
-/// Under auto sizing, its rules, why no look changes anything if one would not, and per profile what its next look
-/// changes, how long a recent change holds it, or that its advice asks for nothing; a blank line after. Nothing while
-/// auto sizing is off, or from a daemon that does not say what it does next.
-pub(super) fn auto_plan(
+/// The profile's memory peaks against its memory, a bar each: the median, p95, p99 and largest, under its memory and
+/// slots, in its colour.
+fn peaks(profile: &ProfileSizing, width: usize, app: &App, theme: Theme) -> Vec<Line<'static>> {
+    let memory = &profile.peaks.memory;
+    let rows = [
+        ("P50", memory.p50),
+        ("P95", memory.p95),
+        ("P99", memory.p99),
+        ("Max", memory.max),
+    ];
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.width())
+        .chain(["Memory".width()])
+        .max()
+        .unwrap_or(0);
+    let figures: Vec<String> = rows.iter().map(|(_, value)| bytes(*value)).collect();
+    let figure_width = figures
+        .iter()
+        .map(|figure| figure.width())
+        .max()
+        .unwrap_or(0);
+    let bar = width.saturating_sub(label_width + 1 + figure_width + 1);
+    let whole = profile.memory.max(memory.max).max(1);
+    let style = theme.profile(app.profile_index(&profile.name));
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{:<label_width$} ", "Memory"), theme.dim()),
+        Span::raw(format!("{} × {}", bytes(profile.memory), profile.slots)),
+    ])];
+    for ((label, value), figure) in rows.iter().zip(figures) {
+        let filled = usize::from(scale(*value, whole, length(bar)));
+        let cap = usize::from(scale(profile.memory, whole, length(bar)));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label:<label_width$} "), theme.dim()),
+            Span::styled("█".repeat(filled), style),
+            Span::styled("░".repeat(cap.saturating_sub(filled)), theme.dim()),
+            Span::raw(" ".repeat(bar - filled.max(cap) + 1)),
+            Span::raw(format!("{figure:>figure_width$}")),
+        ]));
+    }
+    lines
+}
+
+/// Under auto sizing, what its next look does to each profile, a row each; nothing while auto sizing is off, or from
+/// a daemon that does not say what it does next.
+fn plan_rows(
     sizing: &Sizing,
     width: usize,
     now: u64,
@@ -129,7 +249,31 @@ pub(super) fn auto_plan(
         return Vec::new();
     };
     let mut lines = Vec::new();
-    // The rules and what blocks every look are sentences, wrapped rather than cut.
+    let name_width = sizing
+        .profiles
+        .iter()
+        .map(|profile| profile.name.width())
+        .max()
+        .unwrap_or(0);
+    for profile in &sizing.profiles {
+        let (what, _) = human::plan_line(sizing, plan, profile, now);
+        let room = width.saturating_sub(2 + name_width + 1);
+        lines.push(Line::from(vec![
+            Span::styled("■ ", theme.profile(app.profile_index(&profile.name))),
+            Span::raw(format!("{:<name_width$} ", profile.name)),
+            Span::raw(fit(&what, room).trim_end().to_owned()),
+        ]));
+    }
+    lines
+}
+
+/// Under auto sizing, its rules and why no look changes anything if one would not, wrapped to `width`; nothing while
+/// auto sizing is off, or from a daemon that does not say what it does next.
+fn rules(sizing: &Sizing, width: usize, theme: Theme) -> Vec<Line<'static>> {
+    let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
     for (position, line) in wrap(&format!("Auto sizing {}", plan.rules()), width)
         .into_iter()
         .enumerate()
@@ -151,124 +295,83 @@ pub(super) fn auto_plan(
                 .map(|line| Line::styled(line, theme.wait())),
         );
     }
-    let name_width = sizing
-        .profiles
-        .iter()
-        .map(|profile| profile.name.width())
-        .max()
-        .unwrap_or(0);
-    for profile in &sizing.profiles {
-        let (what, why) = human::plan_line(sizing, plan, profile, now);
-        let room = width.saturating_sub(2 + name_width + 1);
-        let what_width = what.width().min(room);
-        let mut spans = vec![
-            Span::styled("■ ", theme.profile(app.profile_index(&profile.name))),
-            Span::raw(format!("{:<name_width$} ", profile.name)),
-            Span::raw(fit(&what, what_width)),
-        ];
-        let rest = room.saturating_sub(what_width + 2);
-        if rest >= 12 {
-            spans.push(Span::styled(
-                format!("  {}", fit(&why, rest).trim_end()),
-                theme.dim(),
-            ));
-        }
-        lines.push(Line::from(spans));
-        // Beside the change, which can still be to its memory or slots.
-        // A sentence with its figures and its reason, wrapped rather than cut.
-        for refusal in plan.refusals(&profile.name) {
-            let indent = 2 + name_width + 1;
-            lines.extend(
-                wrap(&refusal, width.saturating_sub(indent))
-                    .into_iter()
-                    .map(|line| Line::styled(format!("{:indent$}{line}", ""), theme.dim())),
-            );
-        }
-    }
     lines
 }
 
 /// A row per profile: its memory and slots, its jobs' peaks, how busy and how long waited, the advice.
-pub(super) fn sizing_profiles(
-    frame: &mut Frame<'_>,
-    profiles_area: Rect,
-    app: &App,
-    sizing: &Sizing,
-    theme: Theme,
-) {
-    let wide = profiles_area.width >= 100;
-    // The percentiles' runs: each job's recent ones, fewer than the jobs the waits are over.
-    let mut columns = vec![("PROFILE", 0), ("MEMORY", 10), ("RUNS", 5)];
-    // Narrow, the largest peak advice is sized for stays and the percentiles go.
-    if wide {
-        columns.push(("P50", 6));
-    }
-    columns.push(("P95", 6));
-    if wide {
-        columns.push(("P99", 6));
-    }
-    columns.push(("MAX", 6));
-    if wide {
-        columns.push(("AT CAP", 6));
-    }
-    columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8)]);
-    if wide {
-        columns.push(("P50 WARM/COLD", 13));
-    }
-    columns.push(("ADVICE", 13));
-    let rows = sizing.profiles.iter().map(|profile| {
-        let peaks = &profile.peaks;
-        let mut cells = vec![
-            Cell::from(Span::styled(
-                profile.name.clone(),
-                theme.profile(app.profile_index(&profile.name)),
-            )),
-            Cell::from(format!("{} × {}", bytes(profile.memory), profile.slots)),
-            Cell::from(peaks.jobs.to_string()),
-        ];
-        if wide {
-            cells.push(Cell::from(bytes(peaks.memory.p50)));
-        }
-        cells.push(Cell::from(bytes(peaks.memory.p95)));
-        if wide {
-            cells.push(Cell::from(bytes(peaks.memory.p99)));
-        }
-        cells.push(Cell::from(bytes(peaks.memory.max)));
-        if wide {
-            cells.push(Cell::from(if peaks.at_cap > 0 {
-                Span::styled(peaks.at_cap.to_string(), theme.tone(Tone::Bad))
-            } else {
-                Span::raw("")
-            }));
-        }
-        cells.extend([
-            Cell::from(cpu_cell(peaks)),
-            Cell::from(format!("{}%", profile.busy)),
-            Cell::from(duration(profile.wait.p95)),
-        ]);
-        if wide {
-            let starts = &profile.starts;
-            cells.push(Cell::from(if starts.warm > 0 {
-                format!(
-                    "{} / {}",
-                    duration(starts.warm_p50),
-                    duration(starts.cold_p50)
+fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Table<'static> {
+    let profiles = &sizing.profiles;
+    let cells = |cell: &dyn Fn(&ProfileSizing) -> Span<'static>| -> Vec<Span<'static>> {
+        profiles.iter().map(cell).collect()
+    };
+    let plain = |text: &dyn Fn(&ProfileSizing) -> String| -> Vec<Span<'static>> {
+        profiles
+            .iter()
+            .map(|profile| Span::raw(text(profile)))
+            .collect()
+    };
+    let columns = vec![
+        TableColumn::names(
+            "Profile",
+            cells(&|profile| {
+                Span::styled(
+                    profile.name.clone(),
+                    theme.profile(app.profile_index(&profile.name)),
                 )
-            } else {
-                String::new()
-            }));
-        }
-        cells.push(Cell::from(Span::styled(
-            profile.advice_word(),
-            theme.tone(profile.advice.tone().into()),
-        )));
-        Row::new(cells)
-    });
-    let table = Table::new(rows, widths(&columns))
-        .header(Row::new(columns.iter().map(|(name, _)| *name)).style(theme.dim()))
-        .row_highlight_style(selected());
-    let mut state = TableState::default().with_selected(Some(app.sized));
-    frame.render_stateful_widget(table, profiles_area, &mut state);
+            }),
+        ),
+        TableColumn::figures(
+            "Memory",
+            plain(&|profile| format!("{} × {}", bytes(profile.memory), profile.slots)),
+            0,
+        ),
+        TableColumn::figures("Runs", plain(&|profile| profile.peaks.jobs.to_string()), 3),
+        TableColumn::figures("P50", plain(&|profile| bytes(profile.peaks.memory.p50)), 9),
+        TableColumn::figures("P95", plain(&|profile| bytes(profile.peaks.memory.p95)), 0),
+        TableColumn::figures("P99", plain(&|profile| bytes(profile.peaks.memory.p99)), 6),
+        TableColumn::figures("Max", plain(&|profile| bytes(profile.peaks.memory.max)), 0),
+        TableColumn::figures(
+            "At cap",
+            cells(&|profile| {
+                if profile.peaks.at_cap > 0 {
+                    Span::styled(profile.peaks.at_cap.to_string(), theme.tone(Tone::Bad))
+                } else {
+                    Span::raw("")
+                }
+            }),
+            7,
+        ),
+        TableColumn::figures("CPU p99", plain(&|profile| cpu_cell(&profile.peaks)), 0),
+        TableColumn::figures("Busy", plain(&|profile| format!("{}%", profile.busy)), 4),
+        TableColumn::figures("Wait p95", plain(&|profile| duration(profile.wait.p95)), 0),
+        TableColumn::figures(
+            "P50 warm/cold",
+            plain(&|profile| {
+                let starts = &profile.starts;
+                if starts.warm > 0 {
+                    format!(
+                        "{} / {}",
+                        duration(starts.warm_p50),
+                        duration(starts.cold_p50)
+                    )
+                } else {
+                    String::new()
+                }
+            }),
+            8,
+        ),
+        TableColumn::words(
+            "Advice",
+            cells(&|profile| {
+                Span::styled(
+                    profile.advice_word(),
+                    theme.tone(profile.advice.tone().into()),
+                )
+            }),
+            0,
+        ),
+    ];
+    fitted_table(columns, width, None, theme)
 }
 
 /// The CPU p99 of the runs at the profile's `cpus` now, `–` without one.
@@ -276,48 +379,35 @@ pub(super) fn cpu_cell(peaks: &api::Peaks) -> String {
     peaks.cpu_p99().map_or_else(|| "–".to_owned(), cores_used)
 }
 
-/// The selected profile's jobs, a row each.
-pub(super) fn sizing_jobs(
-    frame: &mut Frame<'_>,
-    jobs_area: Rect,
-    profile: &ProfileSizing,
-    wide: bool,
-    theme: Theme,
-) {
-    let mut columns = vec![("REPOSITORY", 0), ("JOB", 0), ("RUNS", 5)];
-    columns.push(("P95", 6));
-    if wide {
-        columns.push(("P99", 6));
-    }
-    columns.extend([("MAX", 6), ("CPU P99", 7), ("WAIT P95", 8), ("NEEDS", 11)]);
-    // The repository and the job share what the other columns and the spaces between them leave.
-    let fixed: usize = columns.iter().map(|(_, width)| width + 1).sum::<usize>() - 1;
-    let shared = usize::from(jobs_area.width).saturating_sub(fixed);
-    let repository_width = shared / 2;
-    let rows = profile.jobs.iter().map(|job| {
-        let needs = job.needs();
-        let needs = Span::styled(needs.text, theme.tone(needs.tone.into()));
-        let name = job_title(job.workflow.as_deref(), &job.name, None).to_string();
-        let mut cells = vec![
-            Cell::from(fit(&job.repository, repository_width)),
-            Cell::from(fit(&name, shared - repository_width)),
-            Cell::from(job.peaks.jobs.to_string()),
-            Cell::from(bytes(job.peaks.memory.p95)),
-        ];
-        if wide {
-            cells.push(Cell::from(bytes(job.peaks.memory.p99)));
-        }
-        cells.extend([
-            Cell::from(bytes(job.peaks.memory.max)),
-            Cell::from(cpu_cell(&job.peaks)),
-            Cell::from(duration(job.wait.p95)),
-            Cell::from(needs),
-        ]);
-        Row::new(cells)
-    });
-    let mut constraints = widths(&columns);
-    constraints[0] = Constraint::Length(u16::try_from(repository_width).unwrap_or(0));
-    let table = Table::new(rows, constraints)
-        .header(Row::new(columns.iter().map(|(name, _)| *name)).style(theme.dim()));
-    frame.render_widget(table, jobs_area);
+/// The selected profile's jobs, a row each: the repository and the job, cut last, then their runs and peaks, the
+/// p99 giving way first, the wait and what each needs.
+fn jobs_table(profile: &ProfileSizing, width: usize, theme: Theme) -> Table<'static> {
+    let jobs = &profile.jobs;
+    let plain = |text: &dyn Fn(&api::JobSizing) -> String| -> Vec<Span<'static>> {
+        jobs.iter().map(|job| Span::raw(text(job))).collect()
+    };
+    let columns = vec![
+        TableColumn::names("Repository", plain(&|job| job.repository.clone())),
+        TableColumn::names(
+            "Job",
+            plain(&|job| job_title(job.workflow.as_deref(), &job.name, None).to_string()),
+        ),
+        TableColumn::figures("Runs", plain(&|job| job.peaks.jobs.to_string()), 2),
+        TableColumn::figures("P95", plain(&|job| bytes(job.peaks.memory.p95)), 0),
+        TableColumn::figures("P99", plain(&|job| bytes(job.peaks.memory.p99)), 3),
+        TableColumn::figures("Max", plain(&|job| bytes(job.peaks.memory.max)), 0),
+        TableColumn::figures("CPU p99", plain(&|job| cpu_cell(&job.peaks)), 1),
+        TableColumn::figures("Wait p95", plain(&|job| duration(job.wait.p95)), 1),
+        TableColumn::words(
+            "Needs",
+            jobs.iter()
+                .map(|job| {
+                    let needs = job.needs();
+                    Span::styled(needs.text, theme.tone(needs.tone.into()))
+                })
+                .collect(),
+            0,
+        ),
+    ];
+    fitted_table(columns, width, None, theme)
 }

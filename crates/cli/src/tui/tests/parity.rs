@@ -8,10 +8,12 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{BuildCacheCounts, Column, JobAction, JobPage, JobState, Section, View};
+use runnerd_core::api::{
+    BuildCacheCounts, CheckStatus, Column, JobAction, JobPage, JobState, Section, View,
+};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
-use super::super::app::{App, Effect, Msg, View as AppView};
+use super::super::app::{App, CheckRow, Effect, Msg, View as AppView};
 use super::super::draw::{Theme, draw, view_keys};
 use super::super::prompts::Prompt;
 use super::{key, listed};
@@ -150,9 +152,10 @@ fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_doe
     assert!(shows(&rows, &facts.host), "{all}");
     assert!(shows(&rows, facts.stopping), "{}: {all}", facts.stopping);
     assert!(shows(&rows, facts.github), "{}: {all}", facts.github);
+    let tiles = super::tiles(&all);
     for figure in &facts.figures {
         let line = format!("{}: {}", figure.label, figure.value);
-        assert!(shows(&rows, &line), "{line}: {all}");
+        assert!(tiles.contains(&line), "{line}: {tiles}");
         if let Some(of) = &figure.of {
             assert!(shows(&rows, of), "{of}: {all}");
         }
@@ -396,7 +399,7 @@ fn the_history_and_records_tables_are_headed_as_core_names_their_columns() {
             Column::Waited,
             Column::Ran,
             Column::MemoryPeak,
-            Column::Cpu,
+            // No fixture job has a CPU average, and a column no job has a figure for is not drawn.
             Column::Queued,
         ],
     );
@@ -506,6 +509,15 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
     let sizing = runnerd_fixtures::sizing(NOW);
     let plan = sizing.auto_plan.clone().unwrap();
     app.update(Msg::Sizing(sizing.clone()));
+    // What auto sizing refuses a profile is what its row means: shown once it is selected.
+    let node = sizing
+        .profiles
+        .iter()
+        .position(|profile| profile.name == "node")
+        .unwrap();
+    for _ in 0..node {
+        app.update(key(KeyCode::Char('j')));
+    }
     let (rows, _) = frame_of(&app, 120, 40);
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let shown = words(&rows.join(" "));
@@ -621,9 +633,23 @@ fn the_overview_lists_what_needs_attention_in_core_s_words_and_tones() {
     let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
     let mut app = app(&daemon);
     app.update(Msg::Attention(Ok(attention.clone())));
+    // Closed, one line: the count, the most urgent item and how many more, as core counts them.
+    let (rows, _) = frame(&app);
+    let strip = rows
+        .iter()
+        .find(|row| row.starts_with("▲ "))
+        .unwrap_or_else(|| panic!("{}", rows.join("\n")));
+    let first: String = attention.items[0].title.chars().take(40).collect();
+    let count = attention.items.len() as u64 + attention.omitted;
+    assert!(strip.starts_with(&format!("▲ {count}  {first}")), "{strip}");
+    if let Some(more) = attention.more(1) {
+        assert!(strip.contains(&more), "{more}: {strip}");
+    }
+    // `!` opens the list.
+    app.update(key(KeyCode::Char('!')));
     let (rows, buffer) = frame(&app);
     let all = rows.join("\n");
-    // The overview shows as many as its spare rows allow, at least five, and counts the rest as core does.
+    // The open list shows as many as its rows allow, at least five, and counts the rest as core does.
     let shown = rows.iter().filter(|row| row.starts_with("▲ ")).count();
     assert!(shown >= 5.min(attention.items.len()), "{all}");
     let facts = runnerd_fixtures::attention_facts(&attention, shown);
@@ -1229,13 +1255,44 @@ fn an_attention_item_leads_to_its_check_or_insight_once_that_view_is_read() {
         app.update(Msg::Doctor(Ok(doctor.clone())));
         app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
         let selected = match item.subject {
-            Subject::Check { .. } => (AppView::Settings, app.check),
+            Subject::Check { .. } => (
+                AppView::Settings,
+                match app.check_rows().get(app.check) {
+                    Some(CheckRow::Check(at)) => *at,
+                    _ => usize::MAX,
+                },
+            ),
             _ => (AppView::Insights, app.insight),
         };
         assert_eq!(selected, (app.view, wanted), "{} is selected", item.title);
         followed += 1;
     }
     assert!(followed >= 2, "the fixtures point at checks and insights");
+}
+
+#[test]
+fn enter_on_an_insight_opens_the_newest_run_that_shows_it() {
+    // Enter on the insights view used to do nothing, though each insight names the runs that show it.
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights(NOW);
+    app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
+    app.update(super::tab(View::Insights));
+    let at = insights
+        .insights
+        .iter()
+        .position(|insight| !insight.runs.is_empty())
+        .unwrap();
+    for _ in 0..at {
+        app.update(key(KeyCode::Char('j')));
+    }
+    let newest = insights.insights[at].runs[0].job;
+    assert!(
+        app.update(key(KeyCode::Enter))
+            .contains(&Effect::OpenJob(newest)),
+        "Enter opens job {newest}"
+    );
+    assert_eq!(app.view, AppView::Job);
 }
 
 #[test]
@@ -1308,6 +1365,30 @@ fn settings_state_each_doctor_check_and_the_state_of_its_run_as_core_does() {
         let mut app = app(&daemon());
         app.update(super::tab(View::Settings));
         app.update(Msg::Doctor(Ok(doctor.clone())));
+        // Folded, the passing checks are one row naming them.
+        let passing: Vec<&str> = doctor
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Pass)
+            .map(|check| check.name.as_str())
+            .collect();
+        if !passing.is_empty() {
+            let (rows, _) = frame(&app);
+            assert!(
+                shows(&rows, &passing.join(", ")),
+                "{passing:?}: {}",
+                rows.join("\n")
+            );
+            let at = app
+                .check_rows()
+                .iter()
+                .position(|row| matches!(row, CheckRow::Passing(_)))
+                .unwrap();
+            for _ in 0..at {
+                app.update(key(KeyCode::Char('j')));
+            }
+            app.update(key(KeyCode::Enter));
+        }
         let (rows, buffer) = frame(&app);
         let all = rows.join("\n");
         if let Some(state) = doctor.state.as_ref().and_then(|state| state.line(NOW)) {
@@ -1606,7 +1687,8 @@ fn the_insights_view_says_what_jobs_and_the_drive_wrote_as_core_words_it() {
     app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
     app.update(super::tab(View::Insights));
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let (rows, _) = frame_of(&app, 300, 120);
+    // Narrower than a pane beside the list, so a wrapped line reads on across the rows.
+    let (rows, _) = frame_of(&app, 130, 120);
     let shown = words(&rows.join(" "));
     for section in insights.disk.unwrap().sections() {
         assert!(

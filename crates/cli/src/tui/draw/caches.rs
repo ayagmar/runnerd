@@ -3,12 +3,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Paragraph, TableState};
 use runnerd_core::api::{self, Caches};
-use unicode_width::UnicodeWidthStr;
 
-use super::{Theme, fit, heading, length, selected, table_hits, widths};
+use super::budget::scale;
+use super::{TableColumn, Theme, fitted_table, heading, length, table_hits};
 use crate::human::{ago, bytes};
 use crate::tui::app::App;
 use crate::tui::mouse::{Hits, List};
@@ -71,39 +72,13 @@ pub(super) fn caches(
         Constraint::Min(0),
     ])
     .areas(rest);
-    let holds_width = caches
-        .volumes
-        .iter()
-        .map(|volume| volume.kind.description().width())
-        .max()
-        .unwrap_or(0)
-        .min(40);
-    let columns = [
-        ("VOLUME", 0),
-        ("HOLDS", holds_width),
-        ("SIZE", 8),
-        ("LIMIT", 18),
-    ];
-    let rows = caches.volumes.iter().map(|volume| {
-        let limit = volume.limit_status();
-        Row::new(vec![
-            Cell::from(volume.name.clone()),
-            Cell::from(Span::styled(
-                fit(&volume.kind.description(), holds_width),
-                theme.dim(),
-            )),
-            Cell::from(Span::styled(
-                bytes(volume.bytes),
-                limit
-                    .as_ref()
-                    .map_or_else(ratatui::style::Style::new, |limit| theme.of(limit.tone())),
-            )),
-            Cell::from(limit.map(|limit| limit.label).unwrap_or_default()),
-        ])
-    });
-    let table = Table::new(rows, widths(&columns))
-        .header(Row::new(columns.iter().map(|(name, _)| *name)).style(theme.dim()))
-        .row_highlight_style(selected());
+    let columns = columns(&caches.volumes, theme);
+    let table = fitted_table(
+        columns,
+        usize::from(table_area.width),
+        Some(app.cache),
+        theme,
+    );
     let mut state = TableState::default().with_selected(Some(app.cache));
     frame.render_stateful_widget(table, table_area, &mut state);
     table_hits(
@@ -117,16 +92,31 @@ pub(super) fn caches(
     frame.render_widget(Paragraph::new(lines), build_area);
 }
 
+/// The cells of a volume's fill bar.
+const FILL: u16 = 12;
+
+/// How full a volume is against its limit, as a bar in its limit's tone; blank for a volume without one.
+fn fill(volume: &api::CacheVolume, theme: Theme) -> Span<'static> {
+    let Some(limit) = volume.limit_status() else {
+        return Span::raw("");
+    };
+    let filled = scale(volume.bytes, limit.limit, FILL);
+    Span::styled(
+        format!(
+            "{}{}",
+            "█".repeat(usize::from(filled)),
+            "░".repeat(usize::from(FILL - filled))
+        ),
+        theme.of(limit.tone()),
+    )
+}
+
 /// The build cache's lines under the table: its heading in bold, then each line wrapped, never cut, since each says
 /// what the cache does as a whole sentence.
 fn build_lines(build: Vec<String>, width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     for (at, line) in build.into_iter().enumerate() {
-        let style = if at == 0 {
-            super::bold()
-        } else {
-            ratatui::style::Style::new()
-        };
+        let style = if at == 0 { super::bold() } else { Style::new() };
         lines.extend(
             super::wrap(&line, width)
                 .into_iter()
@@ -134,4 +124,59 @@ fn build_lines(build: Vec<String>, width: usize) -> Vec<Line<'static>> {
         );
     }
     lines
+}
+
+/// The table's columns: each volume's name, what it holds, its size in its limit's tone, how full it is, and its
+/// limit.
+fn columns(volumes: &[api::CacheVolume], theme: Theme) -> Vec<TableColumn> {
+    vec![
+        TableColumn::names(
+            "Volume",
+            volumes
+                .iter()
+                .map(|volume| Span::raw(volume.name.clone()))
+                .collect(),
+        ),
+        TableColumn::words(
+            "Holds",
+            volumes
+                .iter()
+                .map(|volume| Span::styled(volume.kind.description(), theme.dim()))
+                .collect(),
+            2,
+        ),
+        TableColumn::figures(
+            "Size",
+            volumes
+                .iter()
+                .map(|volume| {
+                    let style = volume
+                        .limit_status()
+                        .map_or_else(Style::new, |limit| theme.of(limit.tone()));
+                    Span::styled(bytes(volume.bytes), style)
+                })
+                .collect(),
+            0,
+        ),
+        TableColumn::words(
+            "",
+            volumes.iter().map(|volume| fill(volume, theme)).collect(),
+            3,
+        ),
+        TableColumn::words(
+            "Limit",
+            volumes
+                .iter()
+                .map(|volume| {
+                    Span::raw(
+                        volume
+                            .limit_status()
+                            .map(|limit| limit.label)
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            1,
+        ),
+    ]
 }

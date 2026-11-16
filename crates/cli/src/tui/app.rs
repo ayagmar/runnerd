@@ -6,12 +6,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
-    self, ActionPreview, ActionQuery, ActionResult, Activity, Attention, Caches, ConfigCheck,
-    ConfigFile, Doctor, Event, EventEnvelope, Fix, HostSample, Insights, Job, JobAction,
-    JobComparison, JobList, JobMetrics, JobOrder, JobQuery, JobRange, JobState, JobSummary,
-    LineRange, LogOutline, LogSearch, LogSearchQuery, LogSummary, QueuedJob, RecordFilter, Records,
-    Resize, Sample, SampleSeries, Savings, Sizing, SlotTimeline, Status, StyledLine, Subject,
-    Timeline,
+    self, ActionPreview, ActionQuery, ActionResult, Activity, Attention, Caches, CheckStatus,
+    ConfigCheck, ConfigFile, Doctor, Event, EventEnvelope, Fix, HostSample, Insights, Job,
+    JobAction, JobComparison, JobList, JobMetrics, JobOrder, JobQuery, JobRange, JobState,
+    JobSummary, LineRange, LogOutline, LogSearch, LogSearchQuery, LogSummary, QueuedJob,
+    RecordFilter, Records, Resize, Sample, SampleSeries, Savings, Sizing, SlotTimeline, Status,
+    StyledLine, Subject, Timeline,
 };
 
 use super::log::{LogView, Way};
@@ -726,7 +726,26 @@ pub(crate) struct App {
     pub(crate) cache: usize,
     pub(crate) doctor: Reading<Doctor>,
     pub(crate) config: Reading<ConfigRead>,
+    /// The selected row of the settings view's checks, in [`App::check_rows`]' order.
     pub(crate) check: usize,
+    /// Whether the settings view lists the passing checks one by one or as one row.
+    pub(crate) passing: Fold,
+}
+
+/// Whether a list folds some of its rows into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fold {
+    Folded,
+    Open,
+}
+
+/// A row of the settings view's checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckRow {
+    /// The doctor's check at this position.
+    Check(usize),
+    /// The passing checks, folded into one row: how many.
+    Passing(usize),
 }
 
 impl App {
@@ -779,6 +798,7 @@ impl App {
             doctor: Reading::default(),
             config: Reading::default(),
             check: 0,
+            passing: Fold::Folded,
         };
         for sample in host {
             push(&mut app.host, sample, HOST_SAMPLES);
@@ -888,7 +908,7 @@ impl App {
             }
             Msg::Doctor(doctor) => {
                 self.doctor.take(doctor);
-                let checks = self.doctor.get().map_or(0, |doctor| doctor.checks.len());
+                let checks = self.check_rows().len();
                 self.check = self.check.min(checks.saturating_sub(1));
                 self.select_wanted();
             }
@@ -1456,8 +1476,12 @@ impl App {
         self.show(next)
     }
 
-    /// The overview with what needs attention selected.
+    /// The overview with what needs attention open and selected; on it already, closes it again.
     fn show_attention(&mut self) -> Vec<Effect> {
+        if self.view == View::Overview && self.pane == Pane::Attention {
+            self.pane = Pane::Slots;
+            return Vec::new();
+        }
         let effects = self.show(View::Overview);
         if !self.notices().is_empty() {
             self.pane = Pane::Attention;
@@ -1484,6 +1508,10 @@ impl App {
             View::History if self.history.search.is_some() => {
                 self.history.search = None;
                 self.first_page()
+            }
+            View::Overview if self.pane == Pane::Attention => {
+                self.pane = Pane::Slots;
+                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -1870,10 +1898,46 @@ impl App {
         if self.view == View::Overview && self.pane == Pane::Attention {
             return self.follow_notice();
         }
+        if self.view == View::Insights {
+            return self.open_insight_run();
+        }
+        if self.view == View::Settings {
+            if let Some(CheckRow::Passing(_)) = self.check_rows().get(self.check) {
+                self.passing = match self.passing {
+                    Fold::Folded => Fold::Open,
+                    Fold::Open => Fold::Folded,
+                };
+            }
+            return Vec::new();
+        }
         match self.selected_job() {
             Some(id) => self.open(id),
             None => Vec::new(),
         }
+    }
+
+    /// Opens the newest run that shows the selected insight.
+    fn open_insight_run(&mut self) -> Vec<Effect> {
+        let Some(insight) = self
+            .insights
+            .get()
+            .and_then(|insights| insights.insights.get(self.insight))
+        else {
+            return Vec::new();
+        };
+        let Some(run) = insight.runs.first() else {
+            return Vec::new();
+        };
+        let stub = stub_summary(
+            run.job,
+            &insight.repository,
+            insight.job.as_deref().unwrap_or_default(),
+        );
+        let effects = self.open(run.job);
+        if !effects.is_empty() {
+            return effects;
+        }
+        self.open_summary(stub)
     }
 
     /// Goes where the selected attention item points: its job, repository, check or insight, or the view its fix
@@ -1935,11 +1999,22 @@ impl App {
     /// after the view shows.
     fn select_wanted(&mut self) {
         let at = match &self.wanted {
-            Some(Wanted::Check(name)) => self
-                .doctor
-                .get()
-                .and_then(|doctor| doctor.checks.iter().position(|check| &check.name == name))
-                .map(|at| self.check = at),
+            Some(Wanted::Check(name)) => {
+                let at = self
+                    .doctor
+                    .get()
+                    .and_then(|doctor| doctor.checks.iter().position(|check| &check.name == name));
+                at.and_then(|at| {
+                    if !self.check_rows().contains(&CheckRow::Check(at)) {
+                        self.passing = Fold::Open;
+                    }
+                    self.check = self
+                        .check_rows()
+                        .iter()
+                        .position(|row| *row == CheckRow::Check(at))?;
+                    Some(())
+                })
+            }
             Some(Wanted::Insight(key)) => self
                 .insights
                 .get()
@@ -2117,10 +2192,10 @@ impl App {
                 &mut self.cache,
                 self.caches.get().map_or(0, |c| c.volumes.len()),
             ),
-            (View::Settings, _) => (
-                &mut self.check,
-                self.doctor.get().map_or(0, |d| d.checks.len()),
-            ),
+            (View::Settings, _) => {
+                let rows = self.check_rows().len();
+                (&mut self.check, rows)
+            }
             (View::Overview, Pane::Attention) => (&mut self.notice, notices),
             (View::Overview, Pane::Slots) => (&mut self.slot, slots),
             (View::Overview, Pane::Queue) => (&mut self.queued, self.live.status.queued.len()),
@@ -2133,6 +2208,38 @@ impl App {
             .saturating_add_signed(by)
             .min(len.saturating_sub(1));
         Vec::new()
+    }
+
+    /// The settings view's checks in the order it lists them: what fails, then what warns, is skipped and informs,
+    /// each in the doctor's order, then the passing checks, one row each or folded into one.
+    pub(crate) fn check_rows(&self) -> Vec<CheckRow> {
+        let Some(doctor) = self.doctor.get() else {
+            return Vec::new();
+        };
+        let rank = |status: CheckStatus| match status {
+            CheckStatus::Fail => 0,
+            CheckStatus::Warn => 1,
+            CheckStatus::Skip => 2,
+            CheckStatus::Info => 3,
+            CheckStatus::Pass => 4,
+        };
+        let mut problems: Vec<usize> = (0..doctor.checks.len())
+            .filter(|at| doctor.checks[*at].status != CheckStatus::Pass)
+            .collect();
+        problems.sort_by_key(|at| rank(doctor.checks[*at].status));
+        let passing: Vec<usize> = (0..doctor.checks.len())
+            .filter(|at| doctor.checks[*at].status == CheckStatus::Pass)
+            .collect();
+        let mut rows: Vec<CheckRow> = problems.into_iter().map(CheckRow::Check).collect();
+        match self.passing {
+            _ if passing.is_empty() => {}
+            Fold::Open => {
+                rows.push(CheckRow::Passing(passing.len()));
+                rows.extend(passing.into_iter().map(CheckRow::Check));
+            }
+            Fold::Folded => rows.push(CheckRow::Passing(passing.len())),
+        }
+        rows
     }
 
     /// Every slot in config order, with its profile's position.

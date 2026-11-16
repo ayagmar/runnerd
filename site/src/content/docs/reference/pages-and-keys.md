@@ -23,14 +23,14 @@ The navigation has five views: Overview, Jobs (History and Records), Insights, C
 
 ## runnerctl tui
 
-Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records and `4` `4` from Sizing to Caches. The overview lists what needs attention, then a row per slot. `enter` opens a job: on a failed one the failure first, then its timeline, steps, memory and CPU against the caps, latest runs, and the log, folded by step and followed while the job runs.
+Its views, `1` to `5`, are Overview, Jobs, Insights, Capacity and Settings; pressing a view's digit again opens its next section, so `2` `2` goes from History to Records and `4` `4` from Sizing to Caches. The overview opens on the budget as one strip, a segment per slot labelled under it, then a row per slot in the same order, the queue and the latest jobs; what needs attention is one line until `!` opens it. On a terminal 140 columns wide or more, Jobs, Insights, Capacity and Settings show the selected row whole beside the list. `enter` opens a job: on a failed one the failure first, then its timeline, steps, memory and CPU against the caps, latest runs, and the log, folded by step and followed while the job runs.
 
 | Key | |
 |---|---|
 | `1` to `5` | overview, jobs, insights, capacity, settings; again for the view's next section; `o` and `h` open the overview and history too |
 | `tab`, `j` `k` or arrows, `PgDn` `PgUp` | the overview's pane; move in it, or in a log; by ten |
-| `enter`, `esc` | open the selected job, or where an attention item points; back |
-| `!` | what needs attention; the header's count opens it too |
+| `enter`, `esc` | open the selected job, an insight's newest run, or where an attention item points; settings: open or fold the passing checks; back |
+| `!` | open or close what needs attention; the header's count opens it too |
 | `/`, `n` `N` | jobs: search names, workflows and branches; job: search the log, the next and previous match |
 | `f` `s` `t`, `l`, `x` | jobs: pick a filter, the order, the time range; the slots' timeline; clear the filters |
 | `]` `[` | jobs: next and previous page |

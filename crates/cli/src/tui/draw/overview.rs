@@ -1,20 +1,23 @@
-//! The overview: what needs attention, the health line, the budget, a lane per slot, the queue with why each job
-//! waits, the repositories and the latest jobs, and the slice's charts when there is room.
+//! The overview: the headline figures, what needs attention as one line, the budget strip, a lane per slot in the
+//! strip's order, the queue with why each job waits, the repositories and the latest jobs, and the slice's charts
+//! when there is room.
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState};
-use runnerd_core::api::{self, Activity, JobSummary, QueuedJob, RepositoryStatus, WaitKind};
+use ratatui::widgets::{Block, Paragraph, Table, TableState};
+use runnerd_core::api::{
+    self, Activity, HealthKind, JobSummary, QueuedJob, RepositoryStatus, WaitKind,
+};
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
 use super::attention::{self, attention};
-use super::budget::budget;
+use super::budget::{self, budget};
 use super::job::drop_least;
-use super::slice::slice;
+use super::slice;
 use super::slots::lanes;
-use super::{bold, fit, heading, length, list_block, selected, spark};
+use super::{bold, fit, heading, length, list_block, picked, row_of, spark};
 use crate::human::{self, ago, duration};
 use crate::tui::app::{App, Pane};
 use crate::tui::mouse::{Hits, List};
@@ -22,18 +25,15 @@ use crate::tui::mouse::{Hits, List};
 /// The fewest rows the repositories and latest jobs keep: a title and four jobs.
 pub(super) const LISTS_MIN: u16 = 5;
 
-/// The most items the attention list shows on the overview; the rest are counted.
-const ATTENTION_SHOWN: usize = 5;
+/// The fewest rows a chart is drawn in: its border and two rows of bars.
+const CHARTS_MIN: u16 = 4;
 
-/// The rows the slice's charts take at most: they show half an hour, which more rows would not add to.
-const CHARTS_MAX: u16 = 8;
+/// The share of the overview the attention list takes at most while it is open.
+const ATTENTION_SHARE: u16 = 2;
 
-/// The fewest rows a chart is drawn in: its border and three rows of bars.
-const CHARTS_MIN: u16 = 5;
-
-/// Top to bottom: health, what needs attention, budget, a lane per slot, the queue, then the repositories and
-/// latest jobs, which take the rows left; the slice's charts take what the lists do not need, up to their size, and
-/// are the first to go.
+/// Top to bottom: the four headline figures, what needs attention as one line (the whole list while it is focused),
+/// the budget strip, a lane per slot in the strip's order, the queue, then the repositories and latest jobs; the
+/// slice's charts take what the lists do not need, as tall as their samples reach, and are the first to go.
 pub(super) fn overview(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -44,19 +44,18 @@ pub(super) fn overview(
 ) {
     let slots = length(app.slots().count());
     let queued = app.live.status.queued.len();
-    let rest = area.height.saturating_sub(1 + 3);
-    let queue_least = if queued == 0 {
-        0
+    let health_height: u16 = if area.height >= 20 { 2 } else { 1 };
+    let bar_rows: u16 = if area.height >= 36 { 2 } else { 1 };
+    let budget_height = budget::height(bar_rows);
+    let attention_open = app.pane == Pane::Attention;
+    let attention_height = if attention_open {
+        attention::open_height(app, area.width, area.height / ATTENTION_SHARE)
     } else {
-        length(queued.min(3) + 1)
+        attention::strip_height(app)
     };
-    // The attention list gives way to the lanes and lists on a short terminal, down to one item.
-    let attention_room = rest.saturating_sub(slots + queue_least + LISTS_MIN);
-    let attention_height = attention::wanted(app, ATTENTION_SHOWN, area.width)
-        .min(attention_room.max(
-            attention::wanted(app, 1, area.width).min(rest.saturating_sub(slots + LISTS_MIN)),
-        ));
-    let rest = rest.saturating_sub(attention_height);
+    let rest = area
+        .height
+        .saturating_sub(health_height + attention_height + budget_height);
     let lanes_height = slots.min(rest.saturating_sub(LISTS_MIN.min(rest / 2)));
     let left = rest.saturating_sub(lanes_height);
     let queue_height = if queued == 0 {
@@ -69,17 +68,12 @@ pub(super) fn overview(
     let left = left.saturating_sub(queue_height);
     let side_by_side = area.width >= 100;
     let lists_wanted = lists_height(app, side_by_side).max(LISTS_MIN);
-    let charts_height = left.saturating_sub(lists_wanted).min(CHARTS_MAX);
-    let charts_height = if charts_height >= CHARTS_MIN && !app.host.is_empty() {
+    let charts_height = slice::height(app).min(left.saturating_sub(lists_wanted));
+    let charts_height = if charts_height >= CHARTS_MIN {
         charts_height
     } else {
         0
     };
-    // Rows nothing else wants show more of what needs attention.
-    let spare = left.saturating_sub(lists_wanted + charts_height);
-    let attention_height = attention_height
-        + spare
-            .min(attention::wanted(app, usize::MAX, area.width).saturating_sub(attention_height));
     let [
         health_area,
         attention_area,
@@ -89,18 +83,24 @@ pub(super) fn overview(
         lists_area,
         charts_area,
     ] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(health_height),
         Constraint::Length(attention_height),
-        Constraint::Length(3),
+        Constraint::Length(budget_height),
         Constraint::Length(lanes_height),
         Constraint::Length(queue_height),
         Constraint::Min(0),
         Constraint::Length(charts_height),
     ])
     .areas(area);
-    health(frame, health_area, app, now, theme);
-    if attention_height > 0 {
+    if health_height > 1 {
+        tiles(frame, health_area, app, now, theme);
+    } else {
+        health(frame, health_area, app, now, theme);
+    }
+    if attention_open {
         attention(frame, attention_area, app, now, theme, hits);
+    } else if attention_height > 0 {
+        attention::strip(frame, attention_area, app, theme, hits);
     }
     budget(frame, budget_area, app, theme);
     lanes(frame, lanes_area, app, now, theme, hits);
@@ -108,7 +108,7 @@ pub(super) fn overview(
         queue(frame, queue_area, app, now, theme, hits);
     }
     if charts_height > 0 {
-        slice(frame, charts_area, app, theme);
+        slice::slice(frame, charts_area, app, theme);
     }
     let [repositories_area, latest_area] = if side_by_side {
         let width = repositories_width(app).min(lists_area.width * 2 / 5);
@@ -123,6 +123,72 @@ pub(super) fn overview(
     };
     repositories(frame, repositories_area, app, theme, hits);
     latest(frame, latest_area, app, now, theme, hits);
+}
+
+/// The four headline figures as tiles across the width: each one's label above, its value in bold with what it is
+/// of and its notes beside it, as many as fit whole, and the hours' longest waits beside the p95 where there is room.
+pub(super) fn tiles(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+    const SPARK_LEAST: usize = 6;
+    let figures = app.live.status.health(now).figures(app.activity.as_ref());
+    let count = length(figures.len().max(1));
+    let [labels, values] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+    let columns = Layout::horizontal(vec![Constraint::Ratio(1, u32::from(count)); figures.len()])
+        .split(labels);
+    let hours = app
+        .activity
+        .as_ref()
+        .map(Activity::wait_hours)
+        .unwrap_or_default();
+    for (figure, column) in figures.into_iter().zip(columns.iter()) {
+        // A cell between tiles.
+        let room = usize::from(column.width).saturating_sub(1);
+        frame.render_widget(
+            Line::styled(fit(figure.label, room).trim_end().to_owned(), theme.dim()),
+            *column,
+        );
+        let value = match figure.tone {
+            api::Tone::Warn => theme.wait().add_modifier(Modifier::BOLD),
+            api::Tone::Neutral | api::Tone::Quiet | api::Tone::Good => bold(),
+            tone @ api::Tone::Bad => theme.tone(tone.into()).add_modifier(Modifier::BOLD),
+        };
+        let mut spans = vec![Span::styled(figure.value, value)];
+        let mut used = Line::from(spans.clone()).width();
+        if let Some(of) = figure.of {
+            let of = format!(" {of}");
+            if used + of.width() <= room {
+                used += of.width();
+                spans.push(Span::raw(of));
+            }
+        }
+        if figure.kind == HealthKind::Wait && hours.iter().any(|wait| *wait > 0) {
+            let bars = room.saturating_sub(used + 1).min(hours.len());
+            if bars >= SPARK_LEAST {
+                let bars = resample(&hours, bars);
+                let longest = bars.iter().copied().max().unwrap_or(0);
+                used += 1 + bars.len();
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    spark(bars.into_iter(), longest, usize::MAX),
+                    theme.wait(),
+                ));
+            }
+        }
+        for note in figure.notes {
+            let note = format!(", {note}");
+            if used + note.width() > room {
+                break;
+            }
+            used += note.width();
+            spans.push(Span::styled(note, theme.dim()));
+        }
+        frame.render_widget(
+            Line::from(spans),
+            Rect {
+                y: values.y,
+                ..*column
+            },
+        );
+    }
 }
 
 /// The rows the repositories and latest jobs would fill, side by side or one above the other.
@@ -355,23 +421,23 @@ pub(super) fn queue(
                 0
             },
     );
-    let rows =
-        queued
-            .iter()
-            .zip(waits)
-            .zip(names)
-            .zip(places)
-            .map(|(((job, wait), name), place)| {
-                let mut cells = vec![
-                    Cell::from(Line::from(Span::styled(wait, theme.wait())).right_aligned()),
-                    Cell::from(fit(&name, name_width)),
-                ];
-                if repository_width > 0 {
-                    cells.push(Cell::from(fit(&place, repository_width)));
-                }
-                cells.push(Cell::from(reason(app, job, now, reason_width, theme)));
-                Row::new(cells)
-            });
+    let rows = queued
+        .iter()
+        .zip(waits)
+        .zip(names)
+        .zip(places)
+        .enumerate()
+        .map(|(at, (((job, wait), name), place))| {
+            let mut cells = vec![
+                Line::from(Span::styled(wait, theme.wait())).right_aligned(),
+                Line::from(fit(&name, name_width)),
+            ];
+            if repository_width > 0 {
+                cells.push(Line::from(fit(&place, repository_width)));
+            }
+            cells.push(Line::from(reason(app, job, now, reason_width, theme)));
+            row_of(cells, focused && at == app.queued)
+        });
     let mut widths = vec![
         Constraint::Length(length(wait_width)),
         Constraint::Length(length(name_width)),
@@ -380,7 +446,7 @@ pub(super) fn queue(
         widths.push(Constraint::Length(length(repository_width)));
     }
     widths.push(Constraint::Fill(1));
-    let table = Table::new(rows, widths).row_highlight_style(selected());
+    let table = Table::new(rows, widths).row_highlight_style(super::selected());
     let mut state = TableState::default().with_selected(focused.then_some(app.queued));
     frame.render_stateful_widget(table, table_area, &mut state);
     hits.rows(
@@ -460,7 +526,7 @@ pub(super) fn repositories(
             let spans = spans(repository, profile, width.saturating_sub(others));
             let line = Line::from(spans);
             if focused && position == app.repository {
-                line.style(selected())
+                picked(line)
             } else {
                 line
             }
@@ -523,34 +589,32 @@ pub(super) fn latest(
     let hidden = jobs.len().saturating_sub(usize::from(inner.height));
     frame.render_widget(more_below(block, hidden, theme), area);
     let widths = LatestWidths::of(jobs, inner.width, now);
-    let rows = jobs.iter().map(|job| {
+    let rows = jobs.iter().enumerate().map(|(at, job)| {
         let mut cells = vec![
-            Cell::from(badge(job, theme)),
-            Cell::from(fit(&job.title().to_string(), widths.title)),
+            Line::from(badge(job, theme)),
+            Line::from(fit(&job.title().to_string(), widths.title)),
         ];
         if widths.repository > 0 {
-            cells.push(Cell::from(fit(&job.repository, widths.repository)));
+            cells.push(Line::from(fit(&job.repository, widths.repository)));
         }
         if widths.branch > 0 {
-            cells.push(Cell::from(Span::styled(
+            cells.push(Line::from(Span::styled(
                 fit(job.branch.as_deref().unwrap_or_default(), widths.branch),
                 theme.dim(),
             )));
         }
         if widths.wait > 0 {
             let wait = job.waited(now).map_or_else(String::new, duration);
-            cells.push(Cell::from(
-                Line::from(Span::styled(wait, theme.wait())).right_aligned(),
-            ));
+            cells.push(Line::from(Span::styled(wait, theme.wait())).right_aligned());
         }
         let ran = job.ran(now).map_or_else(String::new, duration);
         cells.extend([
-            Cell::from(Line::from(ran).right_aligned()),
-            Cell::from(Line::from(Span::styled(queued_ago(job, now), theme.dim())).right_aligned()),
+            Line::from(ran).right_aligned(),
+            Line::from(Span::styled(queued_ago(job, now), theme.dim())).right_aligned(),
         ]);
-        Row::new(cells)
+        row_of(cells, focused && at == app.latest)
     });
-    let table = Table::new(rows, widths.constraints()).row_highlight_style(selected());
+    let table = Table::new(rows, widths.constraints()).row_highlight_style(super::selected());
     let mut state = TableState::default().with_selected(focused.then_some(app.latest));
     frame.render_stateful_widget(table, inner, &mut state);
     hits.rows(

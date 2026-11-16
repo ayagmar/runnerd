@@ -1,5 +1,5 @@
-//! The overview's slots, a lane of one row each: a running slot's job, step, time, memory and CPU; an idle or warm
-//! slot its state, quiet.
+//! The overview's slots, a lane of one row each in the budget strip's order: a running slot's job, step, time,
+//! memory and CPU; an idle or warm slot its state, quiet.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -9,7 +9,7 @@ use runnerd_core::api::{Job, ProfileStatus, Sample, SlotStatus, Status};
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
-use super::{bold, fit, selected, spark};
+use super::{bold, fit, picked, spark};
 use crate::human::{self, bytes, cores_used, duration};
 use crate::tui::app::{App, Pane};
 use crate::tui::mouse::{Hits, List};
@@ -74,9 +74,9 @@ pub(super) fn step_label(job: &Job) -> Option<(String, String)> {
         .map(|(step, position)| (format!("{position}/{}", job.steps.len()), step.name.clone()))
 }
 
-/// A lane per slot, in config order, as many as `area` has rows. A running slot: its square in the profile's colour,
-/// its name, the job and its repository, the step, how long it has run, memory and CPU now, and from 100 columns their
-/// recent samples. An idle or warm slot: its state, dim, and when its runner started.
+/// A lane per slot, in config order as the budget strip draws them, as many as `area` has rows. A running slot: its
+/// square in the profile's colour, its name, then its job's columns, each as wide as the widest lane needs it (see
+/// [`Columns`]). An idle or warm slot: its state, dim, and when its runner started where that fits.
 pub(super) fn lanes(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -99,14 +99,25 @@ pub(super) fn lanes(
         .iter()
         .map(|(_, profile, slot)| format!("{} {}", profile.name, slot.slot).width())
         .max()
-        .unwrap_or(0)
-        .min(14);
+        .unwrap_or(0);
+    let rest = width.saturating_sub(2 + name_width + 1);
+    let running: Vec<Option<Lane<'_>>> = slots
+        .iter()
+        .map(|(_, profile, slot)| {
+            let state = Status::slot_state(profile, slot);
+            slot_job(app, profile, slot)
+                .filter(|_| state.is_running())
+                .map(|job| Lane::of(app, profile, job, now))
+        })
+        .collect();
+    let columns = Columns::of(&running.iter().flatten().collect::<Vec<_>>(), rest);
     let lines: Vec<Line<'_>> = slots
         .iter()
+        .zip(&running)
         .enumerate()
         .skip(first)
         .take(shown)
-        .map(|(position, (index, profile, slot))| {
+        .map(|(position, ((index, profile, slot), lane))| {
             let mut spans = vec![
                 Span::styled("■ ", theme.profile(Some(*index))),
                 Span::styled(
@@ -117,18 +128,18 @@ pub(super) fn lanes(
                     bold(),
                 ),
             ];
-            let state = Status::slot_state(profile, slot);
-            let rest = width.saturating_sub(2 + name_width + 1);
-            if let Some(job) = slot_job(app, profile, slot).filter(|_| state.is_running()) {
-                spans.extend(running(app, profile, job, rest, now, theme));
+            if let Some(lane) = lane {
+                spans.extend(columns.spans(lane, theme));
             } else {
+                let state = Status::slot_state(profile, slot).line();
                 let started = slot
                     .runner
                     .as_ref()
                     .map(|runner| format!(" · started {}", human::ago(runner.started_at, now)))
+                    .filter(|started| state.width() + started.width() <= rest)
                     .unwrap_or_default();
                 spans.push(Span::styled(
-                    fit(&format!("{}{started}", state.line()), rest)
+                    fit(&format!("{state}{started}"), rest)
                         .trim_end()
                         .to_owned(),
                     theme.dim(),
@@ -136,7 +147,7 @@ pub(super) fn lanes(
             }
             let line = Line::from(spans);
             if focused && position == app.slot {
-                line.style(selected())
+                picked(line)
             } else {
                 line
             }
@@ -146,55 +157,173 @@ pub(super) fn lanes(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// A running slot's lane past its name, in `width` cells: fixed columns on the right, their sparklines only from 100
-/// columns; the job's name takes what is left, then its repository if that fits too.
-fn running(
-    app: &App,
-    profile: &ProfileStatus,
-    job: &Job,
-    width: usize,
-    now: u64,
-    theme: Theme,
-) -> Vec<Span<'static>> {
-    let usage = Usage::of(app, profile, job);
-    let (count, name) = step_label(job).unwrap_or_default();
-    let ran = job
-        .summary
-        .timeline
-        .started_at
-        .map_or_else(String::new, |at| duration(now.saturating_sub(at)));
-    let memory = usage.last().map_or_else(String::new, |s| bytes(s.memory));
-    let cpu = usage.last().map_or_else(String::new, |s| cores_used(s.cpu));
-    let sparks = width >= 90;
-    let step_width = if width >= 70 { 16 } else { 0 };
-    let fixed = 7 + step_width + 9 + 7 + 6 + if sparks { 12 } else { 0 };
-    let job_width = width.saturating_sub(fixed).max(10);
-    let title = job.summary.title().to_string();
-    let repository = &job.summary.repository;
-    let (title, repository) = if title.width() + 2 + repository.width().min(12) <= job_width {
-        let pad = job_width - title.width() - 2;
-        (format!("{title}  "), fit(repository, pad))
-    } else {
-        (fit(&title, job_width), String::new())
-    };
-    let mut spans = vec![
-        Span::raw(title),
-        Span::raw(repository),
-        Span::styled(format!(" {count:>5} "), theme.cpu()),
-    ];
-    if step_width > 0 {
-        spans.push(Span::raw(fit(&name, step_width)));
+/// What a running slot's lane shows, as text, with its samples.
+struct Lane<'app> {
+    title: String,
+    repository: String,
+    count: String,
+    step: String,
+    ran: String,
+    memory: String,
+    cpu: String,
+    usage: Usage<'app>,
+}
+
+impl Lane<'_> {
+    fn of<'app>(app: &'app App, profile: &ProfileStatus, job: &Job, now: u64) -> Lane<'app> {
+        let usage = Usage::of(app, profile, job);
+        let (count, step) = step_label(job).unwrap_or_default();
+        Lane {
+            title: job.summary.title().to_string(),
+            repository: job.summary.repository.clone(),
+            count,
+            step,
+            ran: job
+                .summary
+                .timeline
+                .started_at
+                .map_or_else(String::new, |at| duration(now.saturating_sub(at))),
+            memory: usage.last().map_or_else(String::new, |s| bytes(s.memory)),
+            cpu: usage.last().map_or_else(String::new, |s| cores_used(s.cpu)),
+            usage,
+        }
     }
-    spans.extend([
-        Span::raw(format!(" {ran:>7} ")),
-        Span::raw(format!("{memory:>6} ")),
-    ]);
-    if sparks {
-        spans.push(Span::styled(usage.memory(6), theme.memory()));
+}
+
+/// The running lanes' columns, in cells, each as wide as its widest text; 0 for a column left out. Short of room the
+/// sparklines go first, then the repository, then the step's name; the job's name is cut last. Room past them all
+/// widens the sparklines, up to [`SPARK_MOST`] cells each, and then lies between the names and the figures.
+struct Columns {
+    title: usize,
+    repository: usize,
+    count: usize,
+    step: usize,
+    ran: usize,
+    memory: usize,
+    cpu: usize,
+    spark: usize,
+    /// The cells between the repository and the step.
+    slack: usize,
+}
+
+/// The fewest cells a step's name is cut to rather than left out.
+const STEP_LEAST: usize = 12;
+
+/// The fewest cells a sparkline is drawn in.
+const SPARK_LEAST: usize = 6;
+
+/// The most cells a sparkline takes: a lane's samples cover about a minute.
+const SPARK_MOST: usize = 30;
+
+impl Columns {
+    fn of(lanes: &[&Lane<'_>], width: usize) -> Columns {
+        let widest = |text: &dyn Fn(&Lane<'_>) -> usize| {
+            lanes.iter().map(|lane| text(lane)).max().unwrap_or(0)
+        };
+        let mut columns = Columns {
+            title: widest(&|lane| lane.title.width()),
+            repository: widest(&|lane| lane.repository.width()),
+            count: widest(&|lane| lane.count.width()),
+            step: widest(&|lane| lane.step.width()),
+            ran: widest(&|lane| lane.ran.width()),
+            memory: widest(&|lane| lane.memory.width()),
+            cpu: widest(&|lane| lane.cpu.width()),
+            spark: SPARK_LEAST,
+            slack: 0,
+        };
+        // The cells each column takes with the one before it.
+        let used = |columns: &Columns| {
+            let gap = |width: usize| if width > 0 { width + 1 } else { 0 };
+            columns.title
+                + gap(columns.repository)
+                + gap(columns.count)
+                + gap(columns.step)
+                + gap(columns.ran)
+                + gap(columns.memory)
+                + gap(columns.spark)
+                + gap(columns.cpu)
+                + gap(columns.spark)
+        };
+        if used(&columns) > width {
+            columns.spark = 0;
+        }
+        if used(&columns) > width {
+            columns.repository = 0;
+        }
+        let step = columns.step;
+        if used(&columns) > width {
+            columns.step = 0;
+        }
+        let over = used(&columns).saturating_sub(width);
+        columns.title = columns.title.saturating_sub(over);
+        if columns.spark > 0 {
+            let spare = width.saturating_sub(used(&columns)) / 2;
+            columns.spark = (SPARK_LEAST + spare).min(SPARK_MOST);
+        }
+        // A step's name dropped whole comes back cut where a dozen cells are left for it.
+        let left = width.saturating_sub(used(&columns) + 1);
+        if columns.step == 0 && step > 0 && left >= STEP_LEAST {
+            columns.step = step.min(left);
+        }
+        columns.slack = width.saturating_sub(used(&columns));
+        columns
     }
-    spans.push(Span::raw(format!("{cpu:>5} ")));
-    if sparks {
-        spans.push(Span::styled(usage.cpu(6), theme.cpu()));
+
+    fn spans(&self, lane: &Lane<'_>, theme: Theme) -> Vec<Span<'static>> {
+        let mut spans = vec![Span::raw(fit(&lane.title, self.title))];
+        if self.repository > 0 {
+            spans.push(Span::styled(
+                format!(" {}", fit(&lane.repository, self.repository)),
+                theme.dim(),
+            ));
+        }
+        spans.push(Span::raw(" ".repeat(self.slack)));
+        if self.count > 0 {
+            spans.push(Span::styled(
+                format!(" {:>width$}", lane.count, width = self.count),
+                theme.cpu(),
+            ));
+        }
+        if self.step > 0 {
+            spans.push(Span::raw(format!(" {}", fit(&lane.step, self.step))));
+        }
+        if self.ran > 0 {
+            spans.push(Span::raw(format!(
+                " {:>width$}",
+                lane.ran,
+                width = self.ran
+            )));
+        }
+        if self.memory > 0 {
+            spans.push(Span::raw(format!(
+                " {:>width$}",
+                lane.memory,
+                width = self.memory
+            )));
+        }
+        if self.spark > 0 {
+            spans.push(Span::styled(
+                format!(
+                    " {:<width$}",
+                    lane.usage.memory(self.spark),
+                    width = self.spark
+                ),
+                theme.memory(),
+            ));
+        }
+        if self.cpu > 0 {
+            spans.push(Span::raw(format!(
+                " {:>width$}",
+                lane.cpu,
+                width = self.cpu
+            )));
+        }
+        if self.spark > 0 {
+            spans.push(Span::styled(
+                format!(" {}", lane.usage.cpu(self.spark)),
+                theme.cpu(),
+            ));
+        }
+        spans
     }
-    spans
 }

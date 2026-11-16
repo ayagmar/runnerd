@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
 use runnerd_core::api;
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -128,8 +128,47 @@ fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
 
+/// The selected row's style: reversed and bold, one band across the row in a dark or light terminal and without
+/// colour.
 fn selected() -> Style {
-    Style::new().add_modifier(Modifier::REVERSED)
+    Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
+/// `line` as the selected row: its leading mark keeps its tone, a chip in the reversed band, and the rest drops its
+/// spans' colours, so the band reads as one rather than a patchwork of each span's colour.
+fn picked(line: Line<'_>) -> Line<'_> {
+    let alignment = line.alignment;
+    let mut spans = line.spans.into_iter();
+    let mut kept: Vec<Span<'_>> = spans.next().into_iter().collect();
+    kept.extend(spans.map(|span| Span::raw(span.content)));
+    let mut plain = Line::from(kept);
+    plain.alignment = alignment;
+    plain.style(selected())
+}
+
+/// A table row of `cells`; as the selected row, the first cell, its mark or badge, keeps its tone and the others are
+/// plain under the selection's band.
+fn row_of(cells: Vec<Line<'static>>, picked: bool) -> Row<'static> {
+    Row::new(cells.into_iter().enumerate().map(|(at, cell)| {
+        Cell::from(if picked && at > 0 {
+            unstyled(cell)
+        } else {
+            cell
+        })
+    }))
+}
+
+/// `line` without its spans' styles, its alignment kept: a selected table row's cell, which the row's style reverses.
+fn unstyled(line: Line<'_>) -> Line<'_> {
+    let alignment = line.alignment;
+    let mut plain = Line::from(
+        line.spans
+            .into_iter()
+            .map(|span| Span::raw(span.content))
+            .collect::<Vec<_>>(),
+    );
+    plain.alignment = alignment;
+    plain
 }
 
 /// The whole screen, and where it drew what a click can reach.
@@ -146,7 +185,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) -> 
         View::Overview => overview(frame, body, app, now, theme, &mut hits),
         View::History => history(frame, body, app, now, theme, &mut hits),
         View::Records => records(frame, body, app, now, theme, &mut hits),
-        View::Insights => insights(frame, body, app, theme, &mut hits),
+        View::Insights => insights(frame, body, app, now, theme, &mut hits),
         View::Sizing => sizing(frame, body, app, now, theme, &mut hits),
         View::Caches => caches(frame, body, app, now, theme, &mut hits),
         View::Settings => settings(frame, body, app, now, theme, &mut hits),
@@ -405,16 +444,23 @@ fn footer_keys(app: &App, width: usize) -> String {
     let views = format!("1-{} views", View::tabs().len());
     let mut keys: Vec<(u8, &str)> = match app.view {
         View::Overview => {
-            let mut keys = vec![
-                (1, "tab pane"),
-                (2, "j/k move"),
-                (1, "enter open"),
-                (1, "p/r pause/resume"),
-                (3, "P/U all"),
-            ];
-            if app.pane == Pane::Slots {
-                keys.push((2, "R reseed"));
-            }
+            // The focused pane's own keys only.
+            let mut keys = match app.pane {
+                Pane::Attention => vec![(2, "j/k move"), (1, "enter go"), (1, "esc close")],
+                Pane::Slots => vec![
+                    (2, "j/k move"),
+                    (1, "enter open"),
+                    (1, "p/r pause/resume"),
+                    (2, "R reseed"),
+                ],
+                Pane::Queue | Pane::Latest => {
+                    vec![(2, "j/k move"), (1, "enter open"), (1, "p/r pause/resume")]
+                }
+                Pane::Repositories => {
+                    vec![(2, "j/k move"), (1, "p/r pause/resume"), (3, "P/U all")]
+                }
+            };
+            keys.insert(0, (1, "tab pane"));
             if !app.notices().is_empty() && app.pane != Pane::Attention {
                 keys.insert(0, (1, "! attention"));
             }
@@ -436,10 +482,10 @@ fn footer_keys(app: &App, width: usize) -> String {
             (1, "d remove"),
             (1, "D remove all"),
         ],
-        View::Insights => vec![(2, "j/k move")],
+        View::Insights => vec![(2, "j/k move"), (1, "enter open run")],
         View::Sizing => vec![(2, "j/k move"), (1, "a apply the advice")],
         View::Caches => vec![(2, "j/k move"), (1, "d empty")],
-        View::Settings => vec![(2, "j/k move"), (1, "u read again")],
+        View::Settings => vec![(2, "j/k move"), (1, "enter fold"), (1, "u read again")],
         View::Job => {
             let mut keys = vec![
                 (1, "enter fold"),
@@ -503,12 +549,12 @@ fn help(frame: &mut Frame<'_>, area: Rect, hits: &mut Hits) {
         ("tab", "overview: the next pane"),
         ("j k ↓ ↑", "move, or scroll the log; PgDn PgUp by ten"),
         ("enter esc", "open; back"),
-        ("!", "what needs attention"),
+        ("!", "open or close what needs attention"),
         ("/ n N", "search; the next and the previous match"),
         ("f s t", "jobs: filter, sort, time range"),
         ("l x", "jobs: timeline; clear the filters"),
         ("] [", "jobs: the next and the previous page"),
-        ("enter", "job: fold or unfold the step or group"),
+        ("enter", "job: fold a step; settings: the passing checks"),
         ("G g", "follow the log, or go to its start"),
         ("c", "job: compare with an earlier run"),
         ("x a A", "job: cancel, re-run it, re-run the failed"),
@@ -584,7 +630,7 @@ fn pick(frame: &mut Frame<'_>, area: Rect, picker: &Picker, theme: Theme, hits: 
                 ])
             };
             if at == picker.at() {
-                line.style(selected())
+                picked(line)
             } else {
                 line
             }
@@ -624,6 +670,34 @@ fn styled_heading(frame: &mut Frame<'_>, area: Rect, title: &str, note: String, 
         fit(&note, room).trim_end().to_owned()
     };
     frame.render_widget(Line::styled(note, style).alignment(Alignment::Right), area);
+}
+
+/// The columns from which a list has a pane beside it for its selected row.
+const PANE_FROM: u16 = 140;
+
+/// `area` split into a list and, from [`PANE_FROM`] columns, a pane beside it for the selected row: a third of the
+/// width, from 40 to 64 cells, behind a dim rule.
+fn beside(frame: &mut Frame<'_>, area: Rect, theme: Theme) -> (Rect, Option<Rect>) {
+    if area.width < PANE_FROM {
+        return (area, None);
+    }
+    let pane = (area.width / 3).clamp(40, 64);
+    let [list, _, rule, _, pane] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(pane),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled("│", theme.dim());
+            usize::from(rule.height)
+        ]),
+        rule,
+    );
+    (list, Some(pane))
 }
 
 /// A count of rows or cells as a height or width.
@@ -694,13 +768,161 @@ fn list_block(title: &str, focused: bool, theme: Theme) -> Block<'_> {
         ))
 }
 
-/// A table's column widths: 0 fills what the others leave.
-fn widths(columns: &[(&str, usize)]) -> Vec<Constraint> {
-    columns
+/// A column of a table before it is fitted: as wide as its widest cell or heading, the order it gives way in
+/// (the highest first; 0 never) and whether it may be cut, as names may.
+#[derive(Debug, Clone, Copy)]
+struct Fit {
+    width: usize,
+    rank: u8,
+    cut: Cut,
+}
+
+/// Whether a column's cells may be cut to fit, ending in `…`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cut {
+    /// Never: a figure goes whole or not at all.
+    Never,
+    /// Down to [`CUT_LEAST`] cells, the widest first.
+    Names,
+}
+
+/// The fewest cells a name is cut to.
+const CUT_LEAST: usize = 10;
+
+/// The widths of `columns` in `room` cells with a cell between each, `None` for one left out: the highest ranked
+/// give way until the rest fit, or until only those ranked 0 are left, and then the names are cut, the widest first.
+fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
+    let mut widths: Vec<Option<usize>> = columns.iter().map(|column| Some(column.width)).collect();
+    let used = |widths: &[Option<usize>]| -> usize {
+        let shown: Vec<usize> = widths.iter().flatten().copied().collect();
+        shown.iter().sum::<usize>() + shown.len().saturating_sub(1)
+    };
+    while used(&widths) > room {
+        let least = columns
+            .iter()
+            .enumerate()
+            .filter(|(at, column)| column.rank > 0 && widths[*at].is_some())
+            .max_by_key(|(at, column)| (column.rank, *at))
+            .map(|(at, _)| at);
+        let Some(least) = least else { break };
+        widths[least] = None;
+    }
+    while used(&widths) > room {
+        let widest = columns
+            .iter()
+            .enumerate()
+            .filter(|(at, column)| {
+                column.cut == Cut::Names && widths[*at].is_some_and(|width| width > CUT_LEAST)
+            })
+            .max_by_key(|(at, _)| widths[*at])
+            .map(|(at, _)| at);
+        let Some(widest) = widest else { break };
+        if let Some(width) = &mut widths[widest] {
+            *width -= 1;
+        }
+    }
+    widths
+}
+
+/// A column of a [`fitted_table`]: its heading, a cell per row, and how it fits.
+struct TableColumn {
+    title: String,
+    cells: Vec<Span<'static>>,
+    rank: u8,
+    cut: Cut,
+    align: Alignment,
+}
+
+impl TableColumn {
+    /// A column of figures, right-aligned, that gives way at `rank`.
+    fn figures(title: &str, cells: Vec<Span<'static>>, rank: u8) -> TableColumn {
+        TableColumn {
+            title: title.to_uppercase(),
+            cells,
+            rank,
+            cut: Cut::Never,
+            align: Alignment::Right,
+        }
+    }
+
+    /// A column of names, left-aligned, cut before it gives way.
+    fn names(title: &str, cells: Vec<Span<'static>>) -> TableColumn {
+        TableColumn {
+            title: title.to_uppercase(),
+            cells,
+            rank: 0,
+            cut: Cut::Names,
+            align: Alignment::Left,
+        }
+    }
+
+    /// A column of words, left-aligned, never cut, that gives way at `rank`.
+    fn words(title: &str, cells: Vec<Span<'static>>, rank: u8) -> TableColumn {
+        TableColumn {
+            title: title.to_uppercase(),
+            cells,
+            rank,
+            cut: Cut::Never,
+            align: Alignment::Left,
+        }
+    }
+}
+
+/// A table of `columns` in `room` cells, each as wide as its content, fitted by [`fit_columns`], its header dim; the
+/// `selected_row`'s cells plain under the selection's band.
+fn fitted_table(
+    columns: Vec<TableColumn>,
+    room: usize,
+    selected_row: Option<usize>,
+    theme: Theme,
+) -> Table<'static> {
+    let fits: Vec<Fit> = columns
         .iter()
-        .map(|(_, width)| match width {
-            0 => Constraint::Fill(1),
-            width => Constraint::Length(u16::try_from(*width).unwrap_or(u16::MAX)),
+        .map(|column| Fit {
+            width: column
+                .cells
+                .iter()
+                .map(Span::width)
+                .max()
+                .unwrap_or(0)
+                .max(column.title.width()),
+            rank: column.rank,
+            cut: column.cut,
         })
-        .collect()
+        .collect();
+    let widths = fit_columns(&fits, room);
+    let shown: Vec<(TableColumn, usize)> = columns
+        .into_iter()
+        .zip(widths)
+        .filter_map(|(column, width)| Some((column, width?)))
+        .collect();
+    let rows = shown.first().map_or(0, |(column, _)| column.cells.len());
+    let header = Row::new(shown.iter().map(|(column, width)| {
+        Cell::from(
+            Line::from(fit(&column.title, *width).trim_end().to_owned()).alignment(column.align),
+        )
+    }))
+    .style(theme.dim());
+    let body = (0..rows).map(|row| {
+        let cells = shown
+            .iter()
+            .map(|(column, width)| {
+                let span = column.cells.get(row).cloned().unwrap_or_default();
+                let span = if span.width() > *width {
+                    Span::styled(fit(&span.content, *width), span.style)
+                } else {
+                    span
+                };
+                Line::from(span).alignment(column.align)
+            })
+            .collect();
+        row_of(cells, selected_row == Some(row))
+    });
+    let constraints: Vec<Constraint> = shown
+        .iter()
+        .map(|(_, width)| Constraint::Length(length(*width)))
+        .collect();
+    Table::new(body, constraints)
+        .header(header)
+        .row_highlight_style(selected())
 }
