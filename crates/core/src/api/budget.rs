@@ -608,6 +608,15 @@ impl ClosedKind {
             Self::Stalled => "closed while the host stalls",
         }
     }
+
+    /// Its name under a block too narrow for [`ClosedKind::name`], a word: `host`, `closed` or `stalled`.
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Held => "closed",
+            Self::Stalled => "stalled",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -527,3 +527,26 @@ fn the_hosts_line_as_figures_says_each_clause_once_and_leaves_free_to_the_bar() 
         "a stalling host says no runner starts: {stalled:?}"
     );
 }
+
+#[test]
+fn a_closed_part_has_a_word_for_a_block_too_narrow_for_its_name() {
+    // A strip of 80 cells gives the host's few gigabytes a block of a handful of cells: its name must still tell
+    // the three apart there.
+    let kinds = [ClosedKind::Host, ClosedKind::Held, ClosedKind::Stalled];
+    let shorts: Vec<&str> = kinds.iter().map(|kind| kind.short()).collect();
+    for (kind, short) in kinds.iter().zip(&shorts) {
+        assert!(
+            short.len() <= 7 && short.len() < kind.name().len(),
+            "{short} is shorter than {}",
+            kind.name()
+        );
+    }
+    assert_eq!(
+        shorts
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        kinds.len(),
+        "each kind has its own word: {shorts:?}"
+    );
+}
