@@ -233,8 +233,14 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
   const tail = box();
   // The page opens on the failure and the timeline, not at the log's end.
   let following = tail ? ownBox(tail) || atEnd(tail) : true;
+  // Offered only over the tail's lines, not over the log's heading while the lines are still below the screen.
+  const inView = (tail) => {
+    const rect = tail.getBoundingClientRect();
+    return rect.top < foot() - 120 && rect.bottom > 0;
+  };
   const show = () => {
-    if (jump) jump.hidden = following || !toggle.checked;
+    const tail = box();
+    if (jump) jump.hidden = following || !toggle.checked || !tail || !inView(tail);
   };
   document.addEventListener(
     'scroll',
