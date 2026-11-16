@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use runnerd_core::admission::host;
 use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
+use runnerd_core::cache::{self, Names};
 use runnerd_core::command;
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
@@ -28,6 +29,8 @@ pub(crate) struct Host {
     pub images: BTreeMap<String, Result<ImageFound, String>>,
     /// The disk the records of failed jobs take; `None` without a config or Docker.
     pub records: Option<Result<u64, String>>,
+    /// What the running mirror's storage holds; `None` without Docker or a config that turns the mirror on.
+    pub mirror: Option<cache::mirror::Found>,
     /// Sizing advice from the job history; `None` without a config or a history. `read` leaves it out: the daemon
     /// reads its own store, `runnerd doctor` the database with `read_sizing`.
     pub sizing: Option<Result<Sizing, String>>,
@@ -173,10 +176,14 @@ impl Host {
                     _ => BTreeMap::new(),
                 };
                 let records = (config.is_some() && docker.is_ok()).then(read_records);
+                let mirror = config
+                    .filter(|config| config.caches.mirror.enabled && docker.is_ok())
+                    .map(|_| read_mirror());
                 DockerReads {
                     docker,
                     images,
                     records,
+                    mirror,
                 }
             });
             let config_file = path.and_then(|path| {
@@ -226,11 +233,13 @@ impl Host {
                 docker,
                 images,
                 records,
+                mirror,
             } = joined(docker);
             Host {
                 docker,
                 images,
                 records,
+                mirror,
                 sizing: None,
                 os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
                 slice,
@@ -253,6 +262,7 @@ struct DockerReads {
     docker: Result<DockerFacts, String>,
     images: BTreeMap<String, Result<ImageFound, String>>,
     records: Option<Result<u64, String>>,
+    mirror: Option<cache::mirror::Found>,
 }
 
 /// How many repositories `Host::read` reads at once: each read is a `gh` process and a request to GitHub.
@@ -472,6 +482,23 @@ fn read_records() -> Result<u64, String> {
         Docker::connect()?.images(record::LABEL).await
     }))?;
     Ok(images.iter().map(|image| image.bytes).sum())
+}
+
+/// Reads the running mirror's links, without changing them.
+fn read_mirror() -> cache::mirror::Found {
+    let read = || -> Result<cache::mirror::Found, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(bounded(async {
+            let docker = Docker::connect()?;
+            Ok::<_, runnerd_core::docker::Error>(
+                cache::mirror::check(&docker, &Names::new(cache::PREFIX)).await,
+            )
+        }))
+    };
+    read().unwrap_or_else(cache::mirror::Found::Unread)
 }
 
 /// The config's distinct images, by reference.
@@ -724,6 +751,12 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     checks.extend(image_checks(host, config, docker));
     if let (Some(config), Some(records)) = (config, &host.records) {
         checks.push(records_check(records, config));
+    }
+    if let Some(mirror) = &host.mirror {
+        checks.push(cache::mirror::mirror_check(
+            &Names::new(cache::PREFIX),
+            mirror,
+        ));
     }
     if let Some(sizing) = &host.sizing {
         checks.push(sizing_check(sizing));

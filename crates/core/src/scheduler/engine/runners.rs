@@ -760,7 +760,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
                 .await
             {
-                Ok(()) => self.mirror.started(mirror.memory.0),
+                Ok(up) => {
+                    if let cache::mirror::MirrorUp::Started(repair) = &up {
+                        repair.log();
+                    }
+                    self.mirror.started(mirror.memory.0);
+                }
                 // Runners pull from Docker Hub directly when the mirror does not answer.
                 Err(error) => warn!("cannot start the mirror: {error}"),
             }
