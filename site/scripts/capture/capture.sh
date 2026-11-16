@@ -15,11 +15,12 @@ cd "$root"
 what=${*:-dashboard tui terminal}
 scratch=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/runnerd-capture.XXXXXX")
 demo_pid=
+idle_pid=
 cleanup() {
-  if [ -n "$demo_pid" ]; then
-    kill "$demo_pid" 2>/dev/null || true
-    wait "$demo_pid" 2>/dev/null || true
-  fi
+  for pid in $demo_pid $idle_pid; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf "$scratch"
 }
 # The cleanup runs on every way out; a signal ends the script instead of letting it capture on without its daemon.
@@ -29,14 +30,20 @@ trap 'exit 143' TERM
 
 nice -n 10 cargo build --locked -p runnerd-web --example demo
 nice -n 10 cargo build --locked -p runnerd-cli
-mkdir -p "$scratch/run" "$scratch/home"
-target/debug/examples/demo "$scratch/run" 127.0.0.1:7498 >"$scratch/demo.log" 2>&1 &
+mkdir -p "$scratch/run" "$scratch/idle" "$scratch/home"
+target/debug/examples/demo "$scratch/run" 127.0.0.1:7498 >"$scratch/run.log" 2>&1 &
 demo_pid=$!
-for _ in $(seq 50); do [ -S "$scratch/run/runnerd.sock" ] && break; sleep 0.2; done
-[ -S "$scratch/run/runnerd.sock" ] || { cat "$scratch/demo.log" >&2; echo "the demo daemon did not start" >&2; exit 1; }
+# A second demo with no runner at all, for the idle overview.
+RUNNERD_DEMO_SCENE=idle target/debug/examples/demo "$scratch/idle" 127.0.0.1:7499 >"$scratch/idle.log" 2>&1 &
+idle_pid=$!
+for dir in run idle; do
+  for _ in $(seq 50); do [ -S "$scratch/$dir/runnerd.sock" ] && break; sleep 0.2; done
+  [ -S "$scratch/$dir/runnerd.sock" ] || { cat "$scratch/$dir.log" >&2; echo "a demo daemon did not start" >&2; exit 1; }
+done
 # The demo's clock runs from its start, so every capture happens within seconds of it.
 export RUNNERD_CAPTURE_SOCKET="$scratch/run/runnerd.sock"
 export RUNNERD_CAPTURE_LOGIN="$scratch/run/runnerd.web"
+export RUNNERD_CAPTURE_IDLE_LOGIN="$scratch/idle/runnerd.web"
 export RUNNERD_CAPTURE_HOME="$scratch/home"
 here=site/scripts/capture
 for part in $what; do

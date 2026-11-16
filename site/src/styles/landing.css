@@ -227,6 +227,33 @@ html:not(.js) .theme {
   margin-top: 2rem;
 }
 
+/* Text links and the theme button keep their line's size and take a tap of 44px or more: a box around each, drawn by
+   a pseudo-element, so the layout does not grow. */
+:is(.text-link, .nav nav a, .theme, .wordmark, .footer nav a) {
+  position: relative;
+}
+
+:is(.text-link, .nav nav a, .wordmark, .footer nav a)::after,
+.theme::after {
+  content: '';
+  position: absolute;
+  inset: -0.75rem -0.5rem;
+}
+
+.theme::after {
+  inset: -0.875rem -0.75rem;
+}
+
+/* Pressed: every control answers the press before the page changes. */
+:is(.text-link, .nav nav a, .theme, .wordmark, .footer nav a):active {
+  opacity: 0.7;
+}
+
+.copy:active,
+.switch label:active span {
+  transform: translateY(1px);
+}
+
 /* A section: its claim, then its proof. */
 .part {
   padding-bottom: var(--gap-section);
@@ -247,6 +274,10 @@ html:not(.js) .theme {
 
 .part-text p {
   max-width: 44ch;
+}
+
+.part-text .text-link {
+  justify-self: start;
 }
 
 .split {
@@ -334,6 +365,10 @@ html:not(.js) .theme {
 
 .copy:hover {
   color: #ffffff;
+}
+
+.copy:focus-visible {
+  outline-offset: -3px;
 }
 
 /* The close: the name again, and where to go. */
@@ -552,13 +587,12 @@ html:not(.js) .theme {
   color: var(--muted);
 }
 
+/* Two shots side by side on a wide screen, each at about the size the dashboard draws it. */
 .pair {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(1rem, 2vw, 1.5rem);
+  align-items: start;
   margin-top: 2rem;
-}
-
-.pair .shot {
-  max-width: 48rem;
 }
 
 /* Clients: the TUI and the phone, the same height. The TUI's frame sets the row; the phone's column is about the
@@ -665,6 +699,7 @@ html:not(.js) .theme {
 @media (max-width: 960px) {
   .hero,
   .split,
+  .pair,
   .clients {
     grid-template-columns: minmax(0, 1fr);
   }

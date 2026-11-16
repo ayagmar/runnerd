@@ -78,7 +78,6 @@ systemctl --user enable --now runnerd`;
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
 
 // What runnerctl printed against the dashboard's demo daemon; each block cuts out the lines it shows and changes none.
-const status = `$ runnerctl status\n${printed('status', 'JOB ')}`;
 const caches = `$ runnerctl caches\n${printed('caches', 'build cache for')}`;
 const savings = printed('insights', 'This month', '  ');
 const shell = `$ runnerctl shell 120055991489
@@ -194,14 +193,15 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
         </figure>
       </section>
 
-      <section class="part wrap split" aria-labelledby="attention-title">
+      <section class="part wrap split" aria-labelledby="lanes-title">
         <div class="part-text">
-          <h2 id="attention-title">What needs you comes&nbsp;first</h2>
-          <p>A job no runner here can take, a doctor warning, a token GitHub refuses: the dashboard and the TUI open on them, each with what clears it.</p>
+          <h2 id="lanes-title">Every slot is a&nbsp;lane</h2>
+          <p>The dashboard opens on the budget. A slot is as wide as its share of the slice and filled to what its job uses now.</p>
+          <a class="text-link" href={`${base}start/watch/`}>Watch it</a>
         </div>
         <Shot
-          name="part-attention"
-          alt="Four things that need attention on the overview: a config file other users can read, a public repository, a job no profile serves, and a test that got slower, each with its fix or where to look."
+          name="part-lanes"
+          alt="The overview's top: 2 of 6 slots running, 5 waiting, a 32s p95 wait and 6 of 30 jobs failed; 26.25G of 33G reserved; then a lane per slot, jvm 1 running build at 7 of 9 steps with its memory and CPU, node 1 running playwright, a warm jvm 2, node 2 starting, and lanes for the mirror, 3.75G free and 3G held by the host."
           sizes="(min-width: 960px) 40rem, calc(100vw - 2.5rem)"
         />
       </section>
@@ -226,14 +226,19 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
       <section class="part wrap" aria-labelledby="waits-title">
         <div class="part-text">
           <h2 id="waits-title">Every wait says why</h2>
-          <p>A queued job names what holds it. The timeline shows what each slot ran all day, the wait before each job.</p>
+          <p>A queued job names what holds it. The timeline draws the wait before every job.</p>
+          <a class="text-link" href={`${base}guides/waiting/`}>Why is my job waiting?</a>
         </div>
         <div class="pair">
-          <div><pre class="terminal wide" tabindex="0" aria-label="runnerctl status: the queue"><code>{status}</code></pre></div>
+          <Shot
+            name="part-queue"
+            alt="The overview's queue: lint waits because no profile serves the label storefornt-small, visual-diff because a runner is starting for it in node 2, and three jobs because all 2 node slots are busy, each with how long it has waited."
+            sizes="(min-width: 960px) 37rem, calc(100vw - 2.5rem)"
+          />
           <Shot
             name="part-timeline"
             alt="The slots' timeline over 24 hours: a lane per slot, each job a mark coloured by outcome, waits for a runner drawn before them."
-            sizes="(min-width: 960px) 30rem, calc(100vw - 2.5rem)"
+            sizes="(min-width: 960px) 37rem, calc(100vw - 2.5rem)"
           />
         </div>
       </section>
@@ -255,17 +260,18 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
         <div class="part-text">
           <h2 id="clients-title">On a phone, over SSH, in a script</h2>
           <p>The dashboard installs as an app on a phone, <code>runnerctl tui</code> works over SSH, and <code>runnerctl</code> prints the same figures for scripts.</p>
+          <a class="text-link" href={`${base}guides/remote-dashboard/`}>On another device</a>
         </div>
         <div class="clients">
           <Tui
             name="overview-96"
-            label="runnerctl tui's overview: the health line, what needs attention, a row per slot with its job, waiting jobs with why each waits, the repositories and the latest jobs."
+            label="runnerctl tui's overview at 96 by 26: the four health figures, what needs attention as one line, the budget as a strip with a segment per slot, a row per slot with its job, waiting jobs with why each waits, the repositories and the latest jobs."
           />
           <div class="phone">
             <Shot
               name="screen"
               phone
-              alt="The dashboard's overview on a phone, one screen: the health figures, what needs attention, the budget and the tab bar."
+              alt="The dashboard's overview on a phone, one screen: the budget's figures, then the slots as rows, each with a bar for its share of the slice, over the tab bar."
               sizes="20rem"
             />
           </div>
