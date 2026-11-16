@@ -187,6 +187,11 @@ impl Attention {
         self.items == other.items && self.omitted == other.omitted
     }
 
+    /// How many items need attention, those left out included: what a client shows as the list's count.
+    pub fn count(&self) -> u64 {
+        self.items.len() as u64 + self.omitted
+    }
+
     /// What a client that shows the first `shown` items says of the rest: `and 3 more`; `None` when it shows all.
     pub fn more(&self, shown: usize) -> Option<String> {
         let rest = self.items.len().saturating_sub(shown) as u64 + self.omitted;

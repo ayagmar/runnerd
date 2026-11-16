@@ -39,8 +39,8 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
-    Admission, AdmissionPolicy, Basis, CpuAdmission, Event, EventEnvelope, HostSample, JobPeak,
-    JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
+    Admission, AdmissionPolicy, Basis, CpuAdmission, Doctor, Event, EventEnvelope, HostSample,
+    JobPeak, JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -2341,7 +2341,7 @@ async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
     assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, toml);
     // Datastar cancels a request still out only for a new one with the same method and address: the doctor's
     // answer for the config before the save must not land after the one for the config saved.
-    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::from_secs(1);
+    old_doctor(&dashboard, Duration::from_secs(1));
     let page = dashboard.page(&cookie, "/config").await.body;
     assert_eq!(
         doctor_request(&saved.body).address,
@@ -2386,10 +2386,27 @@ fn doctor_request(html: &str) -> DoctorRequest<'_> {
     }
 }
 
+/// A doctor whose last run is 15 minutes old, past what the page takes as it stands, and whose new run takes `delay`.
+fn old_doctor(dashboard: &Dashboard, delay: Duration) {
+    let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+    fixtures.doctor_delay = delay;
+    fixtures.doctor = Some(Doctor {
+        checks: vec![runnerd_core::api::Check {
+            name: "records".to_owned(),
+            status: runnerd_core::api::CheckStatus::Pass,
+            detail: "[records] max_total = 20G".to_owned(),
+            fix: None,
+        }],
+        state: Some(runnerd_core::api::DoctorState::Ready {
+            at: fixtures.now - 900,
+        }),
+    });
+}
+
 #[tokio::test]
 async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_checks_after() {
     let dashboard = Dashboard::start().await;
-    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::from_secs(10);
+    old_doctor(&dashboard, Duration::from_secs(10));
     let cookie = dashboard.sign_in().await;
     for path in ["/config", "/config?resize=node", "/config?undo=jvm"] {
         let page = tokio::time::timeout(Duration::from_secs(5), dashboard.page(&cookie, path))
@@ -2438,6 +2455,28 @@ async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_c
         "a doctor that answers at once is in the page, with no box left to fill: {}",
         page.body
     );
+    // The daemon's last run, 3 minutes old by its clock, is in the first response however long a new run would take, with its
+    // age and a way to run the checks again (the first visit moved the page by 510px when they landed later).
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.doctor = None;
+        fixtures.doctor_delay = Duration::from_secs(10);
+    }
+    let page = tokio::time::timeout(Duration::from_secs(5), dashboard.page(&cookie, "/config"))
+        .await
+        .expect("a recent run answers at once");
+    for expected in ["Checked ", "Run again", "data-checked"] {
+        assert!(
+            page.body.contains(expected),
+            "lacks {expected:?}: {}",
+            page.body
+        );
+    }
+    assert!(
+        !page.body.contains(Doctor::CHECKING),
+        "no box waits for checks the page has"
+    );
+    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::ZERO;
     let doctor = dashboard.page(&cookie, "/config/doctor").await;
     assert_eq!(doctor.status, StatusCode::OK);
     assert!(

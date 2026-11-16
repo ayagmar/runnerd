@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use maud::{Markup, html};
 use qrcode::QrCode;
-use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Section, Sizing, Tone};
+use runnerd_core::api::{
+    Check, ConfigCheck, ConfigFile, Doctor, DoctorQuery, Resize, Section, Sizing, Tone,
+};
 use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::{BudgetBlock, Config, profile_sizes, resize_profile, resized_at};
 use serde::Deserialize;
@@ -39,14 +41,15 @@ pub(crate) struct ConfigView {
     /// The advice the editor holds, or why it holds none.
     pub(crate) resized: Option<Resized>,
     pub(crate) check: ConfigCheck,
-    /// The doctor's checks when the daemon gave them within `DOCTOR_WAIT`, as from a recent run; `None` leaves the
-    /// page to ask for them once it shows.
+    /// The doctor's checks when the daemon gave them within `DOCTOR_WAIT`, as it does its last run up to its refresh
+    /// old (ADR 0145); `None` leaves the page to ask for them once it shows.
     pub(crate) doctor: Option<Result<Doctor, ClientError>>,
     pub(crate) now: u64,
 }
 
-/// How long the page waits for the doctor's checks before it renders without them. A recent run answers well within
-/// it; a fresh run of the host takes longer, and the page asks for it once it shows.
+/// How long the page waits for the doctor's checks before it renders without them. The daemon answers its last run at
+/// once while it is no older than its refresh; a fresh run of the host takes longer, and the page asks for it once it
+/// shows.
 const DOCTOR_WAIT: Duration = Duration::from_millis(50);
 
 /// A profile's advised `memory` and `slots`, written into the editor's text and not saved yet.
@@ -73,9 +76,13 @@ impl ConfigView {
             }
         };
         let doctor = async {
-            tokio::time::timeout(DOCTOR_WAIT, daemon.get::<Doctor>("/v1/doctor"))
-                .await
-                .ok()
+            let recent = DoctorQuery { recent: true };
+            tokio::time::timeout(
+                DOCTOR_WAIT,
+                daemon.get_query::<Doctor>("/v1/doctor", &recent),
+            )
+            .await
+            .ok()
         };
         let (file, sizing, doctor) =
             tokio::join!(daemon.get::<ConfigFile>("/v1/config"), sizing, doctor);
@@ -233,6 +240,10 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
                 // Before the editor, so it is read and reached before the text it describes.
                 @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
+                // What the text shows in place of a secret, read before the text.
+                @if view.text.contains(runnerd_core::config::SECRET_SHOWN) {
+                    p.muted.editor-note { "Notification URLs and header values show as " code { "<secret>" } "; saving keeps them." }
+                }
                 label.visually-hidden for="toml" { "runnerd.toml" }
                 // Line numbers beside the text, as tall as it: the editor has a row per line and one to spare, so it
                 // never scrolls up and down inside the page. Lines do not wrap, so a number stays beside its line,
@@ -252,10 +263,6 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                         data-on:click="!$_reviewing && @post('/config/diff')" { "Review changes" }
                     button.button-quiet type="button" data-indicator:_checking=""
                         data-on:click="@post('/config/check')" { "Check" }
-                }
-                p.muted.editor-note { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
-                @if view.text.contains(runnerd_core::config::SECRET_SHOWN) {
-                    p.muted.editor-note { "Notification URLs and header values show as " code { "<secret>" } "; saving keeps them." }
                 }
             }
             div.config-side {
@@ -507,6 +514,8 @@ pub(crate) fn diff(file: &str, text: &str) -> Markup {
                         }
                     }
                 }
+                // What saving does to the runners, beside the button that saves.
+                p.muted.editor-note { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
                         data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
@@ -608,7 +617,7 @@ pub(crate) fn doctor_pending(saved: Option<&str>) -> Markup {
             h2 #doctor-title { "Doctor" }
             div.check-fold.pending {
                 span.check-mark aria-hidden="true" { span {} span {} span {} span {} }
-                span.check-names { "Checking the host" }
+                span.check-names { (Doctor::CHECKING) }
             }
         }
     }
@@ -633,10 +642,12 @@ pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>, now: u64) -> Markup {
         Tone::Warn => "warn",
         Tone::Neutral | Tone::Quiet => "neutral",
     };
-    let run_again = html! {
-        button.button-quiet type="button" data-indicator:_doctoring=""
-            data-attr:aria-busy="$_doctoring && 'true'"
-            data-on:click=(doctor_get("")) { "Run the doctor again" }
+    let run_again = |label: &str| {
+        html! {
+            button.button-quiet type="button" data-indicator:_doctoring=""
+                data-attr:aria-busy="$_doctoring && 'true'"
+                data-on:click=(doctor_get("")) { (label) }
+        }
     };
     let row = |check: &Check, current: bool, needs: bool| {
         html! {
@@ -649,60 +660,57 @@ pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>, now: u64) -> Markup {
             }
         }
     };
+    let checked = doctor
+        .as_ref()
+        .ok()
+        .and_then(|doctor| doctor.state.as_ref())
+        .and_then(|state| state.checked(now));
     html! {
-        section #doctor .doctor aria-labelledby="doctor-title" {
-            h2 #doctor-title { "Doctor" }
+        // `data-checked` marks checks that stand, whose height the page's script keeps for the next visit.
+        section #doctor .doctor aria-labelledby="doctor-title" data-checked[checked.is_some()] {
+            div.doctor-head {
+                h2 #doctor-title { "Doctor" }
+                @if let Some(checked) = &checked {
+                    span.doctor-age.muted { (checked) }
+                    (run_again("Run again"))
+                }
+            }
             @match doctor {
                 Ok(doctor) => {
-                    @let not_current = doctor.state.as_ref().and_then(|state| state.line(now));
-                    @let current = not_current.is_none();
-                    @let needs = |check: &&Check| current && matches!(check.status.tone(), Tone::Bad | Tone::Warn);
-                    @let (problems, rest): (Vec<&Check>, Vec<&Check>) = doctor.checks.iter().partition(needs);
-                    @if let Some(line) = &not_current {
+                    @let summary = doctor.summary(now);
+                    @let current = summary.not_current.is_none();
+                    @if let Some(line) = &summary.not_current {
                         p.check-message #doctor-state { (line) }
-                        (run_again)
+                        (run_again("Run the doctor again"))
                     }
-                    @if !problems.is_empty() {
+                    @if !summary.problems.is_empty() {
                         ul.check-list.problems {
-                            @for check in &problems { (row(check, current, true)) }
+                            @for check in &summary.problems { (row(check, current, true)) }
                         }
                     }
-                    @if !rest.is_empty() {
+                    @if !summary.rest.is_empty() {
                         details.check-fold aria-describedby=[(!current).then_some("doctor-state")] {
                             summary {
                                 span.check-counts {
-                                    @for (label, count) in counted(&rest) {
-                                        span { strong { (count) } " " (label) }
+                                    @for count in &summary.counts {
+                                        span { strong { (count.count) } " " (count.label) }
                                     }
                                 }
-                                span.check-names { (rest.iter().map(|check| check.name.as_str()).collect::<Vec<_>>().join(" · ")) }
+                                span.check-names { (summary.rest.iter().map(|check| check.name.as_str()).collect::<Vec<_>>().join(" · ")) }
                             }
                             ul.check-list {
-                                @for check in &rest { (row(check, current, false)) }
+                                @for check in &summary.rest { (row(check, current, false)) }
                             }
                         }
                     }
                 }
                 Err(error) => {
                     p.check-message { (error) }
-                    (run_again)
+                    (run_again("Run the doctor again"))
                 }
             }
         }
     }
-}
-
-/// How many of `checks` carry each of core's labels, in the order the labels first come.
-fn counted(checks: &[&Check]) -> Vec<(&'static str, usize)> {
-    let mut counts: Vec<(&'static str, usize)> = Vec::new();
-    for check in checks {
-        let label = check.status.label();
-        match counts.iter_mut().find(|(seen, _)| *seen == label) {
-            Some((_, count)) => *count += 1,
-            None => counts.push((label, 1)),
-        }
-    }
-    counts
 }
 
 #[cfg(test)]

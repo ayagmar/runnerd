@@ -151,3 +151,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0142](0142-a-runners-layers-skip-their-unmount-sync.md) | A runner's layers skip their unmount sync; its Docker Engine's cannot | Accepted |
 | [0143](0143-a-jobs-disk-writes-are-its-containers-io-counters.md) | A job's disk writes are its runner container's io counters, read to its end | Accepted |
 | [0144](0144-the-dashboard-leads-with-the-lanes.md) | The dashboard leads with the lanes | Accepted |
+| [0145](0145-the-dashboard-paints-the-doctors-last-run.md) | The dashboard paints the doctor's last run while it is no older than the refresh | Accepted |
