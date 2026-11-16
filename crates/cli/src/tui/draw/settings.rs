@@ -9,11 +9,14 @@ use ratatui::widgets::Paragraph;
 use runnerd_core::api::{self, Check, CheckStatus, Doctor};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Theme, beside, bold, fit, heading, length, picked, wrap};
+use super::{Theme, beside, bold, clip, fit, heading, length, picked, wrap};
 use crate::human::Tone;
 use crate::tui::app::{App, CheckRow, ConfigRead, Fold};
 use crate::tui::mouse::{Hits, List};
 use crate::tui::reading::{Reading, Unread};
+
+/// The rows the selected check keeps under a list that scrolls, on a narrow terminal.
+const UNDER_LEAST: usize = 6;
 
 pub(super) fn settings(
     frame: &mut Frame<'_>,
@@ -35,11 +38,32 @@ pub(super) fn settings(
         (None, Some(check)) => check_lines(check, width, theme),
         _ => Vec::new(),
     };
+    // The doctor's title and its rows come first, then the selected check whole: the config's block gives way to
+    // them down to its path and mark, and the list scrolls to leave the check at least `UNDER_LEAST` rows.
+    let height = usize::from(main.height);
+    let list = rows.len().max(1);
+    let under_wanted = if under.is_empty() { 0 } else { under.len() + 1 };
+    let config_least = config.len().min(2);
+    let config_rows = config
+        .len()
+        .min(height.saturating_sub(1 + list + under_wanted))
+        .max(config_least.min(height));
+    let left = height.saturating_sub(config_rows + 1);
+    let list_rows = list.min(
+        left.saturating_sub(under_wanted.min(UNDER_LEAST))
+            .max(left.min(1)),
+    );
+    let under_rows = left - list_rows;
+    let config = if config_rows < config.len() {
+        config_short(&app.config, config, config_rows, theme)
+    } else {
+        config
+    };
     let [config_area, doctor_title, checks_area, under_area] = Layout::vertical([
-        Constraint::Length(length(config.len())),
+        Constraint::Length(length(config_rows)),
         Constraint::Length(1),
-        Constraint::Length(length(rows.len().max(1))),
-        Constraint::Min(0),
+        Constraint::Length(length(list_rows)),
+        Constraint::Length(length(under_rows)),
     ])
     .areas(main);
     frame.render_widget(Paragraph::new(config), config_area);
@@ -61,12 +85,15 @@ pub(super) fn settings(
         .unwrap_or_default();
     heading(frame, doctor_title, "Doctor", state, theme);
     checks(frame, checks_area, app, doctor, &rows, theme, hits);
-    let mut lines = vec![Line::from("")];
-    lines.extend(under);
-    frame.render_widget(Paragraph::new(lines), under_area);
+    if under_rows > 0 {
+        let mut lines = vec![Line::from("")];
+        lines.extend(clip(under, under_rows - 1, theme));
+        frame.render_widget(Paragraph::new(lines), under_area);
+    }
     if let (Some(pane), Some(check)) = (pane, selected_check) {
+        let lines = check_lines(check, usize::from(pane.width), theme);
         frame.render_widget(
-            Paragraph::new(check_lines(check, usize::from(pane.width), theme)),
+            Paragraph::new(clip(lines, usize::from(pane.height), theme)),
             pane,
         );
     }
@@ -103,6 +130,38 @@ fn check_lines(check: &Check, width: usize, theme: Theme) -> Vec<Line<'static>> 
         );
     }
     lines
+}
+
+/// The config's lines in `rows` short of room for them all: its path, then its check's mark and word with how many
+/// lines do not fit, so whether it is valid still shows.
+fn config_short(
+    config: &Reading<ConfigRead>,
+    lines: Vec<Line<'static>>,
+    rows: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Reading::Read(read) = config else {
+        return clip(lines, rows, theme);
+    };
+    if rows < 2 {
+        return lines.into_iter().take(rows).collect();
+    }
+    let (status, tone) = if read.check.valid {
+        (CheckStatus::Pass, Tone::Good)
+    } else {
+        (CheckStatus::Fail, Tone::Bad)
+    };
+    // The path, and the blank line that ends the block, are not counted.
+    let hidden = lines.len().saturating_sub(2);
+    let mut short: Vec<Line<'static>> = lines.into_iter().take(1).collect();
+    short.push(Line::from(vec![
+        Span::styled(
+            format!("{} {}", mark(status), status.label()),
+            theme.tone(tone),
+        ),
+        Span::styled(format!("  … {hidden} more lines"), theme.dim()),
+    ]));
+    short
 }
 
 /// What a read of `feature` that gave nothing says.

@@ -88,18 +88,26 @@ pub(super) fn lanes(
     let focused = app.pane == Pane::Slots;
     let width = usize::from(area.width);
     let slots: Vec<_> = app.slots().collect();
-    let shown = usize::from(area.height).min(slots.len());
+    let rows = usize::from(area.height);
+    // Short of a row per slot, the last row says how many more there are.
+    let shown = if slots.len() > rows {
+        rows.saturating_sub(1)
+    } else {
+        slots.len()
+    };
     // The selected slot stays in sight.
     let first = if focused {
         app.slot.saturating_sub(shown.saturating_sub(1))
     } else {
         0
     };
+    // A long profile name takes a third of the row at most, cut before its slot's number, which always shows.
     let name_width = slots
         .iter()
         .map(|(_, profile, slot)| format!("{} {}", profile.name, slot.slot).width())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min((width / 3).max(10));
     let rest = width.saturating_sub(2 + name_width + 1);
     let running: Vec<Option<Lane<'_>>> = slots
         .iter()
@@ -121,17 +129,18 @@ pub(super) fn lanes(
             let mut spans = vec![
                 Span::styled("■ ", theme.profile(Some(*index))),
                 Span::styled(
-                    format!(
-                        "{} ",
-                        fit(&format!("{} {}", profile.name, slot.slot), name_width)
-                    ),
+                    format!("{} ", slot_name(profile, slot.slot, name_width)),
                     bold(),
                 ),
             ];
             if let Some(lane) = lane {
                 spans.extend(columns.spans(lane, theme));
             } else {
-                let state = Status::slot_state(profile, slot).line();
+                let state = Status::slot_state(profile, slot);
+                // Its sentence whole, or its word.
+                let state = Some(state.line())
+                    .filter(|line| line.width() <= rest)
+                    .unwrap_or_else(|| state.word().to_owned());
                 let started = slot
                     .runner
                     .as_ref()
@@ -153,8 +162,31 @@ pub(super) fn lanes(
             }
         })
         .collect();
+    let mut lines = lines;
+    let hidden = slots.len() - shown;
+    if hidden > 0 && rows > 0 {
+        let below = slots.len() - first - shown;
+        let more = [(first, "above"), (below, "below")]
+            .iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, side)| format!("{count} more {side}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        lines.push(Line::styled(format!("  {more}"), theme.dim()));
+    }
     hits.rows(area, List::Slots, first, shown);
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// A slot's name in `width` cells, padded: its profile's name, cut where it must, and its number whole.
+fn slot_name(profile: &ProfileStatus, slot: usize, width: usize) -> String {
+    let number = format!(" {slot}");
+    let name = format!("{}{number}", profile.name);
+    if name.width() <= width {
+        return fit(&name, width);
+    }
+    let cut = fit(&profile.name, width.saturating_sub(number.width()));
+    format!("{}{number}", cut.trim_end())
 }
 
 /// What a running slot's lane shows, as text, with its samples.

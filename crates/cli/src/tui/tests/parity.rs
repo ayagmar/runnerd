@@ -13,7 +13,7 @@ use runnerd_core::api::{
 };
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
-use super::super::app::{App, CheckRow, Effect, Msg, View as AppView};
+use super::super::app::{App, CheckRow, Effect, Msg, Pane, View as AppView};
 use super::super::draw::{Theme, draw, view_keys};
 use super::super::prompts::Prompt;
 use super::{key, listed};
@@ -59,6 +59,12 @@ fn frame_of(app: &App, width: u16, height: u16) -> (Vec<String>, Buffer) {
     (rows, buffer)
 }
 
+/// Whether `cell` is in the selected row's band, which drops every tone so it reads as one block; its glyph and word
+/// still say what it is.
+fn in_band(cell: &ratatui::buffer::Cell) -> bool {
+    cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+}
+
 fn shows(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
@@ -80,9 +86,17 @@ fn assert_rows(rows: &[String], buffer: &Buffer, facts: &[JobRow]) {
             })
             .unwrap_or_else(|| panic!("no row says {fact:?}:\n{}", rows.join("\n")));
         let x = row[..row.find(&badge).unwrap()].chars().count();
-        let style = buffer[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())].style();
+        let cell = &buffer[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())];
+        if in_band(cell) {
+            continue;
+        }
         let expected = COLOUR.tone(human::outcome_tone(fact.kind));
-        assert_eq!(style.fg, expected.fg, "{badge} is {:?}: {row}", fact.kind);
+        assert_eq!(
+            cell.style().fg,
+            expected.fg,
+            "{badge} is {:?}: {row}",
+            fact.kind
+        );
     }
 }
 
@@ -399,10 +413,21 @@ fn the_history_and_records_tables_are_headed_as_core_names_their_columns() {
             Column::Waited,
             Column::Ran,
             Column::MemoryPeak,
-            // No fixture job has a CPU average, and a column no job has a figure for is not drawn.
+            Column::Cpu,
             Column::Queued,
         ],
     );
+    // A job's CPU average shows in its row as core writes it.
+    for fact in facts(&daemon).rows {
+        let Some(cpu) = &fact.cpu else { continue };
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&fact.title) && row.contains(&format!(" {cpu} "))),
+            "job {} shows its CPU average {cpu}: {}",
+            fact.job,
+            rows.join("\n")
+        );
+    }
     // From the history, the Jobs key again opens its next section.
     app.update(key(KeyCode::Char('2')));
     app.update(Msg::Records(daemon.records.clone()));
@@ -571,6 +596,9 @@ fn the_insights_view_states_each_insight_and_the_host_as_core_does() {
         let x = rows[row].find("● ").unwrap();
         let x = u16::try_from(rows[row][..x].chars().count()).unwrap();
         let y = u16::try_from(row).unwrap();
+        if in_band(&buffer[(x, y)]) {
+            continue;
+        }
         assert_eq!(
             Some(buffer[(x, y)].fg),
             COLOUR
@@ -628,6 +656,25 @@ fn cell_of<'buffer>(
 }
 
 #[test]
+fn closing_what_needs_attention_returns_to_the_pane_it_was_opened_from() {
+    // `!` and `esc` closed the list to the slots, wherever it was opened from.
+    let daemon = daemon();
+    let mut app = app(&daemon);
+    let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
+    app.update(Msg::Attention(Ok(attention)));
+    while app.pane != Pane::Latest {
+        app.update(key(KeyCode::Tab));
+    }
+    app.update(key(KeyCode::Char('!')));
+    assert_eq!(app.pane, Pane::Attention);
+    app.update(key(KeyCode::Char('!')));
+    assert_eq!(app.pane, Pane::Latest, "! closes it to the latest jobs");
+    app.update(key(KeyCode::Char('!')));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.pane, Pane::Latest, "esc closes it to the latest jobs");
+}
+
+#[test]
 fn the_overview_lists_what_needs_attention_in_core_s_words_and_tones() {
     let daemon = daemon();
     let attention = runnerd_fixtures::attention(&daemon, &runnerd_fixtures::doctor());
@@ -667,7 +714,7 @@ fn the_overview_lists_what_needs_attention_in_core_s_words_and_tones() {
                 "{fix}, what clears it: {all}"
             );
         }
-        if row.contains(&mark) {
+        if row.contains(&mark) && !in_band(cell_of(&rows, &buffer, &mark)) {
             assert_eq!(
                 Some(cell_of(&rows, &buffer, &mark).fg),
                 COLOUR

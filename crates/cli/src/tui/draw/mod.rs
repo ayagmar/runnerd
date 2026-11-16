@@ -134,28 +134,26 @@ fn selected() -> Style {
     Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
-/// `line` as the selected row: its leading mark keeps its tone, a chip in the reversed band, and the rest drops its
-/// spans' colours, so the band reads as one rather than a patchwork of each span's colour.
+/// `line` as the selected row: its spans drop their colours, so the band reads as one in a dark and a light terminal
+/// alike; a reversed tone turns a mark into the terminal's background on a pale cell. The mark's glyph and word
+/// still say what it is.
+///
+/// The band runs past the text to the area's edge, where a paragraph cuts it, so a short row is as easy to see as a
+/// long one.
 fn picked(line: Line<'_>) -> Line<'_> {
-    let alignment = line.alignment;
-    let mut spans = line.spans.into_iter();
-    let mut kept: Vec<Span<'_>> = spans.next().into_iter().collect();
-    kept.extend(spans.map(|span| Span::raw(span.content)));
-    let mut plain = Line::from(kept);
-    plain.alignment = alignment;
-    plain.style(selected())
+    const BAND: usize = 512;
+    let mut line = unstyled(line);
+    line.spans.push(Span::raw(" ".repeat(BAND)));
+    line.style(selected())
 }
 
-/// A table row of `cells`; as the selected row, the first cell, its mark or badge, keeps its tone and the others are
-/// plain under the selection's band.
+/// A table row of `cells`; as the selected row, every cell plain under the selection's band, as [`picked`] says why.
 fn row_of(cells: Vec<Line<'static>>, picked: bool) -> Row<'static> {
-    Row::new(cells.into_iter().enumerate().map(|(at, cell)| {
-        Cell::from(if picked && at > 0 {
-            unstyled(cell)
-        } else {
-            cell
-        })
-    }))
+    Row::new(
+        cells
+            .into_iter()
+            .map(|cell| Cell::from(if picked { unstyled(cell) } else { cell })),
+    )
 }
 
 /// `line` without its spans' styles, its alignment kept: a selected table row's cell, which the row's style reverses.
@@ -197,7 +195,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) -> 
     }
     footer(frame, bottom, app, theme);
     match &app.overlay {
-        Overlay::Help => help(frame, body, &mut hits),
+        Overlay::Help { page } => help(frame, body, *page, &mut hits),
         Overlay::Pick(picker) => pick(frame, body, picker, theme, &mut hits),
         Overlay::None | Overlay::Input(_) => {}
     }
@@ -242,19 +240,28 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut
         }
     }
     let right = Line::from(right);
-    // Where the tabs and what is on the right do not fit, the tabs not open show their digit only.
-    let mut tabs = tabs_of(app, TabNames::Whole);
+    // Where the tabs and what is on the right do not fit, the version goes first, then the open view's section,
+    // and only then do the tabs not open show their digit alone.
     let job_width = job.as_ref().map_or(0, Span::width);
-    if " runnerd ".width() + Line::from(tabs.clone()).width() + job_width + right.width()
-        > usize::from(area.width)
-    {
-        tabs = tabs_of(app, TabNames::Open);
-    }
+    let fits = |tabs: &[Span<'static>], version_width: usize| {
+        " runnerd ".width()
+            + version_width
+            + Line::from(tabs.to_vec()).width()
+            + job_width
+            + right.width()
+            <= usize::from(area.width)
+    };
+    let (tabs, with_version) = [
+        (TabNames::Whole, true),
+        (TabNames::Whole, false),
+        (TabNames::Plain, false),
+    ]
+    .into_iter()
+    .map(|(names, with_version)| (tabs_of(app, names), with_version))
+    .find(|(tabs, with_version)| fits(tabs, if *with_version { version.width() } else { 0 }))
+    .unwrap_or_else(|| (tabs_of(app, TabNames::Open), false));
     spans.extend(tabs.iter().cloned());
     spans.extend(job);
-    // The version goes first when the tabs and the connection do not fit beside it.
-    let with_version = Line::from(spans.clone()).width() + version.width() + right.width()
-        <= usize::from(area.width);
     if with_version {
         spans.insert(1, version.clone());
     }
@@ -301,9 +308,11 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut
 /// How much of a tab's name the header has room for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TabNames {
-    /// Every tab named.
+    /// Every tab named, the open one with its section.
     Whole,
-    /// Only the open tab named; the others show their digit.
+    /// Every tab named, the open one without its section.
+    Plain,
+    /// Only the open tab named, with its section; the others show their digit.
     Open,
 }
 
@@ -313,12 +322,16 @@ fn tabs_of(app: &App, names: TabNames) -> Vec<Span<'static>> {
         .zip(View::tabs())
         .map(|(key, (shown, _))| {
             if app.view.group() == Some(shown) {
-                let title = match app.view.section().filter(|_| View::of(shown).len() > 1) {
+                let title = match app
+                    .view
+                    .section()
+                    .filter(|_| View::of(shown).len() > 1 && names != TabNames::Plain)
+                {
                     Some(section) => format!(" {key} {} · {} ", shown.title(), section.title()),
                     None => format!(" {key} {} ", shown.title()),
                 };
                 Span::styled(title, selected())
-            } else if names == TabNames::Whole {
+            } else if names != TabNames::Open {
                 Span::raw(format!(" {key} {} ", shown.title()))
             } else {
                 Span::raw(format!(" {key} "))
@@ -482,10 +495,33 @@ fn footer_keys(app: &App, width: usize) -> String {
             (1, "d remove"),
             (1, "D remove all"),
         ],
-        View::Insights => vec![(2, "j/k move"), (1, "enter open run")],
+        View::Insights => {
+            let mut keys = vec![(2, "j/k move")];
+            // `enter` opens the selected insight's newest run, when it has one.
+            if let Some(insights) = app.insights.get()
+                && insights
+                    .insights
+                    .get(app.insight)
+                    .is_some_and(|insight| !insight.runs.is_empty())
+            {
+                keys.push((1, "enter open run"));
+            }
+            keys
+        }
         View::Sizing => vec![(2, "j/k move"), (1, "a apply the advice")],
         View::Caches => vec![(2, "j/k move"), (1, "d empty")],
-        View::Settings => vec![(2, "j/k move"), (1, "enter fold"), (1, "u read again")],
+        View::Settings => {
+            let mut keys = vec![(2, "j/k move")];
+            // `enter` folds and opens the passing checks, on their row.
+            if matches!(
+                app.check_rows().get(app.check),
+                Some(crate::tui::app::CheckRow::Passing(_))
+            ) {
+                keys.push((1, "enter fold"));
+            }
+            keys.push((1, "u read again"));
+            keys
+        }
         View::Job => {
             let mut keys = vec![
                 (1, "enter fold"),
@@ -540,9 +576,10 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn help(frame: &mut Frame<'_>, area: Rect, hits: &mut Hits) {
+fn help(frame: &mut Frame<'_>, area: Rect, page: usize, hits: &mut Hits) {
+    const KEY_WIDTH: usize = 12;
     let (digits, views) = view_keys(&View::tabs());
-    // At most 20, so it fits a terminal of 24 rows.
+    // 20, so they fit a terminal of 24 rows; a shorter one shows them a page at a time.
     let keys: [(&str, &str); 20] = [
         (digits.as_str(), views.as_str()),
         ("digit again", "the view's next section, such as records"),
@@ -565,20 +602,37 @@ fn help(frame: &mut Frame<'_>, area: Rect, hits: &mut Hits) {
         ("click wheel", "select, again to open; scroll"),
         ("? ctrl-z q", "this help; suspend; quit"),
     ];
-    let popup = centred(area, 62, length(keys.len()) + 2);
-    let lines: Vec<Line<'_>> = keys
-        .iter()
-        .map(|(key, what)| {
-            Line::from(vec![
-                Span::styled(format!(" {key:<12}"), bold()),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
+    let widest = keys.iter().map(|(_, what)| what.width()).max().unwrap_or(0);
+    let popup_width = length(1 + KEY_WIDTH + widest + 2).min(area.width);
+    // A description wraps under itself where the popup is narrower than the longest.
+    let room = usize::from(popup_width)
+        .saturating_sub(2 + 1 + KEY_WIDTH)
+        .max(1);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    for (key, what) in &keys {
+        for (at, part) in wrap(what, room).into_iter().enumerate() {
+            let key = if at == 0 { *key } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {key:<KEY_WIDTH$}"), bold()),
+                Span::raw(part),
+            ]));
+        }
+    }
+    let popup = centred(area, popup_width, length(lines.len()) + 2);
+    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
+    let pages = lines.len().div_ceil(shown).max(1);
+    let page = page % pages;
+    let first = page * shown;
+    let mut block = Block::bordered().title(" Keys ");
+    if pages > 1 {
+        block = block.title_bottom(
+            Line::from(format!(" page {} of {pages}, j/k ", page + 1)).right_aligned(),
+        );
+    }
     hits.cover(popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Keys ")),
+        Paragraph::new(lines.into_iter().skip(first).collect::<Vec<_>>()).block(block),
         popup,
     );
 }
@@ -678,10 +732,23 @@ const PANE_FROM: u16 = 140;
 /// `area` split into a list and, from [`PANE_FROM`] columns, a pane beside it for the selected row: a third of the
 /// width, from 40 to 64 cells, behind a dim rule.
 fn beside(frame: &mut Frame<'_>, area: Rect, theme: Theme) -> (Rect, Option<Rect>) {
+    beside_when(frame, area, theme, |_| true)
+}
+
+/// [`beside`], with the pane only where `keeps` says the list loses nothing at the width the pane leaves it.
+fn beside_when(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: Theme,
+    keeps: impl Fn(u16) -> bool,
+) -> (Rect, Option<Rect>) {
     if area.width < PANE_FROM {
         return (area, None);
     }
     let pane = (area.width / 3).clamp(40, 64);
+    if !keeps(area.width.saturating_sub(pane + 3)) {
+        return (area, None);
+    }
     let [list, _, rule, _, pane] = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(1),
@@ -718,6 +785,26 @@ fn spark(values: impl DoubleEndedIterator<Item = u64>, max: u64, width: usize) -
         .collect();
     bars.reverse();
     bars.into_iter().collect()
+}
+
+/// `lines` in `rows`: whole when they fit, else as many as leave a row for a dim `… N more lines`, so a cut is never
+/// silent.
+fn clip(mut lines: Vec<Line<'static>>, rows: usize, theme: Theme) -> Vec<Line<'static>> {
+    if lines.len() <= rows {
+        return lines;
+    }
+    if rows == 0 {
+        return Vec::new();
+    }
+    let hidden = lines.len() - (rows - 1);
+    lines.truncate(rows - 1);
+    let more = if hidden == 1 {
+        "… 1 more line".to_owned()
+    } else {
+        format!("… {hidden} more lines")
+    };
+    lines.push(Line::styled(more, theme.dim()));
+    lines
 }
 
 /// `text` in lines of at most `width` cells, broken between words; a word longer than a line is cut by [`fit`].
@@ -789,14 +876,35 @@ enum Cut {
 /// The fewest cells a name is cut to.
 const CUT_LEAST: usize = 10;
 
-/// The widths of `columns` in `room` cells with a cell between each, `None` for one left out: the highest ranked
-/// give way until the rest fit, or until only those ranked 0 are left, and then the names are cut, the widest first.
+/// The cells a name is cut to before a figure gives way for it: one long name does not cost a table its figures.
+const CUT_FAIR: usize = 30;
+
+/// The widths of `columns` in `room` cells with a cell between each, `None` for one left out: names wider than
+/// [`CUT_FAIR`] are cut to it first, then the highest ranked give way until the rest fit, or until only those ranked
+/// 0 are left, and then the names are cut further, the widest first.
 fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
     let mut widths: Vec<Option<usize>> = columns.iter().map(|column| Some(column.width)).collect();
     let used = |widths: &[Option<usize>]| -> usize {
         let shown: Vec<usize> = widths.iter().flatten().copied().collect();
         shown.iter().sum::<usize>() + shown.len().saturating_sub(1)
     };
+    let cut_to = |widths: &mut Vec<Option<usize>>, least: usize| {
+        while used(widths) > room {
+            let widest = columns
+                .iter()
+                .enumerate()
+                .filter(|(at, column)| {
+                    column.cut == Cut::Names && widths[*at].is_some_and(|width| width > least)
+                })
+                .max_by_key(|(at, _)| widths[*at])
+                .map(|(at, _)| at);
+            let Some(widest) = widest else { break };
+            if let Some(width) = &mut widths[widest] {
+                *width -= 1;
+            }
+        }
+    };
+    cut_to(&mut widths, CUT_FAIR);
     while used(&widths) > room {
         let least = columns
             .iter()
@@ -807,20 +915,7 @@ fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
         let Some(least) = least else { break };
         widths[least] = None;
     }
-    while used(&widths) > room {
-        let widest = columns
-            .iter()
-            .enumerate()
-            .filter(|(at, column)| {
-                column.cut == Cut::Names && widths[*at].is_some_and(|width| width > CUT_LEAST)
-            })
-            .max_by_key(|(at, _)| widths[*at])
-            .map(|(at, _)| at);
-        let Some(widest) = widest else { break };
-        if let Some(width) = &mut widths[widest] {
-            *width -= 1;
-        }
-    }
+    cut_to(&mut widths, CUT_LEAST);
     widths
 }
 

@@ -89,6 +89,7 @@ pub(super) fn caches(
         caches.volumes.len(),
     );
     let lines = build_lines(build, usize::from(build_area.width));
+    let lines = super::clip(lines, usize::from(build_area.height), theme);
     frame.render_widget(Paragraph::new(lines), build_area);
 }
 

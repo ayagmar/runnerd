@@ -10,14 +10,11 @@ use ratatui::widgets::Paragraph;
 use runnerd_core::api::{self, job_title};
 use unicode_width::UnicodeWidthStr;
 
-use super::{Theme, beside, bold, fit, heading, length, picked, wrap};
+use super::{Theme, beside, bold, clip, fit, heading, length, picked, wrap};
 use crate::human::ago;
 use crate::tui::app::App;
 use crate::tui::mouse::{Hits, List};
 use crate::tui::reading::{Reading, Unread};
-
-/// What the host's memory section is called.
-const HOST_TITLE: &str = "Host memory while CI ran";
 
 pub(super) fn insights(
     frame: &mut Frame<'_>,
@@ -63,11 +60,6 @@ pub(super) fn insights(
         .into_iter()
         .map(Line::from)
         .collect();
-    let savings_height = if length(savings.len()) <= main.height / 4 {
-        length(savings.len() + 1)
-    } else {
-        0
-    };
     let rows = length(insights.insights.len().max(1));
     // On a narrow terminal the selected insight's meaning goes under the list.
     let under = if pane.is_none() {
@@ -79,10 +71,21 @@ pub(super) fn insights(
     } else {
         Vec::new()
     };
-    let rest = main
-        .height
-        .saturating_sub(savings_height + rows.min(main.height));
-    let meaning_height = length(under.len() + 1).min(rest);
+    // The list, then the selected insight's meaning, then the savings where they still fit whole: the savings give
+    // way before the meaning.
+    let rest = main.height.saturating_sub(rows.min(main.height));
+    let meaning_height = if under.is_empty() {
+        0
+    } else {
+        length(under.len() + 1).min(rest)
+    };
+    let rest = rest - meaning_height;
+    let savings_height =
+        if length(savings.len()) <= main.height / 4 && length(savings.len() + 1) <= rest {
+            length(savings.len() + 1)
+        } else {
+            0
+        };
     let [savings_area, list_area, meaning_area, sections_area] = Layout::vertical([
         Constraint::Length(savings_height),
         Constraint::Length(rows),
@@ -97,7 +100,11 @@ pub(super) fn insights(
         insight_rows(frame, list_area, app, insights, theme, hits);
     }
     let mut lines = vec![Line::from("")];
-    lines.extend(under);
+    lines.extend(clip(
+        under,
+        usize::from(meaning_height.saturating_sub(1)),
+        theme,
+    ));
     frame.render_widget(Paragraph::new(lines), meaning_area);
     let sections = sections(insights, usize::from(sections_area.width), theme);
     let room = usize::from(sections_area.height);
@@ -112,14 +119,9 @@ pub(super) fn insights(
     }
     frame.render_widget(Paragraph::new(shown), sections_area);
     if let (Some(pane), Some(insight)) = (pane, insights.insights.get(app.insight)) {
+        let lines = meaning(insights, insight, usize::from(pane.width), now, theme);
         frame.render_widget(
-            Paragraph::new(meaning(
-                insights,
-                insight,
-                usize::from(pane.width),
-                now,
-                theme,
-            )),
+            Paragraph::new(clip(lines, usize::from(pane.height), theme)),
             pane,
         );
     }
@@ -178,26 +180,35 @@ fn meaning(
         .find(|waits| waits.repository == insight.repository)
     {
         lines.push(Line::from(""));
-        lines.extend(waits_lines(waits, theme));
+        lines.extend(waits_lines(waits, width, theme));
     }
     lines
 }
 
-/// A repository's waits this week, from queued to started, against the week before, as core words them.
-fn waits_lines(waits: &api::RepositoryWaits, theme: Theme) -> Vec<Line<'static>> {
-    let figures = waits.figures();
-    let label_width = figures
-        .iter()
-        .map(|figure| figure.label.width())
-        .max()
-        .unwrap_or(0);
+/// A repository's waits this week, from queued to started, against the week before, as core words them: its figures
+/// side by side in `width`, each a dim label before its value, and on the next line those that do not fit.
+fn waits_lines(waits: &api::RepositoryWaits, width: usize, theme: Theme) -> Vec<Line<'static>> {
+    const GAP: &str = "   ";
     let mut lines = vec![Line::styled(api::RepositoryWaits::TITLE, bold())];
-    lines.extend(figures.into_iter().map(|figure| {
-        Line::from(vec![
-            Span::styled(format!("{:<label_width$}  ", figure.label), theme.dim()),
-            Span::raw(figure.value),
-        ])
-    }));
+    let mut line: Vec<Span<'static>> = Vec::new();
+    for figure in waits.figures() {
+        let spans = [
+            Span::styled(format!("{} ", figure.label), theme.dim()),
+            Span::styled(figure.value, bold()),
+        ];
+        let used = Line::from(line.clone()).width();
+        let adds = spans.iter().map(Span::width).sum::<usize>();
+        if !line.is_empty() && used + GAP.width() + adds > width {
+            lines.push(Line::from(std::mem::take(&mut line)));
+        }
+        if !line.is_empty() {
+            line.push(Span::raw(GAP));
+        }
+        line.extend(spans);
+    }
+    if !line.is_empty() {
+        lines.push(Line::from(line));
+    }
     lines
 }
 
@@ -206,7 +217,7 @@ fn waits_lines(waits: &api::RepositoryWaits, theme: Theme) -> Vec<Line<'static>>
 fn sections(insights: &api::Insights, width: usize, theme: Theme) -> Vec<Vec<Line<'static>>> {
     let mut sections = Vec::new();
     if !insights.host.is_empty() {
-        let mut lines = vec![Line::styled(HOST_TITLE, bold())];
+        let mut lines = vec![Line::styled(api::HostHazard::TITLE, bold())];
         lines.extend(
             insights
                 .host

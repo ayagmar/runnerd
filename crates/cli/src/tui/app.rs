@@ -678,6 +678,8 @@ pub(crate) struct App {
     /// The view `Esc` returns to from a job.
     back: View,
     pub(crate) pane: Pane,
+    /// The overview's pane `!` and `Esc` return to from the attention list: the one it was opened from.
+    attention_back: Pane,
     pub(crate) notice: usize,
     pub(crate) slot: usize,
     pub(crate) queued: usize,
@@ -763,6 +765,7 @@ impl App {
             view: View::Overview,
             back: View::Overview,
             pane: Pane::Slots,
+            attention_back: Pane::Slots,
             notice: 0,
             slot: 0,
             queued: 0,
@@ -1366,7 +1369,7 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
-            KeyCode::Char('?') => self.overlay = Overlay::Help,
+            KeyCode::Char('?') => self.overlay = Overlay::Help { page: 0 },
             KeyCode::Char('o') => return self.show(View::Overview),
             KeyCode::Char('h') => return self.show(View::History),
             KeyCode::Char('!') => return self.show_attention(),
@@ -1438,11 +1441,18 @@ impl App {
     fn overlay_key(&mut self, code: KeyCode) -> Option<Vec<Effect>> {
         match std::mem::take(&mut self.overlay) {
             Overlay::None => {}
-            Overlay::Help => {
-                return Some(match code {
-                    KeyCode::Char('q') => vec![Effect::Quit],
-                    _ => Vec::new(),
-                });
+            Overlay::Help { page } => {
+                // j and k turn the keys' pages where they do not fit; any other key closes them.
+                let page = match code {
+                    KeyCode::Down | KeyCode::Char('j') => Some(page.saturating_add(1)),
+                    KeyCode::Up | KeyCode::Char('k') => Some(page.saturating_sub(1)),
+                    KeyCode::Char('q') => return Some(vec![Effect::Quit]),
+                    _ => None,
+                };
+                if let Some(page) = page {
+                    self.overlay = Overlay::Help { page };
+                }
+                return Some(Vec::new());
             }
             Overlay::Pick(mut picker) => {
                 match code {
@@ -1479,9 +1489,14 @@ impl App {
     /// The overview with what needs attention open and selected; on it already, closes it again.
     fn show_attention(&mut self) -> Vec<Effect> {
         if self.view == View::Overview && self.pane == Pane::Attention {
-            self.pane = Pane::Slots;
+            self.pane = self.attention_back;
             return Vec::new();
         }
+        self.attention_back = if self.view == View::Overview {
+            self.pane
+        } else {
+            Pane::Slots
+        };
         let effects = self.show(View::Overview);
         if !self.notices().is_empty() {
             self.pane = Pane::Attention;
@@ -1510,7 +1525,7 @@ impl App {
                 self.first_page()
             }
             View::Overview if self.pane == Pane::Attention => {
-                self.pane = Pane::Slots;
+                self.pane = self.attention_back;
                 Vec::new()
             }
             _ => Vec::new(),

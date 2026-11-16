@@ -25,6 +25,9 @@ use crate::tui::mouse::{Hits, List};
 /// The fewest rows the repositories and latest jobs keep: a title and four jobs.
 pub(super) const LISTS_MIN: u16 = 5;
 
+/// The rows the repositories and latest jobs keep before the charts take theirs: a title and seven jobs.
+const LISTS_FAIR: u16 = 8;
+
 /// The fewest rows a chart is drawn in: its border and two rows of bars.
 const CHARTS_MIN: u16 = 4;
 
@@ -67,8 +70,9 @@ pub(super) fn overview(
     };
     let left = left.saturating_sub(queue_height);
     let side_by_side = area.width >= 100;
-    let lists_wanted = lists_height(app, side_by_side).max(LISTS_MIN);
-    let charts_height = slice::height(app).min(left.saturating_sub(lists_wanted));
+    // The charts keep their height while the lists keep a fair share; the lists take every other row.
+    let lists_kept = lists_height(app, side_by_side).clamp(LISTS_MIN, LISTS_FAIR);
+    let charts_height = slice::height(app).min(left.saturating_sub(lists_kept));
     let charts_height = if charts_height >= CHARTS_MIN {
         charts_height
     } else {
@@ -110,8 +114,15 @@ pub(super) fn overview(
     if charts_height > 0 {
         slice::slice(frame, charts_area, app, theme);
     }
-    let [repositories_area, latest_area] = if side_by_side {
-        let width = repositories_width(app).min(lists_area.width * 2 / 5);
+    let [repositories_area, latest_area] = if !side_by_side && lists_area.height < 4 {
+        // Too short for both lists one above the other: the focused one alone, so a focused list is always drawn.
+        if app.pane == Pane::Latest {
+            [Rect::default(), lists_area]
+        } else {
+            [lists_area, Rect::default()]
+        }
+    } else if side_by_side {
+        let width = repositories_width(app, lists_area.width * 2 / 5);
         Layout::horizontal([Constraint::Length(width), Constraint::Min(0)]).areas(lists_area)
     } else {
         // Stacked, the repositories take the rows they need, at most half unless the latest jobs need less.
@@ -457,24 +468,34 @@ pub(super) fn queue(
     );
 }
 
-/// What the repositories pane needs to show each repository whole with its profile, and a cell before the next pane.
-pub(super) fn repositories_width(app: &App) -> u16 {
-    let widest = app
-        .live
-        .status
-        .repositories
-        .iter()
-        .map(|repository| {
-            // `■ `, the name, `  profile`, `  N queued`, `  paused`.
-            2 + repository.name.width()
-                + 2
-                + repository.profiles().width()
-                + format!("  {} queued", repository.queued_jobs).width()
-                + if repository.paused { 8 } else { 0 }
-        })
-        .max()
-        .unwrap_or(0);
-    length(widest + 1).max(24)
+/// What the repositories pane needs to show each repository whole, with its profiles when that fits in `most`
+/// cells, and a cell before the next pane: the rest goes to the latest jobs.
+pub(super) fn repositories_width(app: &App, most: u16) -> u16 {
+    let widest = |profiles: bool| {
+        let widest = app
+            .live
+            .status
+            .repositories
+            .iter()
+            .map(|repository| {
+                // `■ `, the name, `  profile`, `  N queued`, `  paused`.
+                2 + repository.name.width()
+                    + if profiles {
+                        2 + repository.profiles().width()
+                    } else {
+                        0
+                    }
+                    + format!("  {} queued", repository.queued_jobs).width()
+                    + if repository.paused { 8 } else { 0 }
+            })
+            .max()
+            .unwrap_or(0);
+        length(widest + 1).max(24)
+    };
+    Some(widest(true))
+        .filter(|width| *width <= most)
+        .unwrap_or_else(|| widest(false))
+        .min(most)
 }
 
 pub(super) fn repositories(

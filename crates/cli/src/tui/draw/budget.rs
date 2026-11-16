@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use runnerd_core::api::{BudgetParts, HeldKind};
+use runnerd_core::api::{BudgetParts, HeldKind, SlotPart};
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
@@ -30,21 +30,26 @@ pub(super) fn height(bar: u16) -> u16 {
 }
 
 /// The budget's heading: what is reserved of what, how runners are admitted, and what the slice uses, each with its
-/// rank for [`fit_details`].
+/// rank for [`fit_details`]. The names of segments too narrow to label themselves rank [`NAMED_RANK`], so they
+/// outlive the host's long sentence.
 pub(super) fn budget_note(app: &App) -> Vec<(u8, String)> {
     let budget = &app.live.status.budget;
-    let mut parts = vec![(0, budget.memory_reading().line())];
+    let mut parts = vec![(1, budget.memory_reading().line())];
     if let Some(cpu) = budget.cpu {
-        parts.push((1, cpu.line()));
-    }
-    if let Some(host) = budget.host_line() {
-        parts.push((1, host));
+        parts.push((2, cpu.line()));
     }
     if let Some(host) = &app.live.host {
-        parts.push((2, format!("{} in use, sampled", bytes(host.memory))));
+        parts.push((3, format!("{} in use, sampled", bytes(host.memory))));
+    }
+    if let Some(host) = budget.host_line() {
+        parts.push((4, host));
     }
     parts
 }
+
+/// The rank of a segment's name in the heading: the last to go, as nothing else names it, though it follows what is
+/// reserved.
+const NAMED_RANK: u8 = 0;
 
 /// One segment of the strip.
 struct Segment {
@@ -57,8 +62,8 @@ struct Segment {
     style: Style,
     /// Its name under it, longest first, such as `jvm 1`, `mirror` or `held by the host`, `host`.
     names: Vec<String>,
-    /// Its figure under the name, longest first: `3.9G of 9G`, `3.9G`.
-    figures: Vec<String>,
+    /// Its figure under the name, longest first: `3.9G of 9G cap`, `3.9G`.
+    figures: Vec<Figure>,
     /// Whether the heading names it when it has no room: what a slot's lane does not show.
     named_above: bool,
     /// Whether it ends in a gap before the next segment.
@@ -96,9 +101,16 @@ pub(super) fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
             "█".repeat(usize::from(segment.used)),
             segment.style,
         ));
+        // What a slot's job does not use is dim beside what it does, so the two read apart in a light terminal,
+        // where its colour is pale either way.
+        let rest_style = if segment.used > 0 {
+            segment.style.add_modifier(Modifier::DIM)
+        } else {
+            segment.style
+        };
         cells.push(Span::styled(
             segment.glyph.to_string().repeat(rest),
-            segment.style,
+            rest_style,
         ));
         if segment.gap {
             cells.push(Span::raw(" "));
@@ -117,11 +129,17 @@ pub(super) fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
     }
 
     let placed = place(&segments);
+    let mut heading_at = 1;
     for (segment, label) in segments.iter().zip(&placed) {
         if segment.named_above && label.is_none() {
             let name = segment.names.first().cloned().unwrap_or_default();
-            let figure = segment.figures.last().cloned().unwrap_or_default();
-            note.push((3, format!("{name} {figure}")));
+            let figure = segment
+                .figures
+                .last()
+                .map(|figure| figure.text.clone())
+                .unwrap_or_default();
+            note.insert(heading_at, (NAMED_RANK, format!("{name} {figure}")));
+            heading_at += 1;
         }
     }
     let names: Vec<Option<String>> = placed
@@ -130,7 +148,7 @@ pub(super) fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
         .collect();
     let figures: Vec<Option<String>> = placed
         .iter()
-        .map(|label| label.as_ref().map(|label| label.figure.clone()))
+        .map(|label| label.as_ref().map(|label| label.figure.text.clone()))
         .collect();
     frame.render_widget(labels(&segments, &names, Modifier::BOLD, theme), names_area);
     frame.render_widget(
@@ -168,15 +186,32 @@ fn labels(
     Line::from(spans)
 }
 
+/// A figure under a segment's name, and the cells it may take as it changes: a slot's reading keeps its form while
+/// its job's sample gains a digit.
+#[derive(Clone)]
+struct Figure {
+    text: String,
+    room: usize,
+}
+
+impl Figure {
+    fn plain(text: String) -> Figure {
+        Figure {
+            room: text.width(),
+            text,
+        }
+    }
+}
+
 /// A segment's name and figure, one above the other.
 struct Label {
     name: String,
-    figure: String,
+    figure: Figure,
 }
 
 impl Label {
     fn width(&self) -> usize {
-        self.name.width().max(self.figure.width())
+        self.name.width().max(self.figure.room)
     }
 }
 
@@ -195,7 +230,7 @@ fn options(segment: &Segment) -> Vec<Label> {
     if !segment.named_above {
         options.extend(segment.names.iter().map(|name| Label {
             name: name.clone(),
-            figure: String::new(),
+            figure: Figure::plain(String::new()),
         }));
     }
     options.sort_by_key(|label| std::cmp::Reverse(label.width()));
@@ -250,42 +285,38 @@ fn place(segments: &[Segment]) -> Vec<Option<Label>> {
     placed
 }
 
-/// What fills a slot's segment: the cells its job uses, the glyph of the rest, and its figures, longest first.
-struct Fill {
-    used: u16,
-    glyph: char,
-    figures: Vec<String>,
-}
-
-impl Fill {
-    /// A slot of `memory`, with a runner or not, its job's sampled memory if there is one, `room` cells wide.
-    fn of(runner: bool, sample: Option<u64>, memory: u64, room: u16) -> Fill {
-        match (runner, sample) {
-            (true, Some(sample)) => Fill {
-                used: scale(sample, memory, room),
-                glyph: '▓',
-                figures: vec![
-                    format!("{} of {}", bytes(sample), bytes(memory)),
-                    format!(
-                        "{} of {}",
-                        ByteSize(sample).short(),
-                        ByteSize(memory).short()
-                    ),
-                    bytes(sample),
-                    ByteSize(sample).short(),
-                ],
-            },
-            (true, None) => Fill {
-                used: 0,
-                glyph: '▓',
-                figures: vec![bytes(memory), ByteSize(memory).short()],
-            },
-            (false, _) => Fill {
-                used: 0,
-                glyph: '░',
-                figures: vec![format!("idle {}", bytes(memory)), "idle".to_owned()],
-            },
-        }
+/// A slot's segment of `cells`, filled as far as its job uses `sample` bytes of it, labelled with core's reading.
+fn slot_segment(
+    app: &App,
+    part: &SlotPart,
+    cells: u16,
+    sample: Option<u64>,
+    theme: Theme,
+) -> Segment {
+    let status = &app.live.status;
+    let name = status
+        .profiles
+        .get(part.profile)
+        .map_or_else(String::new, |profile| profile.name.clone());
+    Segment {
+        cells,
+        used: sample.map_or(0, |sample| {
+            scale(sample, part.memory, cells.saturating_sub(1))
+        }),
+        glyph: if part.reserved { '▓' } else { '░' },
+        style: theme.profile(Some(part.profile)),
+        names: vec![format!("{name} {}", part.slot)],
+        figures: status
+            .slot_reading(part, sample)
+            .forms()
+            .into_iter()
+            .map(|form| Figure {
+                text: form.text,
+                room: form.room,
+            })
+            .collect(),
+        named_above: false,
+        gap: true,
     }
 }
 
@@ -304,30 +335,18 @@ fn segments(app: &App, parts: &BudgetParts, width: u16, theme: Theme) -> Vec<Seg
         let Some(slot) = profile.slots.iter().find(|slot| slot.slot == part.slot) else {
             continue;
         };
+        // Two cells at least: one to draw, one for the gap after it.
         let cells = scale(part.memory, whole, width)
-            .max(1)
+            .max(2)
             .min(width.saturating_sub(drawn));
         if cells == 0 {
             break;
         }
-        let sample =
-            slot_job(app, profile, slot).and_then(|job| app.live.samples.get(&job.summary.id));
-        let fill = Fill::of(
-            slot.runner.is_some(),
-            sample.map(|sample| sample.memory),
-            part.memory,
-            cells.saturating_sub(1),
-        );
-        segments.push(Segment {
-            cells,
-            used: fill.used,
-            glyph: fill.glyph,
-            style: theme.profile(Some(part.profile)),
-            names: vec![format!("{} {}", profile.name, slot.slot)],
-            figures: fill.figures,
-            named_above: false,
-            gap: true,
-        });
+        let sample = slot_job(app, profile, slot)
+            .and_then(|job| app.live.samples.get(&job.summary.id))
+            .map(|sample| sample.memory)
+            .filter(|_| part.reserved);
+        segments.push(slot_segment(app, part, cells, sample, theme));
         drawn += cells;
     }
     for held in &parts.held {
@@ -349,7 +368,10 @@ fn segments(app: &App, parts: &BudgetParts, width: u16, theme: Theme) -> Vec<Seg
             glyph: '▒',
             style,
             names: vec![held.name()],
-            figures: vec![bytes(held.memory), ByteSize(held.memory).short()],
+            figures: vec![
+                Figure::plain(bytes(held.memory)),
+                Figure::plain(ByteSize(held.memory).short()),
+            ],
             named_above: true,
             gap: true,
         });
@@ -367,8 +389,8 @@ fn segments(app: &App, parts: &BudgetParts, width: u16, theme: Theme) -> Vec<Seg
             used: 0,
             glyph: '·',
             style: theme.dim(),
-            names: vec!["free".to_owned()],
-            figures: vec![free.reading.figure.clone()],
+            names: vec![free.name().to_owned()],
+            figures: vec![Figure::plain(free.reading.figure.clone())],
             named_above: true,
             gap: false,
         });
@@ -383,7 +405,7 @@ fn segments(app: &App, parts: &BudgetParts, width: u16, theme: Theme) -> Vec<Seg
                 closed.kind.name().to_owned(),
                 closed.kind.short().to_owned(),
             ],
-            figures: vec![closed.reading.figure.clone()],
+            figures: vec![Figure::plain(closed.reading.figure.clone())],
             named_above: true,
             gap: false,
         });

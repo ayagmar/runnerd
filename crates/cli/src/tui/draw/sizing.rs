@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use super::Theme;
 use super::budget::scale;
 use super::job::fit_details;
-use super::{TableColumn, beside, bold, fit, fitted_table, heading, length, wrap};
+use super::{TableColumn, beside, bold, clip, fit, fitted_table, heading, length, wrap};
 use crate::human::{self, Tone, bytes, cores_used, duration};
 use crate::tui::app::App;
 use crate::tui::mouse::{Hits, List};
@@ -66,31 +66,19 @@ pub(super) fn sizing(
         _ => Vec::new(),
     };
     let jobs = profile.map_or(0, |profile| profile.jobs.len());
-    let mut plan = rules(sizing, width, theme);
-    plan.extend(plan_rows(sizing, width, now, app, theme));
     let profiles_height = length(sizing.profiles.len() + 1);
-    let plan_height = if plan.is_empty() {
-        0
-    } else {
-        length(plan.len() + 1)
-    };
-    let left = main.height.saturating_sub(profiles_height + plan_height);
-    let under_height = if under.is_empty() {
-        0
-    } else {
-        length(under.len() + 1).min(left)
-    };
-    let left = left.saturating_sub(under_height);
-    let jobs_height = if jobs == 0 {
-        0
-    } else {
-        length(jobs + 2).min(left)
-    };
+    let rows = Rows::of(
+        main.height.saturating_sub(profiles_height),
+        jobs,
+        under.len(),
+        rules(sizing, width, theme),
+        plan_rows(sizing, width, now, app, theme),
+    );
     let [profiles_area, plan_area, under_area, jobs_area] = Layout::vertical([
         Constraint::Length(profiles_height),
-        Constraint::Length(plan_height),
-        Constraint::Length(under_height),
-        Constraint::Length(jobs_height),
+        Constraint::Length(rows.plan_height),
+        Constraint::Length(rows.under),
+        Constraint::Length(rows.jobs),
     ])
     .areas(main);
     let table = profiles_table(app, sizing, width, theme);
@@ -98,13 +86,17 @@ pub(super) fn sizing(
     frame.render_stateful_widget(table, profiles_area, &mut state);
     super::table_hits(hits, profiles_area, List::Sizing, 0, sizing.profiles.len());
     let mut lines = vec![Line::from("")];
-    lines.extend(plan);
+    lines.extend(rows.plan);
     frame.render_widget(Paragraph::new(lines), plan_area);
     let mut lines = vec![Line::from("")];
-    lines.extend(under);
+    lines.extend(clip(
+        under,
+        usize::from(rows.under.saturating_sub(1)),
+        theme,
+    ));
     frame.render_widget(Paragraph::new(lines), under_area);
     if let Some(profile) = profile {
-        if jobs_height > 0 {
+        if rows.jobs > 0 {
             let [_, table_area] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(jobs_area);
             frame.render_widget(jobs_table(profile, width, theme), table_area);
@@ -114,7 +106,67 @@ pub(super) fn sizing(
             let mut lines = meaning(sizing, profile, pane_width, now, app, theme);
             lines.push(Line::from(""));
             lines.extend(peaks(profile, pane_width, app, theme));
+            let lines = clip(lines, usize::from(pane.height), theme);
             frame.render_widget(Paragraph::new(lines), pane);
+        }
+    }
+}
+
+/// How the rows under the profiles are shared, from first to last given: the selected profile's jobs keep a blank row,
+/// their header and two jobs, drawn only with a job in sight so an empty table never reads as a profile without
+/// jobs; then the selected profile's meaning; then what auto sizing does to each profile, and its rules, each whole
+/// or not at all; the jobs take the rest.
+struct Rows {
+    plan: Vec<Line<'static>>,
+    plan_height: u16,
+    under: u16,
+    jobs: u16,
+}
+
+impl Rows {
+    fn of(
+        mut left: u16,
+        jobs: usize,
+        under: usize,
+        rules: Vec<Line<'static>>,
+        plan_rows: Vec<Line<'static>>,
+    ) -> Rows {
+        let jobs_least = if jobs == 0 {
+            0
+        } else {
+            length(jobs.min(2) + 2)
+        };
+        let jobs_least = if left >= jobs_least { jobs_least } else { 0 };
+        left -= jobs_least;
+        let under = if under == 0 {
+            0
+        } else {
+            length(under + 1).min(left)
+        };
+        left -= under;
+        let mut plan = Vec::new();
+        if !plan_rows.is_empty() && length(plan_rows.len() + 1) <= left {
+            plan = plan_rows;
+            if length(plan.len() + rules.len() + 1) <= left {
+                plan.splice(0..0, rules);
+            }
+        }
+        let plan_height = if plan.is_empty() {
+            0
+        } else {
+            length(plan.len() + 1)
+        };
+        left -= plan_height;
+        let jobs = if jobs_least == 0 {
+            0
+        } else {
+            (jobs_least + left).min(length(jobs + 2))
+        };
+        Rows {
+            plan,
+            plan_height,
+            under,
+            jobs,
         }
     }
 }

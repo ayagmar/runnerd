@@ -12,7 +12,7 @@ use super::Theme;
 use super::job::fit_details;
 use super::overview::{badge, badge_width};
 use super::timeline::timeline;
-use super::{beside, bold, column_title, fit, heading, length, row_of, selected, table_hits};
+use super::{beside_when, bold, column_title, fit, heading, length, row_of, selected, table_hits};
 use crate::human::{ago, bytes, cores_used, duration};
 use crate::tui::app::{App, History, Lens};
 use crate::tui::mouse::{Hits, List};
@@ -51,7 +51,9 @@ pub(super) fn history(
         frame.render_widget(Line::styled("no jobs", theme.dim()), body);
         return;
     }
-    let (body, pane) = beside(frame, body, theme);
+    let (body, pane) = beside_when(frame, body, theme, |width| {
+        Columns::alike(jobs, now, body.width, width)
+    });
     let columns = Columns::of(jobs, body.width, now);
     let rows = jobs.iter().enumerate().map(|(at, job)| {
         let mut cells = Vec::new();
@@ -217,6 +219,18 @@ impl Columns {
                 .map(|(column, width, _)| (column, width))
                 .collect(),
         }
+    }
+
+    /// Whether the list shows the same columns at `width` as at `full`: the pane beside it opens only where it does.
+    fn alike(jobs: &[JobSummary], now: u64, full: u16, width: u16) -> bool {
+        let kinds = |width| -> Vec<Column> {
+            Self::of(jobs, width, now)
+                .shown
+                .into_iter()
+                .map(|(column, _)| column)
+                .collect()
+        };
+        kinds(full) == kinds(width)
     }
 
     /// Each column whose cells say something, as wide as its content, with the order it gives way in: the highest
