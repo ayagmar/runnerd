@@ -47,7 +47,7 @@ Redraws in place on a terminal; otherwise prints one line per event.
 
 ## `runnerctl tui`
 
-Full-screen dashboard: what needs attention, CI's health, the budget and each slot's job, the queue with why each job waits, the jobs with search, filters and a timeline, insights, sizing and caches, the doctor's checks, and each job's steps, failure and folded log, with cancel and re-run.
+Full-screen dashboard: CI's health, the budget as lanes with each slot's job, the queue with why each job waits, and what needs attention on one line; the jobs with search, filters and a timeline, insights, sizing and caches, the doctor's checks, and each job's steps, failure and folded log, with cancel and re-run.
 
 Keys: 1-5 the views, tab and j/k to move, enter to open, / to search, ? for all. The mouse clicks and scrolls unless --no-mouse or RUNNERCTL_NO_MOUSE is set.
 

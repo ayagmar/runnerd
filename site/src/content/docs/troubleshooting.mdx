@@ -3,7 +3,15 @@ title: Troubleshooting
 description: Every check runnerd doctor makes, what each failure or warning means, and its fix.
 ---
 
+import Shot from '../../components/Shot.astro';
+
 `runnerd doctor` checks the host and the config, prints each check as `ok`, `info`, `WARN`, `FAIL` or `skip`, and gives a fix under each warning and failure. `runnerctl doctor` shows the running daemon's last run, or runs `runnerd doctor` when no daemon runs; the dashboard's Settings page shows the same, and its warnings and failures are listed as needing attention. A check that cannot run because an earlier one failed, such as everything Docker answers while Docker is down, is skipped.
+
+<Shot
+  name="settings"
+  alt="The Settings page: runnerd.toml in an editor with line numbers, and beside it the doctor, with when it last ran and Run again, showing two warnings with their fixes (a public repository, a config file other users can read) above one folded line for the checks that passed, then the budget check: the largest runner and the mirror take 9.5G of 33G."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
 
 ## Docker and isolation
 

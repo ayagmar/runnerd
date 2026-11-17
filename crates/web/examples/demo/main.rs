@@ -444,8 +444,19 @@ fn scene(fake: &fake::Fake) {
             status.queued.clear();
             for repository in &mut status.repositories {
                 repository.queued_jobs = 0;
+                for pool in &mut repository.pools {
+                    pool.queued_jobs = 0;
+                }
             }
+            // What the busy scene reserved goes with its runners: memory but the mirror's, the host's spare
+            // worked out from it, and every CPU.
             status.budget.memory_in_use = status.budget.mirror_memory;
+            if let Some(host) = &mut status.budget.host {
+                host.spare = host.limit.saturating_sub(status.budget.memory_in_use);
+            }
+            if let Some(cpu) = &mut status.budget.cpu {
+                cpu.in_use = 0;
+            }
             for job in &mut fixtures.jobs {
                 if job.summary.state == JobState::Running {
                     job.summary.state = JobState::Completed;

@@ -143,9 +143,62 @@ h1#_top {
   height: auto;
 }
 
+.shot:active {
+  opacity: 0.85;
+}
+
 [data-theme='light'] .shot[data-shot-theme='dark'],
 [data-theme='dark'] .shot[data-shot-theme='light'] {
   display: none;
+}
+
+/* Headings balance their lines; prose avoids a last word alone. */
+:is(h1, h2, h3, h4) {
+  text-wrap: balance;
+}
+
+.sl-markdown-content :is(p, li) {
+  text-wrap: pretty;
+}
+
+/* Starlight's header and menus: 40px targets on a wide screen with a mouse, 44px (below) on phones, narrow screens
+   and any touch screen. */
+.site-title,
+site-search > button[data-open-modal],
+.social-icons a,
+starlight-theme-select label,
+.sidebar-content a,
+.sidebar-content summary,
+starlight-toc a {
+  min-height: 2.5rem;
+  align-items: center;
+}
+
+site-search > button[data-open-modal],
+.social-icons a {
+  min-width: 2.5rem;
+  justify-content: center;
+}
+
+.sidebar-content a,
+starlight-toc a {
+  display: flex;
+}
+
+.sl-markdown-content .expressive-code .copy button {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+.sl-skip-link {
+  min-height: 2.5rem;
+}
+
+.sl-markdown-content .sl-anchor-link {
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
 }
 
 /* Starlight's header and menus: 44px tap targets on phones and narrow screens, and on any touch screen. */

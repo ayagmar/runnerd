@@ -5,10 +5,17 @@ description: What each cache keeps between jobs, the build cache shared by every
 
 import Caches from '../../../components/diagrams/Caches.astro';
 import Printed from '../../../components/Printed.astro';
+import Shot from '../../../components/Shot.astro';
 
 Yes, in three layers: the slot a job runs in keeps what the last job there left, a build cache per repository serves every slot, and `actions/cache` restores from this machine. `runnerctl caches` shows each volume, its size and the build cache's hits:
 
 <Printed command="runnerctl caches" name="caches" />
+
+<Shot
+  name="caches"
+  alt="The Caches page: 47.38G in 10 volumes. Each volume is a row with its size, its bound where it has one, drawn as a fill against it, its size over 30 days and one labelled button: Reseed from slot 1 for a profile's snapshot, Empty for the rest. Under them, the build cache's week as figures: entries, lookups hit, served, stored and uploads refused."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
 
 ## Warm caches
 

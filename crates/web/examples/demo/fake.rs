@@ -961,7 +961,7 @@ fn insights(fixtures: &Fixtures) -> Insights {
         p50: Some(p50),
         p95: Some(p95),
     };
-    Insights {
+    let mut shown = Insights {
         since: now - 14 * 86_400,
         until: now,
         insights: vec![
@@ -979,35 +979,38 @@ fn insights(fixtures: &Fixtures) -> Insights {
                 },
                 vec![link("halyard/ledger", 2 * 3600, 1)],
             ),
+            // Auto sizing is on in the demo (main.rs's auto_sizing), so it deals with these two: core words them
+            // so and makes them notices.
             insight(
                 "near-cap:halyard/ledger/CI/integration",
-                Severity::Warning,
+                Severity::Notice,
                 "halyard/ledger",
                 Some("integration"),
-                "halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing is off: raise jvm's \
-                 memory, or turn it on.",
+                "halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing raises jvm when a run \
+                 meets the cap.",
                 InsightKind::NearCap {
                     profile: "jvm".to_owned(),
                     peak: 81 * GIB / 10,
                     cap: 9 * GIB,
-                    auto: AutoNote::Off,
+                    auto: AutoNote::Raises,
                 },
                 vec![link("halyard/ledger", 5 * 3600, 1)],
             ),
             insight(
                 "cpu-held:halyard/ledger/CI/build",
-                Severity::Warning,
+                Severity::Notice,
                 "halyard/ledger",
                 Some("build"),
                 "halyard/ledger: CI / build was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota \
-                 throttling it in 15% of its run or more. Auto sizing is off: set jvm's cpus to 10, or turn it on.",
+                 throttling it in 15% of its run or more. Auto sizing raises jvm's cpus while each raise makes it \
+                 faster or less throttled and the slice has room; runnerctl sizing says when it cannot.",
                 InsightKind::CpuHeld {
                     profile: "jvm".to_owned(),
                     cpus: 8,
                     held: 4,
                     total: 10,
                     raised_from: None,
-                    set: Some(10),
+                    set: None,
                 },
                 vec![link("halyard/ledger", 7 * 3600, 1)],
             ),
@@ -1065,7 +1068,18 @@ fn insights(fixtures: &Fixtures) -> Insights {
         ],
         host: Vec::new(),
         disk: Some(disk_writes()),
-    }
+    };
+    // In the order the daemon serves them (`Insights::insights`): warnings first, then by repository, workflow and job.
+    shown.insights.sort_by(|a, b| {
+        (a.severity, &a.repository, &a.workflow, &a.job, &a.key).cmp(&(
+            b.severity,
+            &b.repository,
+            &b.workflow,
+            &b.job,
+            &b.key,
+        ))
+    });
+    shown
 }
 
 /// What the demo's jobs and its drive wrote over the insights' window.

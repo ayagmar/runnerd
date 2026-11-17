@@ -22,11 +22,27 @@ The browser stays signed in for 30 days after its last visit. Memory and CPU are
 
 <Shot
   name="overview"
-  alt="The overview: four things that need attention, the health figures, a lane per slot laid over the memory budget with the running jobs' memory and CPU, and jobs waiting with their reasons."
+  alt="The overview: what needs attention as one line beside the title, four health figures, the memory budget as a lane per slot with the running jobs' step, memory and CPU, lanes for the mirror, what is free and what the host holds, then the waiting jobs with their reasons, the latest jobs, the repositories and the slice's charts."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-The overview opens on what needs attention, when anything does. Below it, a lane per slot shows its share of the memory budget and the job it runs. Five views, `1` to `5` on the keyboard: Overview, Jobs, Insights, Capacity and Settings. [Pages and keys](../../reference/pages-and-keys/) lists what each shows.
+The overview opens on four figures and the memory budget: a lane per slot, as wide as its share of the slice and filled to what its job uses now. What needs attention is one line beside the title that opens to the list.
+
+<Shot
+  name="overview-idle"
+  alt="The overview of an idle machine: 0 of 6 slots running, nothing waiting, 512M of 33G reserved; the lanes are the mirror's 512M, 29.5G free and 3G held by the host, and the six idle slots are chips under them."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
+
+With no runner up, under measured admission, no slot holds any of the budget: the lanes are the mirror, what is free and what the host holds, and each slot is a chip under them, or a row on a phone.
+
+<Shot
+  name="jobs"
+  alt="The Jobs page: the last 30 days as five figures (861 jobs, 90% succeeded, a 9m 07s average run, an 18s average wait, a 7G sampled memory peak) and three small charts, one search field, outcome and repository chips, a Filters fold, then the rows."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
+
+Jobs opens on its last 30 days, then one search field and the rows. Five views, `1` to `5` on the keyboard: Overview, Jobs, Insights, Capacity and Settings. [Pages and keys](../../reference/pages-and-keys/) lists what each shows.
 
 ## The terminal dashboard
 
@@ -34,7 +50,7 @@ The overview opens on what needs attention, when anything does. Below it, a lane
 
 <Tui
   name="overview-96"
-  label="runnerctl tui's overview at 96 by 26: the health line, what needs attention, a row per slot, waiting jobs with their reasons, the repositories and the latest jobs."
+  label="runnerctl tui's overview at 96 by 26: the four health figures, what needs attention as one line, the budget as a strip with a segment per slot, a row per slot with its job, waiting jobs with their reasons, the repositories and the latest jobs."
 />
 
 When the daemon goes away the header says `reconnecting` and the event stream resumes where it stopped. `cargo build -p runnerd-cli --no-default-features` builds `runnerctl` without the TUI.

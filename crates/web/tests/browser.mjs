@@ -3,7 +3,8 @@
 // a first visit to Settings, the doctor's checks included, moves nothing once painted; the jobs list's chips sit in
 // the Filters fold on a phone and beside the search on a wide screen; on a phone a running job's log is part of the
 // page, last, followed only while the reader is at its newest line, and holds the reader's line as lines above go;
-// "Jump to newest" moves nothing; and reseeding a snapshot asks first.
+// "Jump to newest" moves nothing; reseeding a snapshot asks first; and a chart card holds its labels at a laptop's
+// widths.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -187,6 +188,26 @@ try {
       return { scroll: wrap.scrollWidth, client: wrap.clientWidth };
     });
     check(fit.scroll <= fit.client, `${width}px: the jobs list is ${fit.scroll}px in its ${fit.client}px page`);
+    await context.close();
+  }
+
+  // A chart card holds its heading, chart and labels at a laptop's widths, where the overview's two host charts share
+  // half the page: a heading wider than its card once pushed the reading and the time axis out of it.
+  for (const width of [1024, 1280, 1440]) {
+    const { context, page } = await signedIn({ width, height: 900 });
+    for (const path of ['/', '/history?lens=trends']) {
+      await page.goto(new URL(path, login).href);
+      await page.locator('.chart-card .chart-x').first().waitFor();
+      const out = await page.evaluate(() =>
+        [...document.querySelectorAll('.chart-card')].flatMap((card) => {
+          const edge = card.getBoundingClientRect();
+          return [...card.querySelectorAll('h3, h3 *, .chart-x, .chart-x *')]
+            .filter((el) => el.getBoundingClientRect().right > edge.right + 0.5)
+            .map((el) => `${el.textContent.trim().slice(0, 24)} by ${Math.round(el.getBoundingClientRect().right - edge.right)}px`);
+        }),
+      );
+      check(out.length === 0, `${width}px: ${path}'s chart cards hold their labels${out.length ? ` (${out[0]})` : ''}`);
+    }
     await context.close();
   }
 
