@@ -8,9 +8,9 @@ Last 30 days: 277 job-minutes here, about $1.66 at GitHub's 2-core Linux rate be
   An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
 
 warning slower    halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.
-warning near-cap  halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing is off: raise jvm's memory, or turn it on.
-warning cpu-held  halyard/ledger: CI / build was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota throttling it in 15% of its run or more. Auto sizing is off: set jvm's cpus to 10, or turn it on.
 warning flaky     halyard/storefront: CI / e2e failed and then passed on a re-run in 2 of its 31 runs.
+notice  cpu-held  halyard/ledger: CI / build was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota throttling it in 15% of its run or more. Auto sizing raises jvm's cpus while each raise makes it faster or less throttled and the slice has room; runnerctl sizing says when it cannot.
+notice  near-cap  halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing raises jvm when a run meets the cap.
 notice  waits     halyard/storefront: 1 job in 20 waits 4m 10s or more for a runner this week, up from 1m 30s the week before.
 
 disk writes:
