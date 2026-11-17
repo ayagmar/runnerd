@@ -1,4 +1,5 @@
-//! The caches view: one row per cache volume, what it holds, its size against its limit, then the build cache's week.
+//! The caches view: one row per cache volume, what it holds, its size against its limit, then the build cache's week
+//! as core's figures.
 //! Emptying one is `d`, asked first.
 
 use ratatui::Frame;
@@ -56,17 +57,6 @@ pub(super) fn caches(
         format!("measured {}", ago(measured, now)),
         theme,
     );
-    let build: Vec<String> = caches
-        .build
-        .as_ref()
-        .map(|build| {
-            vec![
-                format!("Build cache for {}", api::BUILD_CACHE_TOOLS),
-                build.week_line(),
-                build.actions_cache_line(),
-            ]
-        })
-        .unwrap_or_default();
     let [table_area, build_area] = Layout::vertical([
         Constraint::Length(length(caches.volumes.len() + 1)),
         Constraint::Min(0),
@@ -88,7 +78,11 @@ pub(super) fn caches(
         state.offset(),
         caches.volumes.len(),
     );
-    let lines = build_lines(build, usize::from(build_area.width));
+    let lines = caches
+        .build
+        .as_ref()
+        .map(|build| build_lines(build, usize::from(build_area.width), theme))
+        .unwrap_or_default();
     let lines = super::clip(lines, usize::from(build_area.height), theme);
     frame.render_widget(Paragraph::new(lines), build_area);
 }
@@ -112,18 +106,28 @@ fn fill(volume: &api::CacheVolume, theme: Theme) -> Span<'static> {
     )
 }
 
-/// The build cache's lines under the table: its heading in bold, then each line wrapped, never cut, since each says
-/// what the cache does as a whole sentence.
-fn build_lines(build: Vec<String>, width: usize) -> Vec<Line<'static>> {
+/// The build cache's lines under the table: its heading in bold, its week as core's figures, then how GitHub
+/// Actions' cache goes through it, wrapped, never cut, since it is a whole sentence.
+fn build_lines(build: &api::BuildCacheStats, width: usize, theme: Theme) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
-    for (at, line) in build.into_iter().enumerate() {
-        let style = if at == 0 { super::bold() } else { Style::new() };
-        lines.extend(
-            super::wrap(&line, width)
-                .into_iter()
-                .map(|line| Line::styled(line, style)),
-        );
-    }
+    lines.extend(
+        super::wrap(
+            &format!("Build cache for {}", api::BUILD_CACHE_TOOLS),
+            width,
+        )
+        .into_iter()
+        .map(|line| Line::styled(line, super::bold())),
+    );
+    lines.extend(super::figure_rows(
+        build.figures().iter().map(Into::into),
+        width,
+        theme,
+    ));
+    lines.extend(
+        super::wrap(&build.actions_cache_line(), width)
+            .into_iter()
+            .map(Line::from),
+    );
     lines
 }
 

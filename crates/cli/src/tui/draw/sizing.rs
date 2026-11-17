@@ -19,8 +19,9 @@ use crate::tui::mouse::{Hits, List};
 
 /// What each profile's jobs use and what to set its memory and slots to, then the selected profile's jobs, and what
 /// the selected profile's advice and auto sizing mean for it: beside the tables on a wide terminal, between them on a
-/// narrow one. Under auto sizing, its rules and what its next look does to each profile follow the profiles. Columns are as wide as their content; short
-/// of room the medians, the jobs at their cap, the warm and cold starts and the p99s give way first.
+/// narrow one. Under auto sizing, its rules and what its next look does to each profile follow the profiles. Columns
+/// are as wide as their content; short of room the runs with a peak, the medians, the warm starts, the jobs at their
+/// cap and the p99s give way first, then the warm and cold starts' p50s.
 pub(super) fn sizing(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -350,7 +351,8 @@ fn rules(sizing: &Sizing, width: usize, theme: Theme) -> Vec<Line<'static>> {
     lines
 }
 
-/// A row per profile: its memory and slots, its jobs' peaks, how busy and how long waited, the advice.
+/// A row per profile: its memory and slots, its jobs' peaks, core's figures (its jobs, how busy, how long waited,
+/// warm starts, CPU p99), the advice.
 fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Table<'static> {
     let profiles = &sizing.profiles;
     let cells = |cell: &dyn Fn(&ProfileSizing) -> Span<'static>| -> Vec<Span<'static>> {
@@ -362,7 +364,7 @@ fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Tab
             .map(|profile| Span::raw(text(profile)))
             .collect()
     };
-    let columns = vec![
+    let mut columns = vec![
         TableColumn::names(
             "Profile",
             cells(&|profile| {
@@ -377,7 +379,7 @@ fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Tab
             plain(&|profile| format!("{} × {}", bytes(profile.memory), profile.slots)),
             0,
         ),
-        TableColumn::figures("Runs", plain(&|profile| profile.peaks.jobs.to_string()), 3),
+        TableColumn::figures("Runs", plain(&|profile| profile.peaks.jobs.to_string()), 10),
         TableColumn::figures("P50", plain(&|profile| bytes(profile.peaks.memory.p50)), 9),
         TableColumn::figures("P95", plain(&|profile| bytes(profile.peaks.memory.p95)), 0),
         TableColumn::figures("P99", plain(&|profile| bytes(profile.peaks.memory.p99)), 6),
@@ -393,9 +395,6 @@ fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Tab
             }),
             7,
         ),
-        TableColumn::figures("CPU p99", plain(&|profile| cpu_cell(&profile.peaks)), 0),
-        TableColumn::figures("Busy", plain(&|profile| format!("{}%", profile.busy)), 4),
-        TableColumn::figures("Wait p95", plain(&|profile| duration(profile.wait.p95)), 0),
         TableColumn::figures(
             "P50 warm/cold",
             plain(&|profile| {
@@ -410,20 +409,55 @@ fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Tab
                     String::new()
                 }
             }),
-            8,
-        ),
-        TableColumn::words(
-            "Advice",
-            cells(&|profile| {
-                Span::styled(
-                    profile.advice_word(),
-                    theme.tone(profile.advice.tone().into()),
-                )
-            }),
-            0,
+            5,
         ),
     ];
+    columns.extend(figure_columns(profiles));
+    columns.push(TableColumn::words(
+        "Advice",
+        cells(&|profile| {
+            Span::styled(
+                profile.advice_word(),
+                theme.tone(profile.advice.tone().into()),
+            )
+        }),
+        0,
+    ));
     fitted_table(columns, width, None, theme)
+}
+
+/// Core's figures of each profile as columns, headed by their labels, each cell its value and what it is out of; the
+/// warm starts give way first, then how busy the slots were and the jobs.
+fn figure_columns(profiles: &[ProfileSizing]) -> Vec<TableColumn> {
+    let figures: Vec<Vec<api::LabelledFigure>> =
+        profiles.iter().map(ProfileSizing::figures).collect();
+    let Some(first) = figures.first() else {
+        return Vec::new();
+    };
+    first
+        .iter()
+        .enumerate()
+        .map(|(at, head)| {
+            let rank = match at {
+                0 => 3,
+                1 => 4,
+                3 => 8,
+                _ => 0,
+            };
+            let cells = figures
+                .iter()
+                .map(|row| {
+                    Span::raw(row.get(at).map_or_else(String::new, |figure| {
+                        figure.of.as_ref().map_or_else(
+                            || figure.value.clone(),
+                            |of| format!("{} {of}", figure.value),
+                        )
+                    }))
+                })
+                .collect();
+            TableColumn::figures(&head.label, cells, rank)
+        })
+        .collect()
 }
 
 /// The CPU p99 of the runs at the profile's `cpus` now, `–` without one.
