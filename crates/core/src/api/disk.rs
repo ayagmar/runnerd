@@ -313,6 +313,11 @@ impl DriveWrites {
 }
 
 impl DriveWrites {
+    /// What its bytes are called among the figures: `nvme0n1 wrote`.
+    fn label(&self) -> String {
+        format!("{} wrote", self.device)
+    }
+
     /// What the figures count when Docker's root is a file system in a file on the drive.
     fn store_note(&self) -> Option<String> {
         self.store.as_ref().map(|store| {
@@ -478,9 +483,9 @@ impl DiskWrites {
     const JOBS_WROTE: &'static str = "Jobs wrote";
 
     /// What the figures leave out that changes how they read, a line each, in the order the figures show, each
-    /// naming what it is about: jobs read only in part, bytes that waited to be written back, Docker's root as a file
-    /// system in a file on the drive, and the drive's shares read over a shorter stretch than the drive or without
-    /// the runner slice's. The same words as [`DiskWrites::sections`].
+    /// starting with the label of the figure or the title it is about: jobs read only in part, bytes that waited to be
+    /// written back, Docker's root as a file system in a file on the drive, and the drive's shares read over a
+    /// shorter stretch than the drive or without the runner slice's. The same words as [`DiskWrites::sections`].
     pub fn caveats(&self) -> Vec<String> {
         let mut caveats = Vec::new();
         if self.jobs.measured > 0 {
@@ -492,7 +497,11 @@ impl DiskWrites {
             );
         }
         if let Some(drive) = &self.drive {
-            caveats.extend(drive.store_note());
+            caveats.extend(
+                drive
+                    .store_note()
+                    .map(|note| format!("{}: {note}", drive.label())),
+            );
             caveats.extend(
                 drive
                     .shares
@@ -526,7 +535,7 @@ impl DiskWrites {
         }
         if let Some(drive) = &self.drive {
             figures.push(LabelledFigure::new(
-                format!("{} wrote", drive.device),
+                drive.label(),
                 ByteSize(drive.written).to_string(),
             ));
             figures.push(LabelledFigure::new(
@@ -843,9 +852,9 @@ mod tests {
             [
                 "Jobs wrote: 12 partial, counted as far as read",
                 "Jobs wrote: 3G more waited to be written back as their containers ended",
-                "Docker's root is a file system in a file on it (loop0): the jobs' and the runner slice's figures are \
-                 bytes written to that file system; nvme0n1 also wrote its journal and the overhead of the file system \
-                 under it",
+                "nvme0n1 wrote: Docker's root is a file system in a file on it (loop0): the jobs' and the runner slice's \
+                 figures are bytes written to that file system; nvme0n1 also wrote its journal and the overhead of the \
+                 file system under it",
                 "Who wrote to the drive: over the 1h 00m runnerd read the runner slice",
                 "Who wrote to the drive: the runner slice's share unread",
             ]
@@ -858,10 +867,14 @@ mod tests {
             .collect();
         let said = sentences.join(" ").to_lowercase();
         for caveat in disk.caveats() {
-            let note = [DiskWrites::JOBS_WROTE, DiskWrites::SHARES_TITLE]
-                .iter()
-                .find_map(|title| caveat.strip_prefix(&format!("{title}: ")))
-                .unwrap_or(&caveat);
+            let note = [
+                DiskWrites::JOBS_WROTE,
+                DiskWrites::SHARES_TITLE,
+                "nvme0n1 wrote",
+            ]
+            .iter()
+            .find_map(|title| caveat.strip_prefix(&format!("{title}: ")))
+            .unwrap_or_else(|| panic!("{caveat} names its figure"));
             assert!(said.contains(&note.to_lowercase()), "{note}: {sentences:?}");
         }
         // Read whole, the figures need no caveat.

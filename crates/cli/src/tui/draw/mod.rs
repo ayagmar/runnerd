@@ -1001,7 +1001,9 @@ const CUT_FAIR: usize = 30;
 
 /// The widths of `columns` in `room` cells with a cell between each, `None` for one left out: names wider than
 /// [`CUT_FAIR`] are cut to it first, then the highest ranked give way until the rest fit, or until only those ranked
-/// 0 are left, and then the names are cut further, the widest first.
+/// 0 are left, and then the names are cut further, the widest first. Short of room even then, the columns that are
+/// never cut give way whole, the rightmost first: squeezed, a right-aligned figure would lose its first cells
+/// unmarked and read as another figure.
 fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
     let mut widths: Vec<Option<usize>> = columns.iter().map(|column| Some(column.width)).collect();
     let used = |widths: &[Option<usize>]| -> usize {
@@ -1036,6 +1038,13 @@ fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
         widths[least] = None;
     }
     cut_to(&mut widths, CUT_LEAST);
+    while used(&widths) > room {
+        let last = (0..columns.len())
+            .rev()
+            .find(|at| columns[*at].cut == Cut::Never && widths[*at].is_some());
+        let Some(last) = last else { break };
+        widths[last] = None;
+    }
     widths
 }
 
@@ -1100,7 +1109,10 @@ fn fitted_table(
                 .map(Span::width)
                 .max()
                 .unwrap_or(0)
-                .max(column.title.width()),
+                .max(column.title.width())
+                // A heading of two words one cell from the next reads as two columns: it keeps a cell more, which
+                // its alignment puts on the side away from its words.
+                + usize::from(column.title.contains(' ')),
             rank: column.rank,
             cut: column.cut,
         })

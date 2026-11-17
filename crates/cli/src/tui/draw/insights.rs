@@ -243,10 +243,16 @@ fn disk_figures(disk: &api::DiskWrites, width: usize, theme: Theme) -> Vec<Line<
             .flat_map(|caveat| wrap(caveat, width))
             .map(|line| Line::styled(line, theme.dim())),
     );
-    if let Some(drive) = &disk.drive {
+    // A drive that wrote nothing yet has no shares to draw.
+    if let Some(parts) = disk
+        .drive
+        .as_ref()
+        .map(|drive| drive.shares.parts())
+        .filter(|parts| parts.iter().any(|part| part.bytes > 0))
+    {
         lines.push(Line::from(""));
         lines.push(Line::raw(api::DiskWrites::SHARES_TITLE));
-        lines.extend(shares(&drive.shares.parts(), width, theme));
+        lines.extend(shares(&parts, width, theme));
     }
     for (title, tops) in [
         (api::DiskWrites::WORKFLOWS_TITLE, &disk.workflows),
@@ -352,7 +358,7 @@ fn shares(parts: &[api::DriveShare], width: usize, theme: Theme) -> Vec<Line<'st
 /// The cells of a ranked bar.
 const RANKED_BAR: usize = 10;
 
-/// The workflows or jobs that wrote most, a row each: a bar as long as its share of the first's bytes, its bytes,
+/// The workflows or jobs that wrote most, a row each: a bar as long as its share of the first's bytes, at least a cell, its bytes,
 /// its name and core's note. Where a row does not hold all of it, each takes two: its name, then the bar, bytes and
 /// note.
 fn ranked(tops: &[api::WriteTop], width: usize, theme: Theme) -> Vec<Line<'static>> {
@@ -365,7 +371,9 @@ fn ranked(tops: &[api::WriteTop], width: usize, theme: Theme) -> Vec<Line<'stati
         .all(|top| head + top.name().width() + 2 + top.note().width() <= width);
     let mut lines = Vec::new();
     for (top, value) in tops.iter().zip(values) {
-        let filled = usize::from(scale(top.total, most.max(1), length(RANKED_BAR)));
+        // A writer with bytes shows a cell, however far behind the first.
+        let filled = usize::from(scale(top.total, most.max(1), length(RANKED_BAR)))
+            .max(usize::from(top.total > 0));
         let mut spans = vec![
             Span::styled("█".repeat(filled), theme.memory()),
             Span::styled("░".repeat(RANKED_BAR - filled), theme.dim()),
@@ -407,8 +415,11 @@ fn figure_line(figure: &api::InsightFigure, width: usize, theme: Theme) -> Vec<L
     lines
 }
 
-/// A row per insight: a dot and its kind in its tone, its figure, then its sentence, cut; the selected one stays in
-/// sight.
+/// The fewest cells an insight row keeps for its sentence before its figure takes any.
+const SENTENCE_LEAST: usize = 12;
+
+/// A row per insight: a dot and its kind in its tone, its figure where the sentence keeps [`SENTENCE_LEAST`] cells,
+/// then its sentence, cut; the selected one stays in sight.
 fn insight_rows(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -439,7 +450,9 @@ fn insight_rows(
         .map(|figure| figure.width())
         .max()
         .unwrap_or(0);
-    let figure_room = if figure_width > 0 {
+    // The sentence keeps its room before the figure takes any: narrow, the figure is left to the meaning.
+    let lead = 2 + label_width + 2;
+    let figure_room = if figure_width > 0 && lead + figure_width + 2 + SENTENCE_LEAST <= width {
         figure_width + 2
     } else {
         0
@@ -453,15 +466,21 @@ fn insight_rows(
         .skip(first)
         .take(shown)
         .map(|(at, insight)| {
-            let rest = width.saturating_sub(2 + label_width + 2 + figure_room);
+            let rest = width.saturating_sub(lead + figure_room);
             let line = Line::from(vec![
                 Span::styled("● ", theme.of(insight.tone())),
                 Span::styled(
                     format!("{:<label_width$}  ", insight.kind.label()),
                     theme.of(insight.tone()),
                 ),
-                Span::styled(format!("{:>figure_width$}", figures[at]), bold()),
-                Span::raw(" ".repeat(figure_room - figure_width)),
+                Span::styled(
+                    if figure_room > 0 {
+                        format!("{:>figure_width$}  ", figures[at])
+                    } else {
+                        String::new()
+                    },
+                    bold(),
+                ),
                 Span::raw(fit(&insight.sentence, rest)),
             ]);
             if at == app.insight {

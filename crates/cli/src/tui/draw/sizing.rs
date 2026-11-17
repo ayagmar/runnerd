@@ -21,7 +21,8 @@ use crate::tui::mouse::{Hits, List};
 /// the selected profile's advice and auto sizing mean for it: beside the tables on a wide terminal, between them on a
 /// narrow one. Under auto sizing, its rules and what its next look does to each profile follow the profiles. Columns
 /// are as wide as their content; short of room the runs with a peak, the medians, the warm starts, the jobs at their
-/// cap and the p99s give way first, then the warm and cold starts' p50s.
+/// cap, the jobs and the p99s give way first, then the warm and cold starts' p50s, how busy the slots were and the
+/// waits; a column that still does not fit goes whole, never cut.
 pub(super) fn sizing(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -427,7 +428,7 @@ fn profiles_table(app: &App, sizing: &Sizing, width: usize, theme: Theme) -> Tab
 }
 
 /// Core's figures of each profile as columns, headed by their labels, each cell its value and what it is out of; the
-/// warm starts give way first, then how busy the slots were and the jobs.
+/// warm starts give way first, then the jobs, how busy the slots were and the waits.
 fn figure_columns(profiles: &[ProfileSizing]) -> Vec<TableColumn> {
     let figures: Vec<Vec<api::LabelledFigure>> =
         profiles.iter().map(ProfileSizing::figures).collect();
@@ -439,8 +440,9 @@ fn figure_columns(profiles: &[ProfileSizing]) -> Vec<TableColumn> {
         .enumerate()
         .map(|(at, head)| {
             let rank = match at {
-                0 => 3,
+                0 => 6,
                 1 => 4,
+                2 => 2,
                 3 => 8,
                 _ => 0,
             };
