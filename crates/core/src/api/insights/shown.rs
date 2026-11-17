@@ -172,13 +172,21 @@ impl Insights {
             .count()
     }
 
-    /// How many insights warn, worded for the overview: `3 insights`; `None` when none does.
-    pub fn warning_line(&self) -> Option<String> {
-        match self.warning_count() {
-            0 => None,
-            1 => Some("1 insight".to_owned()),
-            count => Some(format!("{count} insights")),
-        }
+    /// What the insights page says over its list: how many insights it lists, how many of them warn, and the window
+    /// they come from.
+    pub fn heading(&self) -> InsightsHeading {
+        let count = self.insights.len();
+        let figure = match count {
+            0 => "no insights".to_owned(),
+            1 => "1 insight".to_owned(),
+            count => format!("{count} insights"),
+        };
+        let note = match self.warning_count() {
+            0 => format!(" {}", self.window_line()),
+            1 => format!(", 1 warning, {}", self.window_line()),
+            warnings => format!(", {warnings} warnings, {}", self.window_line()),
+        };
+        InsightsHeading { figure, note }
     }
 
     /// The whole days its window covers.
@@ -194,6 +202,24 @@ impl Insights {
     /// What it says without any insight: `nothing stands out from the last 30 days`.
     pub fn empty_line(&self) -> String {
         format!("nothing stands out {}", self.window_line())
+    }
+}
+
+/// What the insights page says over its list, as [`Insights::heading`] words it: `5 insights, 4 warnings, from the
+/// last 14 days`, `1 insight from the last 14 days`, `no insights from the last 14 days`. A client may set the figure
+/// apart; together, as its `Display` writes them, they read as one line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsightsHeading {
+    /// How many it lists: `5 insights`, `1 insight`, `no insights`.
+    pub figure: String,
+    /// The rest, starting with what joins it to the figure: `, 4 warnings, from the last 14 days`, or ` from the last
+    /// 14 days` when none warns.
+    pub note: String,
+}
+
+impl std::fmt::Display for InsightsHeading {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}{}", self.figure, self.note)
     }
 }
 

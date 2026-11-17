@@ -9,7 +9,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
 use runnerd_core::api::{
-    BuildCacheCounts, CheckStatus, Column, JobAction, JobPage, JobState, Section, View,
+    BuildCacheCounts, CheckStatus, Column, DiskWrites, JobAction, JobPage, JobState, Section, View,
 };
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
@@ -573,6 +573,109 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
     let gradle = sizing.profiles.iter().find(|p| p.name == "gradle").unwrap();
     assert_eq!(gradle.advice_word(), "at max_memory");
     assert!(shown.contains("at max_memory"), "{}", rows.join("\n"));
+    // Each profile's figures on its row, as core words them.
+    let (rows, _) = frame_of(&app, 300, 40);
+    for profile in &sizing.profiles {
+        let row = rows
+            .iter()
+            .find(|row| row.trim_start().starts_with(&format!("{} ", profile.name)))
+            .unwrap_or_else(|| panic!("{}: {}", profile.name, rows.join("\n")));
+        for figure in profile.figures() {
+            assert!(
+                shows(&rows, &figure.label.to_uppercase()),
+                "{}",
+                rows.join("\n")
+            );
+            let cell = figure
+                .of
+                .map_or(figure.value.clone(), |of| format!("{} {of}", figure.value));
+            assert!(row.contains(&cell), "{} {cell}: {row}", profile.name);
+        }
+    }
+}
+
+/// A table short of room gives a figure way whole: squeezed, ratatui cut right-aligned cells from the left with no
+/// mark, so a CPU p99 of `7.6 of 8` read as `6 of 8`.
+#[test]
+fn sizing_short_of_room_drops_a_figure_whole_rather_than_cut_it() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    app.update(super::tab(View::Capacity));
+    let sizing = runnerd_fixtures::sizing(NOW);
+    app.update(Msg::Sizing(sizing.clone()));
+    let words: Vec<String> = [
+        "PROFILE",
+        "MEMORY",
+        "RUNS",
+        "P50",
+        "P95",
+        "P99",
+        "MAX",
+        "AT CAP",
+        "P50 WARM/COLD",
+        "ADVICE",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(
+        sizing.profiles[0]
+            .figures()
+            .iter()
+            .map(|figure| figure.label.to_uppercase()),
+    )
+    .flat_map(|title| title.split(' ').map(str::to_owned).collect::<Vec<_>>())
+    .collect();
+    for width in [40, 50, 60, 80] {
+        let (rows, _) = frame_of(&app, width, 40);
+        let all = rows.join("\n");
+        let header = rows
+            .iter()
+            .find(|row| row.starts_with("PROFI"))
+            .unwrap_or_else(|| panic!("{width} columns, a header:\n{all}"));
+        for word in header.split_whitespace() {
+            assert!(
+                words.contains(&word.to_owned()),
+                "{width} columns, {word} whole:\n{all}"
+            );
+        }
+        for profile in &sizing.profiles {
+            let row = rows
+                .iter()
+                .find(|row| row.starts_with(&format!("{} ", profile.name)))
+                .unwrap_or_else(|| panic!("{}: {all}", profile.name));
+            for figure in profile.figures() {
+                if !header.contains(&figure.label.to_uppercase()) {
+                    continue;
+                }
+                let cell = figure
+                    .of
+                    .map_or(figure.value.clone(), |of| format!("{} {of}", figure.value));
+                assert!(
+                    row.contains(&format!(" {cell}")),
+                    "{width} columns, {} {cell}: {row}\n{all}",
+                    profile.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_caches_view_states_the_build_cache_s_week_as_core_s_figures() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    app.update(super::tab(View::Capacity));
+    app.update(super::tab(View::Capacity));
+    app.update(Msg::Caches(Ok(daemon.caches.clone())));
+    let build = daemon.caches.build.unwrap();
+    for width in [60, 120] {
+        let (rows, _) = frame_of(&app, width, 40);
+        let all = rows.join("\n");
+        for figure in build.figures() {
+            assert!(shows(&rows, &figure.label), "{}: {all}", figure.label);
+            assert!(shows(&rows, &figure.value), "{}: {all}", figure.value);
+        }
+    }
 }
 
 #[test]
@@ -583,16 +686,26 @@ fn the_insights_view_states_each_insight_and_the_host_as_core_does() {
     app.update(super::tab(View::Insights));
     let (rows, buffer) = frame(&app);
     let all = rows.join("\n");
-    if let Some(warning) = insights.warning_line() {
-        assert!(shows(&rows, &warning), "{warning}: {all}");
-    }
-    assert!(shows(&rows, &insights.window_line()), "{all}");
+    // The heading counts the rows the list shows, and how many of them warn.
+    let heading = insights.heading().to_string();
+    assert!(
+        heading.starts_with(&format!("{} insights", insights.insights.len())),
+        "{heading}"
+    );
+    assert!(shows(&rows, &heading), "{heading}: {all}");
     for insight in &insights.insights {
         let label = insight.kind.label();
         let row = rows
             .iter()
             .position(|row| row.contains(label) && row.contains(&insight.sentence[..20]))
             .unwrap_or_else(|| panic!("{label}: {all}"));
+        if let Some(figure) = insight.figure() {
+            assert!(
+                rows[row].contains(&figure.value),
+                "{label} leads with {}: {all}",
+                figure.value
+            );
+        }
         let x = rows[row].find("● ").unwrap();
         let x = u16::try_from(rows[row][..x].chars().count()).unwrap();
         let y = u16::try_from(row).unwrap();
@@ -1809,25 +1922,234 @@ fn opens_at_its_failed_step(id: u64) {
 }
 
 #[test]
-fn the_insights_view_says_what_jobs_and_the_drive_wrote_as_core_words_it() {
+fn the_insights_view_draws_what_jobs_and_the_drive_wrote_as_core_s_figures() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights(NOW);
+    let disk = insights.disk.clone().unwrap();
+    app.update(Msg::Insights(Ok(Box::new(insights))));
+    app.update(super::tab(View::Insights));
+    for width in [80, 130] {
+        let (rows, _) = frame_of(&app, width, 120);
+        let all = rows.join("\n");
+        for figure in disk.figures() {
+            assert!(shows(&rows, &figure.label), "{}: {all}", figure.label);
+            assert!(shows(&rows, &figure.value), "{}: {all}", figure.value);
+        }
+        assert!(shows(&rows, DiskWrites::SHARES_TITLE), "{all}");
+        // Without colour, each owner's glyph tells its part of the bar from the others.
+        let parts = disk.drive.as_ref().unwrap().shares.parts();
+        let key: Vec<&String> = parts
+            .iter()
+            .map(|part| {
+                rows.iter()
+                    .find(|row| row.contains(&format!("{}% {}", part.percent, part.owner.label())))
+                    .unwrap_or_else(|| panic!("{:?} in the key: {all}", part.owner))
+            })
+            .collect();
+        let glyphs: Vec<char> = key
+            .iter()
+            .zip(&parts)
+            .map(|(row, part)| {
+                let at = row
+                    .find(&format!("{}% {}", part.percent, part.owner.label()))
+                    .unwrap();
+                row[..at].trim_end().chars().last().unwrap()
+            })
+            .collect();
+        let bar = rows
+            .iter()
+            .skip_while(|row| !row.contains(DiskWrites::SHARES_TITLE))
+            .nth(1)
+            .unwrap();
+        for (glyph, part) in glyphs.iter().zip(&parts) {
+            assert_eq!(
+                bar.contains(*glyph),
+                part.bytes > 0,
+                "{:?} drawn as {glyph} only with bytes: {all}",
+                part.owner
+            );
+        }
+        let mut distinct = glyphs.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            glyphs.len(),
+            "a shape per owner: {glyphs:?}"
+        );
+        // As long as the section is wide, each part a cell and as long as its bytes of the rest.
+        let cells_wide = usize::from(width);
+        assert_eq!(
+            bar.trim_end().chars().count(),
+            cells_wide,
+            "the bar fills the row: {all}"
+        );
+        let owned = parts.iter().filter(|part| part.bytes > 0).count();
+        let whole: u64 = parts.iter().map(|part| part.bytes).sum();
+        for (glyph, part) in glyphs.iter().zip(&parts).filter(|(_, part)| part.bytes > 0) {
+            let cells = bar.chars().filter(|cell| cell == glyph).count();
+            let share = u128::from(part.bytes) * u128::try_from(cells_wide - owned).unwrap()
+                / u128::from(whole);
+            let share = usize::try_from(share).unwrap() + 1;
+            assert!(
+                cells.abs_diff(share) <= 1,
+                "{:?}: {cells} cells for {share}: {bar}",
+                part.owner
+            );
+        }
+        for (title, tops) in [
+            (DiskWrites::WORKFLOWS_TITLE, &disk.workflows),
+            (DiskWrites::TOP_JOBS_TITLE, &disk.top_jobs),
+        ] {
+            assert!(shows(&rows, title), "{all}");
+            for top in tops {
+                assert!(shows(&rows, &top.name()), "{}: {all}", top.name());
+                assert!(shows(&rows, &top.note()), "{}: {all}", top.note());
+            }
+        }
+    }
+}
+
+/// A drive that wrote nothing has no shares: an empty bar over a key of four zeros said percents that do not add up.
+#[test]
+fn a_drive_that_wrote_nothing_draws_no_shares() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights_drive_quiet(NOW);
+    let disk = insights.disk.clone().unwrap();
+    app.update(Msg::Insights(Ok(Box::new(insights))));
+    app.update(super::tab(View::Insights));
+    let (rows, _) = frame_of(&app, 130, 120);
+    let all = rows.join("\n");
+    for figure in disk.figures() {
+        assert!(shows(&rows, &figure.value), "{}: {all}", figure.label);
+    }
+    assert!(!shows(&rows, DiskWrites::SHARES_TITLE), "no shares:\n{all}");
+    assert!(!shows(&rows, "0% runner jobs"), "no key of zeros:\n{all}");
+}
+
+/// On a narrow terminal the figure column gave the sentence 4 cells, or itself was cut without a mark: the row keeps
+/// the sentence and leaves the figure to the selected insight's meaning.
+#[test]
+fn a_narrow_insight_row_keeps_its_sentence_over_its_figure() {
     let (daemon, _) = fixtures();
     let mut app = app(&daemon);
     let insights = runnerd_fixtures::insights(NOW);
     app.update(Msg::Insights(Ok(Box::new(insights.clone()))));
     app.update(super::tab(View::Insights));
-    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Narrower than a pane beside the list, so a wrapped line reads on across the rows.
-    let (rows, _) = frame_of(&app, 130, 120);
-    let shown = words(&rows.join(" "));
-    for section in insights.disk.unwrap().sections() {
+    for width in [20, 30, 40] {
+        let (rows, _) = frame_of(&app, width, 40);
+        let all = rows.join("\n");
+        let label_width = insights
+            .insights
+            .iter()
+            .map(|insight| insight.kind.label().chars().count())
+            .max()
+            .unwrap();
+        let room = usize::from(width) - (2 + label_width + 2);
+        for insight in &insights.insights {
+            let row = rows
+                .iter()
+                .find(|row| row.contains(&format!("● {}", insight.kind.label())))
+                .unwrap_or_else(|| panic!("{}: {all}", insight.kind.label()));
+            let start: String = insight
+                .sentence
+                .chars()
+                .take(room.saturating_sub(1).min(8))
+                .collect();
+            assert!(
+                row.contains(&start),
+                "{width} columns, {} keeps its sentence: {row}\n{all}",
+                insight.kind.label()
+            );
+        }
+    }
+}
+
+/// A writer whose name and note do not fit a row beside its bar takes two: its name whole, then its bar, bytes and
+/// note, never drawn over each other.
+#[test]
+fn a_long_writer_takes_two_rows_its_name_then_its_bar_bytes_and_note() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights_long_writer(NOW);
+    let disk = insights.disk.clone().unwrap();
+    app.update(Msg::Insights(Ok(Box::new(insights))));
+    app.update(super::tab(View::Insights));
+    let (rows, _) = frame_of(&app, 80, 120);
+    let all = rows.join("\n");
+    for top in &disk.workflows {
+        let at = rows
+            .iter()
+            .position(|row| row.trim_end() == top.name())
+            .unwrap_or_else(|| panic!("{} on its own row: {all}", top.name()));
+        let under = &rows[at + 1];
         assert!(
-            shown.contains(section.title),
-            "{}:\n{}",
-            section.title,
-            rows.join("\n")
+            under.starts_with('█'),
+            "its bar under it, a cell at least: {under}"
         );
-        for line in &section.lines {
-            assert!(shown.contains(&words(line)), "{line}:\n{}", rows.join("\n"));
+        assert!(
+            under.contains(&format!(" {}  {}", human::bytes(top.total), top.note())),
+            "its bytes and note under it: {under}\n{all}"
+        );
+    }
+}
+
+/// Narrower than the figures need, the disk writes are core's sentences, each part's title beside its lines.
+#[test]
+fn a_terminal_too_narrow_for_the_disk_figures_reads_core_s_sentences() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights(NOW);
+    let disk = insights.disk.clone().unwrap();
+    app.update(Msg::Insights(Ok(Box::new(insights))));
+    app.update(super::tab(View::Insights));
+    let (rows, _) = frame_of(&app, 39, 300);
+    let all = rows.join("\n");
+    assert!(!shows(&rows, DiskWrites::SHARES_TITLE), "no bar:\n{all}");
+    for section in disk.sections() {
+        let at = rows
+            .iter()
+            .position(|row| row.starts_with(section.title))
+            .unwrap_or_else(|| panic!("{}: {all}", section.title));
+        let first: String = section.lines[0].chars().take(8).collect();
+        assert!(
+            rows[at].contains(&first),
+            "{} beside {first}: {all}",
+            section.title
+        );
+    }
+}
+
+#[test]
+fn what_the_disk_figures_leave_out_reads_dim_under_them_as_core_words_it() {
+    let (daemon, _) = fixtures();
+    for insights in [
+        runnerd_fixtures::insights(NOW),
+        runnerd_fixtures::insights_read_in_part(NOW),
+    ] {
+        let mut app = app(&daemon);
+        let caveats = insights.disk.as_ref().unwrap().caveats();
+        assert!(!caveats.is_empty(), "each fixture has something to say");
+        app.update(Msg::Insights(Ok(Box::new(insights))));
+        app.update(super::tab(View::Insights));
+        let (rows, buffer) = frame_of(&app, 130, 120);
+        let all = rows.join("\n");
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = words(&all.replace('\n', " "));
+        for caveat in &caveats {
+            assert!(shown.contains(&words(caveat)), "{caveat}:\n{all}");
+            let first = caveat
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let y = rows.iter().position(|row| row.starts_with(&first)).unwrap();
+            assert_eq!(
+                buffer[(0, u16::try_from(y).unwrap())].fg,
+                ratatui::style::Color::DarkGray,
+                "{caveat} dim:\n{all}"
+            );
         }
     }
 }
