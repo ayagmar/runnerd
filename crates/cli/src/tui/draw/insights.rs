@@ -243,16 +243,10 @@ fn disk_figures(disk: &api::DiskWrites, width: usize, theme: Theme) -> Vec<Line<
             .flat_map(|caveat| wrap(caveat, width))
             .map(|line| Line::styled(line, theme.dim())),
     );
-    // A drive that wrote nothing yet has no shares to draw.
-    if let Some(parts) = disk
-        .drive
-        .as_ref()
-        .map(|drive| drive.shares.parts())
-        .filter(|parts| parts.iter().any(|part| part.bytes > 0))
-    {
+    if let Some(drive) = disk.drive.as_ref().filter(|drive| !drive.shares.is_empty()) {
         lines.push(Line::from(""));
         lines.push(Line::raw(api::DiskWrites::SHARES_TITLE));
-        lines.extend(shares(&parts, width, theme));
+        lines.extend(shares(&drive.shares.parts(), width, theme));
     }
     for (title, tops) in [
         (api::DiskWrites::WORKFLOWS_TITLE, &disk.workflows),

@@ -290,8 +290,8 @@ impl DriveWrites {
     }
 
     /// Them in lines: what the drive wrote and its daily rate; what the figures count when Docker's root is in a
-    /// file on it; whose it was, runner jobs', the rest of the runner
-    /// slice's, runnerd's own and the share no one in runnerd owns; and btrfs's commits a second.
+    /// file on it; whose it was, runner jobs', the rest of the runner slice's, runnerd's own and the share no one in
+    /// runnerd owns, unless it wrote nothing over the shares; and btrfs's commits a second.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "{} wrote {} over the {} runnerd read it: {} a day at this rate",
@@ -301,7 +301,9 @@ impl DriveWrites {
             ByteSize(self.per_day())
         )];
         lines.extend(self.store_note());
-        lines.push(self.shares.line(self.watched));
+        if !self.shares.is_empty() {
+            lines.push(self.shares.line(self.watched));
+        }
         if let Some(commits) = self.commits {
             lines.push(format!(
                 "btrfs committed {} times a second",
@@ -378,6 +380,12 @@ pub struct DriveShare {
 }
 
 impl DriveShares {
+    /// Whether they have nothing to show: the drive wrote nothing over them, as on the first read after a start, so
+    /// every part is 0 bytes and its percents would not add up to 100. A client draws no shares then.
+    pub fn is_empty(&self) -> bool {
+        self.written == 0
+    }
+
     /// Whose the bytes were, in the order the line says them: runner jobs', the rest of the runner slice's when its
     /// `io.stat` was read, runnerd's own when read, and the rest, no owner runnerd knows. Their bytes add up to the
     /// whole; jobs that ended in the stretch may count what they wrote before it, so no share passes the whole.
@@ -485,7 +493,8 @@ impl DiskWrites {
     /// What the figures leave out that changes how they read, a line each, in the order the figures show, each
     /// starting with the label of the figure or the title it is about: jobs read only in part, bytes that waited to be
     /// written back, Docker's root as a file system in a file on the drive, and the drive's shares read over a
-    /// shorter stretch than the drive or without the runner slice's. The same words as [`DiskWrites::sections`].
+    /// shorter stretch than the drive or without the runner slice's, when there are shares to show. The same words as
+    /// [`DiskWrites::sections`].
     pub fn caveats(&self) -> Vec<String> {
         let mut caveats = Vec::new();
         if self.jobs.measured > 0 {
@@ -503,15 +512,12 @@ impl DiskWrites {
                     .map(|note| format!("{}: {note}", drive.label())),
             );
             caveats.extend(
-                drive
-                    .shares
-                    .stretch_note(drive.watched)
+                (!drive.shares.is_empty())
+                    .then(|| drive.shares.stretch_note(drive.watched))
+                    .flatten()
                     .into_iter()
                     .chain(
-                        drive
-                            .shares
-                            .slice
-                            .is_none()
+                        (!drive.shares.is_empty() && drive.shares.slice.is_none())
                             .then(|| DriveShares::SLICE_UNREAD.to_owned()),
                     )
                     .map(|note| format!("{}: {note}", Self::SHARES_TITLE)),
@@ -896,5 +902,51 @@ mod tests {
             ..disk
         };
         assert_eq!(whole.caveats(), Vec::<String>::new(), "nothing to say");
+    }
+
+    /// A drive that wrote nothing, as on the first read after a start, has shares of 0 bytes whose percents do not
+    /// add up: no client draws them, and core says nothing about them.
+    #[test]
+    fn a_drive_that_wrote_nothing_has_no_shares_to_show_or_speak_of() {
+        let quiet = DriveShares {
+            watched: 3600,
+            written: 0,
+            jobs: 0,
+            slice: None,
+            daemon: None,
+        };
+        assert!(quiet.is_empty(), "nothing to draw");
+        assert!(
+            !DriveShares {
+                written: G,
+                ..quiet
+            }
+            .is_empty(),
+            "the drive wrote"
+        );
+        let drive = DriveWrites {
+            device: "nvme0n1".to_owned(),
+            watched: 2 * 3600,
+            written: 0,
+            shares: quiet,
+            commits: None,
+            store: None,
+        };
+        assert_eq!(
+            drive.lines(),
+            ["nvme0n1 wrote 0B over the 2h 00m runnerd read it: 0B a day at this rate"],
+            "no shares line of zeros"
+        );
+        let disk = DiskWrites {
+            jobs: JobWrites::default(),
+            workflows: Vec::new(),
+            top_jobs: Vec::new(),
+            drive: Some(drive),
+        };
+        assert_eq!(
+            disk.caveats(),
+            Vec::<String>::new(),
+            "neither a shorter stretch nor an unread slice is said of shares not shown"
+        );
     }
 }

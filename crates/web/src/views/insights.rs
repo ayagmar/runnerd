@@ -123,7 +123,7 @@ fn disk_writes(disk: &DiskWrites) -> Markup {
                 h2 #disk-title { (DiskWrites::TITLE) }
             }
             (figure_list("headline disk-figures", &disk.figures()))
-            @if let Some(drive) = &disk.drive {
+            @if let Some(drive) = disk.drive.as_ref().filter(|drive| !drive.shares.is_empty()) {
                 @let parts = drive.shares.parts();
                 div.share {
                     h3 { (DiskWrites::SHARES_TITLE) }
