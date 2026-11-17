@@ -945,6 +945,55 @@ pub fn insights(at: u64) -> api::Insights {
     }
 }
 
+/// The insights of [`insights`] with the drive's shares read in part: the runner slice over 1 h of the drive's 6 h 36
+/// m, and its own share unread.
+pub fn insights_read_in_part(at: u64) -> api::Insights {
+    let mut insights = insights(at);
+    if let Some(drive) = insights.disk.as_mut().and_then(|disk| disk.drive.as_mut()) {
+        drive.shares = api::DriveShares {
+            watched: 3600,
+            written: 90 * GIB,
+            jobs: 30 * GIB,
+            slice: None,
+            daemon: Some(GIB),
+        };
+    }
+    insights
+}
+
+/// The insights of [`insights`] on the first read after a start: the drive read, but nothing written yet.
+pub fn insights_drive_quiet(at: u64) -> api::Insights {
+    let mut insights = insights(at);
+    if let Some(drive) = insights.disk.as_mut().and_then(|disk| disk.drive.as_mut()) {
+        drive.written = 0;
+        drive.shares = api::DriveShares {
+            watched: drive.watched,
+            written: 0,
+            jobs: 0,
+            slice: Some(0),
+            daemon: Some(0),
+        };
+    }
+    insights
+}
+
+/// The insights of [`insights`] with a workflow whose name and note do not fit a row of 80 columns beside its bar.
+pub fn insights_long_writer(at: u64) -> api::Insights {
+    let mut insights = insights(at);
+    if let Some(disk) = insights.disk.as_mut() {
+        disk.workflows.push(api::WriteTop {
+            repository: LEDGER.to_owned(),
+            workflow: Some(
+                "Nightly release candidate build, sign and publish to staging".to_owned(),
+            ),
+            job: None,
+            jobs: 14,
+            total: 9 * GIB,
+        });
+    }
+    insights
+}
+
 /// What jobs and the drive wrote over the insights' window: 6 h of the drive read, most of it no job's.
 fn disk_writes() -> api::DiskWrites {
     let top = |workflow: &str, job: Option<&str>, jobs: u32, total: u64| api::WriteTop {

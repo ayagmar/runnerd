@@ -48,6 +48,40 @@ fn a_warning_reads_the_same_whatever_its_kind() {
     };
     assert_eq!(insights.warning_count(), 2);
     assert_eq!(insights.window_line(), "from the last 30 days");
+    // The page's heading counts what its list shows, and how many of them warn.
+    assert_eq!(
+        insights.heading().to_string(),
+        "3 insights, 2 warnings, from the last 30 days"
+    );
+    let heading = |kept: &[usize]| {
+        Insights {
+            insights: kept
+                .iter()
+                .map(|at| insights.insights[*at].clone())
+                .collect(),
+            ..insights.clone()
+        }
+        .heading()
+    };
+    assert_eq!(
+        heading(&[0, 1]).to_string(),
+        "2 insights, 1 warning, from the last 30 days"
+    );
+    assert_eq!(
+        heading(&[0]).to_string(),
+        "1 insight, 1 warning, from the last 30 days"
+    );
+    assert_eq!(heading(&[1]).to_string(), "1 insight from the last 30 days");
+    assert_eq!(
+        heading(&[]).to_string(),
+        "no insights from the last 30 days"
+    );
+    let set_apart = heading(&[0, 1, 2]);
+    assert_eq!(
+        (set_apart.figure.as_str(), set_apart.note.as_str()),
+        ("3 insights", ", 2 warnings, from the last 30 days"),
+        "the figure set apart from the rest"
+    );
 }
 
 #[test]

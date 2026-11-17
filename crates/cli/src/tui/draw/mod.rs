@@ -856,6 +856,77 @@ fn clip(mut lines: Vec<Line<'static>>, rows: usize, theme: Theme) -> Vec<Line<'s
     lines
 }
 
+/// A figure core words, as [`figure_rows`] lays it out: its label, value and what it is out of.
+struct Shown<'figure> {
+    label: &'figure str,
+    value: &'figure str,
+    of: Option<&'figure str>,
+}
+
+impl<'figure> From<&'figure api::LabelledFigure> for Shown<'figure> {
+    fn from(figure: &'figure api::LabelledFigure) -> Self {
+        Shown {
+            label: &figure.label,
+            value: &figure.value,
+            of: figure.of.as_deref(),
+        }
+    }
+}
+
+impl<'figure> From<&'figure api::WaitFigure> for Shown<'figure> {
+    fn from(figure: &'figure api::WaitFigure) -> Self {
+        Shown {
+            label: figure.label,
+            value: &figure.value,
+            of: None,
+        }
+    }
+}
+
+/// Figures core words, side by side in `width` cells three apart: each its dim label over its bold value and what it
+/// is out of, as wide as the wider of the two. Those that do not fit go under, a pair of rows each line of figures; a
+/// figure wider than `width` is cut.
+fn figure_rows<'figure>(
+    figures: impl IntoIterator<Item = Shown<'figure>>,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    const GAP: usize = 3;
+    let mut lines = Vec::new();
+    let mut labels: Vec<Span<'static>> = Vec::new();
+    let mut values: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for figure in figures {
+        let of = figure.of.map(|of| format!(" {of}")).unwrap_or_default();
+        let cell = figure
+            .label
+            .width()
+            .max(figure.value.width() + of.width())
+            .min(width);
+        if used > 0 && used + GAP + cell > width {
+            lines.push(Line::from(std::mem::take(&mut labels)));
+            lines.push(Line::from(std::mem::take(&mut values)));
+            used = 0;
+        }
+        if used > 0 {
+            labels.push(Span::raw(" ".repeat(GAP)));
+            values.push(Span::raw(" ".repeat(GAP)));
+            used += GAP;
+        }
+        labels.push(Span::styled(fit(figure.label, cell), theme.dim()));
+        let value = fit(figure.value, cell);
+        let of = fit(&of, cell - value.trim_end().width());
+        values.push(Span::styled(value.trim_end().to_owned(), bold()));
+        values.push(Span::styled(of, theme.dim()));
+        used += cell;
+    }
+    if used > 0 {
+        lines.push(Line::from(labels));
+        lines.push(Line::from(values));
+    }
+    lines
+}
+
 /// `text` in lines of at most `width` cells, broken between words; a word longer than a line is cut by [`fit`].
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -930,7 +1001,9 @@ const CUT_FAIR: usize = 30;
 
 /// The widths of `columns` in `room` cells with a cell between each, `None` for one left out: names wider than
 /// [`CUT_FAIR`] are cut to it first, then the highest ranked give way until the rest fit, or until only those ranked
-/// 0 are left, and then the names are cut further, the widest first.
+/// 0 are left, and then the names are cut further, the widest first. Short of room even then, the columns that are
+/// never cut give way whole, the rightmost first: squeezed, a right-aligned figure would lose its first cells
+/// unmarked and read as another figure.
 fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
     let mut widths: Vec<Option<usize>> = columns.iter().map(|column| Some(column.width)).collect();
     let used = |widths: &[Option<usize>]| -> usize {
@@ -965,6 +1038,13 @@ fn fit_columns(columns: &[Fit], room: usize) -> Vec<Option<usize>> {
         widths[least] = None;
     }
     cut_to(&mut widths, CUT_LEAST);
+    while used(&widths) > room {
+        let last = (0..columns.len())
+            .rev()
+            .find(|at| columns[*at].cut == Cut::Never && widths[*at].is_some());
+        let Some(last) = last else { break };
+        widths[last] = None;
+    }
     widths
 }
 
@@ -1029,7 +1109,10 @@ fn fitted_table(
                 .map(Span::width)
                 .max()
                 .unwrap_or(0)
-                .max(column.title.width()),
+                .max(column.title.width())
+                // A heading of two words one cell from the next reads as two columns: it keeps a cell more, which
+                // its alignment puts on the side away from its words.
+                + usize::from(column.title.contains(' ')),
             rank: column.rank,
             cut: column.cut,
         })

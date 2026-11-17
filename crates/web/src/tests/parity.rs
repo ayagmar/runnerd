@@ -351,6 +351,20 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
     let insights = runnerd_fixtures::insights(runnerd_fixtures::NOW);
     dashboard.fake.fixtures.lock().unwrap().insights = Some(insights.clone());
     let page = dashboard.page(&cookie, "/insights").await.body;
+    // The heading counts the cards the page shows, and how many of them warn: its figure set apart, then the rest
+    // with nothing between, so the two read as core's line.
+    let heading = insights.heading();
+    assert!(
+        heading
+            .to_string()
+            .starts_with(&format!("{} insights", insights.insights.len())),
+        "{heading}"
+    );
+    let drawn = format!(
+        "<strong>{}</strong><span class=\"muted\">{}</span>",
+        heading.figure, heading.note
+    );
+    assert!(page.contains(&drawn), "{drawn}: {page}");
     for insight in &insights.insights {
         let at = page
             .find(&insight.sentence)
@@ -408,6 +422,30 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
             assert!(shown.contains(&share), "{share}: {shown}");
         }
     }
+}
+
+/// A drive that wrote nothing has no shares: the page drew an empty bar over a key of 0% that did not add up.
+#[tokio::test]
+async fn a_drive_that_wrote_nothing_draws_no_shares() {
+    let (dashboard, cookie, _, _) = dashboard().await;
+    let insights = runnerd_fixtures::insights_drive_quiet(runnerd_fixtures::NOW);
+    dashboard.fake.fixtures.lock().unwrap().insights = Some(insights.clone());
+    let page = dashboard.page(&cookie, "/insights").await.body;
+    let shown = text(&page);
+    let disk = insights.disk.as_ref().unwrap();
+    for figure in disk.figures() {
+        let said = labelled(&figure);
+        assert!(shown.contains(&said), "{said}: {shown}");
+    }
+    assert!(!page.contains("share-bar"), "no bar: {page}");
+    assert!(
+        !shown.contains(runnerd_core::api::DiskWrites::SHARES_TITLE),
+        "no shares title: {shown}"
+    );
+    assert!(
+        !shown.contains("0% runner jobs"),
+        "no key of zeros: {shown}"
+    );
 }
 
 /// A figure of core's as a page's text reads it: its label, its value, and what it is out of.
