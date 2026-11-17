@@ -232,10 +232,17 @@ fn sections(insights: &api::Insights, width: usize, theme: Theme) -> Vec<Vec<Lin
 /// The fewest cells the disk writes are drawn in as figures and bars; narrower, they are core's sentences.
 const DISK_FIGURES_FROM: usize = 40;
 
-/// The disk writes as figures: what the jobs and the drive wrote, the drive's shares as one bar with its key, and the
+/// The disk writes as figures: what the jobs and the drive wrote, dim under them what the figures leave out, the
+/// drive's shares as one bar with its key, and the
 /// workflows and jobs that wrote most as ranked bars with core's note.
 fn disk_figures(disk: &api::DiskWrites, width: usize, theme: Theme) -> Vec<Line<'static>> {
     let mut lines = figure_rows(disk.figures().iter().map(Into::into), width, theme);
+    lines.extend(
+        disk.caveats()
+            .iter()
+            .flat_map(|caveat| wrap(caveat, width))
+            .map(|line| Line::styled(line, theme.dim())),
+    );
     if let Some(drive) = &disk.drive {
         lines.push(Line::from(""));
         lines.push(Line::raw(api::DiskWrites::SHARES_TITLE));

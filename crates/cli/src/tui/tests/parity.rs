@@ -1920,3 +1920,36 @@ fn the_insights_view_draws_what_jobs_and_the_drive_wrote_as_core_s_figures() {
         }
     }
 }
+
+#[test]
+fn what_the_disk_figures_leave_out_reads_dim_under_them_as_core_words_it() {
+    let (daemon, _) = fixtures();
+    for insights in [
+        runnerd_fixtures::insights(NOW),
+        runnerd_fixtures::insights_read_in_part(NOW),
+    ] {
+        let mut app = app(&daemon);
+        let caveats = insights.disk.as_ref().unwrap().caveats();
+        assert!(!caveats.is_empty(), "each fixture has something to say");
+        app.update(Msg::Insights(Ok(Box::new(insights))));
+        app.update(super::tab(View::Insights));
+        let (rows, buffer) = frame_of(&app, 130, 120);
+        let all = rows.join("\n");
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = words(&all.replace('\n', " "));
+        for caveat in &caveats {
+            assert!(shown.contains(&words(caveat)), "{caveat}:\n{all}");
+            let first = caveat
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let y = rows.iter().position(|row| row.starts_with(&first)).unwrap();
+            assert_eq!(
+                buffer[(0, u16::try_from(y).unwrap())].fg,
+                ratatui::style::Color::DarkGray,
+                "{caveat} dim:\n{all}"
+            );
+        }
+    }
+}

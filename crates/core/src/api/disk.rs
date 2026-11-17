@@ -220,17 +220,28 @@ impl JobWrites {
             ByteSize(self.median),
             ByteSize(self.p90)
         );
-        if self.partial > 0 {
-            let _ = write!(line, "; {} partial, counted as far as read", self.partial);
-        }
-        if self.dirty > 0 {
-            let _ = write!(
-                line,
-                "; {} more waited to be written back as their containers ended",
-                ByteSize(self.dirty)
-            );
+        for note in [self.partial_note(), self.dirty_note()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = write!(line, "; {note}");
         }
         line
+    }
+
+    /// `12 partial, counted as far as read`, when a job was read only in part.
+    fn partial_note(&self) -> Option<String> {
+        (self.partial > 0).then(|| format!("{} partial, counted as far as read", self.partial))
+    }
+
+    /// `3.1G more waited to be written back as their containers ended`, when any did.
+    fn dirty_note(&self) -> Option<String> {
+        (self.dirty > 0).then(|| {
+            format!(
+                "{} more waited to be written back as their containers ended",
+                ByteSize(self.dirty)
+            )
+        })
     }
 }
 
@@ -289,14 +300,7 @@ impl DriveWrites {
             duration(self.watched),
             ByteSize(self.per_day())
         )];
-        if let Some(store) = &self.store {
-            lines.push(format!(
-                "Docker's root is a file system in a file on it ({store}): the jobs' and the runner slice's figures \
-                 are bytes written to that file system; {} also wrote its journal and the overhead of the file \
-                 system under it",
-                self.device
-            ));
-        }
+        lines.extend(self.store_note());
         lines.push(self.shares.line(self.watched));
         if let Some(commits) = self.commits {
             lines.push(format!(
@@ -305,6 +309,20 @@ impl DriveWrites {
             ));
         }
         lines
+    }
+}
+
+impl DriveWrites {
+    /// What the figures count when Docker's root is a file system in a file on the drive.
+    fn store_note(&self) -> Option<String> {
+        self.store.as_ref().map(|store| {
+            format!(
+                "Docker's root is a file system in a file on it ({store}): the jobs' and the runner slice's figures \
+                 are bytes written to that file system; {} also wrote its journal and the overhead of the file \
+                 system under it",
+                self.device
+            )
+        })
     }
 }
 
@@ -391,14 +409,10 @@ impl DriveShares {
     /// read: `Runner jobs 25%; the rest of the runner slice 8% (...); runnerd itself 1%; no owner runnerd knows 66%`.
     /// No share passes the whole.
     pub fn line(&self, watched: u64) -> String {
-        let mut line = if self.watched < watched {
-            format!(
-                "Over the {} runnerd read the runner slice: ",
-                duration(self.watched)
-            )
-        } else {
-            String::new()
-        };
+        let mut line = self
+            .stretch_note(watched)
+            .map(|stretch| format!("{stretch}: "))
+            .unwrap_or_default();
         let said: Vec<String> = self
             .parts()
             .iter()
@@ -413,14 +427,33 @@ impl DriveShares {
             .collect();
         line.push_str(&said.join("; "));
         if self.slice.is_none() {
-            line.push_str(", the runner slice's share unread");
+            line.push_str(", ");
+            line.push_str(Self::SLICE_UNREAD);
         }
-        // The line starts as a sentence does.
-        let mut chars = line.chars();
-        chars.next().map_or_else(String::new, |first| {
-            first.to_uppercase().chain(chars).collect()
+        sentence_case(&line)
+    }
+
+    /// What the shares say when the runner slice was not read.
+    const SLICE_UNREAD: &'static str = "the runner slice's share unread";
+
+    /// `over the 1h 00m runnerd read the runner slice`, when that is shorter than the `watched` seconds the drive was
+    /// read.
+    fn stretch_note(&self, watched: u64) -> Option<String> {
+        (self.watched < watched).then(|| {
+            format!(
+                "over the {} runnerd read the runner slice",
+                duration(self.watched)
+            )
         })
     }
+}
+
+/// `line` starting as a sentence does, its first letter a capital.
+fn sentence_case(line: &str) -> String {
+    let mut chars = line.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// A part of the disk-writes section, under its title.
@@ -441,6 +474,42 @@ impl DiskWrites {
     pub const WORKFLOWS_TITLE: &'static str = "Workflows that wrote most";
     /// What the jobs that wrote most are called.
     pub const TOP_JOBS_TITLE: &'static str = "Jobs that wrote most";
+    /// What the jobs' bytes are called among the figures.
+    const JOBS_WROTE: &'static str = "Jobs wrote";
+
+    /// What the figures leave out that changes how they read, a line each, in the order the figures show, each
+    /// naming what it is about: jobs read only in part, bytes that waited to be written back, Docker's root as a file
+    /// system in a file on the drive, and the drive's shares read over a shorter stretch than the drive or without
+    /// the runner slice's. The same words as [`DiskWrites::sections`].
+    pub fn caveats(&self) -> Vec<String> {
+        let mut caveats = Vec::new();
+        if self.jobs.measured > 0 {
+            caveats.extend(
+                [self.jobs.partial_note(), self.jobs.dirty_note()]
+                    .into_iter()
+                    .flatten()
+                    .map(|note| format!("{}: {note}", Self::JOBS_WROTE)),
+            );
+        }
+        if let Some(drive) = &self.drive {
+            caveats.extend(drive.store_note());
+            caveats.extend(
+                drive
+                    .shares
+                    .stretch_note(drive.watched)
+                    .into_iter()
+                    .chain(
+                        drive
+                            .shares
+                            .slice
+                            .is_none()
+                            .then(|| DriveShares::SLICE_UNREAD.to_owned()),
+                    )
+                    .map(|note| format!("{}: {note}", Self::SHARES_TITLE)),
+            );
+        }
+        caveats
+    }
 
     /// Its figures, in the order they show: the jobs' bytes, count, median and p90 when a job was measured; the
     /// drive's bytes, daily rate and btrfs commits when it was read.
@@ -449,7 +518,7 @@ impl DiskWrites {
         let jobs = &self.jobs;
         if jobs.measured > 0 {
             figures.extend([
-                LabelledFigure::new("Jobs wrote", ByteSize(jobs.total).to_string()),
+                LabelledFigure::new(Self::JOBS_WROTE, ByteSize(jobs.total).to_string()),
                 LabelledFigure::new(JOBS_HEADING, jobs.measured.to_string()),
                 LabelledFigure::new("Median a job", ByteSize(jobs.median).to_string()),
                 LabelledFigure::new("p90 a job", ByteSize(jobs.p90).to_string()),
@@ -736,5 +805,83 @@ mod tests {
             unmeasured.figures().is_empty(),
             "no figures without a measured job or a read drive"
         );
+    }
+
+    /// The figures leave out what the sentences say about how to read them: a client that shows only the figures
+    /// would show bytes from a partly read job, or shares of a drive behind a file system in a file, as whole.
+    #[test]
+    fn the_caveats_say_what_the_figures_leave_out_in_the_sentences_words() {
+        let shares = DriveShares {
+            watched: 3600,
+            written: 100 * G,
+            jobs: 50 * G,
+            slice: None,
+            daemon: None,
+        };
+        let disk = DiskWrites {
+            jobs: JobWrites {
+                measured: 529,
+                partial: 12,
+                total: 145 * G,
+                median: 49 * M,
+                p90: 612 * M,
+                dirty: 3 * G,
+            },
+            workflows: Vec::new(),
+            top_jobs: Vec::new(),
+            drive: Some(DriveWrites {
+                device: "nvme0n1".to_owned(),
+                watched: 2 * 3600,
+                written: 200 * G,
+                shares,
+                commits: None,
+                store: Some("loop0".to_owned()),
+            }),
+        };
+        assert_eq!(
+            disk.caveats(),
+            [
+                "Jobs wrote: 12 partial, counted as far as read",
+                "Jobs wrote: 3G more waited to be written back as their containers ended",
+                "Docker's root is a file system in a file on it (loop0): the jobs' and the runner slice's figures are \
+                 bytes written to that file system; nvme0n1 also wrote its journal and the overhead of the file system \
+                 under it",
+                "Who wrote to the drive: over the 1h 00m runnerd read the runner slice",
+                "Who wrote to the drive: the runner slice's share unread",
+            ]
+        );
+        // The sentences say the same, in the same words.
+        let sentences: Vec<String> = disk
+            .sections()
+            .into_iter()
+            .flat_map(|section| section.lines)
+            .collect();
+        let said = sentences.join(" ").to_lowercase();
+        for caveat in disk.caveats() {
+            let note = [DiskWrites::JOBS_WROTE, DiskWrites::SHARES_TITLE]
+                .iter()
+                .find_map(|title| caveat.strip_prefix(&format!("{title}: ")))
+                .unwrap_or(&caveat);
+            assert!(said.contains(&note.to_lowercase()), "{note}: {sentences:?}");
+        }
+        // Read whole, the figures need no caveat.
+        let whole = DiskWrites {
+            jobs: JobWrites {
+                partial: 0,
+                dirty: 0,
+                ..disk.jobs
+            },
+            drive: disk.drive.map(|drive| DriveWrites {
+                watched: 3600,
+                store: None,
+                shares: DriveShares {
+                    slice: Some(60 * G),
+                    ..shares
+                },
+                ..drive
+            }),
+            ..disk
+        };
+        assert_eq!(whole.caveats(), Vec::<String>::new(), "nothing to say");
     }
 }
