@@ -166,7 +166,7 @@ pub struct CheckCount {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorQuery {
     /// Take the last run as it stands when it is of the config running and no older than the daemon's own refresh
-    /// (10 minutes), instead of asking for a new one past a minute. A daemon before 0.2 ignores it.
+    /// (10 minutes), instead of asking for a new one past a minute. A daemon before 0.1.4 ignores it.
     #[serde(default)]
     pub recent: bool,
 }

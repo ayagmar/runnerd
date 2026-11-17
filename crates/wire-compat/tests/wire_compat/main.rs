@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.1.3";
+const PREVIOUS: &str = "v0.1.4";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +252,7 @@ documents! {
     // Requests: bodies, and query strings as the same fields in JSON.
     "shutdown-request": ShutdownRequest => full(samples::shutdown_request(), None),
     "pause-query": PauseQuery => full(samples::pause_query(), None),
+    "doctor-query": DoctorQuery => full(samples::doctor_query(), None),
     "pairing-query": PairingQuery => full(samples::pairing_query(), None),
     "replace-query": ReplaceQuery => full(samples::replace_query(), None),
     "job-query": JobQuery => full(samples::job_query(), None),
