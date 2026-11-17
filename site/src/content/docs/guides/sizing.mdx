@@ -3,6 +3,8 @@ title: How big should each profile be?
 description: The sizing advice runnerd gives from your jobs' peaks, auto sizing that applies it, and splitting light jobs from heavy ones.
 ---
 
+import Shot from '../../../components/Shot.astro';
+
 `runnerctl sizing`, the dashboard's Sizing page and the TUI turn each job's recent peaks into advice for each profile's `memory` and `slots`. A job's recent runs are its last 60 successful ones in 30 days (3 × `min_jobs` when that is more than 20), failed ones included.
 
 - The need is the largest peak plus `margin`, at least 1G for the page cache peaks leave out, rounded up to 256M. It follows the heaviest run, not a percentile: the cap kills a job that goes over. Under `min_jobs` jobs there is no advice.
@@ -11,7 +13,13 @@ description: The sizing advice runnerd gives from your jobs' peaks, auto sizing 
 - The advice lowers `memory` when the need is a tenth or more under it. Under `caps`, if jobs waited a minute or more (p95, [how a wait is counted](#how-a-wait-is-counted)) or the slots were busy half the time, it also adds as many slots as the memory now holds.
 - Under `measured`, advice never changes `slots`; the advice line says when more would help.
 
-[`[sizing]`](../../reference/configuration-more/#sizing) sets `margin` and `min_jobs`. Advice is written only when applied: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button. It goes through the same check as any config and keeps to the profile's `min_memory`, `max_memory`, `max_slots` and [`memory_ceiling`](../../concepts/admission/#a-host-whose-memory-grows). `runnerd doctor` warns when a profile's jobs need more than its `memory`.
+[`[sizing]`](../../reference/configuration-more/#sizing) sets `margin` and `min_jobs`. Advice is written only when applied: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's **Review** link, which opens it in the config editor, unsaved. It goes through the same check as any config and keeps to the profile's `min_memory`, `max_memory`, `max_slots` and [`memory_ceiling`](../../concepts/admission/#a-host-whose-memory-grows). `runnerd doctor` warns when a profile's jobs need more than its `memory`.
+
+<Shot
+  name="sizing"
+  alt="The Sizing page: a lane per profile on one shared scale. jvm's 9G cap is a pale block with its peaks solid inside it and needs 9G marked: keep, no change. node's 7G cap holds peaks under 2.1G and needs 3.25G: the advice is 3.25G × 4, which auto sizing applies at its next look. Under each lane, its percentiles, the advice in words, and its jobs, busy slots, waits, warm starts and CPU p99; then a line that says auto sizing is on."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
 
 A profile under `admission = "caps"`:
 

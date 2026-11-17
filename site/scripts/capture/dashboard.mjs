@@ -18,7 +18,7 @@ const browser = await chromium.launch({ executablePath });
 // is a wall of rows.
 const pages = [
   { name: 'overview', path: '/', heights: { desktop: 1440, phone: 1200 } },
-  { name: 'overview-idle', path: '/', heights: { desktop: 720 }, idle: true },
+  { name: 'overview-idle', path: '/', heights: { desktop: 720, phone: 1250 }, idle: true },
   // One phone screen of the overview scrolled to the budget, tab bar included, for the landing page beside the TUI's
   // frame: its 390 by 731 is the phone box's inside where the TUI's 96 by 26 frame is 526 px tall.
   { name: 'screen', path: '/', heights: { phone: 731 }, scrollTo: '#budget' },
@@ -27,12 +27,17 @@ const pages = [
   { name: 'job-failed', path: '/jobs/9401', heights: { desktop: 1840 } },
   { name: 'cancel', path: '/jobs/120055991700', heights: { desktop: 440 }, press: '[data-asks="cancel"]' },
   { name: 'settings', path: '/config', heights: { desktop: 900, phone: 1400 } },
+  // Jobs opens on its 30 days and its search, then the rows; a few rows say the rest.
+  { name: 'jobs', path: '/history', heights: { desktop: 900, phone: 1300 } },
+  { name: 'sizing', path: '/sizing', heights: { desktop: 680, phone: 1300 } },
+  { name: 'caches', path: '/caches', heights: { desktop: 1180, phone: 1300 } },
 ];
 // Parts of pages for the landing page, each cut to the box around its elements: at 1000 wide and 2x, so they stay
 // legible at about half the page's width, and at a phone's width for phones.
 const parts = [
   { name: 'part-lanes', path: '/', elements: ['#health', '.machine'] },
   { name: 'part-queue', path: '/', elements: ['#queue'] },
+  { name: 'part-disk', path: '/insights', elements: ['section.disk'] },
   { name: 'part-failure', path: '/jobs/9401', elements: ['#failure'] },
   { name: 'part-timeline', path: '/history?lens=timeline', elements: ['.timeline'] },
   { name: 'part-cancel', path: '/jobs/120055991700', elements: ['#job-action'], press: '[data-asks="cancel"]' },

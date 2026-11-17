@@ -28,7 +28,7 @@ A job is its repository, workflow and job name. Notifications send warnings, not
 
 <Shot
   name="insights"
-  alt="The Insights page: findings from the last 14 days, warnings first, then each repository's waits this week against the week before."
+  alt="The Insights page: a card per insight from the last 14 days, each leading with its kind and the number that changed, such as Slower, 6m 10s from 4m 40s, then its sentence and links."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
@@ -47,7 +47,15 @@ The lines are the host's margin plus a quarter of its memory, and a tenth of its
 
 ### Disk writes
 
-Next, `runnerctl insights` and the dashboard say what the window's jobs wrote to the disk under Docker's root, which workflows and jobs wrote most, and what that disk wrote while runnerd read it:
+Next, `runnerctl insights` and the dashboard say what the window's jobs wrote to the disk under Docker's root, which workflows and jobs wrote most, and what that disk wrote while runnerd read it. The dashboard draws it as figures, a bar of who wrote to the drive and ranked bars, with the sentences in a fold:
+
+<Shot
+  name="part-disk"
+  alt="Insights' disk writes: jobs wrote 402G over 1412 jobs, 120M median and 780M p90 a job; nvme0n1 wrote 1.28T, 94.7G a day at this rate, with 2.6 btrfs commits a second; a bar of who wrote to the drive, 30% runner jobs, 5% the rest of the runner slice, 1% runnerd itself and 64% no owner runnerd knows; then the workflows and jobs that wrote most as ranked bars."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
+
+`runnerctl insights` prints the same:
 
 ```text
 disk writes:
