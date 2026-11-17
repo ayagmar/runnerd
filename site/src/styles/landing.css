@@ -228,7 +228,8 @@ html:not(.js) .theme {
 }
 
 /* Text links and the theme button keep their line's size and take a tap of 44px or more: a box around each, drawn by
-   a pseudo-element, so the layout does not grow. */
+   a pseudo-element, so the layout does not grow. Each reaches 12px above and below and 6px to the sides, so two
+   neighbours never share a point: the gaps between them are at least 24px between rows and 12px within one. */
 :is(.text-link, .nav nav a, .theme, .wordmark, .footer nav a) {
   position: relative;
 }
@@ -237,11 +238,11 @@ html:not(.js) .theme {
 .theme::after {
   content: '';
   position: absolute;
-  inset: -0.75rem -0.5rem;
+  inset: -0.75rem -0.375rem;
 }
 
 .theme::after {
-  inset: -0.875rem -0.75rem;
+  inset: -0.875rem -0.375rem;
 }
 
 /* Pressed: every control answers the press before the page changes. */
@@ -377,7 +378,7 @@ html:not(.js) .theme {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem 2rem;
+  gap: 1.5rem 2rem;
   padding-block: 2.5rem 3rem;
   font-size: var(--step-small);
   color: var(--muted);
