@@ -15,7 +15,7 @@ use runnerd_core::api::{
     AutoNote, AutoPlan, BarEnd, Baseline, Basis, Bucket, Budget, BuildCacheCounts, BuildCacheStats,
     Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, Color, CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission,
-    CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorState, ErrorResponse, Event,
+    CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorQuery, DoctorState, ErrorResponse, Event,
     EventEnvelope, EventQuery, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause, Holder,
     HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples,
     HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobAction, JobActions,
@@ -1687,6 +1687,10 @@ pub(crate) fn events() -> Vec<EventEnvelope> {
             event,
         })
         .collect()
+}
+
+pub(crate) fn doctor_query() -> DoctorQuery {
+    DoctorQuery { recent: true }
 }
 
 pub(crate) fn pause_query() -> PauseQuery {
