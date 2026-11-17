@@ -42,16 +42,7 @@ pub(super) fn insights(
             return;
         }
     };
-    heading(
-        frame,
-        title,
-        name,
-        insights.warning_line().map_or_else(
-            || insights.window_line(),
-            |line| format!("{line} {}", insights.window_line()),
-        ),
-        theme,
-    );
+    heading(frame, title, name, insights.heading().to_string(), theme);
     let (main, pane) = beside(frame, body, theme);
     let width = usize::from(main.width);
     // Whole or not at all: its basis and what it leaves out stay with the dollars.

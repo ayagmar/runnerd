@@ -2649,7 +2649,7 @@ fn the_insights_view_lists_each_insight_in_its_tone_and_the_health_line_leaves_t
         host: Vec::new(),
         disk: None,
     };
-    let warning = insights.warning_line().unwrap();
+    let heading = insights.heading().to_string();
     app.update(Msg::Insights(Ok(Box::new(insights))));
 
     let wide = screen(&app, 160, 40, false);
@@ -2660,7 +2660,11 @@ fn the_insights_view_lists_each_insight_in_its_tone_and_the_health_line_leaves_t
     );
     app.update(tab(runnerd_core::api::View::Insights));
     let shown = screen(&app, 120, 32, false);
-    assert!(shown.contains(&warning), "{warning}: {shown}");
+    assert!(
+        shown.contains("3 insights, 2 warnings, from the last"),
+        "every insight counted, the warnings apart: {shown}"
+    );
+    assert!(shown.contains(&heading), "{heading}: {shown}");
     assert_eq!(
         rows_with(&shown, "failed and then passed").len(),
         4,

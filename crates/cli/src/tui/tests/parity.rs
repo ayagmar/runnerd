@@ -686,10 +686,13 @@ fn the_insights_view_states_each_insight_and_the_host_as_core_does() {
     app.update(super::tab(View::Insights));
     let (rows, buffer) = frame(&app);
     let all = rows.join("\n");
-    if let Some(warning) = insights.warning_line() {
-        assert!(shows(&rows, &warning), "{warning}: {all}");
-    }
-    assert!(shows(&rows, &insights.window_line()), "{all}");
+    // The heading counts the rows the list shows, and how many of them warn.
+    let heading = insights.heading().to_string();
+    assert!(
+        heading.starts_with(&format!("{} insights", insights.insights.len())),
+        "{heading}"
+    );
+    assert!(shows(&rows, &heading), "{heading}: {all}");
     for insight in &insights.insights {
         let label = insight.kind.label();
         let row = rows

@@ -33,13 +33,13 @@ impl InsightsView {
 /// The whole page.
 pub(crate) fn render(view: &InsightsView) -> Markup {
     let insights = &view.insights;
-    let count = insights.insights.len();
     let day = &view.digest;
     let main = html! {
         (heading(View::Insights.title(), Some(Page::Insights), Some(html! {
+            @let heading = insights.heading();
             p.page-figure {
-                strong { (count) @if count == 1 { " insight" } @else { " insights" } }
-                span.muted { " " (insights.window_line()) }
+                strong { (heading.figure) }
+                span.muted { (heading.note) }
             }
         })))
         div.page-head {

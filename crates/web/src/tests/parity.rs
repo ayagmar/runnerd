@@ -351,6 +351,20 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
     let insights = runnerd_fixtures::insights(runnerd_fixtures::NOW);
     dashboard.fake.fixtures.lock().unwrap().insights = Some(insights.clone());
     let page = dashboard.page(&cookie, "/insights").await.body;
+    // The heading counts the cards the page shows, and how many of them warn: its figure set apart, then the rest
+    // with nothing between, so the two read as core's line.
+    let heading = insights.heading();
+    assert!(
+        heading
+            .to_string()
+            .starts_with(&format!("{} insights", insights.insights.len())),
+        "{heading}"
+    );
+    let drawn = format!(
+        "<strong>{}</strong><span class=\"muted\">{}</span>",
+        heading.figure, heading.note
+    );
+    assert!(page.contains(&drawn), "{drawn}: {page}");
     for insight in &insights.insights {
         let at = page
             .find(&insight.sentence)
