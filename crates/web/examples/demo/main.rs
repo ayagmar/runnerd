@@ -446,6 +446,10 @@ fn scene(fake: &fake::Fake) {
                 repository.queued_jobs = 0;
             }
             status.budget.memory_in_use = status.budget.mirror_memory;
+            // The host's spare was worked out from the busy scene's reservations.
+            if let Some(host) = &mut status.budget.host {
+                host.spare = host.limit.saturating_sub(status.budget.memory_in_use);
+            }
             for job in &mut fixtures.jobs {
                 if job.summary.state == JobState::Running {
                     job.summary.state = JobState::Completed;
