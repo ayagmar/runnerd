@@ -961,7 +961,7 @@ fn insights(fixtures: &Fixtures) -> Insights {
         p50: Some(p50),
         p95: Some(p95),
     };
-    Insights {
+    let mut shown = Insights {
         since: now - 14 * 86_400,
         until: now,
         insights: vec![
@@ -1068,7 +1068,18 @@ fn insights(fixtures: &Fixtures) -> Insights {
         ],
         host: Vec::new(),
         disk: Some(disk_writes()),
-    }
+    };
+    // In the order the daemon serves them (`Insights::insights`): warnings first, then by repository, workflow and job.
+    shown.insights.sort_by(|a, b| {
+        (a.severity, &a.repository, &a.workflow, &a.job, &a.key).cmp(&(
+            b.severity,
+            &b.repository,
+            &b.workflow,
+            &b.job,
+            &b.key,
+        ))
+    });
+    shown
 }
 
 /// What the demo's jobs and its drive wrote over the insights' window.
