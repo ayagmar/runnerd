@@ -10,8 +10,11 @@
 #
 # The image is built under a private candidate tag, proved by its image ID, and only then tagged with its release tag,
 # which ends in a hash of every input, so another lock, config, mise, base or recipe makes another tag. An existing
-# release tag on another image is never replaced. Prints the release tag pinned to the image ID last
-# (<name>:<tag>@sha256:<id>), as a profile's `image` names it.
+# release tag on another image is never replaced: promotion holds a lock that is the Docker daemon's own, a stopped
+# container named runnerd-mise-promote-<key> that only one build at a time can create, waiting up to
+# MISE_TOOLS_PROMOTION_WAIT seconds (600) for another. Prints the release tag pinned to the image ID last
+# (<name>:<tag>@sha256:<id>), as a profile's `image` names it. The mise version and digest must be in
+# tested-mise.txt.
 set -euo pipefail
 
 recipe=$(cd "$(dirname "$0")" && pwd)
@@ -46,6 +49,7 @@ done
 [[ "$base" =~ @sha256:[0-9a-f]{64}$ ]] || refuse "--base $base is not pinned by digest (<name>@sha256:<digest>)"
 [[ "$mise_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || refuse "--mise-version $mise_version is not an exact version"
 [[ "$mise_sha256" =~ ^[0-9a-f]{64}$ ]] || refuse "--mise-sha256 is not a SHA-256"
+python3 "$recipe/inputs.py" mise "$mise_version" "$mise_sha256" || exit 1
 # runnerd removes the published repository's tags that no profile names, and would try to pull this one (ADR 0040).
 case "$name" in
   ghcr.io/ayagmar/runnerd-runner) refuse "--name must not be runnerd's published repository" ;;
@@ -59,15 +63,25 @@ done
 sha() { sha256sum -- "$1" | cut -d' ' -f1; }
 lock_sha256=$(sha "$project/mise.lock")
 toml_sha256=$(sha "$project/mise.toml")
-recipe_sha256=$(cat "$recipe/Dockerfile" "$recipe/inputs.py" | sha256sum | cut -d' ' -f1)
+recipe_sha256=$(cat "$recipe/Dockerfile" "$recipe/inputs.py" "$recipe/tested-mise.txt" | sha256sum | cut -d' ' -f1)
 key=$(printf '%s\n' "$base" "$mise_version" "$mise_sha256" "$lock_sha256" "$toml_sha256" "$recipe_sha256" |
   sha256sum | cut -c1-16)
 tag="$name:mise-$mise_version-$key"
 
 candidate="$name:candidate-$key-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 scratch=$(mktemp -d)
-trap 'rm -rf -- "$scratch"' EXIT
-drop_candidate() { docker rmi -- "$candidate" >/dev/null 2>&1 || true; }
+lock="runnerd-mise-promote-$key"
+locked=''
+unlock() {
+  if [ -n "$locked" ]; then docker rm -- "$lock" >/dev/null 2>&1 || true; fi
+  locked=''
+}
+trap 'unlock; rm -rf -- "$scratch"' EXIT
+# The lock's container uses the candidate image, so it goes first: then no untagged image is left behind.
+drop_candidate() {
+  unlock
+  docker rmi -- "$candidate" >/dev/null 2>&1 || true
+}
 
 echo "building $candidate" >&2
 if ! docker build \
@@ -95,9 +109,23 @@ if ! docker run --rm --network none --user runner --entrypoint bash \
   refuse "$id failed its proof; its candidate tag was removed"
 fi
 
-# Promotes the proved image, one build of a tag at a time; a tag already on another image stays as it is.
-exec 9>"${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/runnerd-mise-${key}.lock"
-flock 9
+# Promotes the proved image, one build of a tag at a time on this Docker daemon; a tag already on another image stays
+# as it is.
+waited=0
+until docker create --name "$lock" --label "runnerd.mise.promotion=$tag" --entrypoint true "$id" \
+  >/dev/null 2>"$scratch/lock.err"; do
+  if ! grep -qiE 'conflict|already in use' "$scratch/lock.err"; then
+    drop_candidate
+    refuse "cannot take the promotion lock $lock: $(cat "$scratch/lock.err")"
+  fi
+  if [ "$waited" -ge "${MISE_TOOLS_PROMOTION_WAIT:-600}" ]; then
+    drop_candidate
+    refuse "another build of $tag holds the promotion lock, container $lock; if none runs, docker rm $lock"
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+locked=1
 existing=$(docker image inspect --format '{{.Id}}' -- "$tag" 2>/dev/null || true)
 if [ -n "$existing" ] && [ "$existing" != "$id" ]; then
   drop_candidate
@@ -105,5 +133,4 @@ if [ -n "$existing" ] && [ "$existing" != "$id" ]; then
 fi
 docker tag "$id" "$tag"
 drop_candidate
-flock -u 9
 echo "$tag@$id"

@@ -10,14 +10,19 @@ FROM ${BASE} AS base
 # The repository's config, refused before anything is downloaded when it is outside the shapes the recipe has tested
 # (inputs.py check). The SHA-256s build.sh passes are the image's labels; checking them here keeps the labels true to
 # the files. SHA256SUMS, to which the next stage adds the mise binary, lets a job check that its own mise.toml,
-# mise.lock and mise pin are the ones the image was built from.
+# mise.lock and mise pin are the ones the image was built from. The mise version and binary must be one that passed the
+# recipe's wrong-digest builds (tested-mise.txt).
 FROM base AS inputs
 USER root
 ARG LOCK_SHA256
 ARG TOML_SHA256
+ARG MISE_VERSION
+ARG MISE_SHA256
 COPY --chmod=755 inputs.py /opt/mise/libexec/runnerd-mise-inputs
+COPY --chmod=644 tested-mise.txt /opt/mise/share/tested-mise.txt
 COPY --from=project --chmod=644 mise.toml mise.lock /opt/mise/share/
-RUN cd /opt/mise/share \
+RUN /opt/mise/libexec/runnerd-mise-inputs mise "${MISE_VERSION}" "${MISE_SHA256}" \
+    && cd /opt/mise/share \
     && printf '%s  mise.lock\n%s  mise.toml\n' "${LOCK_SHA256}" "${TOML_SHA256}" > SHA256SUMS \
     && sha256sum --check --strict SHA256SUMS \
     && /opt/mise/libexec/runnerd-mise-inputs check /opt/mise/share \
@@ -33,7 +38,6 @@ ARG TARGETARCH
 ARG MISE_VERSION
 ARG MISE_SHA256
 RUN [ "${TARGETARCH:-$(dpkg --print-architecture)}" = amd64 ] || { echo "linux-x64 only" >&2; exit 1; } \
-    && [ -n "${MISE_VERSION}" ] && [ -n "${MISE_SHA256}" ] \
     && curl -sSfL --retry 3 --connect-timeout 30 --max-time 600 -o /tmp/mise.tar.zst \
         "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-x64.tar.zst" \
     && tar --zstd -xf /tmp/mise.tar.zst -C /tmp mise/bin/mise \

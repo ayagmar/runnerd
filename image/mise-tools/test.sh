@@ -16,11 +16,13 @@ set -euo pipefail
 
 recipe=$(cd "$(dirname "$0")" && pwd)
 prefix="runnerd-mise-test-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-mise_version=2026.10.18
-mise_sha256=e97c38973336aa2ff350fea50f47b412b266fe263b102b7200ff1e9b118c6942
+# The newest tested mise: a row joins tested-mise.txt only with a passing run of this test on it.
+read -r mise_version mise_sha256 < <(grep -v '^#' "$recipe/tested-mise.txt" | tail -n 1)
 work=$(mktemp -d)
 made=()
+lock_held=''
 cleanup() {
+  [ -z "$lock_held" ] || docker rm "$lock_held" >/dev/null 2>&1 || true
   # Candidate tags build.sh left if it was killed, then the tags this run made; the prefix is this run's own.
   docker images --format '{{.Repository}}:{{.Tag}}' | grep -F "$prefix/mise:candidate-" | xargs -r docker rmi >/dev/null || true
   [ ${#made[@]} -eq 0 ] || docker rmi "${made[@]}" >/dev/null 2>&1 || true
@@ -42,8 +44,8 @@ if [ -z "$base" ]; then
   base="$prefix/base:test@${digest#*@}"
 fi
 
-build() { # build <project dir> <log> [<mise sha256>]: on success the last log line is the image's name:tag@id
-  "$recipe/build.sh" --base "$base" --mise-version "$mise_version" --mise-sha256 "${3:-$mise_sha256}" \
+build() { # build <project dir> <log> [<mise sha256>] [<mise version>]: on success the last log line is name:tag@id
+  "$recipe/build.sh" --base "$base" --mise-version "${4:-$mise_version}" --mise-sha256 "${3:-$mise_sha256}" \
     --project "$1" --name "$prefix/mise" >"$2" 2>&1 || return 1
   made+=("$(tail -n 1 "$2" | sed 's/@sha256:.*//')")
 }
@@ -89,8 +91,31 @@ grep -qF "$tag is already image ${other#*@}" "$work/taken.log" || { cat "$work/t
 [ "$(docker image inspect --format '{{.Id}}' "$tag")" = "${other#*@}" ] || fail "$tag was moved"
 docker tag "$id" "$tag"
 
-refused() { # refused <project dir> <what the log must say> [<mise sha256>]
-  if build "$1" "$work/refused.log" "${3:-}"; then fail "built what it must refuse: $2"; fi
+echo "a build waits for another build's promotion lock on the same Docker daemon" >&2
+key=${tag##*-}
+lock_held="runnerd-mise-promote-$key"
+docker create --name "$lock_held" --entrypoint true "$id" >/dev/null
+docker tag "$id" "$prefix/mise:keep"
+made+=("$prefix/mise:keep")
+docker rmi "$tag" >/dev/null
+if MISE_TOOLS_PROMOTION_WAIT=2 build "$recipe/tests/fixture" "$work/locked.log"; then
+  fail "promoted $tag while another build held the lock"
+fi
+grep -qF "another build of $tag holds the promotion lock" "$work/locked.log" \
+  || { cat "$work/locked.log" >&2; fail "no wait on the promotion lock"; }
+if docker image inspect "$tag" >/dev/null 2>&1; then fail "$tag was tagged without the lock"; fi
+docker rm "$lock_held" >/dev/null
+lock_held=''
+docker tag "$id" "$tag"
+
+echo "proof rows come from the config's requests bound to their lock entries" >&2
+dir=$(project specifiers)
+sed -i 's|^specifiers = \["1.8.1"\]|specifiers = ["1.8", "1.8.1"]|' "$dir/mise.lock"
+python3 "$recipe/inputs.py" tools "$dir" >"$work/rows" || fail "the specifiers fixture is refused"
+grep -qP '^jq\t1\.8\.1\t1\.8\.1\t' "$work/rows" || { cat "$work/rows" >&2; fail "jq's row is not the request 1.8.1"; }
+
+refused() { # refused <project dir> <what the log must say> [<mise sha256>] [<mise version>]
+  if build "$1" "$work/refused.log" "${3:-}" "${4:-}"; then fail "built what it must refuse: $2"; fi
   grep -qF -- "$2" "$work/refused.log" || { cat "$work/refused.log" >&2; fail "the refusal does not say: $2"; }
 }
 before_download() {
@@ -118,8 +143,17 @@ dir=$(project template-table)
 sed -i "s|^jq = \"1.8.1\"|jq = { version = \"{{ exec(command='id') }}\" }|" "$dir/mise.toml"
 refused "$dir" "is not a literal version; tables and options are refused"
 before_download
-refused "$recipe/tests/fixture" "/tmp/mise/bin/mise: FAILED" "$(printf '0%.0s' {1..64})"
-if grep -qE "^#[0-9]+ [0-9.]+ $mise_version linux-x64" "$work/refused.log"; then fail "the unverified mise ran"; fi
+dir=$(project trailing-newline)
+sed -i 's|^jq = "1.8.1"|jq = "1.8.1\\n"|' "$dir/mise.toml"
+refused "$dir" 'refused: jq: "1.8.1\n" is not a literal version'
+before_download
+
+echo "only a tested mise version and binary" >&2
+refused "$recipe/tests/fixture" "refused: mise $mise_version with SHA-256 $(printf '0%.0s' {1..64}) has not passed" \
+  "$(printf '0%.0s' {1..64})"
+if grep -q '^building' "$work/refused.log"; then fail "an untested mise reached the build"; fi
+refused "$recipe/tests/fixture" "refused: mise 2026.11.9 with SHA-256 $mise_sha256 has not passed" "" 2026.11.9
+if grep -q '^building' "$work/refused.log"; then fail "an untested mise reached the build"; fi
 
 one_tool() { # one_tool <name> <tool> <request> <lock entries>: a project of one tool
   mkdir "$work/$1"
@@ -127,14 +161,19 @@ one_tool() { # one_tool <name> <tool> <request> <lock entries>: a project of one
   printf 'lockfile_version = 3\n\n%s\n' "$4" >"$work/$1/mise.lock"
   echo "$work/$1"
 }
-node_entry() { # node_entry <digest> [<extra field line>]
+node_entry() { # node_entry <digest> [<extra field line>] [<url suffix, TOML-escaped>]
   printf '[[tools.node]]\nversion = "24.22.1"\nbackend = "core:node"\nspecifiers = ["24.22.1"]\n%s\n\n' "${2:-}"
   printf '[tools.node."platforms.linux-x64"]\nchecksum = "%s"\n' "$1"
-  printf 'url = "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.gz"\n'
+  printf 'url = "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.gz%s"\n' "${3:-}"
 }
 node_sha=sha256:eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
 refused "$(one_tool node-install node 24.22.1 "$(node_entry "$node_sha" 'install = "source"')")" \
   "refused: node@24.22.1: field \`install\` is not one this recipe has tested"
+before_download
+# mise parses the URL, which drops the newline, and then no longer finds it equal to the lock's: it would replace the
+# lock's digest with nodejs.org's (src/plugins/core/node.rs).
+refused "$(one_tool node-newline node 24.22.1 "$(node_entry "sha256:$(printf 'e%.0s' {1..64})" '' '\n')")" \
+  'refused: node@24.22.1: linux-x64 url "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.gz\n" is not exactly'
 before_download
 pypy='[[tools.python]]
 version = "pypy3.11-7.3.20"

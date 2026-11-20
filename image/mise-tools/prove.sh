@@ -1,9 +1,10 @@
 #!/bin/bash
 # The proof that a mise-tools image holds the pinned tools (docs/adr/0149). build.sh runs it in the candidate image as
 # `runner`, with no network. mise, with fresh empty data, cache, state and config dirs, no hooks, and the build's own
-# config (mise.toml's [tools]) with mise.lock, must install nothing; then each locked tool version's program must
-# resolve to a real path inside that version's directory under the system installs, run with a literal argv, and
-# print exactly its locked version. It shows the tools are there and used, not which digest the build checked: that is
+# config (mise.toml's [tools]) with mise.lock, must install nothing; then for each [tools] request, bound to its one
+# lock entry as the build's check binds it, the request must resolve to the directory of that entry's version under
+# the system installs, and its program to a real path inside it, which runs with a literal argv and prints exactly the
+# locked version. It shows the tools are there and used, not which digest the build checked: that is
 # the build's (test.sh's wrong-digest builds).
 #
 # CHECKS holds `<tool>=<program> [<argument>...]` lines for a tool whose version command is not `<name> --version`.
@@ -27,9 +28,10 @@ fail() {
 
 [ "$(id -un)" = runner ] || fail "runs as $(id -un), not runner"
 [ ! -w "$system" ] || fail "$system is writable by runner"
-/opt/mise/libexec/runnerd-mise-inputs tools mise.lock >"$work/inventory" || fail "cannot read mise.lock's tools"
-[ -s "$work/inventory" ] || fail "mise.lock lists no tool"
-awk -F'\t' 'NF != 4 { exit 1 }' "$work/inventory" || fail "the tool list is malformed"
+# One row per [tools] request and the lock entry it is bound to, from the same check the build passed.
+/opt/mise/libexec/runnerd-mise-inputs tools "$work/project" >"$work/inventory" || fail "the build's inputs are refused"
+[ -s "$work/inventory" ] || fail "mise.toml requests no tool"
+awk -F'\t' 'NF != 5 { exit 1 }' "$work/inventory" || fail "the tool list is malformed"
 
 "$mise" install --locked || fail "mise install --locked tried to install something; there is no network"
 if [ -d "$MISE_DATA_DIR/installs" ] && [ -n "$(ls -A "$MISE_DATA_DIR/installs")" ]; then
@@ -37,7 +39,7 @@ if [ -d "$MISE_DATA_DIR/installs" ] && [ -n "$(ls -A "$MISE_DATA_DIR/installs")"
 fi
 
 checked=0
-while IFS=$'\t' read -r tool request version name; do
+while IFS=$'\t' read -r tool request locked version name; do
   argv=("$name" --version)
   while IFS= read -r line; do
     if [ -n "$line" ] && [ "${line%%=*}" = "$tool" ]; then
@@ -53,6 +55,7 @@ while IFS=$'\t' read -r tool request version name; do
     "$system"/*/*/) ;;
     *) fail "$tool@$request: installed at $dir, not under $system" ;;
   esac
+  [ "$(basename "$dir")" = "$locked" ] || fail "$tool@$request: resolves to $dir, not the locked $locked"
   which=$("$mise" which --tool "$tool@$request" "$program") || fail "$tool@$request: has no program $program"
   path=$(realpath -e "$which") || fail "$tool@$request: $which does not exist"
   case "$path" in
