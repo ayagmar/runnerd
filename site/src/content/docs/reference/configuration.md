@@ -82,7 +82,7 @@ A key marked required must be set. Sizes take `K`, `M`, `G` or `T`, durations a 
 | `warm` | `1` | [warm runners](../../concepts/terms/#warm-runner) kept while active; `0` turns them off |
 | `build_cache` | `true` | its runners get the build cache |
 | `build_cache_writers` | `"default-branch"` | whose jobs write to it: `"pull-requests"` adds [people's pull requests from its own branches](../../guides/caches/#build-cache) |
-| `rerun_runner_faults` | `true` | [re-run a run's failed jobs once](../../guides/cancel-rerun/#runner-faults) when its runner, not its code, failed one |
+| `rerun_runner_faults` | `false` | [re-run a run's failed jobs](../../guides/cancel-rerun/#runner-faults) when its runner, not its code, failed one |
 
 The keys for the caches, the job history, records, sizing, GitHub, the dashboard and notifications are on [Caches, history and notifications](../configuration-more/).
 

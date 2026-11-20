@@ -73,7 +73,7 @@ flowchart TB
   a revision; each is a leaf only its own methods write
   ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)); `api::actions` words its
   previews and answers. `actions::rerun`, a task the engine starts, re-runs a run whose runner failed a job once per
-  attempt through the same flights and permit, by a stateless rule on GitHub's attempt; `actions::faults` holds the
+  attempt, where the config opts in, through the same flights and permit, by a rule on GitHub's attempt and conclusion; `actions::faults` holds the
   runs it follows and the repositories a refusal holds, a leaf only its own methods write
   ([ADR 0153](docs/adr/0153-a-run-its-runner-failed-is-rerun-once-per-attempt.md)). `command` runs an external command in a process group of its own and kills it past its
   deadline or at a stop, for the doctor and for `github`'s `gh auth token`; `github::token` holds the client's token

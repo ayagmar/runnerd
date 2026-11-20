@@ -48,8 +48,13 @@ pub(super) struct Due {
 /// Where one run is.
 #[derive(Debug, Clone, Copy)]
 enum Stage {
-    /// A check is due at `at`; `failed` checks failed before it.
-    Due { at: Instant, failed: u32 },
+    /// A check is due at `at`; `failed` checks failed before it. A firm time (a backoff, a hold, a rate limit) is
+    /// never brought forward by another fault.
+    Due {
+        at: Instant,
+        failed: u32,
+        firm: bool,
+    },
     /// Nothing more to do for this attempt: it was re-run, by runnerd or a person, or must not be.
     Settled,
 }
@@ -84,6 +89,8 @@ pub(super) struct Held {
 struct Book {
     runs: HashMap<RunKey, Fault>,
     refusals: BTreeMap<String, Refusal>,
+    /// Until when GitHub's rate limit stops every read and send, once one answered for it.
+    cooldown: Option<Instant>,
 }
 
 /// The runs runnerd follows for a re-run, and the repositories GitHub refused one for.
@@ -127,6 +134,21 @@ impl Faults {
         lock(&self.book).failed(due, at)
     }
 
+    /// Checks `due` again at `at` and no sooner, as for a hold or a rate limit: no check failed.
+    pub(super) fn hold(&self, due: &Due, at: Instant) {
+        lock(&self.book).hold(due, at);
+    }
+
+    /// Stops every read and send until `until`: GitHub's rate limit answered.
+    pub(super) fn cool(&self, until: Instant) {
+        lock(&self.book).cool(until);
+    }
+
+    /// Until when reads and sends are stopped, at `now`, if they are.
+    pub(super) fn cooling(&self, now: Instant) -> Option<Instant> {
+        lock(&self.book).cooling(now)
+    }
+
     /// Notes that GitHub refused `repository`'s re-runs under config revision `revision` at `now`, as `refused` says:
     /// they are held for [`HELD`]. When the hold ends.
     pub(super) fn refuse(
@@ -155,11 +177,16 @@ impl Book {
             && fault.attempt >= attempt
         {
             if fault.attempt == attempt
-                && let Stage::Due { at, failed } = fault.stage
+                && let Stage::Due {
+                    at,
+                    failed,
+                    firm: false,
+                } = fault.stage
             {
                 fault.stage = Stage::Due {
                     at: at.min(now),
                     failed,
+                    firm: false,
                 };
             }
             return;
@@ -170,7 +197,11 @@ impl Book {
                 attempt,
                 job,
                 seen: now,
-                stage: Stage::Due { at: now, failed: 0 },
+                stage: Stage::Due {
+                    at: now,
+                    failed: 0,
+                    firm: false,
+                },
             },
         );
     }
@@ -213,9 +244,42 @@ impl Book {
     fn wait(&mut self, due: &Due, at: Instant) {
         self.with(due, |fault| {
             if let Stage::Due { failed, .. } = fault.stage {
-                fault.stage = Stage::Due { at, failed };
+                fault.stage = Stage::Due {
+                    at,
+                    failed,
+                    firm: false,
+                };
             }
         });
+    }
+
+    /// Checks `due` again at `at` and no sooner, as for a hold or a rate limit: no check failed.
+    fn hold(&mut self, due: &Due, at: Instant) {
+        self.with(due, |fault| {
+            if let Stage::Due { failed, .. } = fault.stage {
+                fault.stage = Stage::Due {
+                    at,
+                    failed,
+                    firm: true,
+                };
+            }
+        });
+    }
+
+    /// Stops every read and send until `until`.
+    fn cool(&mut self, until: Instant) {
+        self.cooldown = Some(self.cooldown.map_or(until, |was| was.max(until)));
+    }
+
+    /// Until when reads and sends are stopped, at `now`, if they are.
+    fn cooling(&mut self, now: Instant) -> Option<Instant> {
+        match self.cooldown {
+            Some(until) if now < until => Some(until),
+            _ => {
+                self.cooldown = None;
+                None
+            }
+        }
     }
 
     /// Checks `due` again at `at` because this check failed; after [`TRIES_MAX`] failed checks, settles it instead.
@@ -227,7 +291,11 @@ impl Book {
                 let failed = failed + 1;
                 again = failed < TRIES_MAX;
                 fault.stage = if again {
-                    Stage::Due { at, failed }
+                    Stage::Due {
+                        at,
+                        failed,
+                        firm: true,
+                    }
                 } else {
                     Stage::Settled
                 };

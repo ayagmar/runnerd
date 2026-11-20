@@ -679,6 +679,41 @@ impl RerunRefused {
         }
     }
 
+    /// What a refused read of run `run` of `repository` is held for, at `now`: GitHub would not show runnerd's token
+    /// the run or its jobs, which the re-run needs first. `answer` is the read's failure, as a refusal.
+    pub fn unread(repository: &str, run: u64, answer: ActionAnswer, now: u64) -> RerunRefused {
+        let (refusal, status) = match answer {
+            ActionAnswer::Refused {
+                refusal, status, ..
+            } => (refusal, status),
+            ActionAnswer::Accepted { status } | ActionAnswer::AlreadyFinished { status } => {
+                (ActionRefusal::Other, Some(status))
+            }
+            ActionAnswer::Unknown { status, .. } => (ActionRefusal::Other, status),
+        };
+        let code = status.map_or_else(String::new, |status| format!(" ({status})"));
+        let message = match refusal {
+            ActionRefusal::NoToken => format!(
+                "runnerd could read no GitHub token, so it could not read run {run} of {repository}. Nothing was \
+                 sent."
+            ),
+            ActionRefusal::Unauthorized => format!(
+                "GitHub refused runnerd's token{code} when it read run {run} of {repository}. Nothing was sent."
+            ),
+            _ => format!(
+                "GitHub would not show run {run} of {repository} to runnerd{code}: the token may lack Actions: read \
+                 on it, or the run is gone. Nothing was sent."
+            ),
+        };
+        RerunRefused {
+            run,
+            since: now,
+            refusal,
+            status,
+            message,
+        }
+    }
+
     /// The attention list's line: `runnerd holds the re-runs of o/app's runner faults for an hour: GitHub refused to
     /// re-run the failed jobs of run 4182 (403): …`.
     pub fn title(&self, repository: &str) -> String {

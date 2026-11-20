@@ -1061,19 +1061,19 @@ fn pools_of_a_repository_sharing_a_label_are_rejected() {
     assert!(error.contains("app") && error.contains("light"), "{error}");
 }
 
-/// Runner faults are re-run by default, and whether they are is the repository's: pools that disagree would leave a
-/// run's re-run to whichever pool's entry was read.
+/// Runner faults are re-run only where the config asks, as the evidence is the job's own output; whether they are is
+/// the repository's: pools that disagree would leave a run's re-run to whichever pool's entry was read.
 #[test]
-fn runner_faults_are_rerun_by_default_and_pools_must_agree() {
+fn runner_faults_are_rerun_only_where_asked_and_pools_must_agree() {
     let config = with_light_pool("[\"app-light\"]", "");
     assert!(
         config
             .repositories
             .iter()
-            .all(|repository| repository.rerun_runner_faults),
-        "rerun_runner_faults is on by default"
+            .all(|repository| !repository.rerun_runner_faults),
+        "rerun_runner_faults is off by default"
     );
-    let error = with_light_pool("[\"app-light\"]", "rerun_runner_faults = false")
+    let error = with_light_pool("[\"app-light\"]", "rerun_runner_faults = true")
         .validate(Some(size("33G")))
         .unwrap_err()
         .to_string();
@@ -1520,5 +1520,33 @@ fn doctor_says_which_images_skip_syncs_and_whether_a_reboot_keeps_their_caches()
     assert_eq!(
         off.syncs_check(&new, PastBoots::Read).detail,
         "kept, as [host] skip_syncs = false sets"
+    );
+}
+
+/// GitHub reads `Org/App` and `org/app` as one repository, so two spellings could put a pool's setting on another's
+/// jobs: the check refuses them.
+#[test]
+fn one_repository_spelled_two_ways_is_rejected() {
+    let error = Config::parse(&format!(
+        "{MINIMAL}
+[profiles.light]
+image_stage = \"app\"
+cpus = 1
+memory = \"1G\"
+slots = 1
+
+[[repositories]]
+name = \"Owner/App\"
+profile = \"light\"
+labels = [\"app-light\"]
+"
+    ))
+    .unwrap()
+    .validate(Some(size("33G")))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("Owner/App") && error.contains("owner/app"),
+        "{error}"
     );
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::{Fake, Reply, actions_of, completed, running};
+use super::{Fake, Reply, actions_of, cancelled, completed, running};
 use crate::api::{self, ActionRefusal};
 use crate::github::{ActionFailure, AttemptJob, JobActionRequest, JobDetails, JobStep, QueuedJob};
 use crate::scheduler::engine::Control;
@@ -128,11 +128,13 @@ struct Rig {
     _dir: TestDir,
 }
 
-/// A history in a temp directory, `o/app` configured with its runner faults re-run, and a GitHub that accepts.
+/// A history in a temp directory, `o/app` configured with its runner faults re-run (its config opts in), and a GitHub
+/// that accepts.
 fn rig() -> Rig {
     let dir = TestDir::new("rerun");
     let store = Store::open(&dir.0.join("history.db")).unwrap();
     let (control, _commands) = Control::new(["o/app".to_owned()], [], store.clone());
+    control.set_action_policy(api_allowed(&["o/app"], &["o/app"]));
     Rig {
         github: Fake::new(Reply::Status(201)),
         control: Arc::new(control),
@@ -494,4 +496,189 @@ async fn github_is_never_asked_twice_for_one_attempt_over_generated_sequences() 
         acted_on >= 10 && unsaid >= 2,
         "acted on {acted_on}, {unsaid} unsaid"
     );
+}
+
+/// Faults in runs 500, 600 and 700 of `o/app`, attempt 1, jobs 1 to 3.
+async fn three_runs(rig: &Rig) {
+    for (job, run) in [(1, 500), (2, 600), (3, 700)] {
+        ran(&rig.store, "o/app", job, run, 1, Ended::RunnerFault).await;
+    }
+    rig.store.flush().await;
+}
+
+#[tokio::test]
+async fn a_send_github_answers_without_saying_is_never_sent_again() {
+    // GitHub did not act: the run stays at its attempt, and nothing tells runnerd the request will not land later.
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Status(502);
+    let actions = start(&rig).await;
+    for hours in [1, 3, 5] {
+        actions
+            .pass(Instant::now() + Duration::from_hours(hours))
+            .await;
+    }
+    assert_eq!(
+        rig.reruns_sent(),
+        1,
+        "an unstated outcome is not sent again"
+    );
+
+    // GitHub acted and answered with a timeout: the run moved on, so the re-run landed.
+    let rig = self::rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Fail(ActionFailure::TimedOut);
+    rig.github.acts.store(true, Ordering::SeqCst);
+    start(&rig).await;
+    rig.store.flush().await;
+    let summary = rig.store.job(1).await.unwrap().unwrap().summary;
+    assert!(summary.rerun_at.is_some(), "a re-run that landed is noted");
+}
+
+#[tokio::test]
+async fn a_run_cancelled_as_a_whole_is_not_rerun_whatever_its_jobs_say() {
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(cancelled(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure"), job(2, "success")]);
+    start(&rig).await;
+    assert_eq!(rig.reruns_sent(), 0, "the run was cancelled");
+}
+
+#[tokio::test]
+async fn a_refused_read_holds_the_repository_like_a_refused_send() {
+    let rig = rig();
+    three_runs(&rig).await;
+    rig.github
+        .set_run(Err(ActionFailure::Status { status: 403 }));
+    let actions = start(&rig).await;
+    assert_eq!(rig.reads(), 1, "one refused read, not one per run");
+    let refused = actions
+        .rerun_refused("o/app")
+        .expect("the refusal is shown");
+    assert_eq!(refused.status, Some(403));
+    actions.pass(Instant::now() + Duration::from_mins(30)).await;
+    assert_eq!(rig.reads(), 1, "held for the hour");
+}
+
+#[tokio::test]
+async fn a_rate_limit_without_a_reset_stops_every_runs_reads_for_a_minute() {
+    let rig = rig();
+    three_runs(&rig).await;
+    rig.github
+        .set_run(Err(ActionFailure::Status { status: 429 }));
+    let actions = start(&rig).await;
+    assert_eq!(rig.reads(), 1, "the other runs wait out the 429");
+    actions.pass(Instant::now() + Duration::from_secs(30)).await;
+    assert_eq!(rig.reads(), 1, "within the minute");
+}
+
+#[tokio::test]
+async fn a_slow_pass_schedules_each_runs_next_read_from_when_it_was_read() {
+    let rig = rig();
+    three_runs(&rig).await;
+    rig.github.set_run(Ok(running(1)));
+    *rig.github.delay.lock().unwrap() = Duration::from_millis(50);
+    let began = Instant::now();
+    let actions = rig.actions();
+    actions.read_faults(began).await;
+    actions.pass(began).await;
+    assert_eq!(rig.reads(), 3);
+    actions.pass(began + Duration::from_millis(60_020)).await;
+    assert_eq!(
+        rig.reads(),
+        3,
+        "each was read 50 ms or more after the pass began"
+    );
+}
+
+#[tokio::test]
+async fn another_fault_does_not_cut_a_failed_checks_backoff_short() {
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github
+        .set_run(Err(ActionFailure::Status { status: 502 }));
+    let actions = start(&rig).await;
+    assert_eq!(rig.reads(), 1);
+    // A second fault of the attempt, or a replay of the first after missed events.
+    ran(&rig.store, "o/app", 2, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    let now = Instant::now();
+    actions.read_faults(now).await;
+    actions.pass(now + Duration::from_secs(1)).await;
+    assert_eq!(rig.reads(), 1, "the backoff holds");
+}
+
+#[tokio::test]
+async fn an_owners_rerun_in_flight_is_not_noted_as_automatic() {
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    let actions = rig.actions();
+    let super::Asked::Preview(preview) = actions
+        .ask(1, api::JobAction::RerunFailed, None)
+        .await
+        .unwrap()
+    else {
+        panic!("a preview first");
+    };
+    let confirm = preview.confirm.clone().unwrap();
+    rig.github.hold();
+    let owner = actions.clone();
+    let asked = tokio::spawn(async move {
+        owner
+            .ask(1, api::JobAction::RerunFailed, Some(&confirm))
+            .await
+    });
+    rig.github.entered(1).await;
+    let automatic = actions.clone();
+    let pass = tokio::spawn(async move {
+        automatic.read_faults(Instant::now()).await;
+        automatic.pass(Instant::now()).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    rig.github.release();
+    asked.await.unwrap().unwrap();
+    pass.await.unwrap();
+    rig.store.flush().await;
+    let summary = rig.store.job(1).await.unwrap().unwrap().summary;
+    assert_eq!(summary.rerun_at, None, "the owner re-ran it, not runnerd");
+}
+
+#[tokio::test]
+async fn a_reload_withdraws_an_automatic_send_still_waiting_for_its_connection() {
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    rig.github
+        .transport
+        .forget_permits(tokio::sync::Semaphore::MAX_PERMITS);
+    let actions = rig.actions();
+    let automatic = actions.clone();
+    let pass = tokio::spawn(async move {
+        automatic.read_faults(Instant::now()).await;
+        automatic.pass(Instant::now()).await;
+    });
+    while rig.github.permitted.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    rig.control.set_action_policy(api_allowed(&["o/app"], &[]));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    rig.github
+        .transport
+        .add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+    pass.await.unwrap();
+    assert_eq!(rig.reruns_sent(), 0, "withdrawn by the reload");
 }

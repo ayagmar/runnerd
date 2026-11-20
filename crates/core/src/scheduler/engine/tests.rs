@@ -836,6 +836,7 @@ impl GithubApi for FakeGithub {
         Ok(github::RunNow {
             attempt: 1,
             completed: false,
+            failed: false,
         })
     }
 

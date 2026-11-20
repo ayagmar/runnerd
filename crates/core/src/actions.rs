@@ -26,7 +26,7 @@ use tokio::sync::watch;
 use tracing::info;
 
 use self::faults::Faults;
-use self::flights::{Boarding, Flights, Issued, Landed, Redeemed};
+use self::flights::{Boarding, Flights, Issued, Landed, Origin, Redeemed, Withheld};
 use self::policy::{Denied, Policy};
 use crate::api::{
     self, ActionAnswer, ActionPreview, ActionRefusal, ActionResult, ActionTarget, JobAction,
@@ -263,6 +263,7 @@ impl JobActions {
                 let issued = Issued {
                     target: target.clone(),
                     revision: policy.revision(),
+                    origin: Origin::Owner,
                 };
                 Some(
                     self.flights
@@ -318,6 +319,15 @@ impl JobActions {
                 let policy = self.control.action_policy();
                 allowed(&policy, &summary.repository)?;
                 self.preview(summary, issued.target.action, run, Some(why), &policy)
+                    .await
+            }
+            // The owner joined runnerd's own re-run, whose permit said no: nothing was sent.
+            Landed::Withheld(_) => {
+                let policy = self.control.action_policy();
+                allowed(&policy, &summary.repository)?;
+                let run = RunSeen::Unread { status: None };
+                let why = Some(Superseded::Unverified);
+                self.preview(summary, issued.target.action, run, why, &policy)
                     .await
             }
         }
@@ -382,7 +392,19 @@ impl JobActions {
         };
         let (slug, run, job) = (target.action.slug(), target.run, target.job);
         info!("{repository}: sending the {slug} of run {run} (job {job}) to GitHub");
-        let answer = match self.github.send(repository, request, &permit).await {
+        let sent = async {
+            match issued.origin {
+                Origin::Owner => self.github.send(repository, request, &permit).await,
+                // A reload that lands while the request waits for its connection withdraws it; one already on the
+                // wire cannot be recalled (ADR 0153).
+                Origin::Automatic => tokio::select! {
+                    biased;
+                    () = self.control.policy_moved(issued.revision) => Err(ActionFailure::Withdrawn),
+                    sent = self.github.send(repository, request, &permit) => sent,
+                },
+            }
+        };
+        let answer = match sent.await {
             Err(ActionFailure::Withdrawn) => match crate::sync::lock(&withheld).take() {
                 Some(landed) => return landed,
                 None => classify(Err(ActionFailure::Withdrawn)),
@@ -421,12 +443,23 @@ impl JobActions {
             ))
         };
         match self.github.run(&target.repository, target.run).await {
+            // runnerd's own re-run goes only to a run completed as `failure`, whatever its jobs said before.
+            Ok(now)
+                if Some(now.attempt) == target.attempt
+                    && issued.origin == Origin::Automatic
+                    && !(now.completed && now.failed) =>
+            {
+                return Some(Landed::Withheld(Withheld::NotFailed));
+            }
             Ok(now) if Some(now.attempt) == target.attempt => {}
             Ok(now) => {
                 return Some(Landed::Repreview {
                     run: seen(now),
                     why: Superseded::AttemptChanged,
                 });
+            }
+            Err(failure) if issued.origin == Origin::Automatic => {
+                return Some(Landed::Withheld(Withheld::Unread(failure)));
             }
             Err(failure) => {
                 return Some(Landed::Repreview {

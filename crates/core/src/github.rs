@@ -165,7 +165,7 @@ pub enum Error {
     /// No token could be read.
     #[error("no GitHub token: {0}")]
     Token(String),
-    /// An action archive or a file could not be downloaded whole: what failed, never an address or the token.
+    /// An action archive, a file or a listing could not be read whole: what failed, never an address or the token.
     #[error("{0}")]
     Download(String),
     /// Not sent: runnerd held it back, to keep GitHub's rate limit for what runners need.
@@ -408,6 +408,8 @@ pub struct RunNow {
     pub attempt: u32,
     /// Whether GitHub says it completed.
     pub completed: bool,
+    /// Whether it completed as `failure`: not cancelled, not timed out as a whole, not anything else.
+    pub failed: bool,
 }
 
 /// A job of one attempt of a workflow run, as a re-run of a run its runner failed reads it (ADR 0153).
@@ -424,6 +426,8 @@ pub struct AttemptJob {
 /// The jobs of an attempt, as GitHub lists them.
 #[derive(Deserialize)]
 struct AttemptJobs {
+    /// How many jobs the attempt has, every page's.
+    total_count: Option<usize>,
     jobs: Vec<AttemptJob>,
 }
 
@@ -692,6 +696,7 @@ struct RunAttemptBody {
     #[serde(default = "first_attempt")]
     run_attempt: u32,
     status: Option<String>,
+    conclusion: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1008,6 +1013,27 @@ impl Github {
             }
         }
         Ok(pages)
+    }
+
+    /// Every page of the listing at `path`, as `get_pages` reads them, or an error when a next page is still named at
+    /// `MAX_PAGES`: for a caller that must see the whole listing or nothing.
+    async fn all_pages<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
+        let mut pages = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let path = if page == 1 {
+                path.to_owned()
+            } else {
+                format!("{path}&page={page}")
+            };
+            let answer: Page<T> = self.get_page(&path).await?;
+            pages.push(answer.body);
+            if !answer.next {
+                return Ok(pages);
+            }
+        }
+        Err(Error::Download(format!(
+            "{path} lists more than {MAX_PAGES} pages"
+        )))
     }
 
     /// Sends a request with the token, once more with a fresh token after a 401, conditional on `etag` if given, and
@@ -1399,6 +1425,7 @@ impl GithubApi for Github {
         Ok(RunNow {
             attempt: body.run_attempt,
             completed: body.status.as_deref() == Some("completed"),
+            failed: body.conclusion.as_deref() == Some("failure"),
         })
     }
 
@@ -1411,17 +1438,19 @@ impl GithubApi for Github {
         let path = format!(
             "/repos/{repository}/actions/runs/{run}/attempts/{attempt}/jobs?per_page={PER_PAGE}"
         );
-        let pages: Result<Vec<AttemptJobs>, Error> = self.get_pages(&path).await;
+        let read = self.all_pages::<AttemptJobs>(&path).await;
         // Read once per re-run: nothing asks for these pages again.
         lock(&self.etags).retain(|cached| !cached.starts_with(&path));
-        let mut jobs: Vec<AttemptJob> = pages
-            .map_err(|error| ActionFailure::of(&error))?
-            .into_iter()
-            .flat_map(|page| page.jobs)
-            .collect();
+        let pages = read.map_err(|error| ActionFailure::of(&error))?;
+        let total = pages.iter().filter_map(|page| page.total_count).max();
+        let mut jobs: Vec<AttemptJob> = pages.into_iter().flat_map(|page| page.jobs).collect();
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
-        Ok(jobs)
+        // A job left unread could be one that vetoes the re-run: all of them, or a failed read.
+        match total {
+            Some(total) if total != jobs.len() => Err(ActionFailure::Broken),
+            _ => Ok(jobs),
+        }
     }
 
     async fn named_runs(&self) -> Vec<NamedRun> {

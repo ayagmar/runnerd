@@ -47,6 +47,7 @@ impl ActionsGithub for FakeGithub {
             Ok(RunNow {
                 attempt: 1,
                 completed: false,
+                failed: false,
             })
         })
     }

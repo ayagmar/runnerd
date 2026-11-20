@@ -159,5 +159,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0150](0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md) | A script asks whether a job waits for the host's memory in an exit code | Accepted |
 | [0151](0151-a-short-job-of-another-profile-passes-a-barrier.md) | A short job of another profile passes a barrier | Accepted |
 | [0152](0152-a-snapshot-over-its-limit-starts-its-tools-over-first.md) | A snapshot over its limit starts its tools over first, and all of it only when that is not enough | Accepted |
-| [0153](0153-a-run-its-runner-failed-is-rerun-once-per-attempt.md) | A run its runner failed is re-run once per attempt | Accepted |
+| [0153](0153-a-run-its-runner-failed-is-rerun-once-per-attempt.md) | A run its runner failed is re-run once per attempt, where the config asks | Accepted |
 | [0154](0154-a-job-keeps-how-long-each-cause-held-it.md) | A job keeps how long each cause held it in the queue | Accepted |

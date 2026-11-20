@@ -9,6 +9,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
+
 use crate::api;
 use crate::sync::lock;
 
@@ -102,6 +104,8 @@ impl Policy {
 #[derive(Debug)]
 pub struct Policies {
     current: Mutex<Arc<Policy>>,
+    /// The current revision, for what waits for a replacement.
+    revisions: watch::Sender<u64>,
 }
 
 impl Policies {
@@ -109,6 +113,7 @@ impl Policies {
     pub fn new(allowed: Allowed) -> Policies {
         Policies {
             current: Mutex::new(Arc::new(Policy::of(1, allowed))),
+            revisions: watch::Sender::new(1),
         }
     }
 
@@ -127,5 +132,14 @@ impl Policies {
             return;
         }
         *current = Arc::new(Policy::of(current.revision + 1, allowed));
+        // Under the lock, so a waiter sees revisions in order.
+        self.revisions.send_replace(current.revision);
+    }
+
+    /// Resolves once the snapshot is another than revision `revision`.
+    pub async fn moved(&self, revision: u64) {
+        let mut revisions = self.revisions.subscribe();
+        // `self` holds the sender, so the wait ends only at a replacement.
+        let _ = revisions.wait_for(|now| *now != revision).await;
     }
 }

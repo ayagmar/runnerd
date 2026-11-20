@@ -1,17 +1,21 @@
 //! Re-runs a run whose runner failed one of its jobs, once per attempt, through the job actions' own path (ADR 0153):
-//! GitHub's re-run of the run's failed jobs, without a preview, on the engine's own GitHub client.
+//! GitHub's re-run of the run's failed jobs, without a preview, on the engine's own GitHub client. Off unless a
+//! repository's `rerun_runner_faults` asks: a runner fault is read from the job's own output.
 //!
-//! The rule is stateless: a run is re-run only while GitHub says its current attempt is the one the fault happened in,
-//! it completed, and every job of that attempt that failed or was cancelled is one the runner failed, and the permit
-//! reads the attempt once more right before the send. Once GitHub accepted, the run is at a later attempt, so neither
-//! this daemon nor a restarted one sends it again; a person's re-run moves it the same way. Faults of a repository
-//! whose `rerun_runner_faults` or `[github] job_actions` is off, or that the config no longer has, wait unread until a
-//! reload turns them on or the run is no longer followed. A refusal
-//! that asking again soon cannot change, such as a token without Actions: write, holds the repository's re-runs for an
-//! hour or until the config changes, with one attention item; its runs wait for the hold's end.
+//! A run is re-run only while GitHub says its current attempt is the one the fault happened in and it completed as
+//! `failure`, and every job of that attempt that failed or was cancelled is one the runner failed; the permit reads
+//! the attempt and the run's conclusion once more right before the send. Once GitHub accepted, the run is at a later
+//! attempt, so neither this daemon nor a restarted one sends it again. GitHub's re-run names no attempt, so a person's
+//! re-run between the permit and the send can still be followed by runnerd's: one more re-run at most, within the
+//! attempt cap. A send whose outcome GitHub did not state is never sent again: a read of the run says whether it
+//! landed. Faults of a repository whose `rerun_runner_faults` or `[github] job_actions` is off, or that the config no
+//! longer has, wait unread until a reload turns them on or the run is no longer followed. A read or send GitHub refuses
+//! in a way asking again soon cannot change, such as a token without Actions: write, holds the repository's re-runs
+//! for an hour or until the config changes, with one attention item; a rate limit stops every run's reads until it
+//! resets.
 //!
-//! It must not re-run a run from its third attempt on, send a held repository's re-run, read GitHub for a run more than once a
-//! minute, or write the history beyond noting the re-run GitHub accepted.
+//! It must not re-run a run from its third attempt on, send a held repository's re-run, send while the rate limit
+//! answered, read GitHub for a run more than once a minute, or write the history beyond noting a re-run that landed.
 
 use std::time::Duration;
 
@@ -21,7 +25,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
 
 use super::faults::{Due, RunKey};
-use super::flights::{Boarding, Issued, Landed};
+use super::flights::{Boarding, Issued, Landed, Origin, Withheld};
 use super::{JobActions, classify, wait};
 use crate::api::{
     ActionAnswer, ActionOutcome, ActionRefusal, ActionResult, ActionTarget, Event, JobAction,
@@ -39,6 +43,9 @@ const POLL: Duration = Duration::from_secs(60);
 /// How long until a check that failed is made again.
 const BACKOFF: Duration = Duration::from_secs(120);
 
+/// How long every read waits after a rate limit GitHub answered without saying when it resets.
+const COOLDOWN: Duration = Duration::from_secs(60);
+
 /// The attempts a fault is re-run from: the first and the second, so a run reaches at most its third by runnerd.
 const ATTEMPTS_MAX: u32 = 2;
 
@@ -46,8 +53,10 @@ const ATTEMPTS_MAX: u32 = 2;
 enum Checked {
     /// Nothing more to do for the attempt.
     Settled,
-    /// Check again at this time; no failure.
-    Wait(Instant),
+    /// Check again this long after the check ended, or sooner if another fault of the attempt comes; no failure.
+    Wait(Duration),
+    /// Check again at this time and no sooner: a hold or a rate limit.
+    Hold(Instant),
     /// The check failed; check again later, a few times.
     Failed,
 }
@@ -90,14 +99,22 @@ impl JobActions {
         }
     }
 
-    /// Checks every run whose check is due at `now`, one after the other.
+    /// Checks every run whose check is due at `now`, one after the other. Each next check is timed from when its own
+    /// ended, and a rate limit GitHub answered stops the rest of the pass.
     pub(super) async fn pass(&self, now: Instant) {
+        // The pass's `now`, or later once its checks took time.
+        let observed = || now.max(Instant::now());
         for due in self.faults.due(now) {
+            if let Some(until) = self.faults.cooling(observed()) {
+                self.faults.hold(&due, until);
+                continue;
+            }
             match self.check(&due, now).await {
                 Checked::Settled => self.faults.settle(&due),
-                Checked::Wait(at) => self.faults.wait(&due, at),
+                Checked::Wait(after) => self.faults.wait(&due, observed() + after),
+                Checked::Hold(at) => self.faults.hold(&due, at),
                 Checked::Failed => {
-                    if !self.faults.failed(&due, now + BACKOFF) {
+                    if !self.faults.failed(&due, observed() + BACKOFF) {
                         warn!(
                             "{}: gave up re-running run {} after {} failed checks",
                             due.key.repository,
@@ -147,10 +164,10 @@ impl JobActions {
         let policy = self.control.action_policy();
         // Off, or not configured: a reload may turn it on again while the run is followed. Nothing is read meanwhile.
         if policy.reruns(repository).is_err() {
-            return Checked::Wait(now + POLL);
+            return Checked::Wait(POLL);
         }
         if let Some(held) = self.faults.held(repository, policy.revision(), now) {
-            return Checked::Wait(held.until);
+            return Checked::Hold(held.until);
         }
         match self.read(self.github.run(repository, run)).await {
             Ok(read) if read.attempt != due.attempt => {
@@ -160,20 +177,24 @@ impl JobActions {
                 );
                 return Checked::Settled;
             }
-            Ok(read) if !read.completed => return Checked::Wait(now + POLL),
+            Ok(read) if !read.completed => return Checked::Wait(POLL),
+            Ok(read) if !read.failed => {
+                info!("{repository}: not re-running run {run}: it did not complete as a failure");
+                return Checked::Settled;
+            }
             Ok(_) => {}
-            Err(failure) => return waited(failure, now),
+            Err(failure) => return self.refused(due, failure, policy.revision()),
         }
         let jobs = match self
             .read(self.github.attempt_jobs(repository, run, due.attempt))
             .await
         {
             Ok(jobs) => jobs,
-            Err(failure) => return waited(failure, now),
+            Err(failure) => return self.refused(due, failure, policy.revision()),
         };
         let faulted = match self.faulted(&jobs).await {
             Ok(faulted) => faulted,
-            Err(Unfit::Unfinished) => return Checked::Wait(now + POLL),
+            Err(Unfit::Unfinished) => return Checked::Wait(POLL),
             Err(Unfit::Other(job)) => {
                 info!(
                     "{repository}: not re-running run {run}: job {job} of attempt {} failed or was cancelled, and \
@@ -187,19 +208,27 @@ impl JobActions {
         if faulted.is_empty() {
             return Checked::Settled;
         }
+        self.send_rerun(due, &faulted, policy.revision()).await
+    }
+
+    /// Sends the re-run of `due`'s run, whose runner failed `faulted`, under config revision `revision`, and what
+    /// GitHub's answer comes to.
+    async fn send_rerun(&self, due: &Due, faulted: &[u64], revision: u64) -> Checked {
+        let RunKey { repository, run } = &due.key;
         let issued = Issued {
             target: ActionTarget {
                 action: JobAction::RerunFailed,
                 job: due.job,
                 name: String::new(),
-                repository: repository.to_owned(),
-                run,
+                repository: repository.clone(),
+                run: *run,
                 attempt: Some(due.attempt),
             },
-            revision: policy.revision(),
+            revision,
+            origin: Origin::Automatic,
         };
         let answer = match self.flights.board(&issued) {
-            Boarding::Busy(_) => return Checked::Wait(now + POLL),
+            Boarding::Busy(_) => return Checked::Wait(POLL),
             Boarding::Follow(answer) => answer,
             Boarding::Lead { landing, answer } => {
                 let landed = self.dispatch(&issued).await;
@@ -222,35 +251,107 @@ impl JobActions {
                 );
                 return Checked::Settled;
             }
+            Landed::Withheld(Withheld::NotFailed) => {
+                info!("{repository}: not re-running run {run}: it is no longer a failed run");
+                return Checked::Settled;
+            }
+            Landed::Withheld(Withheld::Unread(failure)) => {
+                return self.refused(due, failure, revision);
+            }
             Landed::Repreview { .. } => return Checked::Failed,
         };
-        self.landed(due, &faulted, &result, policy.revision(), now)
+        self.landed(due, faulted, &result, revision).await
+    }
+
+    /// What a read GitHub failed or refused comes to: a refusal asking again soon cannot change holds the repository,
+    /// a rate limit stops every read until it resets, anything else is a failed check.
+    fn refused(&self, due: &Due, failure: ActionFailure, revision: u64) -> Checked {
+        let RunKey { repository, run } = &due.key;
+        let answer = classify(Err(failure));
+        match answer {
+            ActionAnswer::Refused {
+                refusal:
+                    ActionRefusal::NoToken
+                    | ActionRefusal::Unauthorized
+                    | ActionRefusal::Forbidden
+                    | ActionRefusal::NotFound,
+                ..
+            } => {
+                let refused = RerunRefused::unread(repository, *run, answer, time::now_ms() / 1000);
+                self.hold_repository(repository, *run, refused, revision)
+            }
+            ActionAnswer::Refused {
+                refusal: ActionRefusal::RateLimited,
+                until,
+                ..
+            } => self.cool(until),
+            ActionAnswer::Refused {
+                status: Some(429), ..
+            } => self.cool(None),
+            _ => Checked::Failed,
+        }
+    }
+
+    /// Holds `repository`'s re-runs for the hour, as `refused` says.
+    fn hold_repository(
+        &self,
+        repository: &str,
+        run: u64,
+        refused: RerunRefused,
+        revision: u64,
+    ) -> Checked {
+        // The class and status only: GitHub's text never reaches a log.
+        warn!(
+            "{repository}: GitHub refused runnerd's automatic re-run of run {run} ({:?}, status {:?}); its runner \
+             faults wait an hour",
+            refused.refusal, refused.status
+        );
+        Checked::Hold(
+            self.faults
+                .refuse(repository, revision, refused, Instant::now()),
+        )
+    }
+
+    /// Stops every read until the rate limit that resets at `until`, seconds since the epoch, does; [`COOLDOWN`] when
+    /// it does not say.
+    fn cool(&self, until: Option<u64>) -> Checked {
+        let epoch = time::now_ms() / 1000;
+        let wait = until.map_or(COOLDOWN, |until| {
+            Duration::from_secs(until.saturating_sub(epoch)).max(Duration::from_secs(1))
+        });
+        let until = Instant::now() + wait;
+        self.faults.cool(until);
+        Checked::Hold(until)
     }
 
     /// What `result`, GitHub's answer to the re-run of `due`'s run, comes to.
-    fn landed(
+    async fn landed(
         &self,
         due: &Due,
         faulted: &[u64],
         result: &ActionResult,
         revision: u64,
-        now: Instant,
     ) -> Checked {
         let RunKey { repository, run } = &due.key;
         match (result.outcome, result.refusal) {
             (ActionOutcome::Accepted | ActionOutcome::AlreadyFinished, _) => {
-                info!(
-                    "{repository}: re-ran the failed jobs of run {run} automatically, as attempt {}: its runner \
-                     failed job {}",
-                    due.attempt + 1,
-                    due.job
-                );
-                self.store.reran(faulted.to_vec(), time::now_ms());
+                self.noted(due, faulted);
                 Checked::Settled
             }
-            (ActionOutcome::Refused, Some(ActionRefusal::RateLimited)) => {
-                Checked::Wait(until_instant(result.until, now))
+            // GitHub did not say: never sent again, as it may land yet. A read says whether it did.
+            (ActionOutcome::Unknown, _) => {
+                match self.read(self.github.run(repository, *run)).await {
+                    Ok(read) if read.attempt > due.attempt => self.noted(due, faulted),
+                    _ => warn!(
+                        "{repository}: GitHub did not say whether it re-ran run {run} (status {:?}); runnerd does not \
+                         ask again",
+                        result.status
+                    ),
+                }
+                Checked::Settled
             }
+            (ActionOutcome::Refused, Some(ActionRefusal::RateLimited)) => self.cool(result.until),
+            (ActionOutcome::Refused, _) if result.status == Some(429) => self.cool(None),
             (
                 ActionOutcome::Refused,
                 Some(
@@ -260,23 +361,30 @@ impl JobActions {
                     | ActionRefusal::NotFound,
                 ),
             ) => {
-                // The class and status only: GitHub's text never reaches a log.
-                warn!(
-                    "{repository}: GitHub refused the automatic re-run of run {run} ({:?}, status {:?}); no runner \
-                     fault of {repository} is re-run until the config changes",
-                    result.refusal, result.status
-                );
                 let refused = RerunRefused::new(result, time::now_ms() / 1000);
-                Checked::Wait(self.faults.refuse(repository, revision, refused, now))
+                self.hold_repository(repository, *run, refused, revision)
             }
             (ActionOutcome::Refused, Some(ActionRefusal::Unprocessable)) => {
                 warn!("{repository}: GitHub cannot re-run run {run} (422); left to its owner");
                 Checked::Settled
             }
-            // Withdrawn by a reload, a conflict, a connection that failed, or an answer that does not say whether
-            // GitHub acted: the next check reads the config and the run's attempt again before any send.
+            // A reload withdrew it: the next check reads the config again.
+            (ActionOutcome::Refused, Some(ActionRefusal::Withdrawn)) => Checked::Wait(POLL),
+            // A conflict, or a connection that failed before anything was sent: the next check reads the config and
+            // the run's attempt again before any send.
             _ => Checked::Failed,
         }
+    }
+
+    /// Notes that GitHub re-ran `due`'s run, whose runner failed `faulted`.
+    fn noted(&self, due: &Due, faulted: &[u64]) {
+        let RunKey { repository, run } = &due.key;
+        info!(
+            "{repository}: re-ran the failed jobs of run {run} automatically, as attempt {}: its runner failed job {}",
+            due.attempt + 1,
+            due.job
+        );
+        self.store.reran(faulted.to_vec(), time::now_ms());
     }
 
     /// The jobs of `jobs` the runner failed, if every one that failed or was cancelled is one.
@@ -333,26 +441,4 @@ enum Unfit {
     Other(u64),
     /// The history could not be read.
     Unread,
-}
-
-/// What a read that failed comes to: the rate limit waits, anything else is a failed check.
-fn waited(failure: ActionFailure, now: Instant) -> Checked {
-    match classify(Err(failure)) {
-        ActionAnswer::Refused {
-            refusal: ActionRefusal::RateLimited,
-            until,
-            ..
-        } => Checked::Wait(until_instant(until, now)),
-        _ => Checked::Failed,
-    }
-}
-
-/// When the rate limit that resets at `until`, seconds since the epoch, lets requests go again, from `now`; a minute
-/// on when it does not say.
-fn until_instant(until: Option<u64>, now: Instant) -> Instant {
-    let epoch = time::now_ms() / 1000;
-    let wait = until.map_or(POLL, |until| {
-        Duration::from_secs(until.saturating_sub(epoch)).max(Duration::from_secs(1))
-    });
-    now + wait
 }

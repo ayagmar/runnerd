@@ -49,6 +49,14 @@ struct Fake {
     by_attempt: Mutex<Vec<(u32, AttemptJob)>>,
     /// How many reads of a run and of an attempt's jobs came.
     reads: AtomicUsize,
+    /// How long a read of a run takes.
+    delay: Mutex<Duration>,
+    /// Held, a send waits after its permit said yes, as for its connection.
+    transport: Semaphore,
+    /// The sends whose permit said yes.
+    permitted: AtomicUsize,
+    /// Whether GitHub acts on a send that reaches it, whatever it answers: the run moves to its next attempt.
+    acts: std::sync::atomic::AtomicBool,
 }
 
 impl Fake {
@@ -63,6 +71,10 @@ impl Fake {
             jobs: Mutex::new(Ok(Vec::new())),
             by_attempt: Mutex::new(Vec::new()),
             reads: AtomicUsize::new(0),
+            delay: Mutex::new(Duration::ZERO),
+            transport: Semaphore::new(Semaphore::MAX_PERMITS),
+            permitted: AtomicUsize::new(0),
+            acts: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -103,7 +115,11 @@ impl ActionsGithub for Fake {
         }
         self.reads.fetch_add(1, Ordering::SeqCst);
         let run = *self.run.lock().unwrap();
-        Box::pin(async move { run })
+        let delay = *self.delay.lock().unwrap();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            run
+        })
     }
 
     fn attempt_jobs<'call>(
@@ -138,10 +154,18 @@ impl ActionsGithub for Fake {
             if !permit().await {
                 return Err(ActionFailure::Withdrawn);
             }
+            self.permitted.fetch_add(1, Ordering::SeqCst);
+            drop(self.transport.acquire().await.unwrap());
             self.sent
                 .lock()
                 .unwrap()
                 .push((repository.to_owned(), request));
+            if self.acts.load(Ordering::SeqCst) {
+                let mut run = self.run.lock().unwrap();
+                if let Ok(now) = *run {
+                    *run = Ok(running(now.attempt + 1));
+                }
+            }
             let reply = *self.reply.lock().unwrap();
             match reply {
                 Reply::Status(status) if (200..300).contains(&status) => Ok(status),
@@ -269,13 +293,25 @@ fn running(attempt: u32) -> RunNow {
     RunNow {
         attempt,
         completed: false,
+        failed: false,
     }
 }
 
+/// Completed as `failure`.
 fn completed(attempt: u32) -> RunNow {
     RunNow {
         attempt,
         completed: true,
+        failed: true,
+    }
+}
+
+/// Completed as `cancelled`, whatever its jobs say.
+fn cancelled(attempt: u32) -> RunNow {
+    RunNow {
+        attempt,
+        completed: true,
+        failed: false,
     }
 }
 

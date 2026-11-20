@@ -692,11 +692,14 @@ async fn a_job_action_is_its_status_its_body_unread_and_it_is_sent_once() {
 async fn a_job_actions_read_of_the_run_is_its_attempt_and_whether_it_completed() {
     let (url, _) = fake_github(|request| match request.uri.as_str() {
         "/repos/o/r/actions/runs/10" => {
-            json(r#"{"id":10,"run_attempt":3,"status":"completed","event":"push","head_sha":"a"}"#)
+            json(r#"{"id":10,"run_attempt":3,"status":"completed","conclusion":"failure","event":"push","head_sha":"a"}"#)
         }
         "/repos/o/r/actions/runs/11" => {
             json(r#"{"id":11,"status":"in_progress","event":"push","head_sha":"a"}"#)
         }
+        "/repos/o/r/actions/runs/13" => json(
+            r#"{"id":13,"run_attempt":1,"status":"completed","conclusion":"cancelled","event":"push","head_sha":"a"}"#,
+        ),
         _ => (
             StatusCode::NOT_FOUND,
             r#"{"message":"Not Found ghp_FAKE_SENTINEL"}"#,
@@ -709,14 +712,25 @@ async fn a_job_actions_read_of_the_run_is_its_attempt_and_whether_it_completed()
         github.action_run("o/r", 10).await,
         Ok(RunNow {
             attempt: 3,
-            completed: true
+            completed: true,
+            failed: true,
         })
     );
     assert_eq!(
         github.action_run("o/r", 11).await,
         Ok(RunNow {
             attempt: 1,
-            completed: false
+            completed: false,
+            failed: false,
+        })
+    );
+    // Cancelled as a whole, whatever its jobs say.
+    assert_eq!(
+        github.action_run("o/r", 13).await,
+        Ok(RunNow {
+            attempt: 1,
+            completed: true,
+            failed: false,
         })
     );
     assert_eq!(
@@ -2036,4 +2050,55 @@ async fn an_archive_is_downloaded_without_the_token_and_never_asked_again_with_i
             "an archive's error never shows an address's query"
         );
     }
+}
+
+/// An attempt's jobs are all of them or none: a listing cut at the page cap, or one with fewer jobs than GitHub counts,
+/// is a failed read, as a job left unread could be one that failed in its code.
+#[tokio::test]
+async fn an_attempts_jobs_cut_short_are_a_failed_read() {
+    let (url, _) = fake_github(|request| {
+        if request.uri.starts_with("/repos/o/r/actions/runs/5/attempts/1/jobs") {
+            // Every page links a next one, past the cap.
+            let id = request.uri.len();
+            return page(
+                request,
+                &format!(
+                    r#"{{"total_count":2000,"jobs":[{{"id":{id},"status":"completed","conclusion":"failure"}}]}}"#
+                ),
+                true,
+            );
+        }
+        if request.uri.starts_with("/repos/o/r/actions/runs/6/attempts/1/jobs") {
+            return page(
+                request,
+                r#"{"total_count":3,"jobs":[{"id":1,"status":"completed","conclusion":"failure"}]}"#,
+                false,
+            );
+        }
+        if request.uri.starts_with("/repos/o/r/actions/runs/7/attempts/1/jobs") {
+            return page(
+                request,
+                r#"{"total_count":1,"jobs":[{"id":1,"status":"completed","conclusion":"failure"}]}"#,
+                false,
+            );
+        }
+        StatusCode::NOT_FOUND.into_response()
+    })
+    .await;
+    let github = client(&url);
+    assert!(
+        github.attempt_jobs("o/r", 5, 1).await.is_err(),
+        "a listing past the page cap is refused"
+    );
+    assert!(
+        github.attempt_jobs("o/r", 6, 1).await.is_err(),
+        "a listing short of its total_count is refused"
+    );
+    assert_eq!(
+        github
+            .attempt_jobs("o/r", 7, 1)
+            .await
+            .map(|jobs| jobs.len()),
+        Ok(1)
+    );
 }
