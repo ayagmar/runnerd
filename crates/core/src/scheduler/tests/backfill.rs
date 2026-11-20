@@ -2,7 +2,7 @@
 //! generated runs and over every small world, its two bounds and what run times that read long cost.
 
 use super::*;
-use crate::scheduler::{Drained, PRIORITY_AFTER, SHORT_RUN};
+use crate::scheduler::{Drained, PRIORITY_AFTER, Retired, SHORT_RUN};
 
 const MINUTE: Duration = Duration::from_secs(60);
 /// When the owner's wait began.
@@ -63,6 +63,7 @@ fn running(memory: u64, ends_in: Duration) -> Slot {
         memory,
         cpu: 0,
         usual: Some(BEFORE + ends_in),
+        caps: Caps { memory, cpu: 0 },
         behind: None,
     })
 }
@@ -200,6 +201,10 @@ fn only_a_short_job_passes_while_a_runner_that_gives_the_room_is_past_its_usual_
         memory: 4 * GIB,
         cpu: 0,
         usual: Some(BEFORE.saturating_sub(MINUTE)),
+        caps: Caps {
+            memory: 4 * GIB,
+            cpu: 0,
+        },
         behind: None,
     });
     let runners = || vec![overdue.clone(), running(8 * GIB, minutes(40))];
@@ -218,6 +223,10 @@ fn a_runner_with_no_estimate_or_no_job_counts_as_ending_now() {
             memory: 4 * GIB,
             cpu: 0,
             usual,
+            caps: Caps {
+                memory: 4 * GIB,
+                cpu: 0,
+            },
             behind: None,
         })
     };
@@ -260,6 +269,7 @@ fn overdue(memory: u64) -> Slot {
         memory,
         cpu: 0,
         usual: Some(Duration::from_mins(9)),
+        caps: Caps { memory, cpu: 0 },
         behind: None,
     })
 }
@@ -296,6 +306,10 @@ fn no_short_job_passes_once_only_what_passed_keeps_the_owner_out() {
         memory: GIB,
         cpu: 0,
         usual: Some(minutes(1)),
+        caps: Caps {
+            memory: GIB,
+            cpu: 1000,
+        },
         behind: Some(1),
     });
     // 4G that may end any moment and `other` beside it: with the passed 1G back, 7G or 8G are left for the 8G owner.
@@ -311,54 +325,6 @@ fn no_short_job_passes_once_only_what_passed_keeps_the_owner_out() {
     };
     assert_passes(&plan_with(5 * GIB));
     assert_held(&plan_with(4 * GIB));
-}
-
-/// The same holds for a job older than the owner with a free slot: it goes first once its room is there.
-#[test]
-fn no_short_job_passes_once_only_what_passed_keeps_an_older_job_out() {
-    let since = now() - WAITED + PRIORITY_AFTER;
-    let passed = Slot::Runner(RunnerSlot {
-        repository: "o/small".to_owned(),
-        busy: true,
-        started_at: since,
-        memory: GIB,
-        cpu: 0,
-        usual: Some(minutes(1)),
-        behind: Some(1),
-    });
-    let plan_with = |older_needs| {
-        let mut profiles = slots(vec![overdue(4 * GIB), running(6 * GIB, minutes(40))]);
-        profiles.get_mut("small").unwrap().slots[0] = passed.clone();
-        profiles.insert(
-            "older".to_owned(),
-            profile(older_needs, 1000, vec![Slot::Free]),
-        );
-        let owner = Repository {
-            waits: starved(5),
-            ..pool("o/big", "big", 8 * GIB, None, &[5])
-        };
-        plan(
-            &[
-                pool("o/older", "older", older_needs, None, &[1]),
-                owner,
-                pool("o/small", "small", GIB, Some(minutes(1)), &[6]),
-            ],
-            &profiles,
-            Budget {
-                drained: Drained {
-                    memory: Some(gib(32)),
-                    ..Drained::default()
-                },
-                ..slice(11 * GIB)
-            },
-            now(),
-        )
-    };
-    // 5G left, 6G with the passed runner back.
-    assert_eq!(started(&plan_with(7 * GIB)), ["o/small"]);
-    let held = plan_with(6 * GIB);
-    assert_eq!(started(&held), [] as [&str; 0], "{held:?}");
-    assert_eq!(held.waiting[&6], Waiting::BehindMemory { job: 5 });
 }
 
 /// A short job keeps to the caps of what passed: whatever it does, the owner still fits once the rest has ended.
@@ -413,6 +379,230 @@ fn a_job_the_barrier_lets_pass_says_what_it_lacks() {
     );
 }
 
+/// A short job that outlasts an older job's wait delays it, and that one's end, and the next older job's start after it:
+/// short passes could chain to the owner however its own room stands. With exact run times in 10G, a 2G runner until
+/// 300 s and a 5G one until 1 s, older jobs A (6G) and B (7G) of 30 s and the 7G owner start at 1, 31 and 61 s under a
+/// strict barrier. A 1G two-minute job that passed at 0 would hold A to 120 s, and another that passed as A started, B
+/// to 240 s, as only 6G is free until it ends: the owner would start at 270 s.
+#[test]
+fn a_short_job_ends_before_an_older_job_could_start() {
+    let plan_at = |runners: Vec<Slot>, older: &[(&str, u64)]| {
+        let used = runners
+            .iter()
+            .map(|slot| match slot {
+                Slot::Runner(runner) => runner.memory,
+                Slot::Free | Slot::Closed => 0,
+            })
+            .sum();
+        let mut profiles = slots(runners);
+        let mut repositories = Vec::new();
+        for (id, (name, needs)) in (3..).zip(older) {
+            profiles.insert((*name).to_owned(), profile(*needs, 1000, vec![Slot::Free]));
+            repositories.push(pool(&format!("o/{name}"), name, *needs, None, &[id]));
+        }
+        repositories.push(Repository {
+            waits: starved(5),
+            ..pool("o/big", "big", 7 * GIB, None, &[5])
+        });
+        repositories.push(pool("o/small", "small", GIB, Some(SHORT_RUN), &[6]));
+        let plan = plan(
+            &repositories,
+            &profiles,
+            Budget {
+                memory: Some(super::super::left(10 * GIB, used)),
+                drained: Drained {
+                    memory: Some(gib(10)),
+                    ..Drained::default()
+                },
+                ..Budget::default()
+            },
+            now(),
+        );
+        assert_eq!(plan.barrier.map(|barrier| barrier.job), Some(5));
+        started(&plan).contains(&"o/small")
+    };
+    let secs = Duration::from_secs;
+    let at_0 = || vec![running(2 * GIB, secs(300)), running(5 * GIB, secs(1))];
+    assert!(
+        !plan_at(at_0(), &[("a", 6 * GIB), ("b", 7 * GIB)]),
+        "at 0 A could start in 1 s"
+    );
+    // At 120 s, with A running: B could start in 30 s, or in 10 minutes had A that long to run.
+    let at_120 = |a_ends_in| vec![running(2 * GIB, secs(180)), running(6 * GIB, a_ends_in)];
+    assert!(
+        !plan_at(at_120(secs(30)), &[("b", 7 * GIB)]),
+        "B could start in 30 s"
+    );
+    assert!(
+        plan_at(at_120(minutes(10)), &[("b", 7 * GIB)]),
+        "B could start in 10 minutes"
+    );
+}
+
+/// A reload lowers a profile's caps for the runners it starts next, not for those that run: a runner that passed
+/// counts at the caps it started with, as its container keeps them. One whose profile the reload removed still runs
+/// and counts too. 12G; the 8G owner waits for a 9G runner; a drain leaves 4G past the owner, which a passed runner of
+/// 4G caps took, so the 1G job of 3G caps waits. Read at its profile's 1G now, 3G would seem left for it.
+#[test]
+fn a_runner_that_passed_counts_at_the_caps_it_started_with() {
+    let since = now() - WAITED + PRIORITY_AFTER;
+    let passed = RunnerSlot {
+        repository: "o/p".to_owned(),
+        busy: true,
+        started_at: since,
+        memory: GIB,
+        cpu: 0,
+        usual: Some(WAITED),
+        caps: Caps {
+            memory: 4 * GIB,
+            cpu: 0,
+        },
+        behind: Some(1),
+    };
+    let plan_with = |p_slots: Vec<Slot>, retired: Vec<Retired>| {
+        let mut profiles = slots(vec![running(9 * GIB, minutes(40))]);
+        profiles.insert("p".to_owned(), profile(GIB, 0, p_slots));
+        profiles.insert("q".to_owned(), profile(3 * GIB, 0, vec![Slot::Free]));
+        plan(
+            &[owner(), pool("o/q", "q", GIB, Some(minutes(1)), &[2])],
+            &profiles,
+            Budget {
+                memory: Some(super::super::left(12 * GIB, 10 * GIB)),
+                drained: Drained {
+                    memory: Some(gib(12)),
+                    ..Drained::default()
+                },
+                retired,
+                ..Budget::default()
+            },
+            now(),
+        )
+    };
+    let reloaded = plan_with(vec![Slot::Runner(passed.clone())], Vec::new());
+    assert_eq!(started(&reloaded), [] as [&str; 0], "{reloaded:?}");
+    assert_eq!(reloaded.waiting[&2], Waiting::BehindMemory { job: 1 });
+    let removed = plan_with(
+        vec![Slot::Free],
+        vec![Retired {
+            profile: "gone".to_owned(),
+            runner: passed.clone(),
+        }],
+    );
+    assert_eq!(started(&removed), [] as [&str; 0], "{removed:?}");
+    // Started at 1G caps, it leaves the 3G.
+    let small = RunnerSlot {
+        caps: Caps {
+            memory: GIB,
+            cpu: 0,
+        },
+        ..passed
+    };
+    assert_eq!(
+        started(&plan_with(vec![Slot::Runner(small)], Vec::new())),
+        ["o/q"]
+    );
+}
+
+/// Under the larger host margin the room comes later than under the plain one, so a backfill read by the margin in force
+/// would let a job pass under the larger one and not under the plain one. Said to wait for the host under the larger
+/// margin, it would let the band go; said to wait behind the barrier under the plain one, it would bring the band back,
+/// plan after plan. Host room of 4G, or 6G by the plain margin; a 10G runner whose end is not known and a passed 2G one:
+/// with the latter back, the 8G owner fits by the plain margin, so the 5G short job waits behind the barrier by either.
+#[test]
+fn a_job_passes_by_the_plain_margin_whichever_stands() {
+    let since = now() - WAITED + PRIORITY_AFTER;
+    let plan_by = |host: i64, host_larger_by: u64, needs: u64, cpu: Option<i64>| {
+        let passed = Slot::Runner(RunnerSlot {
+            repository: "o/small".to_owned(),
+            busy: true,
+            started_at: since,
+            memory: 2 * GIB,
+            cpu: 0,
+            usual: Some(WAITED),
+            caps: Caps {
+                memory: 2 * GIB,
+                cpu: 0,
+            },
+            behind: Some(1),
+        });
+        let mut profiles = slots(vec![Slot::Runner(RunnerSlot {
+            usual: None,
+            ..match overdue(10 * GIB) {
+                Slot::Runner(runner) => runner,
+                Slot::Free | Slot::Closed => unreachable!(),
+            }
+        })]);
+        profiles.get_mut("small").unwrap().slots[0] = passed;
+        profiles.insert("mid".to_owned(), profile(needs, 1000, vec![Slot::Free]));
+        let mid = Repository {
+            runner_cpu: Some(1000),
+            ..pool("o/mid", "mid", needs, Some(minutes(1)), &[2])
+        };
+        plan(
+            &[owner(), mid],
+            &profiles,
+            Budget {
+                host: Some(host),
+                host_larger_by,
+                cpu,
+                drained: Drained {
+                    host: Some(gib(16)),
+                    host_plain: Some(gib(18)),
+                    cpu: Some(16_000),
+                    ..Drained::default()
+                },
+                ..Budget::default()
+            },
+            now(),
+        )
+    };
+    let larger = plan_by(gib(4), 2 * GIB, 5 * GIB, None);
+    let plain = plan_by(gib(6), 0, 5 * GIB, None);
+    for plan in [&larger, &plain] {
+        assert_eq!(plan.barrier.map(|barrier| barrier.job), Some(1));
+        assert_eq!(
+            plan.waiting[&2],
+            Waiting::BehindMemory { job: 1 },
+            "{plan:?}"
+        );
+    }
+    assert_eq!(larger.host_needs().collect::<Vec<_>>(), [8 * GIB]);
+}
+
+/// A job that waits for the host's memory but lacks CPU too would not start by the plain margin either: read as one that
+/// would, it lets the band go, says it waits for CPU under the plain margin, and the band comes back (ADR 0102).
+#[test]
+fn a_job_short_of_cpu_too_is_no_waiter_the_plain_margin_starts() {
+    let plan_with = |cpu: i64| {
+        let mut profiles = slots(Vec::new());
+        profiles.insert("mid".to_owned(), profile(3 * GIB, 1000, vec![Slot::Free]));
+        plan(
+            &[Repository {
+                runner_cpu: Some(1000),
+                ..pool("o/mid", "mid", 3 * GIB, None, &[2])
+            }],
+            &profiles,
+            Budget {
+                host: Some(gib(2)),
+                host_larger_by: 2 * GIB,
+                cpu: Some(cpu),
+                ..Budget::default()
+            },
+            now(),
+        )
+    };
+    let fits = plan_with(1000);
+    let short = plan_with(500);
+    for plan in [&fits, &short] {
+        assert!(
+            matches!(plan.waiting[&2], Waiting::HostMemory { .. }),
+            "{plan:?}"
+        );
+    }
+    assert_eq!(fits.host_needs().collect::<Vec<_>>(), [3 * GIB]);
+    assert_eq!(short.host_needs().collect::<Vec<_>>(), [u64::MAX]);
+}
+
 /// What passed since the barrier matured may hang and grow to its caps: at its caps, it must leave the owner its room.
 /// What started for an older job, before the barrier matured, or as a warm runner did not pass, and the owner waits it
 /// out under a strict barrier too.
@@ -426,7 +616,12 @@ fn the_caps_of_what_passed_since_the_barrier_matured_leave_the_owner_its_room() 
             running(4 * GIB, minutes(20)),
             running(6 * GIB + GIB / 4, minutes(40)),
         ]);
-        let slots = &mut profiles.get_mut(profile).unwrap().slots;
+        let into = profiles.get_mut(profile).unwrap();
+        let caps = Caps {
+            memory: into.memory,
+            cpu: into.cpus,
+        };
+        let slots = &mut into.slots;
         let free = slots.iter().position(|slot| *slot == Slot::Free);
         let runner = Slot::Runner(RunnerSlot {
             repository: "o/other".to_owned(),
@@ -435,6 +630,7 @@ fn the_caps_of_what_passed_since_the_barrier_matured_leave_the_owner_its_room() 
             memory: GIB,
             cpu: 0,
             usual: Some(minutes(600)),
+            caps,
             behind,
         });
         match free {
@@ -471,6 +667,10 @@ fn a_passed_runner_github_gave_no_job_holds_its_room_and_a_warm_one_does_not() {
             memory: 6 * GIB,
             cpu: 0,
             usual: None,
+            caps: Caps {
+                memory: 6 * GIB,
+                cpu: 0,
+            },
             behind,
         })
     };
@@ -678,6 +878,10 @@ fn a_younger_job_ends_before_an_older_job_gets_its_slot() {
             memory: 2 * GIB,
             cpu: 0,
             usual: Some(BEFORE + minutes(5)),
+            caps: Caps {
+                memory: 2 * GIB,
+                cpu: 0,
+            },
             behind: None,
         });
         let mut profiles = slots(vec![running(10 * GIB, minutes(20))]);
@@ -875,6 +1079,10 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
             memory: 4 * GIB,
             cpu: 0,
             usual: Some(ends_in),
+            caps: Caps {
+                memory: 4 * GIB,
+                cpu: 0,
+            },
             behind: None,
         })
     };
@@ -896,6 +1104,10 @@ fn a_clock_that_went_back_makes_no_runner_end_later_than_its_usual_run_time() {
         memory: 7 * GIB,
         cpu: 0,
         usual: Some(minutes(30)),
+        caps: Caps {
+            memory: 7 * GIB,
+            cpu: 0,
+        },
         behind: None,
     });
     let mut wide = slots(vec![
@@ -974,6 +1186,10 @@ mod at_14_22_38 {
             memory: gib_of(hundredths),
             cpu: 0,
             usual: Some(up + ends_in),
+            caps: Caps {
+                memory: gib_of(hundredths),
+                cpu: 0,
+            },
             behind: None,
         })
     }
@@ -1081,6 +1297,10 @@ mod at_14_22_38 {
             memory: GIB / 2,
             cpu: 0,
             usual: Some(Duration::from_secs(30)),
+            caps: Caps {
+                memory: gib_of(175),
+                cpu: 0,
+            },
             behind: Some(10),
         });
         let mut profiles = profiles(vec![passed, Slot::Free, Slot::Free, Slot::Free]);
@@ -1486,6 +1706,10 @@ mod generated {
                             memory: self.takes(run),
                             cpu: of_run.cpu,
                             usual: self.estimate(run.job.ticks),
+                            caps: Caps {
+                                memory: kind.cap,
+                                cpu: kind.cpu,
+                            },
                             behind: run.behind,
                         })
                     })

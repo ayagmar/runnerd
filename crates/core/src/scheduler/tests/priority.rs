@@ -395,6 +395,10 @@ fn a_starved_pool_without_a_free_slot_erects_no_barrier_and_keeps_its_wait() {
         memory: 4 * GIB,
         cpu: 2000,
         usual: None,
+        caps: Caps {
+            memory: 4 * GIB,
+            cpu: 2000,
+        },
         behind: None,
     })]);
     profiles.insert(
@@ -567,6 +571,10 @@ fn a_job_behind_a_barrier_with_no_slot_says_so_and_asks_for_no_slot() {
             memory: GIB,
             cpu: 1000,
             usual: None,
+            caps: Caps {
+                memory: GIB,
+                cpu: 1000,
+            },
             behind: None,
         })],
     };
@@ -633,6 +641,7 @@ fn warm_runner(repository: &str, memory: u64) -> Slot {
         memory,
         cpu: 500,
         usual: None,
+        caps: Caps { memory, cpu: 500 },
         behind: None,
     })
 }
@@ -810,14 +819,16 @@ mod generated {
             let mut slots: Vec<Slot> = self
                 .warm
                 .iter()
-                .map(|memory| {
+                .map(|&memory| {
+                    let caps = Caps { memory, cpu: 0 };
                     Slot::Runner(RunnerSlot {
                         repository: "o/warm".to_owned(),
                         busy: false,
                         started_at: at,
-                        memory: *memory,
+                        memory,
                         cpu: 0,
                         usual: None,
+                        caps,
                         behind: None,
                     })
                 })

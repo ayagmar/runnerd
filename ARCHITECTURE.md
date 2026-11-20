@@ -232,9 +232,10 @@ queued → slot → container → removed
    what runs would make room for puts up the plan's one barrier (`scheduler::priority`, reading the pool's `scheduler::waits::Waits`, which only its own methods write), and no younger job starts until a runner of its pool
    does, but one that usually ends before the running runners' usual ends let the owner or an older waiting job
    start, counting the largest credit the pooled count could reach, and whose cap leaves the owner its room even if it
-   never ends; or one of another profile that usually runs at most 2 minutes, while the owner's and older jobs' room is
-   not there even with what passed given back, within the same caps. A job the barrier would let pass that does not fit
-   says what it lacks, so the host's band reads it as a waiter. `plan` names each pool's held job and the engine keeps its wait, from the
+   never ends; or one of another profile that usually runs at most 2 minutes, ends before any older job could start, and
+   finds the owner's room not there even with what passed given back, within the same caps, by run times read within
+   the minute. Both read the host by its plain margin. A job the barrier would let pass that does not fit says what it
+   lacks, so the host's band reads it as a waiter, unless it lacks CPU too. `plan` names each pool's held job and the engine keeps its wait, from the
    plans of ticks and passes only; the high-water mark and a host stall suspend the barrier
    ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md),
    [ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md),
@@ -452,8 +453,8 @@ always returns, so the daemon closes and flushes the history.
 - What starts behind a barrier keeps two bounds, and only those: if each run takes what the plan read, an owner that
   keeps the barrier starts no later than with nothing behind it, or at most `SHORT_RUN` (2 minutes) later once a short
   job of another profile passed it; whatever they take, it fits once the runners from before the barrier matured and
-  older jobs' have ended, as the caps of what passed since leave it its room and a slot. No short job passes once only
-  what passed keeps the owner or an older job out. Plans read p95s, so a run that ends early can cost the owner what
+  older jobs' have ended, as the caps of what passed since, the caps each started with, leave it its room and a slot.
+  No short job outlasts an older job's wait, nor passes once only what passed keeps the owner out. Plans read p95s, so a run that ends early can cost the owner what
   still runs behind the barrier, and neither bound carries to a later owner. `priority::Backfill` is the one rule, for
   `plan` and `simulate`; it keeps nothing between plans. A runner's engagement keeps the barrier it passed from its
   start, and a restart drops it with the waits

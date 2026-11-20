@@ -740,3 +740,70 @@ fn a_runner_still_booting_at_a_look_grows_from_nothing_and_engages_the_brake() {
         steady.hazard
     );
 }
+
+/// The daemon knows a runner's job, and so when it usually ends, only once it can name it: until then the runner may
+/// end at any moment as far as a backfill knows, so nothing passes by its run time (ADR 0097), and a job the barrier
+/// would let pass waits behind it rather than for the host (ADR 0151). A replay that knew more would start jobs, and
+/// drop the host's larger margin for them, where the daemon does not. Two node runners end at minute 20; the 9G owner
+/// holds from minute 11; a 3-minute docs job, too long to pass as short, queues at minute 12.
+#[test]
+fn a_replay_reads_no_usual_end_of_a_runner_whose_job_has_no_name_yet() {
+    let (mut jobs, mut known) = a_barrier_with_room_behind_it();
+    jobs.truncate(3);
+    let docs = |queued, minutes| run("halyard/lint", "docs", "light", queued, minutes, G / 2);
+    known
+        .jobs
+        .extend((0..3).map(|i| docs(NOW - 600 * MINUTE + i * 40 * MINUTE, 3)));
+    jobs.push(docs(NOW + 12 * MINUTE, 3));
+    let docs_waited = |named_after| {
+        let runs = jobs
+            .iter()
+            .filter(|run| run.name == "site")
+            .map(|run| {
+                let trace = RunTrace {
+                    samples: flat(G / 2, 20),
+                    named_after,
+                };
+                (RunId::of(run), trace)
+            })
+            .collect();
+        let trace = Trace {
+            runs,
+            outside: Vec::new(),
+            total: 64 * G,
+            overhead: 0,
+            guard_overhead: 0,
+            host_overhead: 0,
+        };
+        let replay = simulate(
+            &with_light(),
+            Some(17 * G),
+            None,
+            &jobs,
+            Policy::Caps,
+            &BTreeMap::new(),
+            Replaying {
+                barriers: Barriers::On,
+                arrivals: Arrivals::AsQueued,
+                known: Some(&known),
+                trace: Some(&trace),
+                most_credit: 0,
+                host_reserve: HostReserve::Top2,
+                credit_room: CreditRoom::Counted,
+                band: Band::NoWaiterFits,
+                growth: None,
+            },
+        );
+        replay.pools[&pool("halyard/lint", "light")].waits.clone()
+    };
+    assert_eq!(
+        docs_waited(0),
+        [0],
+        "named at once, the runners end at minute 20"
+    );
+    let unnamed = docs_waited(15 * MINUTE);
+    assert!(
+        unnamed[0] > 0,
+        "unnamed until minute 15, nothing is known of their end: {unnamed:?}"
+    );
+}

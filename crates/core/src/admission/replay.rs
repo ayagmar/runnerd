@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::api::{Basis, HostMemory};
 use crate::config::Config;
-use crate::scheduler::priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner, Short};
+use crate::scheduler::priority::{
+    Around, Backfill, Candidate, Caps, Held, Older, RunTimes, Runner, Short,
+};
 use crate::scheduler::{Barrier, Drained, Left, Pool, Scarce, Waits};
 use crate::sizing::{Measure, Ran};
 use crate::time;
@@ -881,9 +883,14 @@ impl<'run> Replayer<'run> {
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
                     // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
-                    // One the barrier would let pass does, as there (ADR 0151).
+                    // One the barrier would let pass does, as there (ADR 0151). One that lacks CPU too would not start
+                    // by the plain margin, as `Plan::host_needs` reads it.
                     if self.barrier.is_none() || self.may_pass(queued, &listed).is_some() {
-                        self.host_needs.push(short.memory);
+                        let cpu_short = self
+                            .cpu_budget
+                            .is_some_and(|budget| self.cpu_taken() + short.cpu > budget);
+                        self.host_needs
+                            .push(if cpu_short { u64::MAX } else { short.memory });
                     }
                     let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
@@ -980,6 +987,8 @@ impl<'run> Replayer<'run> {
         let runners = self.runners();
         let around = Around {
             left: self.left(),
+            host_larger_by: self.host_larger_by(),
+            run_times: RunTimes::Fresh,
             credit_room: self.credit_room(),
             host_credit_room: self.host_credit_room(),
             drained: self.drained(),
@@ -987,6 +996,15 @@ impl<'run> Replayer<'run> {
             older: &older,
         };
         self.backfill = Backfill::behind(barrier, &run.profile, around, instant(now));
+    }
+
+    /// How much less the host leaves by the margin that stands than by the plain one, as `Budget::host_larger_by`.
+    fn host_larger_by(&self) -> u64 {
+        self.host_memory().map_or(0, |memory| {
+            let occupancy = host::Occupancy::of(!self.running.is_empty());
+            let limit = host::limit(&memory, self.host_band.short(occupancy));
+            host::limit(&memory, false).saturating_sub(limit)
+        })
     }
 
     /// How much more the credit could take off what runs, as `Budget::credit_room`.
@@ -1160,14 +1178,17 @@ impl<'run> Replayer<'run> {
         }
     }
 
-    /// What runs, as a backfill reads it: each job's usual run time as the runs finished so far say.
+    /// What runs, as a backfill reads it: each job's usual run time as the runs finished so far say, once the daemon
+    /// could name it. A runner started at this moment has none, as one the daemon's plan started or has in flight.
     fn runners(&self) -> Vec<Runner<'_>> {
         self.running
             .iter()
             .map(|running| Runner {
                 profile: running.profile,
                 started_at: instant(running.started),
-                usual: self.predictor.usual(&Key::of(running.run), running.profile),
+                usual: (running.started < self.moment && running.named(self.moment))
+                    .then(|| self.predictor.usual(&Key::of(running.run), running.profile))
+                    .flatten(),
                 memory: self.charge(running),
                 cpu: running.cpu_at(self.moment),
                 caps: self.caps(running.profile),

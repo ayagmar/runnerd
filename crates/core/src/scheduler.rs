@@ -14,8 +14,10 @@ pub mod priority;
 mod waits;
 pub mod warm;
 
-use priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner};
-pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, SHORT_RUN, Scarce};
+use priority::{Around, Backfill, Candidate, Held, Older, Runner};
+pub use priority::{
+    Barrier, Caps, Drained, PRIORITY_AFTER, RunTimes, SERVED_PRIORITY_AFTER, SHORT_RUN, Scarce,
+};
 pub use waits::{Wait, Waits};
 
 /// How long a started runner may wait for a job before it counts as surplus: covers the container's start and
@@ -149,6 +151,9 @@ pub struct RunnerSlot {
     pub cpu: u64,
     /// How long its job usually keeps it from `started_at`, once that job and its runs are known (ADR 0097).
     pub usual: Option<Duration>,
+    /// Its container's limits, which a reload does not change: what it may take, once it grows, if it passed a
+    /// barrier (ADR 0131).
+    pub caps: Caps,
     /// The owner of the barrier it started behind (ADR 0131); `None` for one started otherwise, warm, or adopted by a
     /// restart, which loses it with the waits it relates to.
     pub behind: Option<u64>,
@@ -290,6 +295,23 @@ pub struct Plan {
     pub held: Vec<Demand>,
     /// The job no younger job starts before, if one waited long enough.
     pub barrier: Option<Barrier>,
+    /// The jobs `waiting` says wait for the host's memory that lack CPU too, which the plain margin would not start.
+    pub cpu_short: BTreeSet<u64>,
+}
+
+impl Plan {
+    /// What each job waiting for the host's memory needs, as the host's band reads it (ADR 0102). One that lacks CPU
+    /// too would not start by the plain margin either, so it reads as needing more than any margin leaves: the band
+    /// does not go for it, to come back once it says it waits for CPU.
+    pub fn host_needs(&self) -> impl Iterator<Item = u64> + '_ {
+        self.waiting
+            .iter()
+            .filter_map(|(job, reason)| match reason {
+                Waiting::HostMemory { needs, .. } if self.cpu_short.contains(job) => Some(u64::MAX),
+                Waiting::HostMemory { needs, .. } => Some(*needs),
+                _ => None,
+            })
+    }
 }
 
 /// The budgets a plan starts runners within.
@@ -304,6 +326,8 @@ pub struct Budget {
     /// The memory the host has to spare for new runners beside other programs (ADR 0055), negative by what the
     /// running ones reserve past the host's limit; `None` when not known.
     pub host: Option<i64>,
+    /// How much less `host` is than by the plain margin: 0 while the plain margin stands or none is known (ADR 0102).
+    pub host_larger_by: u64,
     /// Nothing starts, so no warm runner stops to make room: measured admission holds the slice at its high-water
     /// mark, or the host's tasks stall for memory. `memory` and `host` are then 0 whatever the room, so no job's wait
     /// starts and none puts up a barrier. Not a reservation for a starved job (ADR 0096).
@@ -320,6 +344,20 @@ pub struct Budget {
     /// stop: under the growth count, a start moves it by what it adds to the room kept, not by its take (ADR 0130).
     /// `None`, each start takes its runner's memory from both, and each stop gives it back.
     pub recount: Option<Recount>,
+    /// How fresh the repositories' usual run times are (ADR 0151).
+    pub run_times: RunTimes,
+    /// The runners of profiles a reload removed, by profile name, which run until their jobs end: a barrier's backfill
+    /// waits for them as for any runner, and counts those that passed it (ADR 0131).
+    pub retired: Vec<Retired>,
+}
+
+/// A runner in a slot of a profile a reload removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retired {
+    /// The profile's name.
+    pub profile: String,
+    /// The runner.
+    pub runner: RunnerSlot,
 }
 
 /// What a plan counts again after each start and stop, and the budgets it reads that count against (ADR 0130).
@@ -455,7 +493,7 @@ pub fn plan(
     let mut slot_bound = SlotBound::default();
     // Under a safety interlock, what is left says nothing of the room there is.
     let drained = (!budget.held).then_some(budget.drained);
-    let mut behind = Behind::new(profiles);
+    let mut behind = Behind::new(profiles, &budget.retired);
     for (position, &(job, repository)) in jobs.iter().enumerate() {
         let Some(missing) = wanted.get_mut(&pool_key(repository)) else {
             continue;
@@ -605,24 +643,29 @@ struct Behind<'plan> {
 }
 
 impl<'plan> Behind<'plan> {
-    /// The runners in `profiles`' slots: what one that waits for a job will run is not known.
-    fn new(profiles: &'plan BTreeMap<String, Profile>) -> Behind<'plan> {
-        let mut runners = Vec::new();
-        for (name, profile) in profiles {
-            for slot in &profile.slots {
-                if let Slot::Runner(runner) = slot {
-                    runners.push(Runner {
-                        profile: name,
-                        started_at: runner.started_at,
-                        usual: runner.usual.filter(|_| runner.busy),
-                        memory: runner.memory,
-                        cpu: runner.cpu,
-                        caps: profile.caps(),
-                        passed: runner.behind.is_some(),
-                    });
-                }
-            }
-        }
+    /// The runners in `profiles`' slots and the `retired` ones: what one that waits for a job will run is not known.
+    fn new(profiles: &'plan BTreeMap<String, Profile>, retired: &'plan [Retired]) -> Behind<'plan> {
+        let slots = profiles.iter().flat_map(|(name, profile)| {
+            profile.slots.iter().filter_map(move |slot| match slot {
+                Slot::Runner(runner) => Some((name.as_str(), runner)),
+                Slot::Free | Slot::Closed => None,
+            })
+        });
+        let retired = retired
+            .iter()
+            .map(|retired| (retired.profile.as_str(), &retired.runner));
+        let runners = slots
+            .chain(retired)
+            .map(|(profile, runner)| Runner {
+                profile,
+                started_at: runner.started_at,
+                usual: runner.usual.filter(|_| runner.busy),
+                memory: runner.memory,
+                cpu: runner.cpu,
+                caps: runner.caps,
+                passed: runner.behind.is_some(),
+            })
+            .collect();
         Behind {
             runners,
             older: Vec::new(),
@@ -645,6 +688,8 @@ impl<'plan> Behind<'plan> {
         };
         let around = Around {
             left,
+            host_larger_by: budget.host_larger_by,
+            run_times: budget.run_times,
             credit_room: budget.credit_room,
             host_credit_room: budget.host_credit_room,
             drained: budget.drained,
@@ -845,6 +890,15 @@ impl Turn<'_> {
         )
     }
 
+    /// Notes `reason` as why the job waits, and whether it lacks CPU beside the host's memory (`Plan::host_needs`).
+    fn says(&self, reason: Waiting, decided: &mut Plan) {
+        let cpu_short = self.left.cpu.is_some_and(|free| free < signed(self.cpu));
+        if cpu_short && matches!(reason, Waiting::HostMemory { .. }) {
+            decided.cpu_short.insert(self.job);
+        }
+        decided.waiting.insert(self.job, reason);
+    }
+
     /// Says why the job waits with no barrier up. Lacking memory or CPU it is held, unless a safety interlock left no
     /// `drained` bounds, and it puts up the barrier if it may.
     fn waits(
@@ -855,7 +909,7 @@ impl Turn<'_> {
         decided: &mut Plan,
     ) {
         let (reason, short) = self.why();
-        decided.waiting.insert(self.job, reason);
+        self.says(reason, decided);
         if !self.free_slot
             && self.profile.preparing.is_none()
             && slot_bound.takes(self.left, self.memory, self.cpu)
@@ -898,7 +952,7 @@ impl Turn<'_> {
         } else {
             reason
         };
-        decided.waiting.insert(self.job, reason);
+        self.says(reason, decided);
         if let Some(scarce) = short.scarce() {
             hold(self.repository, self.job, scarce, decided);
         }

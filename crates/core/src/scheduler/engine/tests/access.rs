@@ -329,6 +329,10 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.measured.set_predictor(None);
     }
 
+    pub(super) fn age_predictor(&mut self, by: Duration) {
+        self.measured.age_predictor(by);
+    }
+
     pub(super) fn set_predictor(&mut self, predictor: Predictor, read_at: SystemTime) {
         self.measured.set_predictor(Some((predictor, read_at)));
     }

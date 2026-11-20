@@ -78,7 +78,7 @@ struct Fixture {
     docker: FakeDocker,
     engine: Engine<FakeGithub, FakeDocker>,
     handle: Handle,
-    _dir: TestDir,
+    dir: TestDir,
 }
 
 impl Fixture {
@@ -100,7 +100,7 @@ impl Fixture {
             docker,
             engine,
             handle,
-            _dir: dir,
+            dir,
         }
     }
 
@@ -649,7 +649,7 @@ async fn a_runner_that_fits_the_slice_but_not_beside_a_shell_erects_no_barrier()
         docker,
         engine,
         handle,
-        _dir: dir,
+        dir,
     };
     fixture.younger_job_after_a_starved_one().await;
     assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
@@ -1126,6 +1126,67 @@ async fn a_short_job_behind_a_barrier_lets_the_hosts_larger_margin_go_and_starts
         "the next plan starts job 11"
     );
     assert_eq!(fixture.runners_of("o/big"), 1, "job 10 still waits");
+}
+
+/// A reload that lowers a profile's caps leaves its running containers as they were, so a runner that passed counts at
+/// the caps it started with (ADR 0131): job 11's 1G, not the 512M job 12 would start at, takes what a drain leaves past
+/// the owner.
+#[tokio::test]
+async fn a_runner_that_passed_counts_at_its_caps_through_a_reload() {
+    let mut fixture = Fixture::behind_the_barrier("quick").await;
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 11 passed");
+    // Busy, it is no waiting runner a reload stops for its limits. Job 11 is still listed, and it claims it.
+    fixture.all_busy();
+    let lowered = big_and_small().replace("memory = \"1G\"", "memory = \"512M\"");
+    fixture
+        .engine
+        .reload(Config::parse(&lowered).unwrap(), Some(9 * G), None);
+    fixture.queue(vec![big(10), named(11, "quick"), named(12, "quick")]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 12 waits");
+    assert_eq!(
+        fixture.reason(12),
+        Some(api::Waiting::BehindMemory { job: 10 })
+    );
+}
+
+/// A history read that fails leaves the last one standing, though a pool's runs may have grown longer since: a short
+/// job passes only by run times read within the minute (ADR 0151). No capture named the small runners, so no end is
+/// known before which the owner's room comes, and job 11 could pass as a short job alone.
+#[tokio::test]
+async fn a_short_job_passes_only_by_run_times_read_within_the_minute() {
+    for read in [Read::Succeeds, Read::Fails] {
+        let mut fixture = Fixture::starved().await;
+        fixture.ran("quick", 200, 3, 2).await;
+        fixture.engine.forget_predictor();
+        fixture.queue(vec![big(10)]);
+        fixture.engine.tick(Shutdown::No).await;
+        fixture.engine.age_predictor(Duration::from_secs(120));
+        if read == Read::Fails {
+            rusqlite::Connection::open(fixture.dir.0.join("history.db"))
+                .unwrap()
+                .execute("ALTER TABLE jobs RENAME TO jobs_gone", [])
+                .unwrap();
+        }
+        fixture.queue(vec![big(10), named(11, "quick")]);
+        fixture.engine.tick(Shutdown::No).await;
+        let reason = fixture.reason(11);
+        match read {
+            Read::Succeeds => assert_eq!(fixture.runners_of("o/small"), 3, "{reason:?}"),
+            Read::Fails => {
+                assert_eq!(fixture.runners_of("o/small"), 2, "job 11 stays queued");
+                assert_eq!(reason, Some(api::Waiting::BehindMemory { job: 10 }));
+            }
+        }
+    }
+}
+
+/// Whether the history can be read at the next plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    Succeeds,
+    Fails,
 }
 
 #[tokio::test]

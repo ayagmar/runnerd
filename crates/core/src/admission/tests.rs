@@ -9,7 +9,9 @@ use super::{
 };
 use crate::config::Config;
 use crate::github::QueuedJob;
-use crate::scheduler::{self, Budget, Decision, Drained, Pool, Profile, Repository, Slot, Waits};
+use crate::scheduler::{
+    self, Budget, Caps, Decision, Drained, Pool, Profile, Repository, Slot, Waits,
+};
 use crate::sizing::{History, Measure, Ran};
 
 const G: u64 = 1 << 30;
@@ -1293,7 +1295,8 @@ fn docs_before_the_older_jobs_slot() -> Ran {
     run("halyard/lint", "docs", "light", queued, 3, G / 2)
 }
 
-/// A lint job, a minute, queued half a minute before the older job's slot frees at minute 14: short (ADR 0151).
+/// A lint job, a minute, queued half a minute before the older job's slot frees at minute 14: short, but it would
+/// outlast that wait, so it passes once the older job starts (ADR 0151).
 fn lint_before_the_older_jobs_slot() -> Ran {
     let queued = NOW + 13 * MINUTE + MINUTE / 2;
     run("halyard/lint", "lint", "light", queued, 1, G / 2)
@@ -1561,6 +1564,10 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
                             memory: limits.memory.0,
                             cpu: 0,
                             usual: runner.usual,
+                            caps: Caps {
+                                memory: limits.memory.0,
+                                cpu: 0,
+                            },
                             behind: runner.behind,
                         })
                     })
@@ -1673,12 +1680,13 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
     assert_eq!(through_the_planner(&jobs, &known), replayed);
     // The docs job waits for the older one, then passes beside it: a runner started for an older job is one the owner
     // waits out under a strict barrier too, so it leaves the room behind the barrier as it was (ADR 0131). A one-minute
-    // lint job passes at once, as a short job, and costs the owner nothing here either (ADR 0151).
+    // lint job would outlast the older job's wait, so it waits for that job to start, then passes as a short job and
+    // costs the owner nothing here either (ADR 0151).
     let lint = pool("halyard/lint", "light");
     let ledger = pool("halyard/ledger", "jvm");
     for (late, waits) in [
         (docs_before_the_older_jobs_slot(), [0, 150]),
-        (lint_before_the_older_jobs_slot(), [0, 0]),
+        (lint_before_the_older_jobs_slot(), [0, 30]),
     ] {
         let (jobs, known) = a_barrier_behind_an_older_job(late);
         let replay = replay_with_light(&jobs, &known, Barriers::On);

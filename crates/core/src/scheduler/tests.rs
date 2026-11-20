@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Budget, Decision, Demand, Hold, IDLE_TIMEOUT, PRIORITY_AFTER, Plan, Pool, Preparing, Profile,
-    Repository, RunnerSlot, Scarce, Slot, SlotRef, StartFor, StopReason, Wait, Waits, plan,
+    Budget, Caps, Decision, Demand, Hold, IDLE_TIMEOUT, PRIORITY_AFTER, Plan, Pool, Preparing,
+    Profile, Repository, RunnerSlot, Scarce, Slot, SlotRef, StartFor, StopReason, Wait, Waits,
+    plan,
 };
 use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
@@ -92,6 +93,10 @@ fn idle_runner(repository: &str, started_at: SystemTime) -> Slot {
         memory: 4 * GIB,
         cpu: 2000,
         usual: None,
+        caps: Caps {
+            memory: 4 * GIB,
+            cpu: 2000,
+        },
         behind: None,
     })
 }
@@ -380,6 +385,10 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
                     memory: 4 * GIB,
                     cpu: 2000,
                     usual: None,
+                    caps: Caps {
+                        memory: 4 * GIB,
+                        cpu: 2000,
+                    },
                     behind: None,
                 }),
                 None => Slot::Free,
@@ -470,6 +479,10 @@ fn each_job_left_queued_says_why_it_waits() {
         memory: GIB,
         cpu: 1000,
         usual: None,
+        caps: Caps {
+            memory: GIB,
+            cpu: 1000,
+        },
         behind: None,
     });
     let mut profiles = profiles(vec![Slot::Free, Slot::Free]);
@@ -539,6 +552,10 @@ fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
         memory: GIB,
         cpu: 1000,
         usual: None,
+        caps: Caps {
+            memory: GIB,
+            cpu: 1000,
+        },
         behind: None,
     });
     let plan = plan(
@@ -608,6 +625,10 @@ fn only_the_jobs_memory_and_cpu_have_room_for_wait_for_a_slot_alone() {
         memory: GIB,
         cpu: 1000,
         usual: None,
+        caps: Caps {
+            memory: GIB,
+            cpu: 1000,
+        },
         behind: None,
     });
     let jobs: Vec<Repository> = (1..=5).map(one).collect();
@@ -1225,6 +1246,10 @@ fn a_job_never_waits_for_the_slot_it_prefers() {
         memory: 4 * GIB,
         cpu: 2000,
         usual: None,
+        caps: Caps {
+            memory: 4 * GIB,
+            cpu: 2000,
+        },
         behind: None,
     });
     let profiles = remembering(
@@ -1322,6 +1347,10 @@ fn a_warm_runner_stops_for_room_only_if_the_count_without_it_fits_the_start() {
             memory: memory * GIB,
             cpu: 2000,
             usual: None,
+            caps: Caps {
+                memory: memory * GIB,
+                cpu: 2000,
+            },
             behind: None,
         })
     };

@@ -147,7 +147,7 @@ impl Measured {
     }
 
     /// Whether the predictor was read less than `REREAD` ago.
-    fn predictor_is_fresh(&self) -> bool {
+    pub(super) fn predictor_is_fresh(&self) -> bool {
         self.predictor
             .as_ref()
             .is_some_and(|(_, read_at)| read_at.elapsed().is_ok_and(|age| age < REREAD))
@@ -219,6 +219,12 @@ impl Measured {
 
     pub(super) fn set_predictor(&mut self, predictor: Option<(Predictor, SystemTime)>) {
         self.predictor = predictor;
+    }
+
+    pub(super) fn age_predictor(&mut self, by: Duration) {
+        if let Some((_, read_at)) = &mut self.predictor {
+            *read_at -= by;
+        }
     }
 }
 
@@ -517,14 +523,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             } if replacing.is_empty() => Some(*memory),
             Decision::Start { .. } | Decision::Stop { .. } => None,
         });
-        let needs = plan
-            .waiting
-            .values()
-            .filter_map(|reason| match reason {
-                api::Waiting::HostMemory { needs, .. } => Some(*needs),
-                _ => None,
-            })
-            .chain(starts);
+        let needs = plan.host_needs().chain(starts);
         let count = self.count(self.host_remembered());
         let band = admitting
             .host
