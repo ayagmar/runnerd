@@ -926,3 +926,51 @@ async fn a_failed_starts_registration_is_deleted_without_holding_back_its_batch(
         "only the running runner stays registered"
     );
 }
+
+#[tokio::test]
+async fn a_failed_start_that_leaves_its_container_is_not_counted_as_a_runner_starting() {
+    // Catches a start Docker failed, whose container stays in the slot for cleanup, charging its job "runner starting"
+    // while its pool backs off (ADR 0154).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("start"),
+    );
+    let (mut engine, handle, _cache) = job_queued_with_cache(&github, &docker, &dir).await;
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .late_failures
+        .push_back(LateFailure {
+            takes_job: false,
+            cleanup_fails: true,
+        });
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.occupied().count(),
+        1,
+        "the container stays in the slot"
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    // From the next plan on, the job waits for what that plan says.
+    let next_plan = std::time::Instant::now();
+    engine.tick(Shutdown::No).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    // Cancelled: its causes are written.
+    github.0.lock().unwrap().queued.clear();
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let since_next_plan = u64::try_from(next_plan.elapsed().as_millis()).unwrap();
+    let causes: String = rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .query_row("SELECT wait_causes FROM jobs WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let causes: BTreeMap<String, u64> = serde_json::from_str(&causes).unwrap();
+    assert!(
+        causes.values().sum::<u64>() <= since_next_plan,
+        "nothing counts from the failed start to the next plan: {causes:?} in {since_next_plan} ms"
+    );
+}

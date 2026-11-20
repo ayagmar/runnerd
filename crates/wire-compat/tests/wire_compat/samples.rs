@@ -1454,14 +1454,18 @@ pub(crate) fn insights() -> Insights {
         queue: vec![ProfileQueue {
             profile: "jvm".to_owned(),
             jobs: 42,
-            waited: 45_100,
+            waited_ms: 45_100_000,
             causes: wait_cause()
                 .into_iter()
-                .map(|cause| CauseWait { cause, waited: 60 })
+                .map(|cause| CauseWait {
+                    cause,
+                    waited_ms: 60_000,
+                })
                 .collect(),
-            before_listed: 840,
-            uncovered: 5_500,
+            before_listed_ms: 840_000,
+            uncovered_ms: 5_500_000,
             unrecorded: 3,
+            estimated: 2,
         }],
     }
 }

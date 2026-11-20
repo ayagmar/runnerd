@@ -879,14 +879,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// What follows a start for a job, whatever it came to: only a runner in its slot ends the job's wait. A start
     /// that failed served nothing, even one that left a container there; its backoff takes the pool's wait, and the
-    /// job waits for neither a slot nor the host's memory since.
+    /// job waits for neither a slot nor the host's memory since. Only a start that succeeded has the job wait for its
+    /// runner starting; a failed one ends its cause, and the next plan names the next (ADR 0154).
     fn started(&mut self, launched: &Launched, outcome: StartOutcome) {
         let Some(job) = launched.job else {
             return;
         };
         let (slot, repository) = (&launched.slot, &launched.repository);
         if self.holds_runner(slot) {
-            self.note_started(job);
+            self.note_in_slot(job);
+        }
+        match outcome {
+            StartOutcome::Started => self.note_booting(job),
+            StartOutcome::Failed => self.note_cause_ended(job, crate::time::now_ms()),
         }
         if outcome == StartOutcome::Started
             && !self.backing_off(repository, &slot.profile, SystemTime::now())

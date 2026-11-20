@@ -989,42 +989,49 @@ pub fn insights(at: u64) -> api::Insights {
 }
 
 /// Why the profiles' jobs queued over the insights' window: jvm's mostly for the host's memory and behind a barrier,
-/// with jobs from before runnerd counted why; node's with a share before runnerd listed them; and a profile whose
+/// with jobs from before runnerd counted why and two whose causes are estimates; node's with a share before runnerd listed them; and a profile whose
 /// jobs all ended before runnerd counted why.
 pub fn queue() -> Vec<api::ProfileQueue> {
-    let cause = |cause: api::WaitCause, waited: u64| api::CauseWait { cause, waited };
+    const S: u64 = 1000;
+    let cause = |cause: api::WaitCause, seconds: u64| api::CauseWait {
+        cause,
+        waited_ms: seconds * S,
+    };
     vec![
         api::ProfileQueue {
             profile: "jvm".to_owned(),
             jobs: 42,
-            waited: 45_100,
+            waited_ms: 45_100 * S,
             causes: vec![
                 cause(api::WaitCause::Host, 22_200),
                 cause(api::WaitCause::Barrier, 9_000),
                 cause(api::WaitCause::Slot, 6_300),
                 cause(api::WaitCause::Booting, 1_260),
             ],
-            before_listed: 840,
-            uncovered: 5_500,
+            before_listed_ms: 840 * S,
+            uncovered_ms: 5_500 * S,
             unrecorded: 3,
+            estimated: 2,
         },
         api::ProfileQueue {
             profile: "node".to_owned(),
             jobs: 1,
-            waited: 95,
+            waited_ms: 95 * S,
             causes: vec![cause(api::WaitCause::Budget, 60)],
-            before_listed: 35,
-            uncovered: 0,
+            before_listed_ms: 35 * S,
+            uncovered_ms: 0,
             unrecorded: 0,
+            estimated: 0,
         },
         api::ProfileQueue {
             profile: "light".to_owned(),
             jobs: 0,
-            waited: 0,
+            waited_ms: 0,
             causes: Vec::new(),
-            before_listed: 0,
-            uncovered: 0,
+            before_listed_ms: 0,
+            uncovered_ms: 0,
             unrecorded: 1,
+            estimated: 0,
         },
     ]
 }

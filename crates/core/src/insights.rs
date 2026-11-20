@@ -113,6 +113,8 @@ pub struct Run {
     pub unseen: u64,
     /// When runnerd first listed it queued; `None` when no listing did.
     pub seen_at: Option<u64>,
+    /// Of `unseen`, what passed before runnerd first listed it: the downtime its first listing found.
+    pub unseen_unlisted: u64,
     /// How long it waited for each cause, in ms (ADR 0154); `None` for a row from before runnerd counted them.
     pub causes: Option<BTreeMap<api::WaitCause, u64>>,
 }

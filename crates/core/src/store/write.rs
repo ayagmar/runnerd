@@ -106,7 +106,11 @@ impl Writer<'_> {
             Write::RunnerCancelBy { runner, at } => self.runner_cancel_by(&runner, at),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
             Write::SlotWaited { jobs, ms } => self.slot_waited(&jobs, ms),
-            Write::CauseWaited { cause, jobs, ms } => self.cause_waited(cause, &jobs, ms),
+            Write::CausesWaited(waits) => {
+                self.change("record what jobs waited for", |_| {
+                    self.causes_waited(&waits)
+                });
+            }
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -461,19 +465,37 @@ impl Writer<'_> {
         }
     }
 
-    fn cause_waited(&self, cause: api::WaitCause, jobs: &[u64], ms: u64) {
-        let path = format!("$.\"{}\"", cause.word());
-        for job in jobs {
-            logged(
-                "record what a job waited for",
-                self.db.execute(
-                    "UPDATE jobs SET wait_causes = json_set(wait_causes, ?2, \
-                     coalesce(json_extract(wait_causes, ?2), 0) + ?3) \
-                     WHERE id = ?1 AND wait_causes IS NOT NULL",
-                    params![job, path, ms],
-                ),
-            );
+    /// Adds `waits` to their jobs' `wait_causes`: one read and one write of each job's row.
+    fn causes_waited(&self, waits: &[super::CauseWait]) -> rusqlite::Result<()> {
+        let mut by_job: BTreeMap<u64, Vec<&super::CauseWait>> = BTreeMap::new();
+        for wait in waits.iter().filter(|wait| wait.ms > 0) {
+            by_job.entry(wait.job).or_default().push(wait);
         }
+        for (job, waits) in by_job {
+            let stored: Option<Option<String>> = self
+                .db
+                .query_row("SELECT wait_causes FROM jobs WHERE id = ?1", [job], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            // No row, or one from before schema 26: nothing to add to.
+            let Some(Some(stored)) = stored else {
+                continue;
+            };
+            let mut causes: BTreeMap<String, u64> =
+                serde_json::from_str(&stored).unwrap_or_default();
+            for wait in waits {
+                let counted = causes.entry(wait.cause.word().to_owned()).or_insert(0);
+                *counted = counted.saturating_add(wait.ms);
+            }
+            let causes = serde_json::to_string(&causes)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            self.db.execute(
+                "UPDATE jobs SET wait_causes = ?2 WHERE id = ?1",
+                params![job, causes],
+            )?;
+        }
+        Ok(())
     }
 
     fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {
@@ -579,7 +601,8 @@ impl Writer<'_> {
         let unseen = self.downtime.map_or(0, |downtime| downtime.of(queued_at));
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, workflow, name, branch, url, labels, state, \
-             queued_at, unseen, seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11, ?12) \
+             queued_at, unseen, seen_at, wait_causes, unseen_unlisted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11, ?12, '{}', ?11) \
              ON CONFLICT (id) DO NOTHING",
             params![
                 job.id,
@@ -620,7 +643,7 @@ impl Writer<'_> {
         // A job the daemon never saw queued: GitHub's listing lagged, or it was queued before the daemon started.
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, runner, queued_at, \
-             started_at) SELECT ?1, repository, ?2, 1, '', '[]', 'running', name, ?3, ?3 FROM runners \
+             started_at, wait_causes) SELECT ?1, repository, ?2, 1, '', '[]', 'running', name, ?3, ?3, '{}' FROM runners \
              WHERE name = ?4 ON CONFLICT (id) DO NOTHING",
             params![job, run_id, at, runner],
         )?;

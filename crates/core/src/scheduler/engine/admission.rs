@@ -156,9 +156,9 @@ impl Measured {
         self.job_waits.booting(job, now)
     }
 
-    /// A runner took `job` at `now`: it waits no more.
-    fn taken(&mut self, job: u64, now: u64) -> Option<CauseWaited> {
-        self.job_waits.taken(job, now)
+    /// `job`'s cause ends at `at`.
+    fn end_cause(&mut self, job: u64, at: u64) -> Option<CauseWaited> {
+        self.job_waits.end_cause(job, at)
     }
 
     /// What predicts the jobs' peaks and usual run times, once the history was read.
@@ -665,27 +665,34 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Ends `job`'s slot or host wait, as its runner is in its slot: it waited from the last commit until now, not
-    /// until the next commit (ADR 0110). From now on its cause is its runner starting (ADR 0154).
-    pub(super) fn note_started(&mut self, job: u64) {
-        let now = time::now_ms();
-        let waited = self.measured.end_wait(job, now);
+    /// until the next commit (ADR 0110).
+    pub(super) fn note_in_slot(&mut self, job: u64) {
+        let waited = self.measured.end_wait(job, time::now_ms());
         self.record_waited(waited.into_iter().collect());
-        let caused = self.measured.booting(job, now);
+    }
+
+    /// A runner started for `job`: from now on its cause is its runner starting (ADR 0154).
+    pub(super) fn note_booting(&mut self, job: u64) {
+        let caused = self.measured.booting(job, time::now_ms());
         self.record_causes(caused.into_iter().collect());
     }
 
-    /// A runner took `job`, whichever it started for: its slot or host wait and its cause end now.
-    pub(super) fn note_taken(&mut self, job: u64) {
-        let now = time::now_ms();
-        let waited = self.measured.end_wait(job, now);
-        self.record_waited(waited.into_iter().collect());
-        let caused = self.measured.taken(job, now);
+    /// `job`'s cause ends at `at` (ms): a start for it failed, or a runner took it then.
+    pub(super) fn note_cause_ended(&mut self, job: u64, at: u64) {
+        let caused = self.measured.end_cause(job, at);
         self.record_causes(caused.into_iter().collect());
     }
 
-    /// Remembers the cause `plan` holds each queued job for, and adds the time since the last commit to the cause each
-    /// had then (ADR 0154). A job the plan starts a runner for keeps the cause it had, its runner starting once that is
-    /// in its slot; a job the plan no longer has, as a runner elsewhere took it or it was cancelled, waits no more.
+    /// A runner took `job` at `at` (ms), whichever it started for: its slot or host wait ends now, its cause at `at`.
+    pub(super) fn note_taken(&mut self, job: u64, at: u64) {
+        self.note_in_slot(job);
+        self.note_cause_ended(job, at);
+    }
+
+    /// Remembers the cause `plan` holds each queued job for, and records the causes that changed or ended up to now,
+    /// or every open one at a checkpoint (ADR 0154). A job the plan starts a runner for keeps the cause it had, its
+    /// runner starting once that is in its slot; a job the plan no longer has, as a runner elsewhere took it or it was
+    /// cancelled, waits no more.
     pub(super) fn note_causes(&mut self, plan: &Plan) {
         let held: BTreeMap<u64, api::WaitCause> = plan
             .waiting
@@ -707,11 +714,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.record_causes(caused);
     }
 
-    /// Adds what ended or went on to the history's causes.
+    /// Adds what ended, changed or was checkpointed to the history's causes, in one write.
     fn record_causes(&self, caused: Vec<CauseWaited>) {
-        for CauseWaited { cause, jobs, ms } in caused {
-            self.store.cause_waited(cause, jobs, ms);
-        }
+        self.store.causes_waited(
+            caused
+                .into_iter()
+                .map(|CauseWaited { job, cause, ms }| crate::store::CauseWait { job, cause, ms })
+                .collect(),
+        );
     }
 
     /// Adds what ended or went on to the history's waits.

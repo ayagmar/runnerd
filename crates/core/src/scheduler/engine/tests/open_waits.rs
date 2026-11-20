@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::invariants::Rng;
 use crate::api::WaitCause;
-use crate::scheduler::engine::open_waits::{CauseWaited, OpenWaits, WaitFor, Waited};
+use crate::scheduler::engine::open_waits::{
+    CAUSE_CHECKPOINT, CauseWaited, OpenWaits, WaitFor, Waited,
+};
 
 /// The cause rules one job at a time: each job's open cause and since when, and the time each job was counted for
 /// each cause.
@@ -39,10 +41,8 @@ impl PerJob {
 
 /// Adds what `OpenWaits` said to record to `counted`.
 fn add(counted: &mut BTreeMap<(u64, WaitCause), u64>, caused: Vec<CauseWaited>) {
-    for CauseWaited { cause, jobs, ms } in caused {
-        for job in jobs {
-            *counted.entry((job, cause)).or_insert(0) += ms;
-        }
+    for CauseWaited { job, cause, ms } in caused {
+        *counted.entry((job, cause)).or_insert(0) += ms;
     }
 }
 
@@ -163,12 +163,23 @@ fn any_sequence_of_commits_starts_and_causes_records_what_the_models_recorded() 
         let mut rng = Rng(seed);
         let (mut waits, mut sets) = (OpenWaits::default(), TwoSets::default());
         let (mut model, mut counted) = (PerJob::default(), BTreeMap::new());
+        // The model counts each plan's stretch on its own; `OpenWaits` counts a cause that goes on as one stretch, cut
+        // at checkpoints, and loses what it had not counted at a restart. With the clock monotonic and no restart they
+        // agree; otherwise `OpenWaits` counts no more than the model.
+        // Half the seeds step the clock back and restart; the other half keep both out, so the two must agree exactly.
+        let rough = seed % 2 == 0;
+        let mut exact = true;
         let mut now = 1000_u64;
         for _ in 0..60 {
-            now = match rng.below(8) {
+            now = match rng.below(10) {
                 0 => now,
                 // The wall clock can step back.
-                1 => now.saturating_sub(rng.below(50)),
+                1 if rough => {
+                    exact = false;
+                    now.saturating_sub(rng.below(50))
+                }
+                // Past a checkpoint.
+                2 => now + CAUSE_CHECKPOINT,
                 _ => now + rng.below(100),
             };
             match rng.below(15) {
@@ -211,14 +222,19 @@ fn any_sequence_of_commits_starts_and_causes_records_what_the_models_recorded() 
                 }
                 13 => {
                     let job = rng.below(8) + 1;
-                    add(&mut counted, waits.taken(job, now).into_iter().collect());
+                    add(
+                        &mut counted,
+                        waits.end_cause(job, now).into_iter().collect(),
+                    );
                     model.count(job, now);
                 }
                 // A restart: no wait survives one, and what was counted stays counted.
-                _ => {
+                _ if rough => {
                     (waits, sets) = (OpenWaits::default(), TwoSets::default());
                     model.open.clear();
+                    exact = false;
                 }
+                _ => {}
             }
             for job in 1..=8 {
                 assert_eq!(
@@ -242,11 +258,78 @@ fn any_sequence_of_commits_starts_and_causes_records_what_the_models_recorded() 
             waits.hold(&BTreeMap::new(), &BTreeSet::new(), now + 7),
         );
         model.hold(&BTreeMap::new(), &BTreeSet::new(), now + 7);
-        counted.retain(|_, ms| *ms > 0);
-        model.counted.retain(|_, ms| *ms > 0);
+        assert_counted(seed, exact, counted, model.counted);
+    }
+}
+
+/// What `OpenWaits` counted against the model: the same when `exact`, and never more.
+fn assert_counted(
+    seed: u64,
+    exact: bool,
+    mut counted: BTreeMap<(u64, WaitCause), u64>,
+    mut model: BTreeMap<(u64, WaitCause), u64>,
+) {
+    counted.retain(|_, ms| *ms > 0);
+    model.retain(|_, ms| *ms > 0);
+    if exact {
         assert_eq!(
-            counted, model.counted,
+            counted, model,
             "seed {seed}: each job counts each stretch once, to the cause it was held for"
         );
     }
+    for (key, ms) in &counted {
+        assert!(
+            model.get(key).is_some_and(|model| ms <= model),
+            "seed {seed}: {key:?} counts {ms} ms, more than it waited: {:?}",
+            model.get(key)
+        );
+    }
+}
+
+#[test]
+fn a_cause_that_goes_on_is_counted_only_when_it_changes_ends_or_a_checkpoint_passes() {
+    // Catches every plan writing every waiting job's row (ADR 0154): the same plan again writes nothing until the
+    // checkpoint, which counts every open cause once.
+    let mut waits = OpenWaits::default();
+    let held = BTreeMap::from([(1, WaitCause::Host), (2, WaitCause::Slot)]);
+    let none = BTreeSet::new();
+    let start = 10 * CAUSE_CHECKPOINT;
+    assert_eq!(waits.hold(&held, &none, start), []);
+    for step in 1..10 {
+        assert_eq!(
+            waits.hold(&held, &none, start + step * 1000),
+            [],
+            "an identical plan writes nothing"
+        );
+    }
+    let checkpoint = start + CAUSE_CHECKPOINT;
+    let counted = |ms| {
+        vec![
+            CauseWaited {
+                job: 1,
+                cause: WaitCause::Host,
+                ms,
+            },
+            CauseWaited {
+                job: 2,
+                cause: WaitCause::Slot,
+                ms,
+            },
+        ]
+    };
+    assert_eq!(
+        waits.hold(&held, &none, checkpoint),
+        counted(CAUSE_CHECKPOINT)
+    );
+    assert_eq!(waits.hold(&held, &none, checkpoint + 1000), []);
+    // Job 2 moves behind a barrier: only its stretch is written.
+    let moved = BTreeMap::from([(1, WaitCause::Host), (2, WaitCause::Barrier)]);
+    assert_eq!(
+        waits.hold(&moved, &none, checkpoint + 2000),
+        [CauseWaited {
+            job: 2,
+            cause: WaitCause::Slot,
+            ms: 2000
+        }]
+    );
 }

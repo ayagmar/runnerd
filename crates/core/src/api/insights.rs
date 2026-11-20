@@ -52,9 +52,10 @@ pub struct Insights {
     pub queue: Vec<ProfileQueue>,
 }
 
-/// Why one profile's jobs queued over a window, from what each plan that held them said (ADR 0154). Waits are
-/// seconds, from GitHub queueing a job to its start, less what passed while no runnerd ran, summed over the jobs
-/// counted; the causes and the two parts no cause covers add up to `waited`, give or take rounding.
+/// Why one profile's jobs queued over a window, from what each plan that held them said (ADR 0154). Unlike the rest
+/// of insights, its times are milliseconds, so shares of short waits come out right. A wait runs from GitHub queueing
+/// a job to its start, less what passed while no runnerd ran, summed over the jobs counted; the causes and the two
+/// parts no cause covers add up to `waited_ms`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileQueue {
     /// The profile.
@@ -62,26 +63,39 @@ pub struct ProfileQueue {
     /// The jobs whose waits it splits.
     pub jobs: u32,
     /// Their waits together.
-    pub waited: u64,
+    pub waited_ms: u64,
     /// What each cause held them for, longest first; none of 0.
     pub causes: Vec<CauseWait>,
-    /// Of `waited`, what passed before runnerd first listed the jobs queued: GitHub's listing lag and the time to
-    /// runnerd's next listing.
-    pub before_listed: u64,
-    /// Of `waited`, what no plan held them for once listed: after a restart until the first plan, and between a
+    /// Of `waited_ms`, what passed before runnerd first listed the jobs queued: GitHub's listing lag and the time to
+    /// runnerd's next listing, less any downtime in it.
+    pub before_listed_ms: u64,
+    /// Of `waited_ms`, what no plan held them for once listed: after a restart until the first plan, and between a
     /// planned start and its runner.
-    pub uncovered: u64,
+    pub uncovered_ms: u64,
     /// The jobs left out as their history rows are from before runnerd counted why jobs wait.
     pub unrecorded: u32,
+    /// The jobs whose causes were counted past their start, as when a runner took one before runnerd read it, and
+    /// were scaled down into the wait left after the time before the listing: their causes are estimates.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub estimated: u32,
 }
 
-/// What one cause held a profile's jobs for, in seconds.
+/// Whether a count is 0, for serde to skip it.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` passes a reference"
+)]
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+/// What one cause held a profile's jobs for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CauseWait {
     /// The cause.
     pub cause: super::WaitCause,
-    /// How long, summed over the jobs.
-    pub waited: u64,
+    /// How long, in ms, summed over the jobs.
+    pub waited_ms: u64,
 }
 
 /// What the host's memory came to while CI ran over a window, from the readings the budget's events stored (ADR 0108):

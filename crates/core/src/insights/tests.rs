@@ -70,6 +70,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         cpu_throttled: None,
         disk: None,
         seen_at: Some(finished - seconds * 1000 - 15_000),
+        unseen_unlisted: 0,
         causes: Some(BTreeMap::new()),
     }
 }
@@ -697,10 +698,7 @@ fn sizing_raises_app_to(config: &Config, jobs: Vec<crate::sizing::Ran>) -> Optio
         jobs,
         ..crate::sizing::History::default()
     };
-    let (last, running) = (
-        BTreeMap::new(),
-        BTreeMap::new(),
-    );
+    let (last, running) = (BTreeMap::new(), BTreeMap::new());
     let changes = crate::sizing::auto::changes(
         config,
         &history,
@@ -1463,6 +1461,7 @@ fn a_profiles_queue_time_splits_by_cause_and_names_what_no_cause_covers() {
     let mut down = queued_for(4, "app", 100, 50, Some(&[(Host, 50)]));
     // The daemon was down for the first 40 s: out of the wait, and out of what came before the listing.
     down.unseen = 40_000;
+    down.unseen_unlisted = 40_000;
     let runs = [
         queued_for(1, "app", 100, 10, Some(&[(Host, 50), (Barrier, 20)])),
         queued_for(2, "app", 300, 5, None),
@@ -1477,20 +1476,25 @@ fn a_profiles_queue_time_splits_by_cause_and_names_what_no_cause_covers() {
     let app = &queue[0];
     assert_eq!(app.profile, "app");
     assert_eq!((app.jobs, app.unrecorded), (3, 1));
-    assert_eq!(app.waited, 100 + 20 + 60);
+    assert_eq!(app.waited_ms, (100 + 20 + 60) * 1000);
     let causes: Vec<(api::WaitCause, u64)> = app
         .causes
         .iter()
-        .map(|cause| (cause.cause, cause.waited))
+        .map(|cause| (cause.cause, cause.waited_ms / 1000))
         .collect();
     assert_eq!(causes, [(Host, 100), (Barrier, 20), (Slot, 15), (Other, 5)]);
-    assert_eq!((app.before_listed, app.uncovered), (10 + 10, 20));
-    let parts: u64 =
-        causes.iter().map(|(_, waited)| waited).sum::<u64>() + app.before_listed + app.uncovered;
-    assert_eq!(parts, app.waited, "the parts add up to the wait");
+    assert_eq!(
+        (app.before_listed_ms, app.uncovered_ms),
+        ((10 + 10) * 1000, 20 * 1000)
+    );
+    let parts: u64 = app.causes.iter().map(|cause| cause.waited_ms).sum::<u64>()
+        + app.before_listed_ms
+        + app.uncovered_ms;
+    assert_eq!(parts, app.waited_ms, "the parts add up to the wait");
     assert_eq!(
         app.line(),
-        "app: 3 jobs waited 3m 00s in all; 1 job from before runnerd counted why is left out"
+        "app: 3 jobs waited 3m 00s in all; 1 job from before runnerd counted why is left out; 1 job's causes are \
+         estimates, scaled into its wait"
     );
     let light = &queue[1];
     assert_eq!((light.jobs, light.unrecorded), (0, 1));
@@ -1499,4 +1503,86 @@ fn a_profiles_queue_time_splits_by_cause_and_names_what_no_cause_covers() {
         light.line(),
         "light: 1 job ended from before runnerd counted why jobs wait"
     );
+}
+
+/// The figure `label` of `profile`'s split, if it shows.
+fn queue_figure(profile: &api::ProfileQueue, label: &str) -> Option<String> {
+    profile
+        .figures()
+        .into_iter()
+        .find(|figure| figure.label == label)
+        .map(|figure| figure.value)
+}
+
+// Catches causes counted past a job's start taking the time before runnerd listed it: that time is known on its own,
+// so it is kept whole, and the causes are scaled into what is left and said to be estimates.
+#[test]
+fn causes_counted_past_a_start_leave_the_time_before_the_listing_whole() {
+    use api::WaitCause::{Booting, Host};
+    // Queued at 0 s, listed at 45 s, held for the host from 50 s to 60 s, started at 70 s, and its take read at
+    // 100 s: 40 s of booting counted.
+    let runs = [queued_for(
+        1,
+        "app",
+        70,
+        45,
+        Some(&[(Host, 10), (Booting, 40)]),
+    )];
+
+    let queue = insights(&whole(&runs), &config(), 14, NOW).queue;
+
+    let app = &queue[0];
+    assert_eq!(
+        queue_figure(app, api::ProfileQueue::BEFORE_LISTED).as_deref(),
+        Some("45s")
+    );
+    assert_eq!(queue_figure(app, Host.label()).as_deref(), Some("5s"));
+    assert_eq!(queue_figure(app, Booting.label()).as_deref(), Some("20s"));
+    assert_eq!(queue_figure(app, api::ProfileQueue::UNCOVERED), None);
+    assert!(
+        app.line().contains("1 job's causes are estimates"),
+        "{}",
+        app.line()
+    );
+}
+
+// Catches a restart while a listed job still queues taking its downtime off the time before the listing, which it
+// came after.
+#[test]
+fn downtime_after_the_listing_is_not_taken_off_the_time_before_it() {
+    use api::WaitCause::Host;
+    // Queued at 0 s, listed at 30 s, no runnerd from 60 s to 100 s, started at 130 s; plans held it 40 s.
+    let mut run = queued_for(1, "app", 130, 30, Some(&[(Host, 40)]));
+    run.unseen = 40_000;
+
+    let queue = insights(&whole(&[run]), &config(), 14, NOW).queue;
+
+    let app = &queue[0];
+    assert_eq!(
+        queue_figure(app, api::ProfileQueue::BEFORE_LISTED).as_deref(),
+        Some("30s")
+    );
+    assert_eq!(
+        queue_figure(app, api::ProfileQueue::UNCOVERED).as_deref(),
+        Some("20s")
+    );
+}
+
+// Catches shares taken from rounded seconds: two causes of 600 ms in a wait of 1.2 s each read 100%.
+#[test]
+fn shares_of_a_wait_under_a_second_come_from_its_milliseconds() {
+    use api::WaitCause::{Host, Slot};
+    let mut run = queued_for(1, "app", 0, 0, None);
+    run.queued_at -= 1200;
+    run.seen_at = Some(run.queued_at);
+    run.causes = Some(BTreeMap::from([(Host, 600), (Slot, 600)]));
+
+    let queue = insights(&whole(&[run]), &config(), 14, NOW).queue;
+
+    let shares: Vec<Option<String>> = queue[0]
+        .figures()
+        .into_iter()
+        .map(|figure| figure.of)
+        .collect();
+    assert_eq!(shares, [Some("50%".to_owned()), Some("50%".to_owned())]);
 }

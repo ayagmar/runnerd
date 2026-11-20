@@ -28,9 +28,13 @@ struct OpenWait {
 #[derive(Debug, Clone, Copy)]
 struct OpenCause {
     cause: WaitCause,
-    /// The commit (ms) it was last counted up to.
+    /// When (ms) it was last counted up to: the cause's start, or the last checkpoint since.
     since: u64,
 }
+
+/// How long a cause that goes on stays uncounted at most, in ms: a plan after this long counts every open cause up to
+/// it, so a crash loses no more of them. A cause that changes or ends is counted at once (ADR 0154).
+pub(super) const CAUSE_CHECKPOINT: u64 = 5 * 60 * 1000;
 
 /// One job's open waits. Each is on its own: a job may wait for a slot sizing reads while its cause is a barrier, or
 /// have a cause and no wait sizing reads.
@@ -70,20 +74,24 @@ pub(super) struct Waited {
     pub ms: u64,
 }
 
-/// Time to add to the waits of `jobs` for `cause`.
-#[derive(Debug, PartialEq, Eq)]
+/// Time to add to `job`'s wait for `cause`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CauseWaited {
+    pub job: u64,
     pub cause: WaitCause,
-    pub jobs: Vec<u64>,
     pub ms: u64,
 }
 
-/// The waits the last plans left open, by job. Only its methods write it. Nothing survives a restart: a job a restart
-/// left waiting counts again from the first plan after it, and what passed between is no cause's. A reload keeps every
-/// wait; one of a repository the reload removed ends at the next commit, as that job is no longer planned.
+/// The waits the last plans left open, by job, and when the open causes were last counted. Only its methods write it.
+/// Nothing survives a restart: a job a restart left waiting counts again from the first plan after it, and what passed
+/// between is no cause's, as is a cause's time since it was last counted, at most `CAUSE_CHECKPOINT`; a stop asked for
+/// ends every cause, so a graceful one loses none. A reload keeps every wait; one of a repository the reload removed
+/// ends at the next commit, as that job is no longer planned.
 #[derive(Debug, Default)]
 pub(super) struct OpenWaits {
     open: BTreeMap<u64, JobWaits>,
+    /// When (ms) every open cause was last counted up to.
+    checkpointed: u64,
 }
 
 impl OpenWaits {
@@ -127,42 +135,53 @@ impl OpenWaits {
     }
 
     /// Commits a plan's causes: each job of `held` waits for its cause from `now` on, a job of `going_on` (one the plan
-    /// starts a runner for that has none yet) for the cause it had, and every other job's cause ends. Every cause
-    /// before this counts up to `now`. Says what to record.
+    /// starts a runner for that has none yet) for the cause it had, and every other job's cause ends. A cause that ends
+    /// or changes counts up to `now`; one that goes on is not counted, unless `CAUSE_CHECKPOINT` has passed since the
+    /// last checkpoint, when every open cause counts up to `now`. Says what to record.
     pub(super) fn hold(
         &mut self,
         held: &BTreeMap<u64, WaitCause>,
         going_on: &BTreeSet<u64>,
         now: u64,
     ) -> Vec<CauseWaited> {
-        let mut ended: BTreeMap<(WaitCause, u64), Vec<u64>> = BTreeMap::new();
+        let checkpoint = now.saturating_sub(self.checkpointed) >= CAUSE_CHECKPOINT;
+        let mut waited = Vec::new();
         for (job, waits) in &mut self.open {
-            let Some(open) = waits.take_cause() else {
+            let Some(open) = waits.cause else {
                 continue;
             };
-            ended
-                .entry((open.cause, open.since))
-                .or_default()
-                .push(*job);
-            if !held.contains_key(job) && going_on.contains(job) {
-                waits.set_cause(OpenCause { since: now, ..open });
+            let next = held
+                .get(job)
+                .copied()
+                .or_else(|| going_on.contains(job).then_some(open.cause));
+            if next == Some(open.cause) && !checkpoint {
+                continue;
+            }
+            if let Some(open) = waits.take_cause() {
+                waited.push(CauseWaited {
+                    job: *job,
+                    cause: open.cause,
+                    ms: now.saturating_sub(open.since),
+                });
+            }
+            if let Some(cause) = next {
+                waits.set_cause(OpenCause { cause, since: now });
             }
         }
         for (job, cause) in held {
-            self.open.entry(*job).or_default().set_cause(OpenCause {
-                cause: *cause,
-                since: now,
-            });
+            let waits = self.open.entry(*job).or_default();
+            if waits.cause.is_none() {
+                waits.set_cause(OpenCause {
+                    cause: *cause,
+                    since: now,
+                });
+            }
         }
         self.open.retain(|_, waits| !waits.is_empty());
-        ended
-            .into_iter()
-            .map(|((cause, since), jobs)| CauseWaited {
-                cause,
-                jobs,
-                ms: now.saturating_sub(since),
-            })
-            .collect()
+        if checkpoint {
+            self.checkpointed = now;
+        }
+        waited
     }
 
     /// A runner is in its slot for `job`: it waits for GitHub to hand the runner a job from `now` on, and its cause
@@ -175,20 +194,21 @@ impl OpenWaits {
             since: now,
         });
         ended.map(|open| CauseWaited {
+            job,
             cause: open.cause,
-            jobs: vec![job],
             ms: now.saturating_sub(open.since),
         })
     }
 
-    /// A runner took `job`: its cause counts up to `now` and ends.
-    pub(super) fn taken(&mut self, job: u64, now: u64) -> Option<CauseWaited> {
+    /// `job`'s cause ends at `at`: a runner took it then, or its start failed. It counts up to `at`, or to its own
+    /// start if that was later.
+    pub(super) fn end_cause(&mut self, job: u64, at: u64) -> Option<CauseWaited> {
         let open = self.open.get_mut(&job)?.take_cause()?;
         self.forget_if_empty(job);
         Some(CauseWaited {
+            job,
             cause: open.cause,
-            jobs: vec![job],
-            ms: now.saturating_sub(open.since),
+            ms: at.saturating_sub(open.since),
         })
     }
 

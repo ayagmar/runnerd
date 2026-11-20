@@ -105,8 +105,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (25, "ALTER TABLE jobs ADD COLUMN failure_cause TEXT;"),
     (
         26,
-        "ALTER TABLE jobs ADD COLUMN wait_causes TEXT DEFAULT '{}';\n\
-         UPDATE jobs SET wait_causes = NULL;",
+        "ALTER TABLE jobs ADD COLUMN wait_causes TEXT;\n\
+         ALTER TABLE jobs ADD COLUMN unseen_unlisted INTEGER NOT NULL DEFAULT 0;",
     ),
 ];
 
@@ -177,6 +177,17 @@ impl StoreError {
     pub fn is_shutdown(&self) -> bool {
         matches!(self, StoreError::Join(join) if join.is_cancelled())
     }
+}
+
+/// A stretch of one job's wait for one cause, which the history adds to the job's `wait_causes` (ADR 0154).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CauseWait {
+    /// The job.
+    pub job: u64,
+    /// What held it.
+    pub cause: api::WaitCause,
+    /// For how long, in ms.
+    pub ms: u64,
 }
 
 /// A runner container as the history records it.
@@ -332,11 +343,7 @@ enum Write {
         jobs: Vec<u64>,
         ms: u64,
     },
-    CauseWaited {
-        cause: api::WaitCause,
-        jobs: Vec<u64>,
-        ms: u64,
-    },
+    CausesWaited(Vec<CauseWait>),
     SlotWaited {
         jobs: Vec<u64>,
         ms: u64,
@@ -834,11 +841,12 @@ impl Store {
         self.send(Write::SlotWaited { jobs, ms });
     }
 
-    /// Adds `ms` to how long each of `jobs` waited for `cause` (ADR 0154). A job whose row is from before schema 26
-    /// keeps counting none, so it never reads as a wait of 0.
-    pub fn cause_waited(&self, cause: api::WaitCause, jobs: Vec<u64>, ms: u64) {
-        if ms > 0 && !jobs.is_empty() {
-            self.send(Write::CauseWaited { cause, jobs, ms });
+    /// Adds what each wait in `waits` lasted to its job's time for its cause (ADR 0154), all in one transaction and
+    /// with one write of each job's row. A job whose row is from before schema 26 keeps counting none, so it never
+    /// reads as a wait of 0.
+    pub fn causes_waited(&self, waits: Vec<CauseWait>) {
+        if waits.iter().any(|wait| wait.ms > 0) {
+            self.send(Write::CausesWaited(waits));
         }
     }
 

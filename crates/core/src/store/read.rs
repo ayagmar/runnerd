@@ -1366,7 +1366,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
          r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
          j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.seen_at, \
-         j.wait_causes FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         j.wait_causes, j.unseen_unlisted FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
     .query_map([since], |row| {
@@ -1405,6 +1405,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             cpu_throttled: row.get(26)?,
             disk: stored_disk(row, 27)?,
             seen_at: row.get(31)?,
+            unseen_unlisted: row.get(33)?,
             causes: row
                 .get::<_, Option<String>>(32)?
                 .map(|text| stored_causes(&text)),

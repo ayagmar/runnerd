@@ -3463,10 +3463,10 @@ fn causes(dir: &TestDir) -> Vec<BTreeMap<String, u64>> {
 }
 
 #[tokio::test]
-async fn each_plan_adds_the_time_to_the_next_to_the_cause_it_held_a_job_for() {
-    // Catches a cause counted twice for one stretch, a job a runner elsewhere took or that was cancelled still
-    // counting, and a started job's wait for GitHub to hand its runner a job left out (ADR 0154). Two slots, four
-    // jobs of 1.25G, and a slice with room for three runners: jobs 1 and 2 start, 3 and 4 wait.
+async fn identical_plans_write_no_cause_and_a_take_or_a_cancel_writes_the_stretch_it_ends() {
+    // Catches every plan rewriting every waiting job's row on an SSD that already writes too much, a stretch counted
+    // twice, and a take or a cancel losing the stretch it ends (ADR 0154). Two slots, four jobs of 1.25G, and a slice
+    // with room for three runners: jobs 1 and 2 start, 3 and 4 wait.
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
@@ -3488,7 +3488,21 @@ async fn each_plan_adds_the_time_to_the_next_to_the_cause_it_held_a_job_for() {
     assert_eq!(registered(&github.calls()).len(), 2);
     tokio::time::sleep(Duration::from_millis(30)).await;
     engine.tick(Shutdown::No).await;
-    // Job 4 is cancelled: the next plan no longer has it.
+    handle.store.flush().await;
+    let settled = causes(&dir);
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    handle.store.flush().await;
+    assert_eq!(
+        causes(&dir),
+        settled,
+        "plans that hold each job for the same cause write nothing"
+    );
+    // A runner takes job 1, and job 4 is cancelled: each writes the stretch it ends.
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine.note_found(&crate::scheduler::engine::history::Found::named(runner, 1));
     github
         .0
         .lock()
@@ -3498,33 +3512,72 @@ async fn each_plan_adds_the_time_to_the_next_to_the_cause_it_held_a_job_for() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     engine.tick(Shutdown::No).await;
     handle.store.flush().await;
-    let at_cancel = causes(&dir);
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    engine.tick(Shutdown::No).await;
-    handle.store.flush().await;
     let elapsed = u64::try_from(began.elapsed().as_millis()).unwrap();
-    let causes = causes(&dir);
+    let ended = causes(&dir);
     let total = |job: &BTreeMap<String, u64>| job.values().sum::<u64>();
-    for (index, job) in causes.iter().enumerate() {
+    for (index, job) in ended.iter().enumerate() {
         assert!(
             total(job) <= elapsed,
             "job {} counts no stretch twice: {job:?} in {elapsed} ms",
             index + 1
         );
     }
-    for started in &causes[..2] {
-        assert!(
-            started.get("booting").is_some_and(|ms| *ms >= 60),
-            "a started job waits for GitHub to hand its runner a job: {causes:?}"
-        );
-    }
     assert!(
-        total(&causes[2]) >= 90,
-        "job 3 waited each stretch: {causes:?}"
+        ended[0].get("booting").is_some_and(|ms| *ms >= 90),
+        "a taken job counts its wait for GitHub to hand its runner a job: {ended:?}"
     );
     assert!(
-        total(&at_cancel[3]) >= 60,
-        "job 4 waited until it was cancelled: {at_cancel:?}"
+        total(&ended[3]) >= 120,
+        "job 4 counts every stretch until it was cancelled: {ended:?}"
     );
-    assert_eq!(causes[3], at_cancel[3], "a cancelled job counts no more");
+}
+
+#[tokio::test]
+async fn a_take_the_engine_reads_late_counts_the_jobs_cause_only_up_to_when_its_capture_found_it() {
+    // Catches the time between a runner taking a job and the engine reading that being charged to the job's cause,
+    // past its start (ADR 0154).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let began = std::time::Instant::now();
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let found_at = time::now_ms();
+    let until_found = u64::try_from(began.elapsed().as_millis()).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine.note_found(&crate::scheduler::engine::history::Found::named_at(
+        runner, 3, found_at,
+    ));
+    handle.store.flush().await;
+    let third: u64 = causes(&dir)[2].values().sum();
+    assert!(
+        third > 0 && third <= until_found,
+        "job 3's cause counts up to its capture: {third} ms of {until_found}"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_writes_every_cause_still_open() {
+    // Catches a graceful stop losing the open causes it never wrote, now that a cause that goes on is written only
+    // when it changes or ends, or at a checkpoint (ADR 0154).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let before: u64 = causes(&dir)[2].values().sum();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    engine.tick(Shutdown::Graceful).await;
+    handle.store.flush().await;
+    let after: u64 = causes(&dir)[2].values().sum();
+    assert!(
+        after >= before + 50,
+        "the stop wrote job 3's open cause: {before} ms, then {after} ms"
+    );
 }

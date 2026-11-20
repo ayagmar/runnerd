@@ -326,9 +326,15 @@ async fn a_jobs_causes_add_up_and_a_row_from_before_schema_26_counts_none() {
     for id in [2, 3] {
         store.queued("o/r", &queued(id), 1_000_000);
     }
-    store.cause_waited(WaitCause::Host, vec![1, 2], 40 * SECOND);
-    store.cause_waited(WaitCause::Host, vec![2], 5 * SECOND);
-    store.cause_waited(WaitCause::NoPool, vec![2], SECOND);
+    let wait = |job, cause, ms| crate::store::CauseWait { job, cause, ms };
+    store.causes_waited(vec![
+        wait(1, WaitCause::Host, 40 * SECOND),
+        wait(2, WaitCause::Host, 40 * SECOND),
+    ]);
+    store.causes_waited(vec![
+        wait(2, WaitCause::Host, 5 * SECOND),
+        wait(2, WaitCause::NoPool, SECOND),
+    ]);
     store.flush().await;
     Connection::open(&path)
         .unwrap()
@@ -354,5 +360,52 @@ async fn a_jobs_causes_add_up_and_a_row_from_before_schema_26_counts_none() {
             ),
             (3, Some([(WaitCause::Other, 7 * SECOND)].into())),
         ]
+    );
+}
+
+// Catches the downtime of a restart while a listed job still queues counted as having come before its first listing,
+// which takes it off the wrong part of the wait (ADR 0154).
+#[tokio::test]
+async fn only_the_downtime_a_jobs_first_listing_found_came_before_that_listing() {
+    let dir = TestDir::new("store-unlisted");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let queue = |store: &Store, id: u64, at: u64| {
+        store.queued(
+            "o/r",
+            &QueuedJob {
+                created_at: at,
+                ..queued(id)
+            },
+            crate::time::now_ms(),
+        );
+    };
+    let first = Store::open_at(&path, start).unwrap();
+    keep_since(&path, start);
+    queue(&first, 1, start + 5 * SECOND);
+    first.host_sample(HostSample {
+        at: (start + 20 * SECOND) / SECOND,
+        cpu: 0,
+        memory: 0,
+    });
+    first.flush().await;
+    drop(first);
+    // An hour without runnerd: job 1, listed before it, still queues; job 2 was queued during it.
+    let second = Store::open_at(&path, start + HOUR).unwrap();
+    queue(&second, 2, start + 30 * SECOND);
+    second.flush().await;
+    let unseen: Vec<(u64, u64)> = Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT unseen, unseen_unlisted FROM jobs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let down = HOUR - 20 * SECOND;
+    assert_eq!(
+        unseen,
+        [(down, 0), (HOUR - 30 * SECOND, HOUR - 30 * SECOND)],
+        "job 1's downtime came after its listing; job 2's before"
     );
 }

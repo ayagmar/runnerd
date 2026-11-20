@@ -100,6 +100,8 @@ Then each profile's queue time over the window, split by what held its jobs. Eac
 
 Two parts no cause covers are named rather than spread over the causes. Before runnerd listed it: from GitHub queueing the job to runnerd's first listing of it. No plan covered: after a restart until the first plan, and between a planned start and its runner. Time runnerd was stopped is left out of the wait, as in [how a wait is counted](../sizing/#how-a-wait-is-counted). Jobs that ended before runnerd counted causes are left out and counted apart, never as a wait of 0.
 
+A cause that goes on is written when it changes or ends, and every 5 minutes, so a crash loses at most 5 minutes of it and the history is not rewritten at every plan. When a job's causes come to more than its wait after the listing, as when GitHub started it before runnerd saw the take, they are scaled to fit, and the line says how many jobs' causes are estimates.
+
 To ask the [job history](../../concepts/terms/#job-history) directly, each job's `wait_causes` holds milliseconds by cause:
 
 ```sh

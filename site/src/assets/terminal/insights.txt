@@ -30,7 +30,7 @@ disk writes:
     halyard/ledger images / image-api: 41G over 26 jobs, 1.58G a job
 
 why jobs queued:
-  jvm: 42 jobs waited 12h 31m in all; 3 jobs from before runnerd counted why are left out
+  jvm: 42 jobs waited 12h 31m in all; 3 jobs from before runnerd counted why are left out; 2 jobs' causes are estimates, scaled into their waits
     WAITED FOR                   TIME  SHARE
     Host memory                6h 10m    49%
     Behind a barrier           2h 30m    20%
