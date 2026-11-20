@@ -2195,12 +2195,17 @@ fn what_the_disk_figures_leave_out_reads_dim_under_them_as_core_words_it() {
 }
 
 #[test]
-fn a_jobs_failure_and_automatic_rerun_show_as_core_words_them() {
+fn a_jobs_failure_rerun_and_probe_show_as_core_words_them() {
     let daemon = daemon();
     let facts = facts(&daemon);
     for (job, line) in [
         (runnerd_fixtures::ACTION_ARCHIVE, facts.failure_line),
         (runnerd_fixtures::RUNNER_FAULT, facts.rerun_line.as_str()),
+        (runnerd_fixtures::RUNNER_FAULT, facts.probe_line.as_str()),
+        (
+            runnerd_fixtures::ACTION_ARCHIVE,
+            facts.unprobed_line.as_str(),
+        ),
     ] {
         let mut app = app(&daemon);
         open(&mut app, daemon.job(job).unwrap());

@@ -436,6 +436,7 @@ fn job(memory_cap: Option<u64>, cpu_cap: Option<u64>) -> Job {
             runner_fault: false,
             failure_cause: None,
             rerun_at: None,
+            probe: None,
             record_mark: None,
         },
         steps: vec![],

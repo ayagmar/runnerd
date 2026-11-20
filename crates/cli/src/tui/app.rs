@@ -188,6 +188,7 @@ fn stub_summary(id: u64, repository: &str, name: &str) -> JobSummary {
         runner_fault: false,
         failure_cause: None,
         rerun_at: None,
+        probe: None,
         record_mark: None,
     }
 }

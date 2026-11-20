@@ -95,8 +95,8 @@ Five things make an automatic re-run more than calling that path from a timer:
   two attempts of a run at most, and a person's concurrent re-run can add one. Turning it on by default needs evidence
   outside the job's reach that the faults leave, which neither `_diag`, the container's exit, nor Sysbox's journal is.
   The candidate is a probe run as root by the container's entrypoint after the runner exits, in the process tree whose
-  seccomp listener Sysbox lost, reported through the container's exit code; it is not built, and no recorded fault can
-  test it.
+  seccomp listener Sysbox lost, reported through the container's exit code. [ADR 0155](0155-a-runner-is-probed-after-it-exits-and-the-verdict-is-recorded.md)
+  builds it, record-only.
 - A run with a failed job on another machine is never re-run: runnerd cannot tell its cause.
 - Each re-run costs three reads of GitHub (the run, its attempt's jobs, the permit's read), one more after an unstated
   outcome, and one synced write to the history. A run in progress costs one read a minute while it is followed.

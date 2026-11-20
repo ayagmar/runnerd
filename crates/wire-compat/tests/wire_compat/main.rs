@@ -329,6 +329,7 @@ documents! {
     "failure-cause": FailureCause => variants(samples::failure_cause()),
     "archive-failure-kind": ArchiveFailureKind => variants(samples::archive_failure_kind()),
     "wait-cause": WaitCause => variants(samples::wait_cause()),
+    "runner-probe": RunnerProbe => variants(samples::runner_probe()),
 }
 
 /// The previous release's samples, one file per document.

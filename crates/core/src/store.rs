@@ -114,6 +114,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE TABLE rerun_claims (repository TEXT NOT NULL, run_id INTEGER NOT NULL, attempt INTEGER NOT NULL, \
          claimed_at INTEGER NOT NULL, PRIMARY KEY (repository, run_id, attempt)) WITHOUT ROWID;",
     ),
+    (28, "ALTER TABLE runners ADD COLUMN probe TEXT;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -337,6 +338,10 @@ enum Write {
         admission: api::Admission,
     },
     RunnerOomKilled(String),
+    RunnerProbe {
+        runner: String,
+        probe: api::RunnerProbe,
+    },
     RunnerStoppedFor {
         runner: String,
         reason: &'static str,
@@ -802,6 +807,14 @@ impl Store {
     /// have missed: one in the last interval before the container stopped.
     pub fn runner_oom_killed(&self, runner: &str) {
         self.send(Write::RunnerOomKilled(runner.to_owned()));
+    }
+
+    /// Records what the probe after a runner exited found (ADR 0155), as its stopped container says.
+    pub fn runner_probe(&self, runner: &str, probe: api::RunnerProbe) {
+        self.send(Write::RunnerProbe {
+            runner: runner.to_owned(),
+            probe,
+        });
     }
 
     /// Records when a forced pause that cancelled a runner's run removes it if it still runs, in ms since the epoch,

@@ -413,6 +413,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
     if let Some(rerun) = summary.rerun_line() {
         let _ = writeln!(out, "{rerun}");
     }
+    if let Some(probe) = summary.probe_line() {
+        let _ = writeln!(out, "{}", paint.paint(probe.tone.into(), &probe.text));
+    }
     if let Some(url) = &summary.url {
         let _ = writeln!(out, "{}", paint.paint(Tone::Dim, url));
     }

@@ -17,7 +17,7 @@ GitHub cancels runs, not jobs, and a re-run takes the jobs that depend on the on
 
 ## Runner faults
 
-With `rerun_runner_faults = true` on a [repository](../../reference/configuration/#repositories), runnerd re-runs a run its runner failed without asking. It is off by default because a runner fault is read from what the failed step printed, and a job's own code can print the same words, as a test of mount errors would.
+With `rerun_runner_faults = true` on a [repository](../../reference/configuration/#repositories), runnerd re-runs a run its runner failed without asking. It is off by default because a runner fault is read from what the failed step printed, and a job's own code can print the same words, as a test of mount errors would. The [probe after each runner](../logs/#everything-else-on-its-page) records evidence a job's output cannot fake; the default may change once it agrees with the log on real faults.
 
 When a job ends as a [runner fault](../../concepts/terms/#job-history), the run completed as a failure and every other job of its attempt that failed or was cancelled is a runner fault too, runnerd asks GitHub to re-run the run's failed jobs, without a preview. It decides that only for a run's first and second attempts, reading the run again right before it asks. A job that failed in its code, on another machine, or a run cancelled as a whole leaves the run alone.
 

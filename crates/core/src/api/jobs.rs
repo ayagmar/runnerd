@@ -121,6 +121,11 @@ pub struct JobSummary {
     /// it, and where a person re-ran the run first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerun_at: Option<u64>,
+    /// What the runner image's probe found after the runner exited (ADR 0155): whether the calls Sysbox serves still
+    /// worked in its container. `None` where no probe ran: an image older than the probe, a container stopped or
+    /// killed before it, a job still running, and from a daemon older than it. Recorded only; it decides nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<RunnerProbe>,
     /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).
     /// `None` for a job without a record note, and from a daemon older than the mark. Not `record`, which a `Job`
     /// that flattens this summary holds in full.
@@ -140,6 +145,29 @@ pub enum FailureCause {
     /// The step that failed is `actions/checkout`: the repository could not be fetched.
     Checkout,
     /// A cause a newer daemon tells apart.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What the probe a runner's entrypoint runs as root after the runner exited found (ADR 0155): it mounts a tmpfs,
+/// a proc and a sysfs and binds one in a mount namespace of its own, then opens a file under `/proc/sys` with
+/// `openat2`, the calls Sysbox serves and a runner fault breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunnerProbe {
+    /// Every call worked.
+    Clean,
+    /// A mount or an unmount failed; `/proc` opened.
+    Mount,
+    /// `/proc` did not open with `openat2`; the mounts worked.
+    Procfs,
+    /// Both failed.
+    MountAndProcfs,
+    /// It did not finish within its time.
+    TimedOut,
+    /// It ran but could not test: it failed before its first call.
+    Broken,
+    /// A verdict a newer daemon tells apart.
     #[serde(other)]
     Unknown,
 }

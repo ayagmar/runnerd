@@ -1,8 +1,9 @@
 #!/bin/bash
 # Runs as root under `dind` (cgroup nesting): lays out this slot's state, starts the container's Docker Engine, then
 # runs the GitHub Actions runner as the unprivileged `runner` user from a just-in-time config. The runner takes one
-# job and exits; scrub.sh deletes its credentials and what the job left among the runner's dot-files and in /tmp, and
-# runnerd removes the container, or keeps it as the record of a failed job.
+# job and exits; scrub.sh deletes its credentials and what the job left among the runner's dot-files and in /tmp,
+# probe.py tries the calls Sysbox serves, and runnerd records its verdict from the container's exit code, then removes
+# the container, or keeps it as the record of a failed job.
 set -euo pipefail
 
 # runnerd puts the runner's just-in-time config here before it starts the container: never in its environment, which
@@ -57,4 +58,16 @@ if pkill -TERM -u runner 2> /dev/null; then
     pkill -KILL -u runner 2> /dev/null || true
 fi
 runnerd-scrub
-exit "$status"
+# Whether the calls Sysbox serves still work in this container (docs/adr/0155), as root once nothing of the runner's
+# runs: the container exits with the verdict, which runnerd records beside the job and acts on nowhere yet. Within 3 s,
+# so docker stop's 10 s still cover the kills and the scrub above; 124 is a probe that did not end, and any code but
+# its own is one that could not run. The runner's own code goes to the log, as runnerd never read it.
+probe=0
+timeout --kill-after=1 3 runnerd-probe || probe=$?
+case $probe in
+    200 | 201 | 202 | 203) ;;
+    124) probe=204 ;;
+    *) probe=205 ;;
+esac
+echo "runnerd: the runner exited with $status; the probe after it with $probe"
+exit "$probe"

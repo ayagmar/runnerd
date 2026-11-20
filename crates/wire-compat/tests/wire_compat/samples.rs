@@ -28,8 +28,8 @@ use runnerd_core::api::{
     PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob,
     Record, RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records,
     RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize,
-    RevertCause, Run, RunLink, RunnerFailure, RunnerSpan, RunnerStatus, RunningJob, Sample,
-    SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
+    RevertCause, Run, RunLink, RunnerFailure, RunnerProbe, RunnerSpan, RunnerStatus, RunningJob,
+    Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
     ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused,
     SizingRevert, Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started, Starts, Stats,
     StatsQuery, StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch, Stopping,
@@ -815,6 +815,7 @@ pub(crate) fn job_summary() -> JobSummary {
         runner_fault: true,
         failure_cause: Some(FailureCause::ActionArchive),
         rerun_at: Some(1_763_000_000),
+        probe: Some(RunnerProbe::Mount),
         record_mark: Some(RecordMark::Kept),
     }
 }
@@ -2153,6 +2154,17 @@ pub(crate) fn failure_cause() -> Vec<FailureCause> {
         FailureCause::ActionArchive,
         FailureCause::ActionResolve,
         FailureCause::Checkout,
+    ]
+}
+
+pub(crate) fn runner_probe() -> Vec<RunnerProbe> {
+    vec![
+        RunnerProbe::Clean,
+        RunnerProbe::Mount,
+        RunnerProbe::Procfs,
+        RunnerProbe::MountAndProcfs,
+        RunnerProbe::TimedOut,
+        RunnerProbe::Broken,
     ]
 }
 

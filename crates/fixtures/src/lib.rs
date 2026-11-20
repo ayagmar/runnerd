@@ -356,6 +356,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         runner_fault: false,
         failure_cause: None,
         rerun_at: None,
+        probe: None,
         record_mark: None,
     }
 }
@@ -471,7 +472,8 @@ fn action_archive() -> Job {
     }
 }
 
-/// [`RUNNER_FAULT`]: Sysbox failed it, and runnerd re-ran its run, which went on to attempt 2.
+/// [`RUNNER_FAULT`]: Sysbox failed it, runnerd re-ran its run, which went on to attempt 2, and the probe after its
+/// runner found mounts failing.
 fn runner_fault() -> JobSummary {
     let mut runner_fault = ran(
         summary(
@@ -486,6 +488,7 @@ fn runner_fault() -> JobSummary {
     "image".clone_into(&mut runner_fault.name);
     runner_fault.runner_fault = true;
     runner_fault.rerun_at = runner_fault.timeline.finished_at.map(|at| at + 30);
+    runner_fault.probe = Some(api::RunnerProbe::Mount);
     runner_fault
 }
 
@@ -1387,6 +1390,10 @@ pub struct Facts {
     pub failure_line: &'static str,
     /// That runnerd re-ran [`RUNNER_FAULT`]'s run, as its page says under its outcome.
     pub rerun_line: String,
+    /// What the probe after [`RUNNER_FAULT`]'s runner found, as its page says under its outcome.
+    pub probe_line: String,
+    /// That no probe ran after [`ACTION_ARCHIVE`], whose image predates it, as its page says: never clean.
+    pub unprobed_line: String,
 }
 
 fn row(job: &JobSummary) -> JobRow {
@@ -1536,6 +1543,8 @@ pub fn facts(daemon: &Daemon) -> Facts {
         github,
         failure_line: job_line(daemon, ACTION_ARCHIVE, JobSummary::failure_line),
         rerun_line: job_line(daemon, RUNNER_FAULT, JobSummary::rerun_line),
+        probe_line: job_line(daemon, RUNNER_FAULT, JobSummary::probe_line).text,
+        unprobed_line: job_line(daemon, ACTION_ARCHIVE, JobSummary::probe_line).text,
     }
 }
 

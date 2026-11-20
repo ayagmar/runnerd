@@ -110,8 +110,8 @@ pub use jobs::{
     ChartLines, FailureCause, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job,
     JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource,
     Limits, LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
-    RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
-    Swap, Timeline, Total, host_margin, job_title,
+    RunComparison, RunnerProbe, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery,
+    StatsRow, Step, Swap, Timeline, Total, host_margin, job_title,
 };
 pub use jobs::{
     BarEnd, Baseline, BaselineRead, COMPARE_STEP_BYTES, COMPARE_STEPS_MAX, ChangeKind,

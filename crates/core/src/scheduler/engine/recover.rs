@@ -197,6 +197,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if container.running {
             self.remove_unkept(container.id, container.name).await;
         } else {
+            // It stopped while no daemon ran: its probe's verdict is in its exit code until it is removed. Unread
+            // when Docker does not answer, as a container that is gone tells nothing.
+            if let Ok(state) = self.docker.inspect(&container.id).await {
+                self.note_probe(&occupant.runner_name, &state);
+            }
             self.decide_left(Unread::new(slot, occupant)).await;
         }
     }

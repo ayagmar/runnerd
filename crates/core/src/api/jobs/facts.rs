@@ -6,8 +6,10 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use super::{FailureCause, Job, JobState, JobSummary, Sample, SampleSeries, Step, Timeline};
-use crate::api::{QueuedJob, Record};
+use super::{
+    FailureCause, Job, JobState, JobSummary, RunnerProbe, Sample, SampleSeries, Step, Timeline,
+};
+use crate::api::{QueuedJob, Record, Tone, Toned};
 
 /// What kind of outcome a job's or a step's is, for each client to colour as it colours that meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +134,45 @@ impl JobSummary {
                 self.run_attempt.saturating_add(1)
             )
         })
+    }
+
+    /// What the probe after its runner exited found (`probe`, ADR 0155), as every client writes it under its outcome,
+    /// with its tone: `a probe after the job found the runner's mounts failing`. For a job that failed, and for any
+    /// job whose probe found a call failing; a failed job without a verdict reads `no probe ran after the job`, never
+    /// as clean. `None` for every other job, and for a verdict this build does not know.
+    pub fn probe_line(&self) -> Option<Toned> {
+        let found = |text: &str, tone| {
+            Some(Toned {
+                text: text.to_owned(),
+                tone,
+            })
+        };
+        match self.probe {
+            None if self.is_failure() => found("no probe ran after the job", Tone::Quiet),
+            None | Some(RunnerProbe::Unknown) => None,
+            Some(RunnerProbe::Clean | RunnerProbe::Broken) if !self.is_failure() => None,
+            Some(RunnerProbe::Clean) => found(
+                "a probe after the job found the runner's mounts and /proc working",
+                Tone::Quiet,
+            ),
+            Some(RunnerProbe::Broken) => found("a probe after the job could not run", Tone::Quiet),
+            Some(RunnerProbe::Mount) => found(
+                "a probe after the job found the runner's mounts failing",
+                Tone::Warn,
+            ),
+            Some(RunnerProbe::Procfs) => found(
+                "a probe after the job found the runner's /proc failing to open",
+                Tone::Warn,
+            ),
+            Some(RunnerProbe::MountAndProcfs) => found(
+                "a probe after the job found the runner's mounts and /proc failing",
+                Tone::Warn,
+            ),
+            Some(RunnerProbe::TimedOut) => found(
+                "a probe after the job did not finish within 3 seconds",
+                Tone::Warn,
+            ),
+        }
     }
 
     /// Seconds it waited for a runner: until it started, or until `now` while it may still start. `None` for a job

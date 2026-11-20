@@ -11,9 +11,9 @@ use tracing::{info, warn};
 use super::history::{CAPTURE_DRAIN, Capture};
 use super::runner_exit::{Exit, Logged, TOOK_JOB};
 use super::{Engine, Occupant, STOP_DEADLINE, Shutdown, Slot};
-use crate::api::{Event, HoldCause, RunnerFailure};
+use crate::api::{self, Event, HoldCause, RunnerFailure};
 use crate::cache;
-use crate::docker::{self, DockerApi, is_being_removed, is_log_gone, is_not_found};
+use crate::docker::{self, DockerApi, RunnerState, is_being_removed, is_log_gone, is_not_found};
 use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{SlotRef, StopReason};
@@ -178,6 +178,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if state.as_ref().is_some_and(|state| state.running) {
             return false;
         }
+        if let Some(state) = &state {
+            self.note_probe(&occupant.runner_name, state);
+        }
         // How long it took to notice: the pacing of slots between jobs (ADR 0095).
         let noticed = state
             .and_then(|state| state.finished_at)
@@ -194,6 +197,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             occupant.repository, occupant.runner_name
         );
         true
+    }
+
+    /// Records what the probe after a stopped runner exited found, as its container says (ADR 0155). Recorded only:
+    /// no decision reads it.
+    pub(super) fn note_probe(&self, runner: &str, state: &RunnerState) {
+        let Some(probe) = state.probe else {
+            return;
+        };
+        if probe != api::RunnerProbe::Clean {
+            info!("{runner}: its probe after the runner exited found {probe:?}");
+        }
+        self.store.runner_probe(runner, probe);
     }
 
     /// Removes the container of a slot's runner that ended and its registration, then frees the slot. If its runner
