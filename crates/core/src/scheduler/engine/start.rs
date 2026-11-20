@@ -704,6 +704,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let image = profile.image.reference();
         let skips = runner_skips(self.config.host.skip_syncs, filter, &mut self.unsynced);
+        // Read once, so its mount and its setting agree.
+        let archives = self.archives.runner();
         // Its build cache opens here, before GitHub registers its runner: the fold closes it if no container comes.
         let spec = RunnerSpec {
             name: name.clone(),
@@ -712,8 +714,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
             memory: profile.memory,
-            env: self.runner_env(skips),
-            mounts: self.runner_mounts(&slot.profile, number, &name, repository),
+            env: self.runner_env(skips, archives.as_ref()),
+            mounts: self.runner_mounts(&slot.profile, number, &name, repository, archives.as_ref()),
             network: Some(self.names.network()),
             labels: std::collections::BTreeMap::new(),
             entrypoint: None,

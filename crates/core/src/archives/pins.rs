@@ -94,14 +94,6 @@ fn pin(value: &str) -> Option<Pin> {
     let owner = parts.next()?;
     let repo = parts.next()?;
     let path: Vec<&str> = parts.collect();
-    let segment = |part: &str| {
-        !part.is_empty()
-            && part != "."
-            && part != ".."
-            && part
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    };
     if !segment(owner) || !segment(repo) || !path.iter().all(|part| segment(part)) {
         return None;
     }
@@ -115,6 +107,23 @@ fn pin(value: &str) -> Option<Pin> {
         path,
         sha: reference.to_owned(),
     })
+}
+
+/// Whether `part` is a name GitHub gives an owner, a repository or a directory: letters, digits, `-`, `_` and `.`,
+/// never `.` or `..` alone.
+fn segment(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && part
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Whether `name` is a repository's `owner/repo`, safe to make a file name of.
+pub(crate) fn repository(name: &str) -> bool {
+    name.split_once('/')
+        .is_some_and(|(owner, repo)| segment(owner) && segment(repo))
 }
 
 /// Whether `reference` is a full commit ID as a pin writes it: 40 lowercase hex digits.

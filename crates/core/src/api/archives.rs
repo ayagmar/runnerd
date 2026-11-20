@@ -47,6 +47,8 @@ pub enum ArchiveFailureKind {
     Rejected,
     /// A kept archive no longer matched what was verified; it was moved to quarantine and is downloaded again.
     Quarantined,
+    /// The store could not be opened or checked whole: runners get no archives until it is.
+    Store,
     /// A kind from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -64,6 +66,9 @@ impl ArchiveFailure {
             ArchiveFailureKind::Rejected => "its archive failed its check and was not kept",
             ArchiveFailureKind::Quarantined => {
                 "its kept archive changed on disk; it was moved to quarantine and is downloaded again"
+            }
+            ArchiveFailureKind::Store => {
+                "cannot be opened or checked, so runners download their actions themselves"
             }
             ArchiveFailureKind::Unknown => "it failed",
         };

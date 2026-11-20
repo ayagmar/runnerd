@@ -86,6 +86,7 @@ impl Refresher {
         let labels: BTreeSet<String> = wanted.iter().map(Key::label).collect();
         self.failures.retain(|subject, failure| match failure.kind {
             api::ArchiveFailureKind::Pins => served.contains(subject),
+            api::ArchiveFailureKind::Store => true,
             _ => labels.contains(subject),
         });
         self.refreshed_at = Some(now);

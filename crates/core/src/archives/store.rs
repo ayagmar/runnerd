@@ -4,7 +4,12 @@
 //! integrity: each entry's SHA-256 and size as verified, when it was fetched and when a refresh last found it
 //! pinned. File times mean nothing to it.
 //!
-//! It must never write an archive in place, replace one that exists, or remove one but by retention or quarantine.
+//! One store has one owner: `open` takes an exclusive lock on `<root>/lock` and holds it for as long as the store
+//! lives, so a second runnerd pointed at the same directory is refused rather than sharing it. An index entry whose
+//! repository or commit is not a name GitHub gives is dropped at open: no path is ever made of it.
+//!
+//! It must never write an archive in place, replace one that exists, or remove one but by retention, quarantine or a
+//! withdrawal.
 //! It survives a restart whole: the index is written to a temporary file, synced and renamed; an archive is synced,
 //! renamed into place without replacing, and its directory synced before the index names it. A file the index does
 //! not name, as one a crash left between its rename and the index's, is quarantined at the next check; `staging/`
@@ -13,12 +18,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ring::rand::{SecureRandom, SystemRandom};
-use rustix::fs::{CWD, RenameFlags, renameat_with};
+use rustix::fs::{CWD, FlockOperation, RenameFlags, flock, renameat_with};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -30,6 +35,7 @@ pub(crate) const ARCHIVES: &str = "archives";
 const STAGING: &str = "staging";
 const QUARANTINE: &str = "quarantine";
 const INDEX: &str = "index.json";
+const LOCK: &str = "lock";
 
 /// An archive as the runner names it: the repository GitHub resolves the action to, and the commit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -41,6 +47,11 @@ pub(crate) struct Key {
 }
 
 impl Key {
+    /// Whether it names an archive as GitHub would: `owner/repo` of safe names, and a 40-digit lowercase commit.
+    pub(crate) fn valid(&self) -> bool {
+        super::pins::repository(&self.repository) && super::pins::commit(&self.sha)
+    }
+
     /// Its file under `archives/`: the repository's `/` as `_`, as the runner replaces it.
     fn file(&self) -> PathBuf {
         Path::new(&self.repository.replace('/', "_")).join(format!("{}.tar.gz", self.sha))
@@ -94,19 +105,58 @@ pub(crate) struct Checked {
     pub(crate) changed: Vec<Key>,
     /// Files under `archives/` the index does not name, by their path there: moved to quarantine.
     pub(crate) strangers: Vec<String>,
+    /// What could not be read or moved, each with why. While any is left, what runners would read is not known good.
+    pub(crate) errors: Vec<String>,
 }
 
-/// The store. Its owner is the archives task alone.
+impl Checked {
+    /// Whether every file under `archives/` is now one the index names and matches.
+    pub(crate) fn clean(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// How a kept archive's file stands against its entry.
+enum Standing {
+    Matches,
+    Changed,
+    Gone,
+}
+
+/// The store. Its owner is the archives task alone, which the lock it holds makes the only one on this host.
 #[derive(Debug)]
 pub(crate) struct ArchiveStore {
     root: PathBuf,
     entries: BTreeMap<Key, Entry>,
+    /// `<root>/lock`, locked exclusively until the store is dropped.
+    _lock: File,
 }
 
 impl ArchiveStore {
-    /// Opens the store at `root`, making its directories, emptying `staging/` and reading the index. An index that
-    /// does not parse is read as empty, so every archive is quarantined at the first check and fetched again.
+    /// Opens the store at `root`, making it and its parents, taking its lock, emptying `staging/` and reading the
+    /// index. Fails with `WouldBlock` while another owner holds the lock. An index that does not parse is read as
+    /// empty, so every archive is quarantined at the first check and fetched again.
     pub(crate) fn open(root: &Path) -> io::Result<ArchiveStore> {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(root)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(root.join(LOCK))?;
+        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            if error == rustix::io::Errno::WOULDBLOCK {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another runnerd keeps its action archives here",
+                )
+            } else {
+                error.into()
+            }
+        })?;
         for dir in [root.to_owned(), root.join(ARCHIVES), root.join(QUARANTINE)] {
             make_dir(&dir)?;
         }
@@ -123,13 +173,23 @@ impl ArchiveStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Index::default(),
             Err(error) => return Err(error),
         };
+        let (valid, invalid): (Vec<Entry>, Vec<Entry>) = index
+            .entries
+            .into_iter()
+            .partition(|entry| entry.key.valid());
+        if !invalid.is_empty() {
+            warn!(
+                "the action archives' index names {} archives that are not GitHub's names; they are dropped",
+                invalid.len()
+            );
+        }
         Ok(ArchiveStore {
             root: root.to_owned(),
-            entries: index
-                .entries
+            entries: valid
                 .into_iter()
                 .map(|entry| (entry.key.clone(), entry))
                 .collect(),
+            _lock: lock,
         })
     }
 
@@ -169,52 +229,70 @@ impl ArchiveStore {
         Ok(self.root.join(STAGING).join(name))
     }
 
-    /// Checks every kept archive against the index, and moves to quarantine each whose file is not what was verified
-    /// and each file the index does not name. An archive whose file is gone is dropped from the index, to be fetched
-    /// again.
+    /// Checks every kept archive against the index, and moves to quarantine each whose file is not what was verified,
+    /// whatever sits there (a directory, a link), and each file the index does not name. An archive whose file is gone
+    /// is dropped from the index, to be fetched again. One file it cannot read or move does not stop it: it goes on
+    /// with the rest, saves what it changed, and says what it could not do in `errors`.
     pub(crate) fn check(&mut self, now: u64) -> io::Result<Checked> {
         let mut checked = Checked::default();
         let archives = self.archives();
-        let mut gone = Vec::new();
-        for (key, entry) in &self.entries {
+        let keys: Vec<Key> = self.entries.keys().cloned().collect();
+        let mut dropped = false;
+        for key in keys {
             let path = archives.join(key.file());
-            match hash_file(&path) {
-                Ok((sha256, size)) if sha256 == entry.sha256 && size == entry.size => {}
-                Ok(_) => {
-                    quarantine(&self.root, &path, now)?;
-                    checked.changed.push(key.clone());
+            let standing = match self.standing(&key, &path) {
+                Ok(standing) => standing,
+                Err(error) => {
+                    checked.errors.push(format!("{}: {error}", key.label()));
+                    continue;
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => gone.push(key.clone()),
-                Err(error) => return Err(error),
+            };
+            match standing {
+                Standing::Matches => {}
+                Standing::Gone => {
+                    self.entries.remove(&key);
+                    dropped = true;
+                }
+                Standing::Changed => match quarantine(&self.root, &path, now) {
+                    Ok(()) => {
+                        self.entries.remove(&key);
+                        dropped = true;
+                        checked.changed.push(key);
+                    }
+                    Err(error) => checked.errors.push(format!("{}: {error}", key.label())),
+                },
             }
         }
         let known: BTreeSet<PathBuf> = self.entries.keys().map(Key::file).collect();
-        for dir in fs::read_dir(&archives)? {
-            let dir = dir?;
-            let inside = if dir.file_type()?.is_dir() {
-                fs::read_dir(dir.path())?
-                    .map(|file| file.map(|file| file.path()))
-                    .collect::<io::Result<Vec<_>>>()?
-            } else {
-                vec![dir.path()]
-            };
-            for file in inside {
-                let relative = file.strip_prefix(&archives).unwrap_or(&file).to_owned();
-                if !known.contains(&relative) {
-                    quarantine(&self.root, &file, now)?;
-                    checked
-                        .strangers
-                        .push(relative.to_string_lossy().into_owned());
-                }
+        for (relative, file) in strangers(&archives, &known, &mut checked.errors)? {
+            match quarantine(&self.root, &file, now) {
+                Ok(()) => checked.strangers.push(relative),
+                Err(error) => checked.errors.push(format!("{relative}: {error}")),
             }
         }
-        if !checked.changed.is_empty() || !gone.is_empty() {
-            for key in checked.changed.iter().chain(&gone) {
-                self.entries.remove(key);
-            }
+        if dropped {
             self.save()?;
         }
         Ok(checked)
+    }
+
+    /// How `key`'s file at `path` stands: anything but a regular file has changed.
+    fn standing(&self, key: &Key, path: &Path) -> io::Result<Standing> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Standing::Gone),
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() {
+            return Ok(Standing::Changed);
+        }
+        let entry = &self.entries[key];
+        let (sha256, size) = hash_file(path)?;
+        Ok(if sha256 == entry.sha256 && size == entry.size {
+            Standing::Matches
+        } else {
+            Standing::Changed
+        })
     }
 
     /// Makes `staged` the archive `key`: synced, renamed into place without replacing a file there, its directory
@@ -273,11 +351,11 @@ impl ArchiveStore {
             }
             self.entries.remove(key);
         }
-        // Empty repository directories go too, as nothing in them is a runner's any more.
+        // Empty repository directories go too, as nothing in them is a runner's any more. A link is never followed.
         for dir in fs::read_dir(&archives)? {
-            let dir = dir?.path();
-            if dir.is_dir() && fs::read_dir(&dir)?.next().is_none() {
-                fs::remove_dir(&dir)?;
+            let dir = dir?;
+            if dir.file_type()?.is_dir() && fs::read_dir(dir.path())?.next().is_none() {
+                fs::remove_dir(dir.path())?;
             }
         }
         // Quarantined files are kept for `keep` too, to be looked at.
@@ -303,6 +381,53 @@ impl ArchiveStore {
         fs::rename(&temporary, self.root.join(INDEX))?;
         sync_dir(&self.root)
     }
+}
+
+/// Every file under `archives/` that is not one of `known`'s, as its path there and in full: anything at its top that
+/// is not a directory, and anything in a repository's directory that is not a known regular file. Links are never
+/// followed. What cannot be read is said in `errors` and left.
+fn strangers(
+    archives: &Path,
+    known: &BTreeSet<PathBuf>,
+    errors: &mut Vec<String>,
+) -> io::Result<Vec<(String, PathBuf)>> {
+    let mut found = Vec::new();
+    for top in fs::read_dir(archives)? {
+        let top = top?;
+        let inside = match top.file_type() {
+            Ok(kind) if kind.is_dir() => match fs::read_dir(top.path()) {
+                Ok(inside) => inside,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", top.path().display()));
+                    continue;
+                }
+            },
+            Ok(_) => {
+                found.push((top.file_name().to_string_lossy().into_owned(), top.path()));
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("{}: {error}", top.path().display()));
+                continue;
+            }
+        };
+        for file in inside {
+            let file = match file {
+                Ok(file) => file,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", top.path().display()));
+                    continue;
+                }
+            };
+            let path = file.path();
+            let relative = path.strip_prefix(archives).unwrap_or(&path).to_owned();
+            let regular = file.file_type().is_ok_and(|kind| kind.is_file());
+            if !regular || !known.contains(&relative) {
+                found.push((relative.to_string_lossy().into_owned(), path));
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Makes `dir` with mode 0755 whatever the umask, if it is not there.

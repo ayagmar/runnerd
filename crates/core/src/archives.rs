@@ -152,13 +152,18 @@ impl Settings {
     }
 }
 
-/// The engine's side of the store: where it is, the settings it hands the task, and what the task last published.
+/// The engine's side of the store: where it is, the settings it hands the task, and what the task last published:
+/// what clients show, and what runners get. The task publishes the runners' view only after the store opened and a
+/// check found every file under `archives/` good, and withdraws it when a check does not or the archives go off; a
+/// runner reads it once as it starts. Nothing survives a restart: a new task checks before it publishes.
 #[derive(Debug)]
 pub struct Link {
     /// The store's directory; `None` when the daemon could not name one.
     directory: Option<PathBuf>,
     settings: watch::Sender<Settings>,
     status: watch::Sender<Option<api::ActionArchives>>,
+    /// What a runner gets while the archives are checked good; `None` otherwise.
+    ready: watch::Sender<Option<RunnerArchives>>,
 }
 
 impl Link {
@@ -168,6 +173,7 @@ impl Link {
             directory,
             settings: watch::Sender::new(Settings::of(config)),
             status: watch::Sender::new(None),
+            ready: watch::Sender::new(None),
         }
     }
 
@@ -178,13 +184,20 @@ impl Link {
             source,
             directory,
             self.settings.subscribe(),
-            self.status.clone(),
+            Published {
+                status: self.status.clone(),
+                ready: self.ready.clone(),
+            },
         ));
-        Some(Running(task))
+        Some(Running(Some(task)))
     }
 
-    /// Hands the task `config`'s settings, after a reload.
+    /// Hands the task `config`'s settings, after a reload. Turned off, runners get no archives from then on; turned
+    /// on again, not before the task checked them.
     pub fn reload(&self, config: &Config) {
+        if !config.caches.actions.enabled {
+            self.ready.send_replace(None);
+        }
         self.settings.send_if_modified(|settings| {
             let new = Settings::of(config);
             let changed = *settings != new;
@@ -199,11 +212,20 @@ impl Link {
         self.status.borrow().clone().filter(|_| on)
     }
 
-    /// What a runner container mounts and its environment gets, while the store is on and its archives' directory
-    /// exists: the directory, read-only, at [`MOUNT`], and [`ENV`] naming it.
+    /// What a runner container mounts and its environment gets, read once as it starts: the archives' directory,
+    /// read-only, at [`MOUNT`], and [`ENV`] naming it, while the store is on and its last check found it good.
     pub fn runner(&self) -> Option<RunnerArchives> {
-        let archives = self.directory.as_ref()?.join(store::ARCHIVES);
-        (self.settings.borrow().enabled && archives.is_dir()).then(|| RunnerArchives {
+        if !self.settings.borrow().enabled {
+            return None;
+        }
+        self.ready.borrow().clone()
+    }
+}
+
+impl RunnerArchives {
+    /// What a runner gets of the archives at `archives`.
+    fn of(archives: &Path) -> RunnerArchives {
+        RunnerArchives {
             mount: Mount {
                 target: Some(MOUNT.to_owned()),
                 source: Some(archives.to_string_lossy().into_owned()),
@@ -212,8 +234,14 @@ impl Link {
                 ..Default::default()
             },
             env: format!("{ENV}={MOUNT}"),
-        })
+        }
     }
+}
+
+/// What the task publishes to its `Link`.
+struct Published {
+    status: watch::Sender<Option<api::ActionArchives>>,
+    ready: watch::Sender<Option<RunnerArchives>>,
 }
 
 /// What a runner container gets of the archives.
@@ -226,13 +254,26 @@ pub struct RunnerArchives {
 }
 
 /// The running task; dropping it stops the task. A download stopped midway leaves a file in `staging/`, which the
-/// next start removes.
+/// next start removes. The store's lock is held until the last blocking hash, check or write it started ends, as each
+/// holds the store.
 #[derive(Debug)]
-pub struct Running(tokio::task::JoinHandle<()>);
+pub struct Running(Option<tokio::task::JoinHandle<()>>);
+
+impl Running {
+    /// Stops the task and waits until it has.
+    pub async fn stop(mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
 }
 
@@ -243,35 +284,26 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Owns the store at `directory`: opens it, then refreshes at start, every `REFRESH` and whenever the settings
-/// change, publishing what clients show after each.
+/// Owns the store at `directory`: refreshes at start, every `REFRESH` and whenever the settings change. Each
+/// refresh opens the store if it is not open yet, checks it, and publishes the runners' view only if that check
+/// found it good, before it downloads anything; then publishes what clients show.
 async fn run<S: Source + 'static>(
     source: Arc<S>,
     directory: PathBuf,
     mut settings: watch::Receiver<Settings>,
-    status: watch::Sender<Option<api::ActionArchives>>,
+    published: Published,
 ) {
-    let opened = {
-        let directory = directory.clone();
-        tokio::task::spawn_blocking(move || ArchiveStore::open(&directory)).await
-    };
-    let store = match opened {
-        Ok(Ok(store)) => store,
-        Ok(Err(error)) => {
-            warn!(
-                "no action archives: cannot open {}: {error}",
-                directory.display()
-            );
-            return;
-        }
-        Err(_) => return,
-    };
-    let mut archives = Archives::new(store);
+    let mut archives = Archives::new(directory.clone());
+    let view = RunnerArchives::of(&directory.join(store::ARCHIVES));
     loop {
         let now = settings.borrow_and_update().clone();
         if now.enabled {
-            archives.refresh(&*source, &now, unix_now()).await;
-            status.send_replace(Some(archives.status()));
+            let good = archives.check(unix_now()).await;
+            published.ready.send_replace(good.then(|| view.clone()));
+            archives.update(&*source, &now, unix_now()).await;
+            published.status.send_replace(Some(archives.status()));
+        } else {
+            published.ready.send_replace(None);
         }
         tokio::select! {
             () = tokio::time::sleep(REFRESH) => {}
@@ -283,30 +315,47 @@ async fn run<S: Source + 'static>(
 /// The store and what the task knows besides it: what a refresh works on.
 #[derive(Debug)]
 pub(crate) struct Archives {
+    /// The store's directory.
+    directory: PathBuf,
     /// Shared with the blocking tasks that hash, verify and write; only this task's refresh uses them, one at a time.
-    store: Arc<Mutex<ArchiveStore>>,
+    /// `None` until it opens: each refresh tries again.
+    store: Option<Arc<Mutex<ArchiveStore>>>,
     refresher: Refresher,
 }
 
 impl Archives {
-    pub(crate) fn new(store: ArchiveStore) -> Archives {
+    /// The archives kept at `directory`, opened at the first check.
+    pub(crate) fn new(directory: PathBuf) -> Archives {
         Archives {
-            store: Arc::new(Mutex::new(store)),
+            directory,
+            store: None,
             refresher: Refresher::default(),
         }
     }
 
     /// What clients show.
     pub(crate) fn status(&self) -> api::ActionArchives {
-        let (entries, bytes) = lock(&self.store).size();
+        let (entries, bytes) = self
+            .store
+            .as_ref()
+            .map_or((0, 0), |store| lock(store).size());
         self.refresher.status(entries, bytes)
     }
 
-    /// One refresh at `now`: checks the kept archives, reads the pins of each served repository whose default branch
-    /// moved, downloads and verifies what is pinned and missing, following the pins of each archive as deep as a
-    /// runner nests actions, and removes what no repository pinned for `keep`.
+    /// One refresh at `now`: a check, then an update.
+    #[cfg(test)]
     pub(crate) async fn refresh<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
         self.check(now).await;
+        self.update(source, settings, now).await;
+    }
+
+    /// Reads the pins of each served repository whose default branch moved, downloads and verifies what is pinned
+    /// and missing, following the pins of each archive as deep as a runner nests actions, and removes what no
+    /// repository pinned for `keep`. Nothing while the store is not open.
+    pub(crate) async fn update<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
         let mut names = Names::default();
         for repository in &settings.repositories {
             self.read_pins(source, &mut names, repository, now).await;
@@ -317,20 +366,20 @@ impl Archives {
         let mut tried: BTreeSet<Key> = BTreeSet::new();
         // Each round downloads what the last made known, one level deeper.
         for _ in 0..=MAX_DEPTH {
-            wanted = self.closure(source, &mut names).await;
+            wanted = self.closure(source, &store, &mut names).await;
             let missing: Vec<Key> = wanted
                 .iter()
-                .filter(|key| !tried.contains(*key) && !lock(&self.store).holds(key))
+                .filter(|key| !tried.contains(*key) && !lock(&store).holds(key))
                 .cloned()
                 .collect();
             if missing.is_empty() || fetched_bytes >= REFRESH_BYTES {
                 break;
             }
             tried.extend(missing.iter().cloned());
-            fetched_bytes += self.fetch_all(source, missing, now).await;
+            fetched_bytes += self.fetch_all(source, &store, missing, now).await;
         }
         let retained = {
-            let store = self.store.clone();
+            let store = store.clone();
             let pinned = wanted.clone();
             let keep = settings.keep;
             tokio::task::spawn_blocking(move || lock(&store).retain(&pinned, keep, now)).await
@@ -351,22 +400,61 @@ impl Archives {
         self.refresher.finish(&settings.repositories, &wanted, now);
     }
 
-    /// Checks every kept archive against the index; what changed is quarantined, and fetched again by this refresh.
-    async fn check(&mut self, now: u64) {
-        let store = self.store.clone();
-        match tokio::task::spawn_blocking(move || lock(&store).check(now)).await {
-            Ok(Ok(checked)) => {
-                for key in checked.changed {
-                    self.refresher
-                        .fail(&key.label(), api::ArchiveFailureKind::Quarantined, now);
-                }
-                for stranger in checked.strangers {
-                    warn!("action archive {stranger} is not in the index; moved to quarantine");
-                }
+    /// Opens the store if it is not open, and checks every kept archive against the index: what changed is
+    /// quarantined, and fetched again by the next update. Whether every file under `archives/` is now good: `false`
+    /// while the store cannot open, or the check could not read or move a file.
+    pub(crate) async fn check(&mut self, now: u64) -> bool {
+        let subject = self.directory.display().to_string();
+        let store = match self.open().await {
+            Ok(store) => store,
+            Err(error) => {
+                warn!("no action archives: cannot open {subject}: {error}");
+                self.refresher
+                    .fail(&subject, api::ArchiveFailureKind::Store, now);
+                return false;
             }
-            Ok(Err(error)) => warn!("cannot check the action archives: {error}"),
-            Err(_) => {}
+        };
+        let checked = match tokio::task::spawn_blocking(move || lock(&store).check(now)).await {
+            Ok(Ok(checked)) => checked,
+            Ok(Err(error)) => {
+                warn!("cannot check the action archives: {error}");
+                self.refresher
+                    .fail(&subject, api::ArchiveFailureKind::Store, now);
+                return false;
+            }
+            Err(_) => return false,
+        };
+        for key in &checked.changed {
+            self.refresher
+                .fail(&key.label(), api::ArchiveFailureKind::Quarantined, now);
         }
+        for stranger in &checked.strangers {
+            warn!("action archive {stranger} is not in the index; moved to quarantine");
+        }
+        for error in &checked.errors {
+            warn!("cannot check the action archive {error}; runners get no archives until it is");
+        }
+        if checked.clean() {
+            self.refresher.succeed(&subject);
+        } else {
+            self.refresher
+                .fail(&subject, api::ArchiveFailureKind::Store, now);
+        }
+        checked.clean()
+    }
+
+    /// The store, opened now if it is not yet.
+    async fn open(&mut self) -> std::io::Result<Arc<Mutex<ArchiveStore>>> {
+        if let Some(store) = &self.store {
+            return Ok(store.clone());
+        }
+        let directory = self.directory.clone();
+        let store = tokio::task::spawn_blocking(move || ArchiveStore::open(&directory))
+            .await
+            .map_err(std::io::Error::other)??;
+        let store = Arc::new(Mutex::new(store));
+        self.store = Some(store.clone());
+        Ok(store)
     }
 
     /// Reads which actions `repository`'s default branch pins, when it moved since the last read. On any failure,
@@ -440,7 +528,12 @@ impl Archives {
 
     /// Every archive the served repositories' pins reach, through the pins of the archives held, as deep as a runner
     /// nests actions. A nested action whose repository cannot be read now is left out of this refresh.
-    async fn closure<S: Source>(&self, source: &S, names: &mut Names) -> BTreeSet<Key> {
+    async fn closure<S: Source>(
+        &self,
+        source: &S,
+        store: &Arc<Mutex<ArchiveStore>>,
+        names: &mut Names,
+    ) -> BTreeSet<Key> {
         let mut seen: BTreeSet<Wanted> = BTreeSet::new();
         let mut level: BTreeSet<Wanted> = self.refresher.wanted();
         for _ in 0..MAX_DEPTH {
@@ -449,7 +542,7 @@ impl Archives {
                 if !seen.insert(wanted.clone()) {
                     continue;
                 }
-                let nested: Vec<Pin> = lock(&self.store).uses(&wanted.key, &wanted.path).to_vec();
+                let nested: Vec<Pin> = lock(store).uses(&wanted.key, &wanted.path).to_vec();
                 for pin in nested {
                     match names.public(source, &pin.repository).await {
                         Ok(Some(name)) => {
@@ -479,8 +572,13 @@ impl Archives {
     }
 
     /// Downloads, verifies and publishes each of `missing`, a few at a time; returns the bytes downloaded.
-    async fn fetch_all<S: Source>(&mut self, source: &S, missing: Vec<Key>, now: u64) -> u64 {
-        let store = &self.store;
+    async fn fetch_all<S: Source>(
+        &mut self,
+        source: &S,
+        store: &Arc<Mutex<ArchiveStore>>,
+        missing: Vec<Key>,
+        now: u64,
+    ) -> u64 {
         let results: Vec<(Key, Result<u64, Fetch>)> = futures_util::stream::iter(missing)
             .map(|key| async move {
                 let result = fetch(source, store, &key, now).await;

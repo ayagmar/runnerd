@@ -793,7 +793,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Letting go of the tracked containers stops the sampler, which stores the drive's window it was adding up:
         // the daemon closes its history right after this returns.
         drop(self);
-        drop(archives);
+        if let Some(archives) = archives {
+            archives.stop().await;
+        }
         let _ = sampler.await;
     }
 

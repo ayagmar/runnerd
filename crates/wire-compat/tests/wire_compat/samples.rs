@@ -1004,6 +1004,7 @@ pub(crate) fn archive_failure_kind() -> Vec<ArchiveFailureKind> {
         ArchiveFailureKind::Download,
         ArchiveFailureKind::Rejected,
         ArchiveFailureKind::Quarantined,
+        ArchiveFailureKind::Store,
     ];
     for kind in &every {
         match kind {
@@ -1011,6 +1012,7 @@ pub(crate) fn archive_failure_kind() -> Vec<ArchiveFailureKind> {
             | ArchiveFailureKind::Download
             | ArchiveFailureKind::Rejected
             | ArchiveFailureKind::Quarantined
+            | ArchiveFailureKind::Store
             // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
             | ArchiveFailureKind::Unknown => {}
         }

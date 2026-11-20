@@ -346,13 +346,16 @@ fn settings() -> Settings {
 }
 
 fn open(dir: &Path) -> Archives {
-    Archives::new(ArchiveStore::open(dir).unwrap())
+    Archives::new(dir.to_owned())
 }
 
 /// The archives under `archives/`, as `<dir>/<file>`.
 fn on_disk(root: &Path) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for dir in fs::read_dir(root.join("archives")).unwrap() {
+    let Ok(dirs) = fs::read_dir(root.join("archives")) else {
+        return found;
+    };
+    for dir in dirs {
         let dir = dir.unwrap();
         for file in fs::read_dir(dir.path()).unwrap() {
             found.insert(format!(
@@ -611,7 +614,7 @@ async fn an_archive_changed_on_disk_is_quarantined_and_fetched_again() {
 async fn a_refresh_killed_midway_leaves_nothing_a_runner_reads_and_recovers_at_the_next_start() {
     let dir = TestDir::new("archives");
     let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
-    drop(open(&dir.0));
+    drop(ArchiveStore::open(&dir.0).unwrap());
     // Killed mid-download, and killed after a rename the index never heard of.
     fs::write(dir.0.join("staging/1f2e3d"), b"\x1f\x8b half").unwrap();
     let renamed = dir
@@ -621,23 +624,140 @@ async fn a_refresh_killed_midway_leaves_nothing_a_runner_reads_and_recovers_at_t
     fs::create_dir_all(renamed.parent().unwrap()).unwrap();
     fs::write(&renamed, &archive(CHECKOUT, "runs: {}\n")[..40]).unwrap();
     let mut archives = open(&dir.0);
+    assert!(
+        archives.check(T0).await,
+        "the start's check leaves only what the index names"
+    );
     assert_eq!(
         count(&dir.0, "staging"),
         0,
         "the half download is gone at start"
     );
-    archives.refresh(&github, &settings(), T0).await;
     assert_eq!(
         count(&dir.0, "quarantine"),
         1,
         "the file the index never named"
     );
+    archives.update(&github, &settings(), T0).await;
     assert_eq!(github.downloads().len(), 1);
     assert_eq!(
         on_disk(&dir.0),
         BTreeSet::from([file_of("actions/checkout", CHECKOUT)])
     );
     assert!(verify::verify(&renamed, CHECKOUT, verify::BUDGET).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_store_opens_where_its_parents_are_not_there_yet() {
+    let dir = TestDir::new("archives");
+    let root = dir.0.join("cache/runnerd/actions");
+    let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
+    let mut archives = open(&root);
+    archives.refresh(&github, &settings(), T0).await;
+    assert_eq!(
+        on_disk(&root),
+        BTreeSet::from([file_of("actions/checkout", CHECKOUT)])
+    );
+    let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "every runner reads through it");
+}
+
+#[test]
+fn a_second_owner_of_one_store_is_refused_until_the_first_lets_go() {
+    let dir = TestDir::new("archives");
+    let first = ArchiveStore::open(&dir.0).unwrap();
+    let second = ArchiveStore::open(&dir.0).map(drop).unwrap_err();
+    assert_eq!(second.kind(), std::io::ErrorKind::WouldBlock);
+    drop(first);
+    assert!(
+        ArchiveStore::open(&dir.0).is_ok(),
+        "the store opens once its owner is gone"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_store_that_cannot_open_says_so_and_opens_once_it_can() {
+    let dir = TestDir::new("archives");
+    let root = dir.0.join("actions");
+    fs::write(&root, b"not a directory").unwrap();
+    let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
+    let mut archives = open(&root);
+    assert!(!archives.check(T0).await, "nothing is good to read");
+    archives.update(&github, &settings(), T0).await;
+    let failures = archives.status().failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].kind, ArchiveFailureKind::Store);
+    fs::remove_file(&root).unwrap();
+    archives.refresh(&github, &settings(), T0 + 600).await;
+    assert_eq!(archives.status().failures, Vec::new());
+    assert_eq!(archives.status().entries, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_goes_past_what_it_cannot_read_and_quarantines_whatever_sits_at_an_archive_s_place()
+{
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    // A directory where checkout's archive was, and setup-node's bytes changed after it.
+    let checkout = dir
+        .0
+        .join("archives")
+        .join(file_of("actions/checkout", CHECKOUT));
+    fs::remove_file(&checkout).unwrap();
+    fs::create_dir(&checkout).unwrap();
+    fs::write(checkout.join("inside"), b"x").unwrap();
+    let node = dir
+        .0
+        .join("archives")
+        .join(file_of("actions/setup-node", NODE));
+    let mut bytes = fs::read(&node).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&node, bytes).unwrap();
+    assert!(archives.check(T0 + 600).await, "both were moved aside");
+    assert_eq!(count(&dir.0, "quarantine"), 2);
+    archives.update(&github, &settings(), T0 + 600).await;
+    assert_eq!(github.downloads().len(), 4, "both fetched again");
+    check_invariants(&dir.0, "after the check");
+    // A file it cannot read leaves the store not good, and the rest checked.
+    if !rustix::process::geteuid().is_root() {
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o000)).unwrap();
+        let stray = dir.0.join("archives/actions_checkout/stray.tar.gz");
+        fs::write(&stray, b"x").unwrap();
+        assert!(
+            !archives.check(T0 + 1200).await,
+            "one archive cannot be read"
+        );
+        assert!(!stray.exists(), "the stranger was still moved aside");
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_index_that_names_a_path_outside_archives_is_never_followed() {
+    let dir = TestDir::new("archives");
+    let root = dir.0.join("actions");
+    fs::create_dir_all(&root).unwrap();
+    let outside = dir.0.join("precious.tar.gz");
+    fs::write(&outside, b"keep me").unwrap();
+    fs::write(
+        root.join("index.json"),
+        r#"{"entries":[{"repository":"o/r","sha":"../../../precious","sha256":"00","size":1,"fetched_at":0,"pinned_at":0}]}"#,
+    )
+    .unwrap();
+    let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
+    let mut archives = open(&root);
+    archives.refresh(&github, &settings(), T0).await;
+    assert_eq!(fs::read(&outside).unwrap(), b"keep me");
+    assert_eq!(archives.status().entries, 1, "only the archive fetched");
 }
 
 #[tokio::test(start_paused = true)]
@@ -867,6 +987,7 @@ async fn the_store_holds_only_verified_archives_over_generated_refreshes_restart
                     }
                 }
                 Step::Killed => {
+                    fs::create_dir_all(dir.0.join("staging")).unwrap();
                     fs::write(dir.0.join("staging/half"), b"\x1f\x8b").unwrap();
                     let stray: PathBuf = dir.0.join("archives/actions_setup-node");
                     fs::create_dir_all(&stray).unwrap();
