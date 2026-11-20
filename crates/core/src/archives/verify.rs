@@ -1,22 +1,33 @@
-//! Whether a downloaded file is an action archive a runner may unpack: a whole gzip stream holding one whole tar, its
-//! PAX global header's `comment` the commit it was asked for, as `git archive` writes it, and every entry inside one
-//! top directory. It reads the file once, within budgets, and hashes it; it extracts nothing and never writes.
+//! Whether a downloaded file is an action archive a runner may unpack: a whole gzip stream holding one whole tar in
+//! the narrow shape `git archive` writes, its PAX global header's `comment` the commit it was asked for, and every
+//! entry inside one top directory. It reads the headers itself, so what it checks is what GNU `tar -xzf` unpacks: only
+//! the one global `comment`, extended headers of one `path` each, ustar headers with valid checksums, directories and
+//! regular files each inside a directory listed before it, and two zero blocks then zeros to the end. Links, GNU long
+//! names and any other metadata are refused, and the runner downloads that action itself. It reads the file once,
+//! within budgets, and hashes it; it extracts nothing and never writes.
 //!
 //! What it proves and what it does not (ADR 0147): the archive is well formed, cannot place a file outside its
-//! directory, and says it is the commit asked for. It does not prove its files are that commit's: GitHub's answer to
-//! an authenticated request for that commit is trusted for that.
+//! directory, and says it is the commit asked for. It does not prove its files are that commit's: GitHub's answer for
+//! that commit is trusted for that.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, BufRead as _, BufReader, Read};
-use std::path::{Component, Path};
+use std::path::Path;
 
 use flate2::bufread::GzDecoder;
 use ring::digest;
-use tar::EntryType;
 
 use super::pins::is_action_file;
+
+#[cfg(test)]
+mod tests;
+
+/// A tar block.
+const BLOCK: usize = 512;
+
+/// The most bytes of PAX records a header may carry: far above one path's.
+const RECORDS: u64 = 64 << 10;
 
 /// What an archive may hold, so a hostile one cannot exhaust the daemon's memory or time.
 #[derive(Debug, Clone, Copy)]
@@ -69,21 +80,26 @@ pub(crate) enum Rejected {
     /// It expands past the budget, or has more entries than it allows.
     #[error("past its budget of {0}")]
     Budget(&'static str),
-    /// It does not open with a PAX global header whose comment is the commit asked for.
+    /// It does not open with a PAX global header whose one record is the comment of the commit asked for.
     #[error("its PAX comment is not the commit asked for")]
     Comment,
-    /// An entry's name leaves the top directory, or the entries have more than one.
-    #[error("entry {0:?} is outside its one top directory")]
+    /// A header `git archive` does not write: a bad checksum or magic, a size that is not octal, extended records
+    /// other than one `path`, or a mode beyond the permission bits.
+    #[error("a header is not one git archive writes: {0}")]
+    Header(&'static str),
+    /// An entry's name leaves the top directory, the entries have more than one, or its directory was not listed
+    /// before it.
+    #[error("entry {0:?} is outside a directory listed before it")]
     Outside(String),
-    /// A hard link, a device, a FIFO or another kind a runner should never unpack.
-    #[error("entry {0:?} is of a kind an action archive does not hold")]
+    /// A link, a device, a FIFO or another kind it does not hold.
+    #[error("entry {0:?} is of a kind it does not hold")]
     Kind(String),
-    /// A symbolic link whose target leaves the top directory.
-    #[error("symbolic link {0:?} points outside its top directory")]
-    Link(String),
     /// Two entries of one name.
     #[error("entry {0:?} is in it twice")]
     Duplicate(String),
+    /// The tar does not end in two zero blocks and zeros after them.
+    #[error("its tar does not end as one does")]
+    End,
     /// Bytes follow the gzip stream.
     #[error("data follows its gzip stream")]
     Trailing,
@@ -109,49 +125,137 @@ pub(crate) fn hash_file(path: &Path) -> io::Result<(String, u64)> {
     Ok(hashed.finish())
 }
 
+/// The names `path` holds as `tar -t` lists them, directories with a trailing `/`, sorted; for the tests that compare
+/// it with GNU tar's.
+#[cfg(test)]
+pub(crate) fn listing(path: &Path, sha: &str) -> Result<Vec<String>, Rejected> {
+    let file = File::open(path).map_err(Rejected::Unreadable)?;
+    let mut hashed = Hashed::new(BufReader::new(file));
+    let checker = read(&mut hashed, sha, BUDGET)?;
+    let mut names: Vec<String> = checker
+        .seen
+        .iter()
+        .map(|name| {
+            if checker.dirs.contains(name) {
+                format!("{name}/")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 fn read_archive<R: Read>(
     hashed: &mut Hashed<R>,
     sha: &str,
     budget: Budget,
 ) -> Result<BTreeMap<String, ActionFile>, Rejected> {
+    read(hashed, sha, budget).map(|checker| checker.actions)
+}
+
+fn read<'sha, R: Read>(
+    hashed: &mut Hashed<R>,
+    sha: &'sha str,
+    budget: Budget,
+) -> Result<Checker<'sha>, Rejected> {
     // A reader of our own under the decoder, so what it reads past the gzip stream is still there to look at.
     let mut gzip = GzDecoder::new(BufReader::new(hashed));
-    let capped = Capped {
+    let mut tar = Capped {
         inner: &mut gzip,
         left: budget.expanded,
     };
-    let mut archive = tar::Archive::new(capped);
     let mut checker = Checker {
         sha,
         budget,
         top: None,
         seen: BTreeSet::new(),
+        dirs: BTreeSet::new(),
         entries: 0,
         commented: false,
+        path: None,
         actions: BTreeMap::new(),
     };
-    for entry in archive.entries().map_err(tar_error)? {
-        let entry = entry.map_err(tar_error)?;
-        checker.check(entry)?;
+    loop {
+        let block = read_block(&mut tar)?;
+        if block.iter().all(|&byte| byte == 0) {
+            break;
+        }
+        checker.check(&block, &mut tar)?;
     }
-    if !checker.commented || checker.top.is_none() {
-        return Err(Rejected::Comment);
+    if !checker.commented || checker.top.is_none() || checker.path.is_some() {
+        return Err(if checker.commented {
+            Rejected::End
+        } else {
+            Rejected::Comment
+        });
     }
-    // The rest of the tar stream (its end blocks and padding) and the gzip trailer, whose CRC and length the decoder
-    // checks once it reaches them.
-    let mut rest = archive.into_inner();
-    io::copy(&mut rest, &mut io::sink()).map_err(tar_error)?;
+    // The second zero block, then zeros to the end of the stream, which also has the decoder check the gzip
+    // trailer's CRC and length.
+    if read_block(&mut tar)?.iter().any(|&byte| byte != 0) {
+        return Err(Rejected::End);
+    }
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = tar.read(&mut buffer).map_err(tar_error)?;
+        if read == 0 {
+            break;
+        }
+        if buffer[..read].iter().any(|&byte| byte != 0) {
+            return Err(Rejected::End);
+        }
+    }
     // Nothing may follow the gzip stream: a second member would be read by `tar -xzf` and not checked here.
     let mut buffered = gzip.into_inner();
     match buffered.fill_buf() {
-        Ok([]) => Ok(checker.actions),
+        Ok([]) => Ok(checker),
         Ok(_) => Err(Rejected::Trailing),
         Err(error) => Err(Rejected::Tar(error)),
     }
 }
 
+/// The next block; a stream that ends inside one, or before it, is cut short.
+fn read_block<R: Read>(reader: &mut R) -> Result<[u8; BLOCK], Rejected> {
+    let mut block = [0_u8; BLOCK];
+    reader.read_exact(&mut block).map_err(tar_error)?;
+    Ok(block)
+}
+
+/// Reads `size` bytes of an entry's data and its padding to the next block: the data, when `keep`.
+fn read_data<R: Read>(reader: &mut R, size: u64, keep: bool) -> Result<Option<Vec<u8>>, Rejected> {
+    let padded = size.next_multiple_of(BLOCK as u64);
+    let data = if keep {
+        let mut data = Vec::new();
+        reader
+            .by_ref()
+            .take(size)
+            .read_to_end(&mut data)
+            .map_err(tar_error)?;
+        if data.len() as u64 != size {
+            return Err(Rejected::Tar(io::ErrorKind::UnexpectedEof.into()));
+        }
+        Some(data)
+    } else {
+        skip(reader, size)?;
+        None
+    };
+    skip(reader, padded - size)?;
+    Ok(data)
+}
+
+/// Reads past `count` bytes, all of which must be there.
+fn skip<R: Read>(reader: &mut R, count: u64) -> Result<(), Rejected> {
+    let skipped = io::copy(&mut reader.by_ref().take(count), &mut io::sink()).map_err(tar_error)?;
+    if skipped == count {
+        Ok(())
+    } else {
+        Err(Rejected::Tar(io::ErrorKind::UnexpectedEof.into()))
+    }
+}
+
 /// A read that failed: past the budget, or a gzip or tar stream that is cut short or malformed, which the decoder
-/// and the tar reader do not tell apart.
+/// does not tell apart.
 fn tar_error(error: io::Error) -> Rejected {
     if error.kind() == io::ErrorKind::FileTooLarge {
         Rejected::Budget("expanded bytes")
@@ -160,145 +264,254 @@ fn tar_error(error: io::Error) -> Rejected {
     }
 }
 
+/// A ustar header as `git archive` writes it.
+struct Header<'block> {
+    /// Its name: the prefix, a `/`, and the name, or the name alone.
+    name: String,
+    kind: u8,
+    size: u64,
+    block: &'block [u8; BLOCK],
+}
+
+impl Header<'_> {
+    /// Reads `block` as a POSIX ustar header with a valid checksum, an octal size and a mode of permission bits only.
+    fn parse(block: &[u8; BLOCK]) -> Result<Header<'_>, Rejected> {
+        if &block[257..263] != b"ustar\0" || &block[263..265] != b"00" {
+            return Err(Rejected::Header("its magic is not POSIX ustar's"));
+        }
+        let stored =
+            octal(&block[148..156]).ok_or(Rejected::Header("its checksum is not octal"))?;
+        let sum: u64 = block
+            .iter()
+            .enumerate()
+            .map(|(at, &byte)| {
+                if (148..156).contains(&at) {
+                    u64::from(b' ')
+                } else {
+                    u64::from(byte)
+                }
+            })
+            .sum();
+        if stored != sum {
+            return Err(Rejected::Header("its checksum does not match"));
+        }
+        let size = octal(&block[124..136]).ok_or(Rejected::Header("its size is not octal"))?;
+        let mode = octal(&block[100..108]).ok_or(Rejected::Header("its mode is not octal"))?;
+        if mode & !0o777 != 0 {
+            return Err(Rejected::Header("its mode has more than permission bits"));
+        }
+        let name = field(&block[..100])?;
+        let prefix = field(&block[345..500])?;
+        let name = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        Ok(Header {
+            name,
+            kind: block[156],
+            size,
+            block,
+        })
+    }
+
+    /// Whether its link name is empty, as it is for anything but a link.
+    fn unlinked(&self) -> bool {
+        self.block[157..257].iter().all(|&byte| byte == 0)
+    }
+}
+
+/// A NUL-terminated header field, UTF-8.
+fn field(bytes: &[u8]) -> Result<&str, Rejected> {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    std::str::from_utf8(&bytes[..end]).map_err(|_| Rejected::Header("a name is not UTF-8"))
+}
+
+/// An octal number field as `git archive` writes it: digits, ended by a NUL or a space; never base-256.
+fn octal(bytes: &[u8]) -> Option<u64> {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0 || byte == b' ')
+        .unwrap_or(bytes.len());
+    let digits = &bytes[..end];
+    if digits.is_empty() || bytes[end..].iter().any(|&byte| byte != 0 && byte != b' ') {
+        return None;
+    }
+    digits.iter().try_fold(0_u64, |value, &digit| {
+        (b'0'..=b'7')
+            .contains(&digit)
+            .then(|| value.checked_mul(8)?.checked_add(u64::from(digit - b'0')))
+            .flatten()
+    })
+}
+
+/// PAX records as `<length> <key>=<value>\n`, each length its record's bytes, filling `data` exactly.
+fn records(data: &[u8]) -> Result<Vec<(&str, &str)>, Rejected> {
+    let malformed = Rejected::Header("its PAX records are malformed");
+    let mut found = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let space = rest
+            .iter()
+            .position(|&byte| byte == b' ')
+            .ok_or(Rejected::Header("its PAX records are malformed"))?;
+        let length: usize = std::str::from_utf8(&rest[..space])
+            .ok()
+            .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|digits| digits.parse().ok())
+            .ok_or(Rejected::Header("its PAX records are malformed"))?;
+        if length <= space + 1 || length > rest.len() || rest[length - 1] != b'\n' {
+            return Err(malformed);
+        }
+        let record = std::str::from_utf8(&rest[space + 1..length - 1])
+            .map_err(|_| Rejected::Header("its PAX records are malformed"))?;
+        let (key, value) = record
+            .split_once('=')
+            .ok_or(Rejected::Header("its PAX records are malformed"))?;
+        found.push((key, value));
+        rest = &rest[length..];
+    }
+    Ok(found)
+}
+
 /// What has been seen of an archive so far.
 struct Checker<'sha> {
     sha: &'sha str,
     budget: Budget,
     /// The one top directory every entry is in.
     top: Option<String>,
+    /// Every entry's name, without a trailing `/`.
     seen: BTreeSet<String>,
+    /// Those of directories.
+    dirs: BTreeSet<String>,
     entries: u64,
     /// Whether its global header named the commit.
     commented: bool,
+    /// The `path` of an extended header, for the entry after it.
+    path: Option<String>,
     actions: BTreeMap<String, ActionFile>,
 }
 
 impl Checker<'_> {
-    fn check<R: Read>(&mut self, mut entry: tar::Entry<'_, R>) -> Result<(), Rejected> {
-        self.entries += 1;
-        if self.entries > self.budget.entries {
-            return Err(Rejected::Budget("entries"));
+    /// Checks the entry whose header is `block`, and reads its data from `tar`.
+    fn check<R: Read>(&mut self, block: &[u8; BLOCK], tar: &mut R) -> Result<(), Rejected> {
+        let header = Header::parse(block)?;
+        if !header.unlinked() {
+            return Err(Rejected::Kind(header.name));
         }
-        let kind = entry.header().entry_type();
-        if kind == EntryType::XGlobalHeader {
-            // Only the first entry, as `git archive` writes it.
-            if self.entries != 1 {
-                return Err(Rejected::Kind("a second PAX global header".to_owned()));
-            }
-            let comment = entry
-                .pax_extensions()
-                .map_err(tar_error)?
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .find(|extension| extension.key().ok() == Some("comment"))
-                .and_then(|extension| extension.value().ok().map(str::to_owned));
-            if comment.as_deref() != Some(self.sha) {
-                return Err(Rejected::Comment);
-            }
-            self.commented = true;
-            return Ok(());
+        match header.kind {
+            b'g' => return self.global(&header, tar),
+            b'x' => return self.extended(&header, tar),
+            _ => {}
         }
         if !self.commented {
             return Err(Rejected::Comment);
         }
-        let name = entry
-            .path()
-            .map_err(tar_error)?
-            .to_string_lossy()
-            .into_owned();
-        let parts = components(&name).ok_or_else(|| Rejected::Outside(name.clone()))?;
-        let Some((first, inside)) = parts.split_first() else {
-            return Err(Rejected::Outside(name));
-        };
-        match &self.top {
-            Some(top) if top != first => return Err(Rejected::Outside(name)),
-            Some(_) => {}
-            None => self.top = Some((*first).to_owned()),
+        self.entries += 1;
+        if self.entries > self.budget.entries {
+            return Err(Rejected::Budget("entries"));
         }
-        let normal = parts.join("/");
-        if !self.seen.insert(normal) {
-            return Err(Rejected::Duplicate(name));
-        }
-        match kind {
-            EntryType::Directory => Ok(()),
-            // A file directly at the top would be a second top-level entry.
-            _ if inside.is_empty() => Err(Rejected::Outside(name)),
-            EntryType::Regular | EntryType::Continuous => {
-                let relative = inside.join("/");
-                if is_action_file(&relative) {
-                    let bytes = if entry.size() <= self.budget.action_file {
-                        let mut bytes = Vec::new();
-                        entry.read_to_end(&mut bytes).map_err(tar_error)?;
-                        Some(bytes)
-                    } else {
-                        None
-                    };
-                    let file = ActionFile {
-                        yml: relative.rsplit('/').next() == Some("action.yml"),
-                        bytes,
-                    };
-                    let dir = super::pins::action_dir(&relative).to_owned();
-                    // The runner loads `action.yml` when both are there.
-                    match self.actions.get(&dir) {
-                        Some(kept) if kept.yml => {}
-                        _ => {
-                            self.actions.insert(dir, file);
-                        }
+        let name = self.path.take().unwrap_or(header.name);
+        match header.kind {
+            b'5' => {
+                let path = name.strip_suffix('/').unwrap_or(&name);
+                self.place(path, &name)?;
+                if header.size != 0 {
+                    return Err(Rejected::Header("a directory has data"));
+                }
+                self.dirs.insert(path.to_owned());
+                Ok(())
+            }
+            b'0' => {
+                self.place(&name, &name)?;
+                let Some((_, inside)) = name.split_once('/') else {
+                    return Err(Rejected::Outside(name));
+                };
+                if !is_action_file(inside) {
+                    read_data(tar, header.size, false)?;
+                    return Ok(());
+                }
+                let keep = header.size <= self.budget.action_file;
+                let bytes = read_data(tar, header.size, keep)?;
+                let file = ActionFile {
+                    yml: inside.rsplit('/').next() == Some("action.yml"),
+                    bytes,
+                };
+                let dir = super::pins::action_dir(inside).to_owned();
+                // The runner loads `action.yml` when both are there.
+                match self.actions.get(&dir) {
+                    Some(kept) if kept.yml => {}
+                    _ => {
+                        self.actions.insert(dir, file);
                     }
                 }
                 Ok(())
             }
-            EntryType::Symlink => {
-                let target = entry
-                    .link_name()
-                    .map_err(tar_error)?
-                    .map(|target| target.to_string_lossy().into_owned())
-                    .ok_or_else(|| Rejected::Link(name.clone()))?;
-                if confined(&inside[..inside.len() - 1], &target) {
-                    Ok(())
-                } else {
-                    Err(Rejected::Link(name))
-                }
-            }
             _ => Err(Rejected::Kind(name)),
         }
     }
-}
 
-/// The normal parts of an entry's name, `None` if it is absolute or climbs with `..`. `.` parts are dropped.
-fn components(name: &str) -> Option<Vec<&str>> {
-    let mut parts = Vec::new();
-    for component in Path::new(name).components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_str()?),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+    /// The global header: the first entry, one record, the commit's `comment`.
+    fn global<R: Read>(&mut self, header: &Header<'_>, tar: &mut R) -> Result<(), Rejected> {
+        if self.commented || self.entries != 0 || header.size > RECORDS {
+            return Err(Rejected::Comment);
         }
-    }
-    Some(parts)
-}
-
-/// Whether a symbolic link in the directory `dir` (parts below the top directory) pointing at `target` stays inside
-/// the top directory, once its `..` are followed.
-fn confined(dir: &[&str], target: &str) -> bool {
-    if target.starts_with('/') || target.is_empty() {
-        return false;
-    }
-    let mut depth = dir.len();
-    for part in target.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                let Some(up) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = up;
+        let data = read_data(tar, header.size, true)?.unwrap_or_default();
+        match records(&data)?.as_slice() {
+            [("comment", comment)] if *comment == self.sha => {
+                self.commented = true;
+                Ok(())
             }
-            _ => depth += 1,
+            _ => Err(Rejected::Comment),
         }
     }
-    true
+
+    /// An extended header: one `path` record, for an entry that follows.
+    fn extended<R: Read>(&mut self, header: &Header<'_>, tar: &mut R) -> Result<(), Rejected> {
+        if !self.commented {
+            return Err(Rejected::Comment);
+        }
+        if self.path.is_some() || header.size > RECORDS {
+            return Err(Rejected::Header("an extended header is not one path"));
+        }
+        let data = read_data(tar, header.size, true)?.unwrap_or_default();
+        match records(&data)?.as_slice() {
+            [("path", path)] if !path.is_empty() => {
+                self.path = Some((*path).to_owned());
+                Ok(())
+            }
+            _ => Err(Rejected::Header("an extended header is not one path")),
+        }
+    }
+
+    /// Notes `path` (`name` as written), which must be the top directory, or new and in a directory listed before it.
+    fn place(&mut self, path: &str, name: &str) -> Result<(), Rejected> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts
+            .iter()
+            .any(|part| part.is_empty() || *part == "." || *part == "..")
+        {
+            return Err(Rejected::Outside(name.to_owned()));
+        }
+        match parts.split_last() {
+            Some((_, [])) if self.top.is_none() && name.ends_with('/') => {
+                self.top = Some(path.to_owned());
+            }
+            Some((_, parents)) if !parents.is_empty() => {
+                if !self.dirs.contains(&parents.join("/")) {
+                    return Err(Rejected::Outside(name.to_owned()));
+                }
+            }
+            _ => return Err(Rejected::Outside(name.to_owned())),
+        }
+        if !self.seen.insert(path.to_owned()) {
+            return Err(Rejected::Duplicate(name.to_owned()));
+        }
+        Ok(())
+    }
 }
 
 /// A reader that hashes and counts what passes through it.

@@ -56,10 +56,10 @@ enum Item<'item> {
 
 /// A header whose name is written raw, so a test can write the names `tar` refuses to.
 fn header(kind: EntryType, name: &str, size: u64) -> Header {
-    let mut header = Header::new_gnu();
+    let mut header = Header::new_ustar();
     header.set_entry_type(kind);
     let bytes = name.as_bytes();
-    header.as_gnu_mut().unwrap().name[..bytes.len()].copy_from_slice(bytes);
+    header.as_ustar_mut().unwrap().name[..bytes.len()].copy_from_slice(bytes);
     header.set_mode(if kind == EntryType::Directory {
         0o755
     } else {
@@ -103,7 +103,7 @@ fn tar_of(comment: &str, items: &[Item<'_>]) -> Vec<u8> {
                 };
                 let mut entry = header(kind, name, 0);
                 let bytes = target.as_bytes();
-                entry.as_gnu_mut().unwrap().linkname[..bytes.len()].copy_from_slice(bytes);
+                entry.as_ustar_mut().unwrap().linkname[..bytes.len()].copy_from_slice(bytes);
                 entry.set_cksum();
                 builder.append(&entry, &[][..]).unwrap();
             }
@@ -127,7 +127,8 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
 fn archive(sha: &str, action: &str) -> Vec<u8> {
     let top = format!("o-r-{}/", &sha[..7]);
     let file = format!("{top}action.yml");
-    let link = format!("{top}dist/main.js");
+    let dist = format!("{top}dist/");
+    let main = format!("{top}dist/main.js");
     let readme = format!("{top}README.md");
     gzip(&tar_of(
         sha,
@@ -135,7 +136,8 @@ fn archive(sha: &str, action: &str) -> Vec<u8> {
             Item::Dir(&top),
             Item::File(&file, action),
             Item::File(&readme, "an action"),
-            Item::Symlink(&link, "../action.yml"),
+            Item::Dir(&dist),
+            Item::File(&main, "console.log(1)"),
         ],
     ))
 }
@@ -1226,7 +1228,7 @@ async fn a_failed_download_is_reported_and_tried_again_at_the_next_refresh() {
 }
 
 #[test]
-fn a_git_archive_shaped_tarball_with_confined_links_passes_and_lists_its_action_files() {
+fn a_git_archive_shaped_tarball_passes_within_its_budget_and_lists_its_action_files() {
     let dir = TestDir::new("archives");
     let path = dir.0.join("a.tar.gz");
     fs::write(&path, archive(CHECKOUT, "runs: {}\n")).unwrap();

@@ -179,16 +179,7 @@ impl ArchiveStore {
             .write(true)
             .mode(0o600)
             .open(root.join(LOCK))?;
-        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-            if error == rustix::io::Errno::WOULDBLOCK {
-                io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "another runnerd keeps its action archives here",
-                )
-            } else {
-                error.into()
-            }
-        })?;
+        lock_exclusive(&lock)?;
         for dir in [root.to_owned(), root.join(ARCHIVES), root.join(QUARANTINE)] {
             make_dir(&dir)?;
         }
@@ -493,6 +484,31 @@ impl ArchiveStore {
         fs::rename(&temporary, self.root.join(INDEX))?;
         sync_dir(&self.root)
     }
+}
+
+/// How long `open` waits for the lock: a process forked from this one holds it until it runs its program, which it
+/// does at once; another owner holds it for good.
+const LOCK_TRIES: u32 = 40;
+const LOCK_WAIT: Duration = Duration::from_millis(25);
+
+/// Takes `lock` exclusively, waiting out a moment's hold. Fails with `WouldBlock` while another owner holds it.
+fn lock_exclusive(lock: &File) -> io::Result<()> {
+    for _ in 1..LOCK_TRIES {
+        match flock(lock, FlockOperation::NonBlockingLockExclusive) {
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => std::thread::sleep(LOCK_WAIT),
+            other => return other.map_err(io::Error::from),
+        }
+    }
+    flock(lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        if error == rustix::io::Errno::WOULDBLOCK {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "another runnerd keeps its action archives here",
+            )
+        } else {
+            error.into()
+        }
+    })
 }
 
 /// Every file under `archives/` that is not one of `known`'s, as its path there and in full: anything at its top that
