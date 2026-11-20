@@ -465,11 +465,11 @@ enum Write {
         done: oneshot::Sender<bool>,
     },
     ClaimRerun {
-        attempt: run::Attempt,
+        attempt: run::ClaimKey,
         at: u64,
         done: oneshot::Sender<Claim>,
     },
-    ReleaseRerun(run::Attempt),
+    ReleaseRerun(run::ClaimKey),
     Flush(oneshot::Sender<()>),
 }
 
@@ -879,7 +879,7 @@ impl Store {
     pub async fn claim_rerun(&self, repository: &str, run: u64, attempt: u32, at: u64) -> Claim {
         let (done, claimed) = oneshot::channel();
         self.send(Write::ClaimRerun {
-            attempt: run::Attempt {
+            attempt: run::ClaimKey {
                 repository: repository.to_owned(),
                 run,
                 attempt,
@@ -896,7 +896,7 @@ impl Store {
     /// Releases the claim [`Store::claim_rerun`] made, once nothing of the re-run reached GitHub: the permit stopped
     /// it, or GitHub refused it. A release lost to a crash leaves the attempt claimed, never sent.
     pub fn release_rerun(&self, repository: &str, run: u64, attempt: u32) {
-        self.send(Write::ReleaseRerun(run::Attempt {
+        self.send(Write::ReleaseRerun(run::ClaimKey {
             repository: repository.to_owned(),
             run,
             attempt,

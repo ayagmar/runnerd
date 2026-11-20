@@ -73,7 +73,7 @@ pub enum Claim {
 
 /// One attempt of a repository's run, as a claim names it.
 #[derive(Debug)]
-pub(super) struct Attempt {
+pub(super) struct ClaimKey {
     /// `owner/name`.
     pub(super) repository: String,
     /// The workflow run.

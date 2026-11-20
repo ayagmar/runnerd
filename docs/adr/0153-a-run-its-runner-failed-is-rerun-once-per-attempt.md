@@ -74,7 +74,7 @@ Five things make an automatic re-run more than calling that path from a timer:
   events and, at a start or after missing events, reads the history's faults of the last 6 hours not marked re-run.
 - **Stored state is the claim and the mark.** Schema 27 adds `rerun_claims` and `jobs.rerun_at`. The mark is set on
   each faulted job of the attempt only when GitHub accepted runnerd's request, and is what the job's page shows; the
-  claim is what keeps a request from going twice. Schema 26 is the wait reasons' (#331), which lands first.
+  claim is what keeps a request from going twice. Schema 26 is the wait reasons' ([ADR 0154](0154-a-job-keeps-how-long-each-cause-held-it.md)).
 - **Refusals hold, rate limits stop.** A 401, 403 or 404, or no token, holds the repository's re-runs for an hour, or
   until the config changes, whether a read or the send was refused. Its runs wait for the hold's end, so one refused
   request per repository and hour goes out. `RepositoryStatus::rerun_refused` carries what was refused, worded by core,

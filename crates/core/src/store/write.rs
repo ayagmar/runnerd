@@ -1294,7 +1294,7 @@ impl Writer<'_> {
     }
 
     /// Claims an automatic re-run's attempt, synced to disk, and drops claims older than a day.
-    fn claim_rerun(&self, attempt: &super::run::Attempt, at: u64) -> super::Claim {
+    fn claim_rerun(&self, attempt: &super::run::ClaimKey, at: u64) -> super::Claim {
         let mut inserted = 0;
         let committed = self
             .durably(|| {
@@ -1319,7 +1319,7 @@ impl Writer<'_> {
         }
     }
 
-    fn release_rerun(&self, attempt: &super::run::Attempt) {
+    fn release_rerun(&self, attempt: &super::run::ClaimKey) {
         logged(
             "release an automatic re-run's claim",
             self.db.execute(
