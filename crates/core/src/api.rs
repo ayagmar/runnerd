@@ -71,9 +71,9 @@ mod units;
 
 pub use actions::{
     ActionAnswer, ActionOutcome, ActionPreview, ActionQuery, ActionRefusal, ActionResult,
-    ActionTarget, CONFIRM_SECS, JOB_ACTIONS_CHECK, JobAction, JobActions, PreviewFacts, RunSeen,
-    SIBLINGS_MAX, Superseded, UnknownCause, actions_in_flight, actions_no_run,
-    actions_not_configured, actions_off,
+    ActionTarget, CONFIRM_SECS, JOB_ACTIONS_CHECK, JobAction, JobActions, PreviewFacts,
+    RerunRefused, RunSeen, SIBLINGS_MAX, Superseded, UnknownCause, actions_in_flight,
+    actions_no_run, actions_not_configured, actions_off,
 };
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
 pub use archives::{ActionArchives, ArchiveFailure, ArchiveFailureKind};
@@ -543,6 +543,10 @@ pub struct RepositoryStatus {
     /// that predates it, which did not say, so a client never reads it as listed (ADR 0150).
     #[serde(default)]
     pub queue: QueueShown,
+    /// Why runnerd re-runs none of its runner faults, once GitHub refused one of its automatic re-runs in a way asking
+    /// again cannot change (ADR 0153); absent otherwise, and from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun_refused: Option<RerunRefused>,
 }
 
 /// Whether a status shows a repository's queued jobs, or none because they could not be listed (ADR 0150).

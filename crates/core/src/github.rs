@@ -410,6 +410,23 @@ pub struct RunNow {
     pub completed: bool,
 }
 
+/// A job of one attempt of a workflow run, as a re-run of a run its runner failed reads it (ADR 0153).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AttemptJob {
+    /// The job's ID.
+    pub id: u64,
+    /// `queued`, `in_progress`, `completed`, ….
+    pub status: String,
+    /// Once completed: `success`, `failure`, `cancelled`, `skipped`, `timed_out`, ….
+    pub conclusion: Option<String>,
+}
+
+/// The jobs of an attempt, as GitHub lists them.
+#[derive(Deserialize)]
+struct AttemptJobs {
+    jobs: Vec<AttemptJob>,
+}
+
 /// Why a job action's request, or its read of the run, got no success: a class and a status. Holds no text, so
 /// nothing GitHub wrote, and no token, can leave through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,6 +561,14 @@ pub trait GithubApi: crate::archives::Source + Send + Sync {
         repository: &str,
         run: u64,
     ) -> impl Future<Output = Result<RunNow, ActionFailure>> + Send;
+    /// The jobs of attempt `attempt` of a workflow run, every runner's, with their conclusions, for a re-run of a run
+    /// its runner failed (ADR 0153); failures as a class and a status.
+    fn attempt_jobs(
+        &self,
+        repository: &str,
+        run: u64,
+        attempt: u32,
+    ) -> impl Future<Output = Result<Vec<AttemptJob>, ActionFailure>> + Send;
     /// The workflows' names of the runs whose job reads kept GitHub's name because the workflow's could not be read
     /// then, as far as they can be read now (ADR 0140). Each run is given once; one whose workflow GitHub does not
     /// give is dropped, and keeps GitHub's name.
@@ -1375,6 +1400,28 @@ impl GithubApi for Github {
             attempt: body.run_attempt,
             completed: body.status.as_deref() == Some("completed"),
         })
+    }
+
+    async fn attempt_jobs(
+        &self,
+        repository: &str,
+        run: u64,
+        attempt: u32,
+    ) -> Result<Vec<AttemptJob>, ActionFailure> {
+        let path = format!(
+            "/repos/{repository}/actions/runs/{run}/attempts/{attempt}/jobs?per_page={PER_PAGE}"
+        );
+        let pages: Result<Vec<AttemptJobs>, Error> = self.get_pages(&path).await;
+        // Read once per re-run: nothing asks for these pages again.
+        lock(&self.etags).retain(|cached| !cached.starts_with(&path));
+        let mut jobs: Vec<AttemptJob> = pages
+            .map_err(|error| ActionFailure::of(&error))?
+            .into_iter()
+            .flat_map(|page| page.jobs)
+            .collect();
+        jobs.sort_by_key(|job| job.id);
+        jobs.dedup_by_key(|job| job.id);
+        Ok(jobs)
     }
 
     async fn named_runs(&self) -> Vec<NamedRun> {

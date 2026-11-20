@@ -6,11 +6,17 @@
 //! in hand, and before each send (a 401's second included), the snapshot is checked, the run read again for its
 //! attempt, and the snapshot checked once more, with nothing in between that and the send.
 //!
-//! It must not write the job history (GitHub's listings bring what the action did), kill a runner, keep a deadline,
-//! send an ambiguous request again, or put GitHub's text or the token anywhere: a refusal is its class and status.
+//! `rerun` sends one action itself: the re-run of a run whose runner failed one of its jobs (ADR 0153), through the
+//! same flights and the same check before the send, without a preview.
+//!
+//! It must not write the job history (GitHub's listings bring what the action did) beyond noting an automatic re-run
+//! GitHub accepted, kill a runner, keep a deadline, send an owner's ambiguous request again, or put GitHub's text or
+//! the token anywhere: a refusal is its class and status.
 
+mod faults;
 mod flights;
 pub mod policy;
+mod rerun;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,13 +25,14 @@ use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 use tracing::info;
 
+use self::faults::Faults;
 use self::flights::{Boarding, Flights, Issued, Landed, Redeemed};
 use self::policy::{Denied, Policy};
 use crate::api::{
     self, ActionAnswer, ActionPreview, ActionRefusal, ActionResult, ActionTarget, JobAction,
     JobSummary, PreviewFacts, RunSeen, SIBLINGS_MAX, Superseded, UnknownCause,
 };
-use crate::github::{ActionFailure, GithubApi, JobActionRequest, Permit, RunNow};
+use crate::github::{ActionFailure, AttemptJob, GithubApi, JobActionRequest, Permit, RunNow};
 use crate::scheduler::engine::{Control, Shutdown};
 use crate::store::{Store, StoreError};
 use crate::time;
@@ -60,6 +67,14 @@ pub trait ActionsGithub: Send + Sync + 'static {
         run: u64,
     ) -> BoxFuture<'call, Result<RunNow, ActionFailure>>;
 
+    /// Reads the jobs of attempt `attempt` of the run, every runner's, with their conclusions.
+    fn attempt_jobs<'call>(
+        &'call self,
+        repository: &'call str,
+        run: u64,
+        attempt: u32,
+    ) -> BoxFuture<'call, Result<Vec<AttemptJob>, ActionFailure>>;
+
     /// Sends `request` once, asking `permit` once the token is in hand and before each send; GitHub's success
     /// status, or why not.
     fn send<'call>(
@@ -77,6 +92,15 @@ impl<G: GithubApi + 'static> ActionsGithub for G {
         run: u64,
     ) -> BoxFuture<'call, Result<RunNow, ActionFailure>> {
         Box::pin(GithubApi::action_run(self, repository, run))
+    }
+
+    fn attempt_jobs<'call>(
+        &'call self,
+        repository: &'call str,
+        run: u64,
+        attempt: u32,
+    ) -> BoxFuture<'call, Result<Vec<AttemptJob>, ActionFailure>> {
+        Box::pin(GithubApi::attempt_jobs(self, repository, run, attempt))
     }
 
     fn send<'call>(
@@ -128,6 +152,7 @@ pub struct JobActions {
     store: Store,
     control: Arc<Control>,
     flights: Arc<Flights>,
+    faults: Arc<Faults>,
     deadline: Duration,
 }
 
@@ -151,6 +176,7 @@ impl JobActions {
             store,
             control,
             flights: Arc::new(Flights::new(limits.confirmation)),
+            faults: Arc::new(Faults::default()),
             deadline: limits.deadline,
         }
     }
@@ -414,6 +440,18 @@ impl JobActions {
         (self.control.action_policy().revision() != issued.revision).then(withdrawn)
     }
 
+    /// Why `repository`'s runner faults are not re-run, if GitHub refused one under the config of this moment
+    /// (ADR 0153): what its status shows.
+    pub fn rerun_refused(&self, repository: &str) -> Option<api::RerunRefused> {
+        self.faults
+            .held(
+                repository,
+                self.control.action_policy().revision(),
+                tokio::time::Instant::now(),
+            )
+            .map(|held| held.refused)
+    }
+
     /// How many runs have an action in flight.
     #[cfg(test)]
     fn in_flight(&self) -> usize {
@@ -432,7 +470,8 @@ fn allowed(policy: &Policy, repository: &str) -> Result<(), ActionError> {
     policy.allows(repository).map_err(|denied| {
         ActionError::Forbidden(match denied {
             Denied::Off => api::actions_off().to_owned(),
-            Denied::NotConfigured => api::actions_not_configured(repository),
+            // `allows` never says `RerunsOff`.
+            Denied::NotConfigured | Denied::RerunsOff => api::actions_not_configured(repository),
         })
     })
 }

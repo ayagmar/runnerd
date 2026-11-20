@@ -118,6 +118,7 @@ impl Writer<'_> {
                     self.causes_waited(&waits)
                 });
             }
+            Write::Reran { jobs, at } => self.reran(&jobs, at),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -503,6 +504,18 @@ impl Writer<'_> {
             )?;
         }
         Ok(())
+    }
+
+    fn reran(&self, jobs: &[u64], at: u64) {
+        for job in jobs {
+            logged(
+                "record an automatic re-run",
+                self.db.execute(
+                    "UPDATE jobs SET rerun_at = ?2 WHERE id = ?1 AND rerun_at IS NULL",
+                    params![job, at],
+                ),
+            );
+        }
     }
 
     fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {

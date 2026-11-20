@@ -839,6 +839,15 @@ impl GithubApi for FakeGithub {
         })
     }
 
+    async fn attempt_jobs(
+        &self,
+        _repository: &str,
+        _run: u64,
+        _attempt: u32,
+    ) -> Result<Vec<github::AttemptJob>, github::ActionFailure> {
+        Ok(Vec::new())
+    }
+
     async fn named_runs(&self) -> Vec<github::NamedRun> {
         std::mem::take(&mut self.0.lock().unwrap().named_runs)
     }
@@ -6406,6 +6415,7 @@ fn repository_status(
         queued_jobs,
         listing: None,
         queue,
+        rerun_refused: None,
     }
 }
 
@@ -6472,6 +6482,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
                 }],
                 paused: false,
                 queued_jobs: 0,
+                rerun_refused: None,
                 listing: None,
                 queue: api::QueueShown::Unlisted,
             }

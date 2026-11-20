@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use super::records::RecordSelection;
 use super::stop::Stop;
 use super::{Engine, Occupant, Slot};
-use crate::actions::policy::{Policies, Policy};
+use crate::actions::policy::{Allowed, Policies, Policy};
 use crate::api;
 use crate::cache;
 use crate::config::{ByteSize, Config};
@@ -283,7 +283,11 @@ impl Control {
         drop(store.paused(paused.iter().cloned().collect()));
         let (commands, receiver) = mpsc::unbounded_channel();
         let control = Control {
-            actions: Policies::new(api::JobActions::On, repositories.clone()),
+            actions: Policies::new(Allowed {
+                setting: api::JobActions::On,
+                repositories: repositories.clone(),
+                reruns: repositories.clone(),
+            }),
             repositories: Mutex::new(repositories),
             paused: Mutex::new(paused),
             store,
@@ -400,10 +404,10 @@ impl Control {
         self.actions.now()
     }
 
-    /// Replaces that snapshot whole, from `[github] job_actions` and the configured repositories: the engine does at
-    /// start and at each reload.
-    pub fn set_action_policy(&self, setting: api::JobActions, repositories: BTreeSet<String>) {
-        self.actions.replace(setting, repositories);
+    /// Replaces that snapshot whole, from `[github] job_actions`, the configured repositories and their
+    /// `rerun_runner_faults`: the engine does at start and at each reload.
+    pub fn set_action_policy(&self, allowed: Allowed) {
+        self.actions.replace(allowed);
     }
 
     /// Resolves once a stop of any mode is asked for: what is sent to GitHub on the owner's behalf ends then.
@@ -957,10 +961,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (name, state) in self.repositories.iter_listed_mut() {
             state.forget_waits(|profile| config.pool_in(name, profile).is_some());
         }
-        self.control.set_action_policy(
-            api::JobActions::configured(self.config.github.job_actions),
-            names.clone(),
-        );
+        self.control.set_action_policy(Allowed::of(&self.config));
         self.control.set_repositories(names);
         let profiles = &self.config.profiles;
         self.upkeep

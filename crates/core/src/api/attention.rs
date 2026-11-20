@@ -89,6 +89,9 @@ pub enum AttentionKind {
     /// Action archives runnerd should keep for its runners failed to be read, downloaded or kept (ADR 0147): jobs
     /// download those actions themselves.
     ActionArchives,
+    /// GitHub refused runnerd's automatic re-run of a run its runner failed (ADR 0153): it holds that repository's
+    /// re-runs for an hour.
+    RerunRefused,
     /// A kind from a newer daemon than this client knows: draw it by its title.
     #[serde(other)]
     Unknown,
@@ -222,6 +225,7 @@ pub fn attention_items(
     );
     items.extend(github(status, now));
     items.extend(action_archives(status));
+    items.extend(rerun_refused(status));
     items.sort_by(|a, b| {
         rank(a.tone)
             .cmp(&rank(b.tone))
@@ -467,6 +471,26 @@ fn action_archives(status: &Status) -> Option<AttentionItem> {
         subject: Subject::Github,
         since: archives.failing_since(),
         fix: None,
+    })
+}
+
+/// One item per repository whose automatic re-runs GitHub refused.
+fn rerun_refused(status: &Status) -> impl Iterator<Item = AttentionItem> + '_ {
+    status.repositories.iter().filter_map(|repository| {
+        let refused = repository.rerun_refused.as_ref()?;
+        Some(AttentionItem {
+            key: format!("rerun-refused:{}", repository.name),
+            kind: AttentionKind::RerunRefused,
+            tone: Tone::Warn,
+            title: refused.title(&repository.name),
+            subject: Subject::Repository {
+                name: repository.name.clone(),
+            },
+            since: Some(refused.since),
+            fix: Some(Fix::Text {
+                text: refused.fix().to_owned(),
+            }),
+        })
     })
 }
 

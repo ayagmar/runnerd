@@ -15,4 +15,8 @@ GitHub cancels runs, not jobs, and a re-run takes the jobs that depend on the on
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
+## Runner faults
+
+When a job ends as a [runner fault](../../concepts/terms/#job-history) and every other job of its attempt that failed or was cancelled is one too, runnerd asks GitHub to re-run the run's failed jobs, without a preview, once the run has completed. It does it from a run's first and second attempts only, and never once the run is at a later attempt, so a person's re-run, or runnerd's own before a restart, is never doubled. A job that failed in its code, or on another machine, leaves the run alone. The job's page then says *runnerd re-ran the run's failed jobs as attempt 2*. If GitHub refuses, as for a token without Actions: write, runnerd holds that repository's re-runs for an hour and says so in the attention list. `rerun_runner_faults = false` on a [repository](../../reference/configuration/#repositories), or `job_actions = false`, turns it off.
+
 A classic token needs the `repo` scope, a fine-grained one Actions: write; `runnerd doctor` says what it can tell without trying. [Security model](../../security/#job-actions) says what these actions can do on GitHub.

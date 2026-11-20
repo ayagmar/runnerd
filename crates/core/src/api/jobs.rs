@@ -116,6 +116,11 @@ pub struct JobSummary {
     /// than it, and where the log does not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_cause: Option<FailureCause>,
+    /// When runnerd asked GitHub to re-run its run's failed jobs because its runner failed it (ADR 0153), in seconds:
+    /// GitHub accepted, and the run went on to its next attempt. `None` for every other job, from a daemon older than
+    /// it, and where a person re-ran the run first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun_at: Option<u64>,
     /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).
     /// `None` for a job without a record note, and from a daemon older than the mark. Not `record`, which a `Job`
     /// that flattens this summary holds in full.

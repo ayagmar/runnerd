@@ -21,6 +21,7 @@ fn status(queued: Vec<QueuedJob>) -> Status {
                 pools: Vec::new(),
                 paused: false,
                 queued_jobs: 0,
+                rerun_refused: None,
                 listing: None,
                 queue: QueueShown::Listed,
             })

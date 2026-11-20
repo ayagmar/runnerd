@@ -32,7 +32,7 @@ mod read;
 mod run;
 mod write;
 
-pub use run::RunJobs;
+pub use run::{RunJobs, RunnerFault};
 
 /// The schema a new database is created with, at [`VERSION`].
 const SCHEMA: &str = include_str!("store/schema.sql");
@@ -108,6 +108,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "ALTER TABLE jobs ADD COLUMN wait_causes TEXT;\n\
          ALTER TABLE jobs ADD COLUMN unseen_unlisted INTEGER NOT NULL DEFAULT 0;",
     ),
+    (27, "ALTER TABLE jobs ADD COLUMN rerun_at INTEGER;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -347,6 +348,10 @@ enum Write {
     SlotWaited {
         jobs: Vec<u64>,
         ms: u64,
+    },
+    Reran {
+        jobs: Vec<u64>,
+        at: u64,
     },
     BuildCache {
         runner: String,
@@ -850,6 +855,12 @@ impl Store {
         }
     }
 
+    /// Notes that runnerd asked GitHub to re-run the failed jobs of the run `jobs` are of because their runner failed
+    /// them, and GitHub accepted, at `at` ms (ADR 0153). A job noted already keeps its first time.
+    pub fn reran(&self, jobs: Vec<u64>, at: u64) {
+        self.send(Write::Reran { jobs, at });
+    }
+
     /// The last host sample sent, stored or not; `None` before the first.
     pub fn latest_host_sample(&self) -> Option<api::HostSample> {
         lock(&self.latest_host).clone()
@@ -1057,6 +1068,12 @@ impl Store {
     /// A job with its steps.
     pub async fn job(&self, id: u64) -> Result<Option<api::Job>, StoreError> {
         self.read(move |db| read::job(db, id)).await
+    }
+
+    /// The jobs their runner failed (`runner_fault`) whose records became final at or after `since` ms and that
+    /// runnerd has not re-run, oldest first: what a restarted daemon may still re-run (ADR 0153).
+    pub async fn runner_faults(&self, since: u64) -> Result<Vec<RunnerFault>, StoreError> {
+        self.read(move |db| run::runner_faults(db, since)).await
     }
 
     /// Up to `limit` other jobs of `repository`'s run `run` than `except`, newest attempt first (ADR 0134).

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::BoxFuture;
 use reqwest::StatusCode;
 use runnerd_core::actions::ActionsGithub;
+use runnerd_core::actions::policy::Allowed;
 use runnerd_core::api::{
     ActionOutcome, ActionPreview, ActionQuery, ActionResult, ErrorResponse, JobAction, JobActions,
 };
@@ -48,6 +49,15 @@ impl ActionsGithub for FakeGithub {
                 completed: false,
             })
         })
+    }
+
+    fn attempt_jobs<'call>(
+        &'call self,
+        _repository: &'call str,
+        _run: u64,
+        _attempt: u32,
+    ) -> BoxFuture<'call, Result<Vec<runnerd_core::github::AttemptJob>, ActionFailure>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 
     fn send<'call>(
@@ -179,9 +189,11 @@ async fn the_shared_client_reads_a_preview_a_result_and_each_refusal() {
     );
     // Off in the config of the moment: 403, worded.
     let configured = BTreeSet::from(["o/app".to_owned()]);
-    daemon
-        .control
-        .set_action_policy(JobActions::Off, configured.clone());
+    daemon.control.set_action_policy(Allowed {
+        setting: JobActions::Off,
+        repositories: configured.clone(),
+        reruns: configured.clone(),
+    });
     let off = client
         .job_action(5, JobAction::Cancel, &ActionQuery::default())
         .await
@@ -191,7 +203,11 @@ async fn the_shared_client_reads_a_preview_a_result_and_each_refusal() {
             if *status == StatusCode::FORBIDDEN && message.contains("job_actions is false")),
         "{off}"
     );
-    daemon.control.set_action_policy(JobActions::On, configured);
+    daemon.control.set_action_policy(Allowed {
+        setting: JobActions::On,
+        repositories: configured.clone(),
+        reruns: configured,
+    });
     let unknown = client
         .job_action(99, JobAction::Cancel, &ActionQuery::default())
         .await

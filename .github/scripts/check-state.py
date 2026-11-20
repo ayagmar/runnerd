@@ -53,6 +53,7 @@ ROOTS = (
     "crates/daemon/src/api/doctor_cache.rs:Last",
     "crates/daemon/src/api/attention.rs:Snapshot",
     "crates/core/src/actions/flights.rs:Flights",
+    "crates/core/src/actions/faults.rs:Faults",
     "crates/core/src/actions/policy.rs:Policies",
     "crates/core/src/github/token.rs:Tokens",
     "crates/cli/src/tui/app.rs:App",

@@ -576,6 +576,11 @@ pub struct Repository {
     /// the repository. Default `"default-branch"`.
     #[serde(default)]
     pub build_cache_writers: BuildCacheWriters,
+    /// Whether runnerd asks GitHub to re-run a run's failed jobs, once per attempt, when its runner failed one of them
+    /// and none failed otherwise (ADR 0153), the same in every pool of the repository. Needs `[github] job_actions`.
+    /// Default true.
+    #[serde(default = "default_true")]
+    pub rerun_runner_faults: bool,
 }
 
 /// `build_cache_writers` of a `[[repositories]]`: whose jobs' uploads the shared build cache keeps (ADR 0053).
@@ -1174,6 +1179,15 @@ pub enum ConfigError {
         /// The repository's `owner/name`.
         repository: String,
     },
+    /// Two `[[repositories]]` entries of one repository say differently whether its runner faults are re-run.
+    #[error(
+        "repository {repository}'s entries set rerun_runner_faults differently; whether runnerd re-runs a run its \
+         runner failed is the repository's, so set the same in each"
+    )]
+    PoolRerunsDiffer {
+        /// The repository's `owner/name`.
+        repository: String,
+    },
     /// `unsafe-dind` without `allow_unsafe = true`.
     #[error(
         "isolation \"unsafe-dind\" runs runner containers privileged, so a job can take over the host; \
@@ -1503,6 +1517,11 @@ impl Config {
                 }
                 if second.build_cache_writers != first.build_cache_writers {
                     return Err(ConfigError::PoolWritersDiffer {
+                        repository: first.name.clone(),
+                    });
+                }
+                if second.rerun_runner_faults != first.rerun_runner_faults {
+                    return Err(ConfigError::PoolRerunsDiffer {
                         repository: first.name.clone(),
                     });
                 }

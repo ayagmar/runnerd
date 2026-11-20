@@ -162,6 +162,7 @@ fn repository(name: &str, pool: PoolStatus, queued_jobs: usize) -> RepositorySta
         queued_jobs,
         listing: None,
         queue: api::QueueShown::Listed,
+        rerun_refused: None,
     }
 }
 
@@ -354,6 +355,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         log: LogSummary::default(),
         runner_fault: false,
         failure_cause: None,
+        rerun_at: None,
         record_mark: None,
     }
 }
@@ -469,6 +471,24 @@ fn action_archive() -> Job {
     }
 }
 
+/// [`RUNNER_FAULT`]: Sysbox failed it, and runnerd re-ran its run, which went on to attempt 2.
+fn runner_fault() -> JobSummary {
+    let mut runner_fault = ran(
+        summary(
+            RUNNER_FAULT,
+            STOREFRONT,
+            JobState::Completed,
+            Some("failure"),
+        ),
+        1500,
+        Some(1400),
+    );
+    "image".clone_into(&mut runner_fault.name);
+    runner_fault.runner_fault = true;
+    runner_fault.rerun_at = runner_fault.timeline.finished_at.map(|at| at + 30);
+    runner_fault
+}
+
 fn jobs() -> Vec<Job> {
     let [startup_failure, never_started, elsewhere] = not_run_here();
     let mut running = ran(summary(RUNNING, LEDGER, JobState::Running, None), 240, None);
@@ -497,18 +517,7 @@ fn jobs() -> Vec<Job> {
         1800,
         Some(1700),
     );
-    let mut runner_fault = ran(
-        summary(
-            RUNNER_FAULT,
-            STOREFRONT,
-            JobState::Completed,
-            Some("failure"),
-        ),
-        1500,
-        Some(1400),
-    );
-    "image".clone_into(&mut runner_fault.name);
-    runner_fault.runner_fault = true;
+    let runner_fault = runner_fault();
     let mut timed_out = ran(
         summary(TIMED_OUT, LEDGER, JobState::Completed, Some("timed_out")),
         7180,
@@ -1376,6 +1385,8 @@ pub struct Facts {
     pub github: &'static str,
     /// What failed [`ACTION_ARCHIVE`], as its page says under its outcome.
     pub failure_line: &'static str,
+    /// That runnerd re-ran [`RUNNER_FAULT`]'s run, as its page says under its outcome.
+    pub rerun_line: String,
 }
 
 fn row(job: &JobSummary) -> JobRow {
@@ -1404,6 +1415,18 @@ fn build_stats(daemon: &Daemon) -> &BuildCacheStats {
         .build
         .as_ref()
         .expect("the build cache's stats")
+}
+
+/// What `line` says of job `id` of `daemon`.
+#[expect(
+    clippy::expect_used,
+    reason = "test support: fixtures without their own jobs fail the test"
+)]
+fn job_line<T>(daemon: &Daemon, id: u64, line: impl Fn(&JobSummary) -> Option<T>) -> T {
+    daemon
+        .job(id)
+        .and_then(|job| line(&job.summary))
+        .expect("the fixtures' job says it")
 }
 
 /// The facts of `daemon`, as core computes them at [`NOW`].
@@ -1511,10 +1534,8 @@ pub fn facts(daemon: &Daemon) -> Facts {
         savings_30_days: daemon.savings.last_30_days.headline(),
         stopping,
         github,
-        failure_line: daemon
-            .job(ACTION_ARCHIVE)
-            .and_then(|job| job.summary.failure_line())
-            .expect("an action archive's failure"),
+        failure_line: job_line(daemon, ACTION_ARCHIVE, JobSummary::failure_line),
+        rerun_line: job_line(daemon, RUNNER_FAULT, JobSummary::rerun_line),
     }
 }
 

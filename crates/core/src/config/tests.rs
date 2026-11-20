@@ -1061,6 +1061,28 @@ fn pools_of_a_repository_sharing_a_label_are_rejected() {
     assert!(error.contains("app") && error.contains("light"), "{error}");
 }
 
+/// Runner faults are re-run by default, and whether they are is the repository's: pools that disagree would leave a
+/// run's re-run to whichever pool's entry was read.
+#[test]
+fn runner_faults_are_rerun_by_default_and_pools_must_agree() {
+    let config = with_light_pool("[\"app-light\"]", "");
+    assert!(
+        config
+            .repositories
+            .iter()
+            .all(|repository| repository.rerun_runner_faults),
+        "rerun_runner_faults is on by default"
+    );
+    let error = with_light_pool("[\"app-light\"]", "rerun_runner_faults = false")
+        .validate(Some(size("33G")))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("owner/app's entries set rerun_runner_faults differently"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_pool_without_labels_is_rejected() {
     let error = with_light_pool("[]", "")
@@ -1368,7 +1390,7 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
     // count.
     assert_eq!(
         rows.len(),
-        39,
+        40,
         "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();

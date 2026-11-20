@@ -114,6 +114,7 @@ fn status() -> Status {
             }],
             paused: false,
             queued_jobs: 1,
+            rerun_refused: None,
             listing: None,
             queue: QueueShown::Listed,
         }],
@@ -168,6 +169,7 @@ fn job(state: JobState) -> Job {
             log: LogSummary::default(),
             runner_fault: false,
             failure_cause: None,
+            rerun_at: None,
             record_mark: None,
         },
         steps: Vec::new(),
@@ -904,6 +906,7 @@ fn status_waiting_for_host_memory_answers_in_the_exit_code_and_never_reads_troub
         pools: Vec::new(),
         paused: false,
         queued_jobs: 1,
+        rerun_refused: None,
         listing: None,
         queue: QueueShown::Listed,
     });

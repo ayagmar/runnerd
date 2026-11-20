@@ -44,6 +44,7 @@ fn job(state: JobState, conclusion: &str, steps: Vec<Step>) -> Job {
             log: LogSummary::default(),
             runner_fault: false,
             failure_cause: None,
+            rerun_at: None,
             record_mark: None,
         },
         steps,

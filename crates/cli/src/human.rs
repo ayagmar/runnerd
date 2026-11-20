@@ -410,6 +410,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
     if let Some(cause) = summary.failure_line() {
         let _ = writeln!(out, "{}", paint.paint(tone, cause));
     }
+    if let Some(rerun) = summary.rerun_line() {
+        let _ = writeln!(out, "{rerun}");
+    }
     if let Some(url) = &summary.url {
         let _ = writeln!(out, "{}", paint.paint(Tone::Dim, url));
     }
@@ -1145,6 +1148,7 @@ mod tests {
                 }],
                 paused: true,
                 queued_jobs: 2,
+                rerun_refused: None,
                 listing: None,
                 queue: runnerd_core::api::QueueShown::Listed,
             },

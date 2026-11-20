@@ -72,6 +72,7 @@ fn repository(name: &str, profile: &str) -> RepositoryStatus {
         }],
         paused: false,
         queued_jobs: 0,
+        rerun_refused: None,
         listing: None,
         queue: runnerd_core::api::QueueShown::Listed,
     }
@@ -147,6 +148,7 @@ fn summary(id: u64, state: JobState) -> JobSummary {
         log: LogSummary::default(),
         runner_fault: false,
         failure_cause: None,
+        rerun_at: None,
         record_mark: None,
     }
 }

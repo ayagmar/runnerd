@@ -5,6 +5,8 @@
 
 #![allow(clippy::unwrap_used, reason = "tests")]
 
+mod rerun;
+
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,7 +17,7 @@ use tokio::sync::Semaphore;
 
 use super::{ActionError, ActionsGithub, Asked, JobActions, Limits};
 use crate::api::{self, ActionOutcome, ActionPreview, ActionRefusal, JobAction};
-use crate::github::{ActionFailure, JobActionRequest, Permit, QueuedJob, RunNow};
+use crate::github::{ActionFailure, AttemptJob, JobActionRequest, Permit, QueuedJob, RunNow};
 use crate::scheduler::engine::{Control, Shutdown};
 use crate::store::Store;
 use crate::testdir::TestDir;
@@ -41,6 +43,12 @@ struct Fake {
     gate: Semaphore,
     /// Runs during the next read of the run, as something that lands while GitHub answers it.
     during_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// What a read of an attempt's jobs says.
+    jobs: Mutex<Result<Vec<AttemptJob>, ActionFailure>>,
+    /// When not empty, the jobs a read of an attempt lists instead, each with its attempt.
+    by_attempt: Mutex<Vec<(u32, AttemptJob)>>,
+    /// How many reads of a run and of an attempt's jobs came.
+    reads: AtomicUsize,
 }
 
 impl Fake {
@@ -52,6 +60,9 @@ impl Fake {
             entered: AtomicUsize::new(0),
             gate: Semaphore::new(Semaphore::MAX_PERMITS),
             during_read: Mutex::new(None),
+            jobs: Mutex::new(Ok(Vec::new())),
+            by_attempt: Mutex::new(Vec::new()),
+            reads: AtomicUsize::new(0),
         })
     }
 
@@ -90,8 +101,29 @@ impl ActionsGithub for Fake {
         if let Some(during) = during {
             during();
         }
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let run = *self.run.lock().unwrap();
         Box::pin(async move { run })
+    }
+
+    fn attempt_jobs<'call>(
+        &'call self,
+        _repository: &'call str,
+        _run: u64,
+        attempt: u32,
+    ) -> BoxFuture<'call, Result<Vec<AttemptJob>, ActionFailure>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let by_attempt = self.by_attempt.lock().unwrap();
+        let jobs = if by_attempt.is_empty() {
+            self.jobs.lock().unwrap().clone()
+        } else {
+            Ok(by_attempt
+                .iter()
+                .filter(|(of, _)| *of == attempt)
+                .map(|(_, job)| job.clone())
+                .collect())
+        };
+        Box::pin(async move { jobs })
     }
 
     fn send<'call>(
@@ -191,6 +223,15 @@ fn actions_of(
             confirmation: lasts,
         },
     )
+}
+
+/// `setting` for `repositories`, each with its runner faults re-run.
+fn allowed(setting: api::JobActions, repositories: BTreeSet<String>) -> super::policy::Allowed {
+    super::policy::Allowed {
+        setting,
+        reruns: repositories.clone(),
+        repositories,
+    }
 }
 
 fn preview(asked: Asked) -> Box<ActionPreview> {
@@ -384,7 +425,9 @@ async fn a_repository_removed_and_added_back_voids_its_confirmations() {
     let setup = setup(Reply::Status(202)).await;
     let token = confirm(&setup, JobAction::Cancel).await;
     let on = api::JobActions::On;
-    setup.control.set_action_policy(on, BTreeSet::new());
+    setup
+        .control
+        .set_action_policy(allowed(on, BTreeSet::new()));
     assert_eq!(
         setup
             .actions
@@ -395,7 +438,7 @@ async fn a_repository_removed_and_added_back_voids_its_confirmations() {
     );
     setup
         .control
-        .set_action_policy(on, BTreeSet::from(["o/app".to_owned()]));
+        .set_action_policy(allowed(on, BTreeSet::from(["o/app".to_owned()])));
     let again = preview(
         setup
             .actions
@@ -412,7 +455,7 @@ async fn a_repository_removed_and_added_back_voids_its_confirmations() {
     let kept = again.confirm.unwrap();
     setup
         .control
-        .set_action_policy(on, BTreeSet::from(["o/app".to_owned()]));
+        .set_action_policy(allowed(on, BTreeSet::from(["o/app".to_owned()])));
     let result = done(
         setup
             .actions
@@ -428,9 +471,10 @@ async fn a_repository_removed_and_added_back_voids_its_confirmations() {
 async fn job_actions_turned_off_refuse_a_confirmation_before_github() {
     let setup = setup(Reply::Status(202)).await;
     let token = confirm(&setup, JobAction::Cancel).await;
-    setup
-        .control
-        .set_action_policy(api::JobActions::Off, BTreeSet::from(["o/app".to_owned()]));
+    setup.control.set_action_policy(allowed(
+        api::JobActions::Off,
+        BTreeSet::from(["o/app".to_owned()]),
+    ));
     assert_eq!(
         setup
             .actions
@@ -453,9 +497,10 @@ async fn a_reload_while_the_send_waits_for_its_token_withdraws_it() {
     };
     setup.github.entered(1).await;
     // A reload that turns job actions off lands while the token is read.
-    setup
-        .control
-        .set_action_policy(api::JobActions::Off, BTreeSet::from(["o/app".to_owned()]));
+    setup.control.set_action_policy(allowed(
+        api::JobActions::Off,
+        BTreeSet::from(["o/app".to_owned()]),
+    ));
     setup.github.release();
     let result = done(asked.await.unwrap().unwrap());
     assert_eq!(result.outcome, ActionOutcome::Refused);
@@ -476,10 +521,10 @@ async fn a_reload_while_the_run_is_read_again_before_the_send_withdraws_it() {
     // right before the send: the confirmation was shown under the config before it.
     let control = setup.control.clone();
     *setup.github.during_read.lock().unwrap() = Some(Box::new(move || {
-        control.set_action_policy(
+        control.set_action_policy(allowed(
             api::JobActions::On,
             BTreeSet::from(["o/app".to_owned(), "o/new".to_owned()]),
-        );
+        ));
     }));
     let result = done(
         setup
@@ -1134,7 +1179,7 @@ fn a_policy_is_read_whole_while_reloads_replace_it() {
     use super::policy::Policies;
     let a = BTreeSet::from(["o/a".to_owned()]);
     let a_and_b = BTreeSet::from(["o/a".to_owned(), "o/b".to_owned()]);
-    let policies = Arc::new(Policies::new(api::JobActions::On, a.clone()));
+    let policies = Arc::new(Policies::new(allowed(api::JobActions::On, a.clone())));
     let first = policies.now().revision();
     std::thread::scope(|scope| {
         let reloads = {
@@ -1143,8 +1188,8 @@ fn a_policy_is_read_whole_while_reloads_replace_it() {
             scope.spawn(move || {
                 // On without o/b, then off with it: neither lets o/b's jobs be acted on.
                 for _ in 0..2000 {
-                    policies.replace(api::JobActions::On, a.clone());
-                    policies.replace(api::JobActions::Off, a_and_b.clone());
+                    policies.replace(allowed(api::JobActions::On, a.clone()));
+                    policies.replace(allowed(api::JobActions::Off, a_and_b.clone()));
                 }
             })
         };
@@ -1166,7 +1211,7 @@ fn a_policy_is_read_whole_while_reloads_replace_it() {
         "each change moves the revision"
     );
     let settled = policies.now().revision();
-    policies.replace(api::JobActions::Off, a_and_b);
+    policies.replace(allowed(api::JobActions::Off, a_and_b));
     assert_eq!(
         policies.now().revision(),
         settled,

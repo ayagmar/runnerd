@@ -551,6 +551,8 @@ pub struct Engine<G = Github, D = Docker> {
     build_cache: Option<BuildCache>,
     /// The action archives' store: where it is, its settings and what it last published (ADR 0147).
     archives: archives::Link,
+    /// The job actions, for the re-runs of runner faults the engine starts and the refusals its status shows.
+    actions: Arc<JobActions>,
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
     /// cache when `[caches.build] branches` names none.
     default_branches: BTreeMap<String, build_cache::DefaultBranch>,
@@ -643,14 +645,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             store.clone(),
         );
         let control = Arc::new(control);
-        control.set_action_policy(
-            api::JobActions::configured(config.github.job_actions),
-            config
-                .repositories
-                .iter()
-                .map(|repository| repository.name.clone())
-                .collect(),
-        );
+        control.set_action_policy(crate::actions::policy::Allowed::of(&config));
         let github = Arc::new(github);
         let actions = JobActions::new(
             github.clone(),
@@ -730,6 +725,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             records,
             build_cache: build_cache.clone(),
             archives,
+            actions: Arc::new(actions.clone()),
             default_branches: BTreeMap::new(),
             ended_uploads: BTreeMap::new(),
             visibility_due: Arc::default(),
@@ -778,6 +774,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         tokio::spawn(disk_target(self.docker.clone(), self.paths.clone(), disk));
         // Stopped when this returns, as `archives` goes with it.
         let archives = self.archives.start(self.github.clone());
+        // Ends at a stop, as it waits for one.
+        tokio::spawn(JobActions::clone(&self.actions).rerun_faults());
         let control = self.control.clone();
         let deadline = async {
             control.hurried().await;

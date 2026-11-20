@@ -123,6 +123,17 @@ impl JobSummary {
             .and_then(FailureCause::line)
     }
 
+    /// That runnerd re-ran it, as every client writes it under its outcome: `runnerd re-ran the run's failed jobs as
+    /// attempt 2, since the runner failed this one`. `None` for a job runnerd did not re-run (`rerun_at`).
+    pub fn rerun_line(&self) -> Option<String> {
+        self.rerun_at.map(|_| {
+            format!(
+                "runnerd re-ran the run's failed jobs as attempt {}, since the runner failed this one",
+                self.run_attempt.saturating_add(1)
+            )
+        })
+    }
+
     /// Seconds it waited for a runner: until it started, or until `now` while it may still start. `None` for a job
     /// that ended without starting here.
     pub fn waited(&self, now: u64) -> Option<u64> {

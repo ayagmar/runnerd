@@ -2381,6 +2381,10 @@ dl.health-figures {
   color: var(--failure-ink);
 }
 
+.job-rerun {
+  margin: 0;
+}
+
 .facts,
 .totals,
 .headline {

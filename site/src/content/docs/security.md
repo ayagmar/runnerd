@@ -27,7 +27,7 @@ runnerd reads the GitHub CLI's token at start, and again when GitHub rejects it.
 
 ## Job actions
 
-With [`[github] job_actions`](../reference/configuration-more/#github) on, the default, a client can ask the daemon to cancel a job's workflow run or re-run jobs on GitHub with that token. Cancel stops the whole run, on every runner, not only here; a re-run takes the jobs that depend on it along. Each is previewed and sent only with a confirmation the daemon issued for that preview, once, within 5 minutes. A request whose outcome is unknown, as after a timeout, is never sent again by itself. `job_actions = false` turns both off; a [forced pause](../reference/api/#routes) still cancels runs.
+With [`[github] job_actions`](../reference/configuration-more/#github) on, the default, a client can ask the daemon to cancel a job's workflow run or re-run jobs on GitHub with that token. Cancel stops the whole run, on every runner, not only here; a re-run takes the jobs that depend on it along. Each is previewed and sent only with a confirmation the daemon issued for that preview, once, within 5 minutes. A request whose outcome is unknown, as after a timeout, is never sent again by itself. runnerd sends one action itself, with no preview: the re-run of a run's failed jobs when its runner failed one of them and no other failed in its code, once per attempt, from the first two ([Runner faults](../guides/cancel-rerun/#runner-faults)). `job_actions = false` turns them all off; a [forced pause](../reference/api/#routes) still cancels runs.
 
 ## The API socket
 

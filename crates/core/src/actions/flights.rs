@@ -190,6 +190,32 @@ impl Flights {
         }
     }
 
+    /// Boards `issued` without a confirmation, for an action runnerd sends itself (ADR 0153): it leads a new flight,
+    /// follows the same action from the same job in flight, or is busy behind another one.
+    pub(super) fn board(self: &Arc<Flights>, issued: &Issued) -> Boarding {
+        let target = &issued.target;
+        let key = RunKey {
+            repository: target.repository.clone(),
+            run: target.run,
+        };
+        let asked = Asked {
+            action: target.action,
+            job: target.job,
+        };
+        match lock(&self.book).board(key.clone(), asked) {
+            Joined::Follow(answer) => Boarding::Follow(answer),
+            Joined::Busy(other) => Boarding::Busy(other),
+            Joined::Lead { id, answer } => Boarding::Lead {
+                landing: Landing {
+                    flights: self.clone(),
+                    key,
+                    id,
+                },
+                answer,
+            },
+        }
+    }
+
     /// How many runs have an action in flight.
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
@@ -226,7 +252,35 @@ enum Taken {
     },
 }
 
+/// What [`Book::board`] did.
+enum Joined {
+    Follow(watch::Receiver<Option<Landed>>),
+    Busy(JobAction),
+    Lead {
+        id: u64,
+        answer: watch::Receiver<Option<Landed>>,
+    },
+}
+
 impl Book {
+    /// Joins the flight of `key`, or starts one, for `asked`.
+    fn board(&mut self, key: RunKey, asked: Asked) -> Joined {
+        match self.runs.get(&key) {
+            Some(flight) if flight.asked == asked => Joined::Follow(flight.answer.subscribe()),
+            Some(flight) => Joined::Busy(flight.asked.action),
+            None => {
+                let id = self.next_flight;
+                self.next_flight += 1;
+                let (answer, receiver) = watch::channel(None);
+                self.runs.insert(key, Flight { id, asked, answer });
+                Joined::Lead {
+                    id,
+                    answer: receiver,
+                }
+            }
+        }
+    }
+
     fn issue(&mut self, token: String, issued: Issued, now: Instant, lasts: Duration) {
         self.forget(now, lasts);
         while self.issued.len() >= ISSUED_MAX {
