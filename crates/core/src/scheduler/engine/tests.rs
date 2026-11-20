@@ -3249,7 +3249,7 @@ async fn a_resumed_repository_shows_active_in_the_status_once_the_resume_answers
     assert_eq!(
         events.last(),
         Some(&api::Event::RepositoryChanged {
-            repository: repository_status(false, 0)
+            repository: repository_status(false, 0, api::QueueShown::Listed)
         })
     );
     github.release();
@@ -6286,7 +6286,11 @@ async fn events_of(handle: &Handle, after: &mut u64, prefix: &str) -> Vec<api::E
         .collect()
 }
 
-fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus {
+fn repository_status(
+    paused: bool,
+    queued_jobs: usize,
+    queue: api::QueueShown,
+) -> api::RepositoryStatus {
     api::RepositoryStatus {
         name: "o/r".to_owned(),
         pools: vec![api::PoolStatus {
@@ -6297,6 +6301,7 @@ fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus 
         paused,
         queued_jobs,
         listing: None,
+        queue,
     }
 }
 
@@ -6309,7 +6314,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     assert_eq!(
         repository_events(&handle, &mut after).await,
         [api::Event::RepositoryChanged {
-            repository: repository_status(false, 0)
+            repository: repository_status(false, 0, api::QueueShown::Unlisted)
         }]
     );
     engine.publish();
@@ -6320,7 +6325,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     assert_eq!(
         repository_events(&handle, &mut after).await,
         [api::Event::RepositoryChanged {
-            repository: repository_status(true, 0)
+            repository: repository_status(true, 0, api::QueueShown::Unlisted)
         }]
     );
 
@@ -6330,7 +6335,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     assert_eq!(
         repository_events(&handle, &mut after).await,
         [api::Event::RepositoryChanged {
-            repository: repository_status(true, 1)
+            repository: repository_status(true, 1, api::QueueShown::Listed)
         }]
     );
     engine.tick(Shutdown::No).await;
@@ -6342,7 +6347,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     assert_eq!(
         repository_events(&handle, &mut after).await,
         [api::Event::RepositoryChanged {
-            repository: repository_status(false, 1)
+            repository: repository_status(false, 1, api::QueueShown::Listed)
         }]
     );
 
@@ -6364,6 +6369,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
                 paused: false,
                 queued_jobs: 0,
                 listing: None,
+                queue: api::QueueShown::Unlisted,
             }
         }]
     );
@@ -6395,7 +6401,7 @@ async fn a_restart_without_a_repository_announces_its_removal_to_clients_resumin
     // Restarted with o/s in place of o/r, on the same history.
     let config = CONFIG.replace("name = \"o/r\"", "name = \"o/s\"");
     let (_engine, handle) = engine_with(&github, &docker, &dir, &config);
-    let mut s = repository_status(false, 0);
+    let mut s = repository_status(false, 0, api::QueueShown::Unlisted);
     s.name = "o/s".to_owned();
     assert_eq!(
         repository_events(&handle, &mut cursor).await,

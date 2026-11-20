@@ -116,6 +116,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .repositories
                         .listed(&name)
                         .and_then(|state| state.listing().failure()),
+                    queue: if self
+                        .repositories
+                        .listed(&name)
+                        .is_some_and(|state| state.listing().is_listed())
+                    {
+                        api::QueueShown::Listed
+                    } else {
+                        api::QueueShown::Unlisted
+                    },
                     paused: self.control.is_paused(&name),
                     queued_jobs: queued.iter().filter(|job| job.repository == name).count(),
                     name,

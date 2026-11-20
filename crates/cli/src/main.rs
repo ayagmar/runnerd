@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use runnerd_core::api::{
     ActionQuery, ActionResult, Caches, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event,
-    EventQuery, Insights, InsightsQuery, Job, JobAction, JobPage, JobQuery, JobState, LogQuery,
-    NotifyTest, NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
+    EventQuery, HostWait, Insights, InsightsQuery, Job, JobAction, JobPage, JobQuery, JobState,
+    LogQuery, NotifyTest, NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
     RemoveRecordsQuery, RemovedRecords, Resize, Savings, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
@@ -51,7 +51,17 @@ struct Cli {
 enum Command {
     /// Show the memory and CPU budgets, every slot and what runs in it, the repositories, and why each queued job
     /// waits.
-    Status,
+    ///
+    /// With --waiting-for, print nothing and answer in the exit code, for scripts: 0 when a queued job waits for
+    /// it, 1 when none does, 2 when the daemon cannot be asked or the repository is not one it serves.
+    Status {
+        /// Only answer whether a queued job waits for this.
+        #[arg(long, value_enum)]
+        waiting_for: Option<WaitingFor>,
+        /// With --waiting-for, only this repository's jobs (owner/name).
+        #[arg(long, requires = "waiting_for")]
+        repo: Option<String>,
+    },
     /// List jobs, newest first.
     Jobs {
         /// Only this repository (owner/name).
@@ -327,6 +337,22 @@ impl From<ClientError> for Error {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A script reads `status --waiting-for`'s 1 as "nothing waits", so it fails with its own code.
+    let answers_in_exit_code = matches!(
+        cli.command,
+        Command::Status {
+            waiting_for: Some(_),
+            ..
+        }
+    );
+    let fail = |error: &dyn std::fmt::Display| {
+        let code = fail(error);
+        if answers_in_exit_code {
+            ExitCode::from(CANNOT_ANSWER)
+        } else {
+            code
+        }
+    };
     let Some(socket) = cli.socket.clone().or_else(default_socket) else {
         return fail(&"XDG_RUNTIME_DIR is not set; pass --socket");
     };
@@ -418,15 +444,55 @@ fn exit(success: bool) -> ExitCode {
     }
 }
 
+/// What `runnerctl status --waiting-for` asks about.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum WaitingFor {
+    /// The host's memory beside its other programs, also behind an older job that waits for it.
+    HostMemory,
+}
+
+/// The exit code of `runnerctl status --waiting-for` when it cannot answer, apart from 0 (a job waits) and 1 (none
+/// does), as grep's is: a script must not read a daemon it could not ask as "nothing waits".
+const CANNOT_ANSWER: u8 = 2;
+
+/// `runnerctl status`, or with `--waiting-for host-memory [--repo owner/name]` the answer in the exit code alone; an
+/// error then leaves with [`CANNOT_ANSWER`].
+async fn status(
+    client: &Client,
+    json: bool,
+    paint: human::Paint,
+    waiting_for: Option<WaitingFor>,
+    repository: Option<&str>,
+) -> Result<ExitCode, Error> {
+    let Some(WaitingFor::HostMemory) = waiting_for else {
+        let status: Status = client.get("/v1/status").await?;
+        if json {
+            return print_json(&status);
+        }
+        output::text(&human::status(&status, now(), paint));
+        return Ok(ExitCode::SUCCESS);
+    };
+    if json {
+        return Err(Error::Local(
+            "--waiting-for answers in the exit code; it prints no JSON".to_owned(),
+        ));
+    }
+    let status: Status = client.get("/v1/status").await?;
+    let answer = status.host_wait(repository);
+    match answer {
+        HostWait::Waits => Ok(ExitCode::SUCCESS),
+        HostWait::Clear => Ok(ExitCode::FAILURE),
+        HostWait::Unavailable | HostWait::UnknownRepository => {
+            Err(Error::Local(answer.trouble(repository).unwrap_or_default()))
+        }
+    }
+}
+
 async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, Error> {
     let paint = output::paint();
     match command {
-        Command::Status => {
-            let status: Status = client.get("/v1/status").await?;
-            if json {
-                return print_json(&status);
-            }
-            output::text(&human::status(&status, now(), paint));
+        Command::Status { waiting_for, repo } => {
+            return status(client, json, paint, waiting_for, repo.as_deref()).await;
         }
         Command::Jobs {
             repo,

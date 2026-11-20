@@ -155,3 +155,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0146](0146-the-dashboard-paints-the-doctors-last-run.md) | The dashboard paints the doctor's last run while it is no older than the refresh | Accepted |
 | [0147](0147-runners-read-verified-action-archives-from-runnerds-cache.md) | Runners read verified action archives from runnerd's cache | Accepted |
 | [0148](0148-a-failed-jobs-log-says-whether-an-action-or-checkout-failed-it.md) | A failed job's log says whether an action or its checkout failed it | Accepted |
+| [0150](0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md) | A script asks whether a job waits for the host's memory in an exit code | Accepted |

@@ -161,6 +161,7 @@ fn repository(name: &str, pool: PoolStatus, queued_jobs: usize) -> RepositorySta
         paused: false,
         queued_jobs,
         listing: None,
+        queue: api::QueueShown::Listed,
     }
 }
 

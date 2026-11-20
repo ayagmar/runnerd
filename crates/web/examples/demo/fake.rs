@@ -671,6 +671,7 @@ impl Fixtures {
                     paused: false,
                     queued_jobs: 0,
                     listing: None,
+                    queue: runnerd_core::api::QueueShown::Listed,
                 },
                 RepositoryStatus {
                     name: "halyard/storefront".to_owned(),
@@ -687,6 +688,7 @@ impl Fixtures {
                     paused: false,
                     queued_jobs: 1,
                     listing: None,
+                    queue: runnerd_core::api::QueueShown::Listed,
                 },
             ],
             queued: vec![QueuedJob {

@@ -7,8 +7,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    CheckStatus, Doctor, DoctorState, Insight, InsightKind, Insights, QueuedJob, Severity, Status,
-    Tone, View, Waiting,
+    CheckStatus, Doctor, DoctorState, HostWait, Insight, InsightKind, Insights, QueuedJob,
+    Severity, Status, Tone, View, Waiting,
 };
 
 /// The most items an [`Attention`] lists; the rest are counted in `omitted`.
@@ -338,21 +338,17 @@ fn host_memory(status: &Status, insights: Option<&Insights>) -> Option<Attention
         .insights
         .iter()
         .find(|insight| matches!(insight.kind, InsightKind::HostHeld { .. }))?;
-    status
-        .queued
-        .iter()
-        .any(|job| matches!(job.waiting, Some(Waiting::HostMemory { .. })))
-        .then(|| AttentionItem {
-            key: "host-memory".to_owned(),
-            kind: AttentionKind::HostMemory,
-            tone: Tone::Warn,
-            title: held.sentence.clone(),
-            subject: Subject::Host,
-            since: None,
-            fix: Some(Fix::Open {
-                view: View::Overview,
-            }),
-        })
+    (status.host_wait(None) == HostWait::Waits).then(|| AttentionItem {
+        key: "host-memory".to_owned(),
+        kind: AttentionKind::HostMemory,
+        tone: Tone::Warn,
+        title: held.sentence.clone(),
+        subject: Subject::Host,
+        since: None,
+        fix: Some(Fix::Open {
+            view: View::Overview,
+        }),
+    })
 }
 
 /// The doctor's failures and warnings from a current run, or one item saying its checks are not current.

@@ -58,6 +58,7 @@ mod figure;
 mod insights;
 mod jobs;
 mod labels;
+mod queue;
 mod records;
 mod results;
 mod savings;
@@ -128,6 +129,7 @@ pub use jobs::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
+pub use queue::HostWait;
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
@@ -537,6 +539,25 @@ pub struct RepositoryStatus {
     /// first, while GitHub's rate limit stops them, and from a daemon before 0.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listing: Option<ListingFailure>,
+    /// Whether `Status::queued` holds its queued jobs as GitHub listed them at the last tick; `Unknown` from a daemon
+    /// that predates it, which did not say, so a client never reads it as listed (ADR 0150).
+    #[serde(default)]
+    pub queue: QueueShown,
+}
+
+/// Whether a status shows a repository's queued jobs, or none because they could not be listed (ADR 0150).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueueShown {
+    /// Its last listing answered, so its jobs in `Status::queued` are those GitHub had queued then, possibly none.
+    Listed,
+    /// No listing has answered since the daemon started, the last one failed or the rate limit stopped it, or the
+    /// daemon stops: `Status::queued` leaves its jobs out, whether any are queued or not.
+    Unlisted,
+    /// A daemon that predates this, or a state from a newer daemon than this client knows: nothing is said.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// Why runnerd cannot list a repository's queued jobs (ADR 0132): what class of failure GitHub's answer was, never its
