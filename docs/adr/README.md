@@ -72,7 +72,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0062](0062-client-parity-is-checked.md) | Client parity is checked, not remembered | Amended by 0093 |
 | [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md) | A warm runner's room pays the host's deficit first, and a seed container fits the budget | Amended by 0096 |
 | [0064](0064-each-notify-kind-is-a-sender.md) | Each notification target kind is a sender of its own, and Discord is one | Accepted |
-| [0065](0065-a-snapshot-starts-over-from-the-image.md) | A snapshot over its limit starts over from the image | Accepted |
+| [0065](0065-a-snapshot-starts-over-from-the-image.md) | A snapshot over its limit starts over from the image | Amended by 0152 |
 | [0066](0066-a-reseed-that-did-not-finish.md) | A reseed that did not finish starts the profile over from the image | Accepted |
 | [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md) | What a job deleted of the image is hidden by whiteouts beside the snapshot | Accepted |
 | [0068](0068-cpus-follow-run-averages.md) | Auto sizing moves `cpus` on each job's run average, not on CPU peaks | Amended by 0075 |
@@ -157,3 +157,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0148](0148-a-failed-jobs-log-says-whether-an-action-or-checkout-failed-it.md) | A failed job's log says whether an action or its checkout failed it | Accepted |
 | [0149](0149-pinned-mise-and-tools-are-baked-into-a-derived-image.md) | A repository's pinned mise and tools are baked into an image derived from runnerd's | Accepted |
 | [0150](0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md) | A script asks whether a job waits for the host's memory in an exit code | Accepted |
+| [0152](0152-a-snapshot-over-its-limit-starts-its-tools-over-first.md) | A snapshot over its limit starts its tools over first, and all of it only when that is not enough | Accepted |

@@ -1,6 +1,6 @@
 # 0065. A snapshot over its limit starts over from the image
 
-Status: **Accepted** (2026-10-25). Amends [0041](0041-snapshot-and-mirror-limits.md).
+Status: **Accepted** (2026-10-25), amended by [0152](0152-a-snapshot-over-its-limit-starts-its-tools-over-first.md). Amends [0041](0041-snapshot-and-mirror-limits.md).
 
 ## Context
 

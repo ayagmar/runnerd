@@ -8,6 +8,11 @@
 # An image without a layer's path (base has no Android SDK) skips that layer.
 LAYERS=(cache:/home/runner/.cache tools:/home/runner/_work/_tool android:/opt/android-sdk)
 
+# The layers a snapshot over its limit starts over from the image first (seed.sh), in order, until the rest fits: the
+# tools a job's setup step downloads again, then Android's SDK packages. The cache layer, whose Gradle and npm caches a
+# job is slowest without, is never among them: a snapshot they do not bring under its limit starts over whole.
+START_OVER_FIRST=(tools android)
+
 # Files and directories in the cache layer where a job may leave a registry token or its own settings: cargo's
 # credentials and config, Gradle's properties (signing keys, publishing credentials) and init scripts (credentials, and
 # code every later build runs), the Maven wrapper's settings (MAVEN_USER_HOME), Hugging Face's tokens (HF_HOME). The

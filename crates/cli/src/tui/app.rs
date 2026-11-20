@@ -1205,8 +1205,8 @@ impl App {
     /// A profile's cache reseeded, or failing to.
     fn reseeded(&mut self, profile: &str, output: &str, error: Option<&str>) {
         let done = api::reseeded(profile, error);
-        let text = match last_line(output) {
-            last if error.is_none() && !last.is_empty() => format!("{done}: {last}"),
+        let text = match api::reseed_outcome(output) {
+            outcome if error.is_none() && !outcome.is_empty() => format!("{done}: {outcome}"),
             _ => done,
         };
         let tone = if error.is_some() {
@@ -2420,8 +2420,4 @@ fn follow(selected: Option<u64>, row: usize, rows: &[u64]) -> usize {
         .and_then(|id| rows.iter().position(|candidate| *candidate == id))
         .unwrap_or(row)
         .min(rows.len().saturating_sub(1))
-}
-
-fn last_line(text: &str) -> &str {
-    text.trim().lines().last().unwrap_or_default()
 }

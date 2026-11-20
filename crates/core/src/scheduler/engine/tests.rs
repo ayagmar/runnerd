@@ -1007,8 +1007,13 @@ struct DockerState {
     envs: HashMap<String, Vec<String>>,
     /// What seed containers exit with, at once; `None`: they run for the whole test.
     seed_exit: Option<i64>,
+    /// While true, the wait for a seed container that runs fails to connect, as when the Engine's API goes away.
+    seed_waits_refused: tokio::sync::watch::Sender<bool>,
     /// What the containers that start a slot's layers over exit with, at once.
     start_over_exit: i64,
+    /// `Outage::Refused`: the Engine refuses the wait for a container that starts a slot's layers over and its removal
+    /// once it was made, as when its API goes away while that container runs.
+    start_over_outage: Outage,
     /// What the container that repairs the mirror's storage prints; unset, that it read no links.
     repair_log: Option<String>,
     /// How many of the next repair containers fail to be made, as when the Engine is busy.
@@ -1509,6 +1514,14 @@ impl DockerApi for FakeDocker {
         if state.removed_elsewhere.contains(container) {
             return Err(not_found());
         }
+        if state.start_over_outage == Outage::Refused
+            && container.ends_with("-start-over")
+            && state.containers.iter().any(|made| made.name == container)
+        {
+            return Err(docker::Error::IOError {
+                err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            });
+        }
         if state.being_removed.contains(container) {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 409,
@@ -1589,7 +1602,13 @@ impl DockerApi for FakeDocker {
     async fn wait(&self, container: &str) -> Result<i64, docker::Error> {
         self.outage().await?;
         if container.ends_with("-start-over") {
-            return Ok(self.0.lock().unwrap().start_over_exit);
+            let state = self.0.lock().unwrap();
+            if state.start_over_outage == Outage::Refused {
+                return Err(docker::Error::IOError {
+                    err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+                });
+            }
+            return Ok(state.start_over_exit);
         }
         if container.ends_with("-mirror-repair") {
             let mut state = self.0.lock().unwrap();
@@ -1603,10 +1622,17 @@ impl DockerApi for FakeDocker {
             let _ = held.wait_for(|held| !held).await;
             return Ok(0);
         }
-        if let Some(code) = self.0.lock().unwrap().seed_exit {
-            return Ok(code);
-        }
-        std::future::pending().await
+        let mut refused = {
+            let state = self.0.lock().unwrap();
+            if let Some(code) = state.seed_exit {
+                return Ok(code);
+            }
+            state.seed_waits_refused.subscribe()
+        };
+        let _ = refused.wait_for(|refused| *refused).await;
+        Err(docker::Error::IOError {
+            err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+        })
     }
 
     async fn logs(&self, container: &str) -> Result<String, docker::Error> {
@@ -4696,6 +4722,72 @@ async fn a_requested_reseed_holds_back_new_runners_until_the_profile_is_free_and
     }
     assert!(docker.calls().contains(&seed), "{:?}", docker.calls());
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_seed_container_docker_cannot_say_ended_holds_its_profile_until_docker_can() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.request_reseed("app").unwrap();
+    let seed = Names::new("runnerd").seed("app");
+    for _ in 0..100 {
+        if docker.calls().contains(&format!("start {seed}")) {
+            break;
+        }
+        engine.tick(Shutdown::No).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        docker.calls().contains(&format!("start {seed}")),
+        "{:?}",
+        docker.calls()
+    );
+
+    // The Engine's API goes away while the seed runs: its wait and its removal fail, so it may still be writing.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.remove_outage = Outage::Refused;
+        state.seed_waits_refused.send_replace(true);
+    }
+    github.0.lock().unwrap().queued = vec![job(3)];
+    for _ in 0..12 {
+        engine.tick(Shutdown::No).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    engine.publish();
+    assert!(
+        handle.status.borrow().profiles[0].reseeding,
+        "app reseeds while Docker cannot say its seed ended"
+    );
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+    let asked = docker
+        .calls()
+        .iter()
+        .filter(|call| **call == format!("remove {seed}"))
+        .count();
+    assert!(asked > 2, "the seed's end is asked again: {asked} removals");
+
+    // Docker answers again: the seed exited meanwhile, and the profile's runners start.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.remove_outage = Outage::None;
+        state.seed_exit = Some(0);
+    }
+    for _ in 0..12 {
+        if !registered(&github.calls()).is_empty() {
+            break;
+        }
+        engine.tick(Shutdown::No).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    engine.publish();
+    assert!(
+        !handle.status.borrow().profiles[0].reseeding,
+        "app's reseed ended once Docker said its seed did"
+    );
+    assert_eq!(registered(&github.calls()).len(), 1, "{:?}", github.calls());
 }
 
 #[tokio::test]

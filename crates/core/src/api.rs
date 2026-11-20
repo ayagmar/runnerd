@@ -134,7 +134,7 @@ pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
-pub use results::{force_pause_consequence, reseed_requested, reseeded};
+pub use results::{force_pause_consequence, reseed_outcome, reseed_requested, reseeded};
 pub use savings::{
     Period, PricedRun, PricedRunner, Pricing, PricingHistory, SELF_HOSTED_RATE, SavedWindow,
     Savings, Sku, Usd, Visibility, billed_minutes, reads_since,

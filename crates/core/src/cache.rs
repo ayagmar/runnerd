@@ -4,10 +4,12 @@
 //! runner starts, and it never touches a volume a running container uses.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HostConfig, Mount, MountType, NetworkingConfig,
 };
+use tracing::warn;
 
 use crate::api;
 use crate::config::{self, ByteSize};
@@ -569,9 +571,10 @@ pub struct Reseed<'profile> {
 }
 
 /// Makes slot 1's layers the profile's new snapshot and drops every slot's own layer changes (`image/seed.sh`),
-/// if slot 1 changed at least `min_changes`. A snapshot that would outgrow `max_size` starts over from the image,
-/// as every slot's changes go too (docs/adr/0065); after a reseed that did not finish, it starts over whatever the
-/// limits (docs/adr/0066). Call only while none of the profile's slots runs. Returns the seed container's output.
+/// if slot 1 changed at least `min_changes`. A snapshot that would outgrow `max_size` starts its tools layer, then
+/// its Android layer, over from the image until the rest fits, and every layer when that is not enough, each with
+/// every slot's changes to it (docs/adr/0065, docs/adr/0152); after a reseed that did not finish, it starts over
+/// whatever the limits (docs/adr/0066). Call only while none of the profile's slots runs. Returns the seed container's output.
 pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<String, Error> {
     let names = reseed.names;
     let mut mounts = vec![volume(names.base(reseed.profile), "/base", false)];
@@ -611,7 +614,17 @@ pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<Stri
         Err(error) if !is_not_found(&error) => return Err(error),
         _ => {}
     }
-    let id = docker.start(&spec, reseed.isolation).await?;
+    let id = match docker.start(&spec, reseed.isolation).await {
+        Ok(id) => id,
+        // A start whose answer was lost may have left the container running: it ends only once Docker says so.
+        Err(failed) => match failed.container {
+            Some(container) if failed.may_have_run => {
+                let _ = finish_reseed(docker, &container).await;
+                return Err(failed.error);
+            }
+            _ => return Err(failed.error),
+        },
+    };
     finish_reseed(docker, &id).await
 }
 
@@ -682,7 +695,12 @@ pub async fn start_layers_over(
         jit_config: None,
     };
     let id = docker.start(&spec, start.isolation).await?;
-    finish_reseed(docker, &id).await.map(|_| ())
+    // Once: the tick awaits it. A container Docker cannot say ended is an error, so the caches stay torn, and the
+    // next try removes it before it starts another.
+    match finish_once(docker, &id).await {
+        Finished::Ended(result) => result.map(|_| ()),
+        Finished::Unconfirmed(error) => Err(error),
+    }
 }
 
 /// What a measure container (`image/seed.sh measure`) runs on: the profile's image, its slot 1 and the snapshot,
@@ -777,11 +795,44 @@ pub fn seeded(output: &str) -> bool {
     !output.trim_start().starts_with("not seeded")
 }
 
-/// Waits for a seed or measure container to exit, removes it, and returns its output. Also takes over a seed
-/// container an earlier daemon left running: stopping it between its `rm` and `mv` would lose that snapshot layer.
+/// How long `finish_reseed` waits before it asks Docker again about a container it could not tell had ended.
+const ASK_AGAIN: Duration = Duration::from_secs(10);
+
+/// Waits for a seed or measure container to exit, removes it, and returns its output, in a background task. Also takes
+/// over a seed container an earlier daemon left running: stopping it between its `rm` and `mv` would lose that
+/// snapshot layer. It returns only once Docker said the container exited or is gone: one whose wait and removal both
+/// failed, as when the Engine's API went away, may still be rewriting the snapshot or a slot's layers, so it asks
+/// again every `ASK_AGAIN`, and the profile reseeds until then (docs/adr/0152). Never awaited in the tick.
 pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<String, Error> {
+    loop {
+        match finish_once(docker, container).await {
+            Finished::Ended(result) => return result,
+            Finished::Unconfirmed(error) => {
+                warn!(
+                    "cannot tell whether {container} ended, so what it writes stays held: asking again in {}s: \
+                     {error}",
+                    ASK_AGAIN.as_secs()
+                );
+                tokio::time::sleep(ASK_AGAIN).await;
+            }
+        }
+    }
+}
+
+/// What one attempt of `finish_reseed` found.
+enum Finished {
+    /// The container exited or is gone: its output, or why there is none.
+    Ended(Result<String, Error>),
+    /// Docker said neither: why its removal failed.
+    Unconfirmed(Error),
+}
+
+/// Waits for the container once and removes it.
+async fn finish_once(docker: &impl DockerApi, container: &str) -> Finished {
+    let waited = docker.wait(container).await;
+    let exited = waited.is_ok();
     let result = async {
-        let code = docker.wait(container).await?;
+        let code = waited?;
         let output = docker.logs(container).await?;
         if code == 0 {
             Ok(output)
@@ -793,10 +844,12 @@ pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<S
         }
     }
     .await;
-    let removed = docker.remove(container).await;
-    let output = result?;
-    removed?;
-    Ok(output)
+    match docker.remove(container).await {
+        Err(error) if is_not_found(&error) => Finished::Ended(result),
+        Err(error) if !exited => Finished::Unconfirmed(error),
+        Err(error) => Finished::Ended(result.and(Err(error))),
+        Ok(()) => Finished::Ended(result),
+    }
 }
 
 #[cfg(test)]

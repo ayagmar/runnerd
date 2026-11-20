@@ -15,7 +15,7 @@ The rest of `runnerd.toml`'s keys; [Configuration](../configuration/) has the ru
 | `mirror.max_size` | `"10G"` | emptied above this when no runner runs |
 | `pnpm.max_size`, `maven.max_size` | required | the shared pnpm store and Maven repository, emptied above this when no runner runs |
 | `reseed_at` | `"2G"` | slot 1's layers become the profile's snapshot once they changed this much and it is idle ([Warm caches](../../guides/caches/#warm-caches)) |
-| `snapshot_max` | `"10G"` | a larger snapshot starts over from the image |
+| `snapshot_max` | `"10G"` | a larger snapshot starts its tool cache over from the image, then its Android SDK, then all of it |
 | `build.enabled` | `true` | the shared [build cache](../../guides/caches/#build-cache) |
 | `build.max_size` | `"10G"` | above this its least recently used entries go when no runner runs; [GitHub Actions' cache](../../guides/caches/#github-actions-cache) counts too |
 | `build.branches` | `[]` | branches besides the default branch whose pushes, schedules and manual runs write to it |

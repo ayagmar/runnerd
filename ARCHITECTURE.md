@@ -313,10 +313,12 @@ queued → slot → container → removed
 6. After a job in slot 1, `cache::measure` reads what slot 1's layers changed, read-only beside the profile's runners,
    at most every 10 minutes per profile. When that reaches `[caches] reseed_at`, the last reseed did not finish or the
    measure failed, or the caches' check measured the snapshot over `[caches] snapshot_max`, the profile is due to
-   reseed: once it is idle, `cache::reseed` makes slot 1's layers the profile's snapshot, which starts over above
-   that limit, from the image ([ADR 0094](docs/adr/0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md),
+   reseed: once it is idle, `cache::reseed` makes slot 1's layers the profile's snapshot. Above that limit its tools
+   layer, then its Android layer, start over from the image, and the whole snapshot when the cache layer alone is
+   still over ([ADR 0094](docs/adr/0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md),
    [ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md),
-   [ADR 0065](docs/adr/0065-a-snapshot-starts-over-from-the-image.md)). What slot 1's jobs deleted of the image goes
+   [ADR 0065](docs/adr/0065-a-snapshot-starts-over-from-the-image.md),
+   [ADR 0152](docs/adr/0152-a-snapshot-over-its-limit-starts-its-tools-over-first.md)). What slot 1's jobs deleted of the image goes
    in whiteouts beside the snapshot ([ADR 0067](docs/adr/0067-whiteouts-of-the-image-beside-the-snapshot.md)).
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`), removes its
