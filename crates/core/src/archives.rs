@@ -38,8 +38,8 @@ pub const MOUNT: &str = "/opt/runnerd/actions";
 /// The runner's setting that points it at the archives: `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`.
 pub const ENV: &str = "ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE";
 
-/// How often the store refreshes: each repository's default branch is checked this often, one conditional request
-/// each, which costs GitHub's rate limit nothing while it is unchanged.
+/// How often the store refreshes: each served repository is asked for its default branch and that branch's head this
+/// often, two requests each while it is unchanged, and its tree and files only when the head moved.
 const REFRESH: Duration = Duration::from_secs(600);
 
 /// What one refresh may spend.
@@ -379,24 +379,32 @@ impl Archives {
 
     /// Reads the pins of each served repository whose default branch moved, downloads and verifies what is pinned
     /// and missing, following the pins of each archive as deep as a runner nests actions, and removes what no
-    /// repository pinned for `keep`. Nothing while the store is not open.
+    /// repository pinned for `keep`, but only when every served repository's pins and every archive they reach are
+    /// known whole: what was not read may pin anything. Nothing while the store is not open.
     pub(crate) async fn update<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
         let Some(store) = self.store.clone() else {
             return;
         };
         let meter = Meter::new(self.limits);
         let mut names = Names::default();
+        let mut directs: BTreeMap<String, Option<Direct>> = BTreeMap::new();
         for repository in &settings.repositories {
-            self.read_pins(source, &meter, &mut names, repository, now)
+            let direct = self
+                .read_pins(source, &meter, &store, &mut names, repository, now)
                 .await;
+            directs.insert(repository.clone(), direct);
         }
         self.withdraw(source, &meter, &store, &mut names).await;
-        let mut wanted = BTreeSet::new();
         // Each archive is tried once a refresh: one that failed waits for the next.
         let mut tried: BTreeSet<Key> = BTreeSet::new();
-        // Each round downloads what the last made known, one level deeper.
+        // Each round downloads what the last made known, one level deeper: level 0, the repositories' own pins, to
+        // level `MAX_DEPTH`.
         for _ in 0..=MAX_DEPTH {
-            wanted = self.closure(source, &meter, &store, &mut names).await;
+            let mut wanted = BTreeSet::new();
+            for direct in directs.values().flatten() {
+                let reach = closure(source, &meter, &store, &mut names, &direct.wanted).await;
+                wanted.extend(reach.keys);
+            }
             let missing: Vec<Key> = wanted
                 .iter()
                 .filter(|key| !tried.contains(*key) && !lock(&store).holds(key))
@@ -408,11 +416,49 @@ impl Archives {
             tried.extend(missing.iter().cloned());
             self.fetch_all(source, &meter, &store, missing, now).await;
         }
+        let mut whole = BTreeMap::new();
+        let mut removal = store::Removal::Expired;
+        let mut wanted = BTreeSet::new();
+        for (repository, direct) in &directs {
+            let Some(direct) = direct else {
+                removal = store::Removal::Held;
+                continue;
+            };
+            let reach = closure(source, &meter, &store, &mut names, &direct.wanted).await;
+            if direct.read && reach.complete {
+                whole.insert(
+                    repository.clone(),
+                    store::Inventory {
+                        head: direct.head.clone(),
+                        wanted: direct.wanted.clone(),
+                        reached: reach.keys.clone(),
+                    },
+                );
+            } else {
+                removal = store::Removal::Held;
+            }
+            wanted.extend(reach.keys);
+        }
+        if removal == store::Removal::Held {
+            info!(
+                "some pins of the served repositories are not known whole; no action archive is removed this refresh"
+            );
+        }
         let retained = {
             let store = store.clone();
-            let pinned = wanted.clone();
             let keep = settings.keep;
-            tokio::task::spawn_blocking(move || lock(&store).retain(&pinned, keep, now)).await
+            let served = settings.repositories.clone();
+            let reached = wanted.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut store = lock(&store);
+                store.record(whole, &served)?;
+                // What the last whole inventories reached stays too: while a repository cannot be read, what it
+                // pinned when it last could is all that is known of it.
+                let mut pinned = store.reached(&served);
+                pinned.extend(reached);
+                store.retain(&pinned, keep, removal, now)
+            })
+            .await
         };
         match retained {
             Ok(Ok(removed)) => {
@@ -523,127 +569,38 @@ impl Archives {
         Ok(store)
     }
 
-    /// Reads which actions `repository`'s default branch pins, when it moved since the last read. On any failure,
-    /// or a tree GitHub cut short, the last pins read are kept.
+    /// The pins of `repository` this refresh goes by: read now when its default branch moved since its last whole
+    /// inventory, that inventory's when it has not. When they cannot be read, the last inventory's, not read now, or
+    /// `None` without one.
     async fn read_pins<S: Source>(
         &mut self,
         source: &S,
         meter: &Meter,
+        store: &Arc<Mutex<ArchiveStore>>,
         names: &mut Names,
         repository: &str,
         now: u64,
-    ) {
-        match self.pins_of(source, meter, names, repository).await {
-            Ok(Some((head, wanted))) => {
-                self.refresher.read(repository, head, wanted);
+    ) -> Option<Direct> {
+        let last = lock(store).inventory(repository).cloned();
+        match pins_of(source, meter, names, repository, last.as_ref()).await {
+            Ok(direct) => {
                 self.refresher.succeed(repository);
+                Some(direct)
             }
-            Ok(None) => self.refresher.succeed(repository),
             Err(error) => {
                 warn!(
-                    "{repository}: cannot read the actions it pins; keeping the last read: {}",
+                    "{repository}: cannot read the actions it pins; keeping the last read and every archive: {}",
                     error.brief()
                 );
                 self.refresher
                     .fail(repository, api::ArchiveFailureKind::Pins, now);
+                last.map(|inventory| Direct {
+                    head: inventory.head,
+                    wanted: inventory.wanted,
+                    read: false,
+                })
             }
         }
-    }
-
-    /// `repository`'s head and the public actions its workflows and action files pin there, or `None` when its
-    /// default branch has not moved since they were last read.
-    async fn pins_of<S: Source>(
-        &self,
-        source: &S,
-        meter: &Meter,
-        names: &mut Names,
-        repository: &str,
-    ) -> Result<Option<(String, BTreeSet<Wanted>)>, PinsError> {
-        meter.ask(source)?;
-        let details = source.action_repository(repository).await?;
-        meter.ask(source)?;
-        let head = source
-            .branch_head(repository, &details.default_branch)
-            .await?;
-        if self.refresher.head(repository) == Some(head.as_str()) {
-            return Ok(None);
-        }
-        meter.ask(source)?;
-        let tree = source.tree(repository, &head).await?;
-        if tree.truncated {
-            return Err(PinsError::Truncated);
-        }
-        let mut pinned: BTreeSet<Pin> = BTreeSet::new();
-        let files = tree
-            .files
-            .iter()
-            .filter(|file| pins::read_for_pins(&file.path) && file.size <= PIN_FILE_BYTES)
-            .take(PIN_FILES);
-        for file in files {
-            meter.ask(source)?;
-            let bytes = source.blob(repository, &file.blob, PIN_FILE_BYTES).await?;
-            pinned.extend(pins::pins(&String::from_utf8_lossy(&bytes)));
-        }
-        let mut wanted = BTreeSet::new();
-        for pin in pinned {
-            if let Some(name) = names.public(source, meter, &pin.repository).await? {
-                wanted.insert(Wanted {
-                    key: Key {
-                        repository: name,
-                        sha: pin.sha,
-                    },
-                    path: pin.path,
-                });
-            }
-        }
-        Ok(Some((head, wanted)))
-    }
-
-    /// Every archive the served repositories' pins reach, through the pins of the archives held, as deep as a runner
-    /// nests actions. A nested action whose repository cannot be read now is left out of this refresh.
-    async fn closure<S: Source>(
-        &self,
-        source: &S,
-        meter: &Meter,
-        store: &Arc<Mutex<ArchiveStore>>,
-        names: &mut Names,
-    ) -> BTreeSet<Key> {
-        let mut seen: BTreeSet<Wanted> = BTreeSet::new();
-        let mut level: BTreeSet<Wanted> = self.refresher.wanted();
-        for _ in 0..MAX_DEPTH {
-            let mut next = BTreeSet::new();
-            for wanted in &level {
-                if !seen.insert(wanted.clone()) {
-                    continue;
-                }
-                let nested: Vec<Pin> = lock(store).uses(&wanted.key, &wanted.path).to_vec();
-                for pin in nested {
-                    match names.public(source, meter, &pin.repository).await {
-                        Ok(Some(name)) => {
-                            next.insert(Wanted {
-                                key: Key {
-                                    repository: name,
-                                    sha: pin.sha,
-                                },
-                                path: pin.path,
-                            });
-                        }
-                        Ok(None) => {}
-                        Err(error) => warn!(
-                            "cannot read {}, which {} pins: {}",
-                            pin.repository,
-                            wanted.key.label(),
-                            error.brief()
-                        ),
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            level = next;
-        }
-        seen.into_iter().map(|wanted| wanted.key).collect()
     }
 
     /// Downloads, verifies and publishes each of `missing`, a few at a time; returns the bytes downloaded.
@@ -690,6 +647,162 @@ impl Archives {
                 }
             }
         }
+    }
+}
+
+/// A served repository's own pins, as one refresh goes by them.
+#[derive(Debug)]
+struct Direct {
+    /// The commit of its default branch they are of.
+    head: String,
+    wanted: BTreeSet<Wanted>,
+    /// Whether they are known whole at `head`: read now, or the last whole inventory at the same head.
+    read: bool,
+}
+
+/// `repository`'s pins at its default branch's head: the inventory `last`'s when the head has not moved, read whole
+/// from its tree when it has. A tree GitHub cut short, more files than are read, a file too large or not YAML, and a
+/// repository a pin names that GitHub does not answer for each fail it: what was not read may pin anything.
+async fn pins_of<S: Source>(
+    source: &S,
+    meter: &Meter,
+    names: &mut Names,
+    repository: &str,
+    last: Option<&store::Inventory>,
+) -> Result<Direct, PinsError> {
+    meter.ask(source)?;
+    let details = source.action_repository(repository).await?;
+    meter.ask(source)?;
+    let head = source
+        .branch_head(repository, &details.default_branch)
+        .await?;
+    if let Some(last) = last.filter(|last| last.head == head) {
+        return Ok(Direct {
+            head,
+            wanted: last.wanted.clone(),
+            read: true,
+        });
+    }
+    meter.ask(source)?;
+    let tree = source.tree(repository, &head).await?;
+    if tree.truncated {
+        return Err(PinsError::Truncated);
+    }
+    let files: Vec<&TreeFile> = tree
+        .files
+        .iter()
+        .filter(|file| pins::read_for_pins(&file.path))
+        .collect();
+    if files.len() > PIN_FILES {
+        return Err(PinsError::Files(files.len()));
+    }
+    let mut pinned: BTreeSet<Pin> = BTreeSet::new();
+    for file in files {
+        if file.size > PIN_FILE_BYTES {
+            return Err(PinsError::Large(file.path.clone()));
+        }
+        meter.ask(source)?;
+        let bytes = source.blob(repository, &file.blob, PIN_FILE_BYTES).await?;
+        let found = pins::file_pins(&file.path, &bytes).map_err(|why| PinsError::Unreadable {
+            path: file.path.clone(),
+            why,
+        })?;
+        pinned.extend(found);
+    }
+    let mut wanted = BTreeSet::new();
+    for pin in pinned {
+        if let Some(name) = names.public(source, meter, &pin.repository).await? {
+            wanted.insert(Wanted {
+                key: Key {
+                    repository: name,
+                    sha: pin.sha,
+                },
+                path: pin.path,
+            });
+        }
+    }
+    Ok(Direct {
+        head,
+        wanted,
+        read: true,
+    })
+}
+
+/// Every archive `direct` reaches, through the pins of the archives held: level 0 is `direct`, and the pins of each
+/// level's archives are the next, to level `MAX_DEPTH`, the deepest a runner nests.
+#[derive(Debug)]
+struct Reach {
+    keys: BTreeSet<Key>,
+    /// Whether every pin on the way is known: each archive is held, its action file was read, and each repository
+    /// it pins answered.
+    complete: bool,
+}
+
+/// What `direct` reaches now (`Reach`).
+async fn closure<S: Source>(
+    source: &S,
+    meter: &Meter,
+    store: &Arc<Mutex<ArchiveStore>>,
+    names: &mut Names,
+    direct: &BTreeSet<Wanted>,
+) -> Reach {
+    let mut seen: BTreeSet<Wanted> = BTreeSet::new();
+    let mut complete = true;
+    let mut level: BTreeSet<Wanted> = direct.clone();
+    for depth in 0..=MAX_DEPTH {
+        let mut next = BTreeSet::new();
+        for wanted in &level {
+            if !seen.insert(wanted.clone()) {
+                continue;
+            }
+            let (held, unread, nested) = {
+                let store = lock(store);
+                (
+                    store.holds(&wanted.key),
+                    store.unread(&wanted.key, &wanted.path),
+                    store.uses(&wanted.key, &wanted.path).to_vec(),
+                )
+            };
+            if !held || unread {
+                complete = false;
+                continue;
+            }
+            // A runner nests no deeper: what the deepest level pins, it never runs.
+            if depth == MAX_DEPTH {
+                continue;
+            }
+            for pin in nested {
+                match names.public(source, meter, &pin.repository).await {
+                    Ok(Some(name)) => {
+                        next.insert(Wanted {
+                            key: Key {
+                                repository: name,
+                                sha: pin.sha,
+                            },
+                            path: pin.path,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        complete = false;
+                        warn!(
+                            "cannot read {}, which {} pins: {}",
+                            pin.repository,
+                            wanted.key.label(),
+                            error.brief()
+                        );
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    Reach {
+        keys: seen.into_iter().map(|wanted| wanted.key).collect(),
+        complete,
     }
 }
 
@@ -808,17 +921,25 @@ async fn fetch<S: Source>(
             let verified = verify::verify(&file, &key.sha, verify::BUDGET)
                 .map_err(|rejected| Fetch::Rejected(format!("failed its check: {rejected}")))?;
             let size = verified.size;
-            let uses: BTreeMap<String, Vec<Pin>> = verified
-                .actions
-                .iter()
-                .map(|(dir, text)| (dir.clone(), pins::pins(text)))
-                .filter(|(_, pins)| !pins.is_empty())
-                .collect();
+            let mut uses: BTreeMap<String, Vec<Pin>> = BTreeMap::new();
+            let mut unread = BTreeSet::new();
+            for (dir, action) in &verified.actions {
+                match action.bytes.as_deref().map(pins::action_file_pins) {
+                    Some(Ok(found)) if found.is_empty() => {}
+                    Some(Ok(found)) => {
+                        uses.insert(dir.clone(), found);
+                    }
+                    Some(Err(_)) | None => {
+                        unread.insert(dir.clone());
+                    }
+                }
+            }
             let staged = Staged {
                 file: file.clone(),
                 sha256: verified.sha256,
                 size,
                 uses,
+                unread,
             };
             lock(&store)
                 .publish(key, staged, now)
@@ -844,6 +965,12 @@ enum PinsError {
     Github(#[from] Error),
     #[error("GitHub cut its tree short")]
     Truncated,
+    #[error("it has {0} workflows and action files, more than are read")]
+    Files(usize),
+    #[error("{0} is larger than is read")]
+    Large(String),
+    #[error("{path}: {why}")]
+    Unreadable { path: String, why: pins::Unreadable },
 }
 
 impl PinsError {
@@ -851,7 +978,10 @@ impl PinsError {
     fn brief(&self) -> String {
         match self {
             PinsError::Github(error) => error.brief(),
-            PinsError::Truncated => self.to_string(),
+            PinsError::Truncated
+            | PinsError::Files(_)
+            | PinsError::Large(_)
+            | PinsError::Unreadable { .. } => self.to_string(),
         }
     }
 }

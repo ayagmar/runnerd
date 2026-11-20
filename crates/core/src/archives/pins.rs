@@ -1,6 +1,7 @@
-//! The actions a workflow or an action's metadata pins by commit: each `uses: owner/repo[/path]@<sha>`. Pure
-//! functions over text; it fetches nothing. Never a tag or a branch, which can move: an archive is kept under the
-//! commit it is, and only a pin names that commit.
+//! The actions a workflow or an action's metadata pins by commit: each step's `uses: owner/repo[/path]@<sha>`, read
+//! from the parsed YAML as the runner reads it, never from a script's text. Pure functions over text; it fetches
+//! nothing. A file it cannot parse is `Unreadable`, never read as pinning nothing. Never a tag or a branch, which can
+//! move: an archive is kept under the commit it is, and only a pin names that commit.
 
 /// The deepest an action may nest composite actions, as the runner allows it (`Constants.CompositeActionsMaxDepth`):
 /// the pins of an archive are followed this many levels from a workflow.
@@ -23,15 +24,17 @@ pub(crate) struct Pin {
 /// Whether `path` in a repository's tree is a file pins are read from: a workflow (`.github/workflows/*.yml` or
 /// `.yaml`) or an action's metadata anywhere (`action.yml`, `action.yaml`).
 pub(crate) fn read_for_pins(path: &str) -> bool {
-    let yaml = |name: &str| {
-        std::path::Path::new(name)
-            .extension()
-            .is_some_and(|extension| extension == "yml" || extension == "yaml")
-    };
-    let workflow = path
-        .strip_prefix(".github/workflows/")
-        .is_some_and(|name| !name.contains('/') && yaml(name));
-    workflow || is_action_file(path)
+    is_workflow(path) || is_action_file(path)
+}
+
+/// Whether `path` is a workflow: a `.yml` or `.yaml` file right in `.github/workflows/`.
+fn is_workflow(path: &str) -> bool {
+    path.strip_prefix(".github/workflows/").is_some_and(|name| {
+        !name.contains('/')
+            && std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension == "yml" || extension == "yaml")
+    })
 }
 
 /// Whether `path` is an action's metadata file: `action.yml` or `action.yaml`, at the root or in a directory.
@@ -45,43 +48,91 @@ pub(crate) fn action_dir(file: &str) -> &str {
     file.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-/// Every action `text`, a workflow or an action's metadata, pins by commit, in order, each once. A local action
-/// (`./…`), a Docker image (`docker://…`), a tag or a branch, and a reusable workflow (`…/.github/workflows/…@sha`),
-/// which is no action archive, are left out.
-pub(crate) fn pins(text: &str) -> Vec<Pin> {
+/// Why a file's pins could not be read: what it says is not known, so what it pins is not either.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Unreadable {
+    /// It is not YAML, or not within the parser's limits.
+    #[error("it is not YAML a runner reads: {0}")]
+    Yaml(String),
+    /// It holds more than one YAML document.
+    #[error("it holds more than one YAML document")]
+    Documents,
+    /// It is not UTF-8.
+    #[error("it is not UTF-8")]
+    Text,
+}
+
+/// What the file at `path` pins by commit: a workflow's steps' `uses`, or an action's composite steps'.
+pub(crate) fn file_pins(path: &str, bytes: &[u8]) -> Result<Vec<Pin>, Unreadable> {
+    if is_workflow(path) {
+        workflow_pins(std::str::from_utf8(bytes).map_err(|_| Unreadable::Text)?)
+    } else {
+        action_file_pins(bytes)
+    }
+}
+
+/// What an action's metadata file pins by commit.
+pub(crate) fn action_file_pins(bytes: &[u8]) -> Result<Vec<Pin>, Unreadable> {
+    action_pins(std::str::from_utf8(bytes).map_err(|_| Unreadable::Text)?)
+}
+
+/// Every action a workflow pins by commit: each `jobs.<job>.steps[].uses`, in order, each once. A job's own `uses`,
+/// a reusable workflow, is no action archive.
+pub(crate) fn workflow_pins(text: &str) -> Result<Vec<Pin>, Unreadable> {
+    let Some(document) = document(text)? else {
+        return Ok(Vec::new());
+    };
+    let jobs = document
+        .get("jobs")
+        .and_then(Yaml::as_mapping)
+        .into_iter()
+        .flat_map(|jobs| jobs.values());
+    Ok(unique(jobs.flat_map(|job| steps_uses(job.get("steps")))))
+}
+
+/// Every action an action's metadata pins by commit: each `runs.steps[].uses` of a composite action, in order, each
+/// once.
+pub(crate) fn action_pins(text: &str) -> Result<Vec<Pin>, Unreadable> {
+    let Some(document) = document(text)? else {
+        return Ok(Vec::new());
+    };
+    let runs = document.get("runs");
+    Ok(unique(steps_uses(runs.and_then(|runs| runs.get("steps")))))
+}
+
+use saphyr::{LoadableYamlNode as _, SafelyIndex as _, Yaml};
+
+/// The one YAML document `text` holds, `None` for an empty file. saphyr bounds what its aliases may expand to.
+fn document(text: &str) -> Result<Option<Yaml<'_>>, Unreadable> {
+    let mut documents =
+        Yaml::load_from_str(text).map_err(|error| Unreadable::Yaml(error.to_string()))?;
+    match documents.len() {
+        0 => Ok(None),
+        1 => Ok(documents.pop()),
+        _ => Err(Unreadable::Documents),
+    }
+}
+
+/// The `uses` of each step of `steps`, a sequence of mappings, that is a string.
+fn steps_uses<'yaml>(steps: Option<&'yaml Yaml<'_>>) -> impl Iterator<Item = &'yaml str> {
+    steps
+        .and_then(Yaml::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(|step| step.get("uses").and_then(Yaml::as_str))
+}
+
+/// The pins of `values` that name an action by commit, in order, each once.
+fn unique<'value>(values: impl Iterator<Item = &'value str>) -> Vec<Pin> {
     let mut found: Vec<Pin> = Vec::new();
-    for line in text.lines() {
-        let Some(value) = uses_value(line) else {
-            continue;
-        };
-        if let Some(pin) = pin(value)
+    for value in values {
+        if let Some(pin) = pin(value.trim())
             && !found.contains(&pin)
         {
             found.push(pin);
         }
     }
     found
-}
-
-/// The value of a `uses:` key on `line`, as a step (`- uses: …`) or a job writes it, without its quotes and comment.
-fn uses_value(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    let line = line.strip_prefix("- ").map_or(line, str::trim_start);
-    let value = line.strip_prefix("uses:")?;
-    let value = match value.find(" #") {
-        Some(comment) => &value[..comment],
-        None => value,
-    };
-    let value = value.trim();
-    let unquoted = value
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .or_else(|| {
-            value
-                .strip_prefix('\'')
-                .and_then(|rest| rest.strip_suffix('\''))
-        });
-    Some(unquoted.unwrap_or(value))
 }
 
 /// A pin from a `uses:` value, if it names a repository's action by commit.
@@ -136,7 +187,7 @@ pub(crate) fn commit(reference: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pin, pins, read_for_pins};
+    use super::{Pin, Unreadable, action_pins, file_pins, read_for_pins, workflow_pins};
 
     const SHA: &str = "08eba0b27e820071cde6df949e0beb9ba4906955";
 
@@ -158,16 +209,68 @@ mod tests {
              - uses: actions/cache@v4\n      - uses: ./.github/actions/mise\n      \
              - uses: docker://alpine@sha256:{SHA}{SHA}\n      - uses: actions/checkout@{}\n      \
              - uses: o/../evil@{SHA}\n      - uses: actions/checkout@{SHA}\n      \
-             - run: echo uses: actions/fake@{SHA}\n",
+             - run: 'echo uses: actions/fake@{SHA}'\n",
             SHA.to_uppercase()
         );
         assert_eq!(
-            pins(&workflow),
-            vec![
+            workflow_pins(&workflow),
+            Ok(vec![
                 pin("actions/checkout", ""),
                 pin("actions/setup-node", ""),
                 pin("tailscale/github-action", "oauth"),
-            ]
+            ])
+        );
+    }
+
+    #[test]
+    fn a_step_s_uses_is_read_however_yaml_writes_it_and_never_from_a_script() {
+        let workflow = format!(
+            "jobs:\n  test:\n    steps:\n      - {{uses: actions/checkout@{SHA}}}\n      \
+             - \"uses\": actions/setup-node@{SHA}\n      - name: script\n        run: |\n          \
+             cat > ci.yml <<EOF\n          - uses: actions/fake@{SHA}\n          EOF\n      \
+             - &mise\n        uses: jdx/mise-action@{SHA}\n  lint:\n    steps:\n      - *mise\n"
+        );
+        assert_eq!(
+            workflow_pins(&workflow),
+            Ok(vec![
+                pin("actions/checkout", ""),
+                pin("actions/setup-node", ""),
+                pin("jdx/mise-action", ""),
+            ])
+        );
+        let action = format!(
+            "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@{SHA}\n    \
+             - run: 'echo uses: actions/fake@{SHA}'\n      shell: bash\n"
+        );
+        assert_eq!(action_pins(&action), Ok(vec![pin("actions/checkout", "")]));
+        assert_eq!(
+            action_pins("runs:\n  using: node24\n  main: index.js\n"),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_yaml_a_runner_reads_is_unreadable_not_empty() {
+        for broken in ["jobs: [\n", "a: 1\n---\nb: 2\n", "jobs:\n\ttest: 1\n"] {
+            assert!(
+                workflow_pins(broken).is_err(),
+                "{broken:?} is not read as pinning nothing"
+            );
+        }
+        let laughs = (1..12).fold(
+            String::from("a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n"),
+            |text, level| {
+                let refs = vec![format!("*a{}", level - 1); 10].join(", ");
+                format!("{text}a{level}: &a{level} [{refs}]\n")
+            },
+        );
+        assert!(
+            workflow_pins(&laughs).is_err(),
+            "aliases that expand past the parser's bound"
+        );
+        assert_eq!(
+            file_pins(".github/workflows/ci.yml", b"\xff\xfe"),
+            Err(Unreadable::Text)
         );
     }
 

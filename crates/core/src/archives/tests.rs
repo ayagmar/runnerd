@@ -26,6 +26,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use tar::{EntryType, Header};
 
+use super::pins::MAX_DEPTH;
 use super::store::ArchiveStore;
 use super::verify::{self, Rejected};
 use super::{ActionRepository, Archives, Settings, Source, Tree, TreeFile};
@@ -1006,6 +1007,200 @@ async fn a_tree_cut_short_or_a_failed_read_keeps_the_last_pins() {
     github.push("c3", &[&pin("actions/checkout", CHECKOUT)]);
     archives.refresh(&github, &settings(), T0 + 41 * DAY).await;
     assert_eq!(archives.status().failures, Vec::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_outage_across_a_restart_removes_nothing_the_last_whole_inventory_reached() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new("c1", &[&pin("tailscale/github-action/oauth", OAUTH)]);
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    let reached = BTreeSet::from([
+        file_of("Tailscale/github-action", OAUTH),
+        file_of("actions/checkout", CHECKOUT_NEXT),
+    ]);
+    assert_eq!(on_disk(&dir.0), reached);
+    drop(archives);
+    github.0.lock().unwrap().down = true;
+    let mut restarted = open(&dir.0);
+    restarted.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        reached,
+        "what o/app pinned, nested pins included, when it was last read whole"
+    );
+    // A repository no longer served takes its inventory with it.
+    let mut none = settings();
+    none.repositories.clear();
+    restarted.refresh(&github, &none, T0 + 40 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::new(),
+        "nothing serves them any more"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn pins_beyond_what_is_read_remove_nothing_while_they_stay_unread() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    github.push("c2", &[&pin("actions/setup-node", NODE)]);
+    archives.refresh(&github, &settings(), T0 + DAY).await;
+    // c3 has more workflows than are read; the last of them pins checkout again.
+    github.push("c3", &[&pin("actions/setup-node", NODE)]);
+    {
+        let mut fake = github.0.lock().unwrap();
+        let files = &mut fake.trees.get_mut("c3").unwrap().files;
+        for n in 0..300 {
+            files.insert(
+                format!(".github/workflows/w{n:03}.yml"),
+                "on: push\n".to_owned(),
+            );
+        }
+        files.insert(
+            ".github/workflows/z.yml".to_owned(),
+            format!(
+                "jobs:\n  test:\n    steps:\n      - uses: {}\n",
+                pin("actions/checkout", CHECKOUT)
+            ),
+        );
+    }
+    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert!(
+        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
+        "a file left unread may pin it"
+    );
+    let failures = archives.status().failures;
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].kind, ArchiveFailureKind::Pins);
+    // A workflow that is not YAML a runner reads is no more read as pinning nothing.
+    github.push("c4", &[&pin("actions/setup-node", NODE)]);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .trees
+        .get_mut("c4")
+        .unwrap()
+        .files
+        .insert(
+            ".github/workflows/bad.yml".to_owned(),
+            "jobs: [\n".to_owned(),
+        );
+    archives.refresh(&github, &settings(), T0 + 21 * DAY).await;
+    assert!(
+        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
+        "a file that does not parse may pin it"
+    );
+    github.push("c5", &[&pin("actions/setup-node", NODE)]);
+    archives.refresh(&github, &settings(), T0 + 22 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("actions/setup-node", NODE)]),
+        "read whole again, what no pin kept for 14 days goes"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_archive_whose_action_file_is_unread_or_missing_removes_nothing() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("jdx/mise-action", MISE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    // c2 drops checkout and pins mise at a commit whose action file is not YAML: what it pins is not known.
+    github.set_tarball(
+        &format!("jdx/mise-action@{NODE}"),
+        archive(NODE, "runs: [\n"),
+    );
+    github.push("c2", &[&pin("jdx/mise-action", NODE)]);
+    archives.refresh(&github, &settings(), T0 + DAY).await;
+    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert!(
+        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
+        "the unread action file may pin it"
+    );
+    // c3 pins one whose download keeps failing: what it pins is not known either.
+    github.push("c3", &[&pin("actions/setup-node", NODE)]);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failing
+        .insert(pin("actions/setup-node", NODE));
+    archives.refresh(&github, &settings(), T0 + 40 * DAY).await;
+    assert!(
+        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
+        "an archive not held may pin it"
+    );
+    github.0.lock().unwrap().failing.clear();
+    archives.refresh(&github, &settings(), T0 + 41 * DAY).await;
+    assert!(
+        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
+        "what the last whole inventory reached was pinned until it was replaced"
+    );
+    archives.refresh(&github, &settings(), T0 + 56 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("actions/setup-node", NODE)]),
+        "known whole again, what no pin kept for 14 days went"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn pins_are_followed_as_deep_as_a_runner_nests_and_no_deeper() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new("c1", &[]);
+    // Level n is n/chain at a commit of n's, whose action pins level n + 1; level 0 is the workflow's.
+    let sha = |level: u32| format!("{level:0>40}");
+    {
+        let mut fake = github.0.lock().unwrap();
+        for level in 0..=MAX_DEPTH + 1 {
+            let name = format!("n{level}/chain");
+            fake.repositories.insert(
+                name.clone(),
+                ActionRepository {
+                    full_name: name.clone(),
+                    public: true,
+                    default_branch: "main".to_owned(),
+                },
+            );
+            let action = format!(
+                "runs:\n  using: composite\n  steps:\n    - uses: n{}/chain@{}\n",
+                level + 1,
+                sha(level + 1)
+            );
+            fake.tarballs
+                .insert(pin(&name, &sha(level)), archive(&sha(level), &action));
+        }
+    }
+    github.push("c1", &[&pin("n0/chain", &sha(0))]);
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    let expected: BTreeSet<String> = (0..=MAX_DEPTH)
+        .map(|level| file_of(&format!("n{level}/chain"), &sha(level)))
+        .collect();
+    assert_eq!(
+        on_disk(&dir.0),
+        expected,
+        "levels 0 to {MAX_DEPTH}; the runner never runs level {}",
+        MAX_DEPTH + 1
+    );
+    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert_eq!(on_disk(&dir.0), expected, "a whole chain keeps every level");
 }
 
 #[tokio::test(start_paused = true)]

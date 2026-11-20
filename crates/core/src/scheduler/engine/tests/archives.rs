@@ -59,12 +59,7 @@ async fn first_runner(
     std::fs::write(&unchecked, b"not what any check verified").unwrap();
     boot(&dir, "boot-1");
     let (mut engine, _handle) = engine_with_archives(&github, &docker, &dir, config);
-    let _task = checked.then(|| {
-        engine
-            .archives
-            .start(Arc::new(github.clone()))
-            .unwrap()
-    });
+    let _task = checked.then(|| engine.archives.start(Arc::new(github.clone())).unwrap());
     if checked && Config::parse(config).unwrap().caches.actions.enabled {
         for _ in 0..1000 {
             if engine.archives.runner().is_some() {

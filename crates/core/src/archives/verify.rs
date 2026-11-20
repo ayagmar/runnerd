@@ -45,7 +45,16 @@ pub(crate) struct Verified {
     pub(crate) size: u64,
     /// The action files it holds, by the directory they are in (`""` for the top directory): what their pins are
     /// read from.
-    pub(crate) actions: BTreeMap<String, String>,
+    pub(crate) actions: BTreeMap<String, ActionFile>,
+}
+
+/// An action's metadata file in an archive: the one the runner loads, `action.yml` before `action.yaml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionFile {
+    /// Whether it is `action.yml`.
+    pub(crate) yml: bool,
+    /// Its bytes; `None` when it is larger than the budget lets be read, so what it pins is not known.
+    pub(crate) bytes: Option<Vec<u8>>,
 }
 
 /// Why an archive is not kept. Each says what was wrong, never with the archive's content.
@@ -104,7 +113,7 @@ fn read_archive<R: Read>(
     hashed: &mut Hashed<R>,
     sha: &str,
     budget: Budget,
-) -> Result<BTreeMap<String, String>, Rejected> {
+) -> Result<BTreeMap<String, ActionFile>, Rejected> {
     // A reader of our own under the decoder, so what it reads past the gzip stream is still there to look at.
     let mut gzip = GzDecoder::new(BufReader::new(hashed));
     let capped = Capped {
@@ -161,7 +170,7 @@ struct Checker<'sha> {
     entries: u64,
     /// Whether its global header named the commit.
     commented: bool,
-    actions: BTreeMap<String, String>,
+    actions: BTreeMap<String, ActionFile>,
 }
 
 impl Checker<'_> {
@@ -217,12 +226,25 @@ impl Checker<'_> {
             _ if inside.is_empty() => Err(Rejected::Outside(name)),
             EntryType::Regular | EntryType::Continuous => {
                 let relative = inside.join("/");
-                if is_action_file(&relative) && entry.size() <= self.budget.action_file {
-                    let mut text = String::new();
-                    // An action file that is not UTF-8 holds no pins a runner reads.
-                    if entry.read_to_string(&mut text).is_ok() {
-                        let dir = super::pins::action_dir(&relative).to_owned();
-                        self.actions.entry(dir).or_insert(text);
+                if is_action_file(&relative) {
+                    let bytes = if entry.size() <= self.budget.action_file {
+                        let mut bytes = Vec::new();
+                        entry.read_to_end(&mut bytes).map_err(tar_error)?;
+                        Some(bytes)
+                    } else {
+                        None
+                    };
+                    let file = ActionFile {
+                        yml: relative.rsplit('/').next() == Some("action.yml"),
+                        bytes,
+                    };
+                    let dir = super::pins::action_dir(&relative).to_owned();
+                    // The runner loads `action.yml` when both are there.
+                    match self.actions.get(&dir) {
+                        Some(kept) if kept.yml => {}
+                        _ => {
+                            self.actions.insert(dir, file);
+                        }
                     }
                 }
                 Ok(())

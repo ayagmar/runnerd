@@ -1,7 +1,6 @@
-//! What the archives task knows besides the store: each served repository's pins as last read, at the commit they
-//! were read at, and what failed and has not succeeded since. Only its methods write it. It lives in memory: a
-//! restart reads every repository's pins again and forgets the failures; a reload keeps it, and the next refresh
-//! drops what the config no longer serves.
+//! What the archives task knows besides the store: what failed and has not succeeded since, and when the last
+//! refresh ended. Only its methods write it. It lives in memory: a restart forgets the failures; a reload keeps it,
+//! and the next refresh drops what the config no longer serves. The pins live in the store's index.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,25 +8,18 @@ use super::store::Key;
 use crate::api;
 
 /// An action a refresh wants kept: its archive, and the directory of the action in it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Wanted {
+    #[serde(flatten)]
     pub(crate) key: Key,
     /// `""` for the repository's root.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) path: String,
-}
-
-/// A repository's pins, as read at one commit of its default branch.
-#[derive(Debug, Clone)]
-struct Pins {
-    head: String,
-    wanted: BTreeSet<Wanted>,
 }
 
 /// The archives task's memory.
 #[derive(Debug, Default)]
 pub(crate) struct Refresher {
-    /// By served repository, its last good pins.
-    pins: BTreeMap<String, Pins>,
     /// By subject (`owner/name` or `owner/name@sha`), what failed.
     failures: BTreeMap<String, api::ArchiveFailure>,
     /// When the last refresh ended, in seconds since the epoch.
@@ -35,25 +27,6 @@ pub(crate) struct Refresher {
 }
 
 impl Refresher {
-    /// The commit `repository`'s pins were last read at.
-    pub(crate) fn head(&self, repository: &str) -> Option<&str> {
-        self.pins.get(repository).map(|pins| pins.head.as_str())
-    }
-
-    /// Keeps `wanted` as `repository`'s pins at `head`, replacing what was read before.
-    pub(crate) fn read(&mut self, repository: &str, head: String, wanted: BTreeSet<Wanted>) {
-        self.pins
-            .insert(repository.to_owned(), Pins { head, wanted });
-    }
-
-    /// Every served repository's pins, as last read.
-    pub(crate) fn wanted(&self) -> BTreeSet<Wanted> {
-        self.pins
-            .values()
-            .flat_map(|pins| pins.wanted.iter().cloned())
-            .collect()
-    }
-
     /// Notes that `subject` failed as `kind` at `now`; one failing still keeps when it began.
     pub(crate) fn fail(&mut self, subject: &str, kind: api::ArchiveFailureKind, now: u64) {
         let failure =
@@ -78,11 +51,8 @@ impl Refresher {
         self.failures.remove(subject);
     }
 
-    /// Ends a refresh at `now`: forgets the pins of repositories no longer `served`, and the failures of what is
-    /// neither served nor `wanted` any more.
+    /// Ends a refresh at `now`: forgets the failures of what is neither served nor `wanted` any more.
     pub(crate) fn finish(&mut self, served: &[String], wanted: &BTreeSet<Key>, now: u64) {
-        self.pins
-            .retain(|repository, _| served.contains(repository));
         let labels: BTreeSet<String> = wanted.iter().map(Key::label).collect();
         self.failures.retain(|subject, failure| match failure.kind {
             api::ArchiveFailureKind::Pins => served.contains(subject),
