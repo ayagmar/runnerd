@@ -1264,25 +1264,39 @@ fn a_barrier_with_room_behind_it() -> (Vec<Ran>, History) {
 }
 
 /// An owner that needs both node runners gone, the first of which ends at minute 14 and lets a node job older than the
-/// owner into its slot. A lint job queued half a minute before that would run a minute, past that start.
-fn a_barrier_behind_an_older_job() -> (Vec<Ran>, History) {
+/// owner into its slot, and `late` queued after the owner.
+fn a_barrier_behind_an_older_job(late: Ran) -> (Vec<Ran>, History) {
     let page = |queued, minutes| run("halyard/storefront", "page", "node", queued, minutes, G);
-    let lint = |queued, minutes| run("halyard/lint", "lint", "light", queued, minutes, G / 2);
     let report = |queued, minutes| run("halyard/lint", "report", "light", queued, minutes, G / 2);
     let check = |queued, minutes| run("halyard/ledger", "check", "jvm", queued, minutes, G);
+    let docs = |queued, minutes| run("halyard/lint", "docs", "light", queued, minutes, G / 2);
     let (_, mut known) = a_barrier_with_room_behind_it();
-    known
-        .jobs
-        .extend((0..3).map(|i| page(NOW - 600 * MINUTE + i * 40 * MINUTE, 14)));
+    known.jobs.extend((0..3).flat_map(|i| {
+        let at = NOW - 600 * MINUTE + i * 40 * MINUTE;
+        [page(at, 14), docs(at, 3)]
+    }));
     let jobs = vec![
         page(NOW, 14),
         site(NOW + 1000, 20),
         report(NOW + 2000, 30),
         site(NOW + MINUTE / 2, 20),
         check(NOW + MINUTE, 4),
-        lint(NOW + 13 * MINUTE + MINUTE / 2, 1),
+        late,
     ];
     (jobs, known)
+}
+
+/// A docs job, 3 minutes, queued two and a half before the older job's slot frees at minute 14: it would run past that
+/// start, and is too long to pass as a short job (ADR 0151).
+fn docs_before_the_older_jobs_slot() -> Ran {
+    let queued = NOW + 11 * MINUTE + MINUTE / 2;
+    run("halyard/lint", "docs", "light", queued, 3, G / 2)
+}
+
+/// A lint job, a minute, queued half a minute before the older job's slot frees at minute 14: short (ADR 0151).
+fn lint_before_the_older_jobs_slot() -> Ran {
+    let queued = NOW + 13 * MINUTE + MINUTE / 2;
+    run("halyard/lint", "lint", "light", queued, 1, G / 2)
 }
 
 /// `jobs` replayed with `with_light()` in 17G, `known` known from the start.
@@ -1657,29 +1671,31 @@ fn the_replay_and_the_planner_start_a_shared_fixture_at_the_same_moments() {
         .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
         .collect();
     assert_eq!(through_the_planner(&jobs, &known), replayed);
-    // The lint job waits for the older one, then passes beside it: a runner started for an older job is one the owner
-    // waits out under a strict barrier too, so it leaves the room behind the barrier as it was (ADR 0131).
-    let (jobs, known) = a_barrier_behind_an_older_job();
-    let replay = replay_with_light(&jobs, &known, Barriers::On);
+    // The docs job waits for the older one, then passes beside it: a runner started for an older job is one the owner
+    // waits out under a strict barrier too, so it leaves the room behind the barrier as it was (ADR 0131). A one-minute
+    // lint job passes at once, as a short job, and costs the owner nothing here either (ADR 0151).
     let lint = pool("halyard/lint", "light");
-    assert_eq!(replay.backfilled.jobs, 1, "the lint job passes");
-    assert_eq!(
-        replay.pools[&lint].waits,
-        [0, 30],
-        "once the older job started, at minute 14"
-    );
-    let strict = replay_with_light(&jobs, &known, Barriers::Strict);
     let ledger = pool("halyard/ledger", "jvm");
-    assert_eq!(
-        replay.pools[&ledger].waits, strict.pools[&ledger].waits,
-        "and the owner starts when it would"
-    );
-    let replayed: BTreeMap<Pool, Vec<u64>> = replay
-        .pools
-        .iter()
-        .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
-        .collect();
-    assert_eq!(through_the_planner(&jobs, &known), replayed);
+    for (late, waits) in [
+        (docs_before_the_older_jobs_slot(), [0, 150]),
+        (lint_before_the_older_jobs_slot(), [0, 0]),
+    ] {
+        let (jobs, known) = a_barrier_behind_an_older_job(late);
+        let replay = replay_with_light(&jobs, &known, Barriers::On);
+        assert_eq!(replay.backfilled.jobs, 1, "the late job passes");
+        assert_eq!(replay.pools[&lint].waits, waits);
+        let strict = replay_with_light(&jobs, &known, Barriers::Strict);
+        assert_eq!(
+            replay.pools[&ledger].waits, strict.pools[&ledger].waits,
+            "and the owner starts when it would"
+        );
+        let replayed: BTreeMap<Pool, Vec<u64>> = replay
+            .pools
+            .iter()
+            .map(|(pool, replayed)| (pool.clone(), replayed.waits.clone()))
+            .collect();
+        assert_eq!(through_the_planner(&jobs, &known), replayed);
+    }
     // A served pool: job two's short limit is up at minute 22, so what would take its room waits; with the first limit
     // the page and report jobs start at minute 23 and it waits out the report's 30 minutes.
     let (mut jobs, mut known) = a_barrier_with_room_behind_it();

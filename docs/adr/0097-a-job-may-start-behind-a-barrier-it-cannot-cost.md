@@ -4,7 +4,8 @@ Status: **Accepted** (2026-11-06), amended by [0098](0098-a-pool-waits-longer-fo
 move every replay figure here, and by [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md), which counts the
 largest credit when it says when room gathers, and by
 [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md), whose rule 4 counts only what passed
-the barrier. Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Passes follow
+the barrier, and by [0151](0151-a-short-job-of-another-profile-passes-a-barrier.md), which lets a short job of another
+profile pass where rules 2 and 3 find no time. Amends [0096](0096-a-job-starved-of-memory-or-cpu-goes-first.md). Passes follow
 [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md). No wire, schema or config change.
 
 ## Context

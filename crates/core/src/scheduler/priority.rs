@@ -1,8 +1,8 @@
 //! Which one pool goes first once memory or CPU keeps running out before its next job's runner fits (ADR 0096): how
 //! long each pool's next job waited, whether a barrier has served the pool (ADR 0098), what an empty slice would hold,
-//! the rule that picks a plan's one barrier, and which younger jobs may start behind it all the same (`Backfill`, ADR
-//! 0097). `plan` and `admission::simulate` both decide by it, so a replay shows what the daemon does. It does no I/O
-//! and reads no clock; the engine keeps the waits (`waits`), and it never stops or clamps what already runs.
+//! the rule that picks a plan's one barrier, and which younger jobs may start behind it all the same (`Backfill`, ADRs
+//! 0097 and 0151). `plan` and `admission::simulate` both decide by it, so a replay shows what the daemon does. It does
+//! no I/O and reads no clock; the engine keeps the waits (`waits`), and it never stops or clamps what already runs.
 
 use std::time::{Duration, SystemTime};
 
@@ -18,6 +18,12 @@ pub const PRIORITY_AFTER: Duration = Duration::from_secs(600);
 /// `PRIORITY_AFTER` for a pool a barrier has served, until its queue empties: its wait restarts with each job, so with
 /// the first limit a pool of many large jobs could run them only one at a time (ADR 0098).
 pub const SERVED_PRIORITY_AFTER: Duration = Duration::from_secs(120);
+
+/// A job of another profile whose pool usually runs no longer than this may start behind a barrier whatever the running
+/// runners' ends say, while the owner's room has not come (ADR 0151): a short job gives back what it took before waiting
+/// could have gathered much, so if its run takes what the plan read it costs the owner this at most. As long as a served
+/// pool's job waits before it may hold (`SERVED_PRIORITY_AFTER`), and longer than most light jobs' p95.
+pub const SHORT_RUN: Duration = Duration::from_secs(120);
 
 /// What a job's runner lacks that a running job gives back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -216,19 +222,25 @@ pub(crate) struct Candidate<'plan> {
     pub(crate) caps: Caps,
 }
 
-/// The room behind a barrier, as ADRs 0097 and 0131 bound it. If each run takes what the plan read, everything started
-/// here has ended before the owner or any job older than it could start, so nothing they see changes and an owner that
-/// keeps the barrier starts no later than with no backfill. The plan reads p95s, so a run that ends early can bring the
-/// room while a job started here still runs, and that job can cost the owner what it has left. Whatever the run times
-/// do, what passed a barrier since this one matured cannot take, even at its caps, what an empty slice has for the owner
-/// and the older jobs, nor the last free slot of its profile, so the owner fits once the older jobs and what ran before
-/// have ended.
+/// The room behind a barrier, as ADRs 0097, 0131 and 0151 bound it. If each run takes what the plan read, a job that
+/// passes by its run time (0097) has ended before the owner or any job older than it could start, so nothing they see
+/// changes and an owner that keeps the barrier starts no later than with no backfill. A short job of another profile
+/// (0151) passes while the owner's room has not come, even with no time known for it, and costs the owner at most what
+/// it has left to run once the room comes: nothing more passes as a short job once only what passed keeps the owner or
+/// an older job out. The plan reads p95s, so a run that ends early can bring the room while a job started here still
+/// runs, and that job can cost the owner what it has left. Whatever the run times do, what passed a barrier since this
+/// one matured cannot take, even at its caps, what an empty slice has for the owner and the older jobs, nor the last
+/// free slot of its profile, so the owner fits once the older jobs and what ran before have ended.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backfill<'plan> {
     /// The owner's profile.
     profile: &'plan str,
-    /// How long from now until the running runners' usual ends let the owner or an older job start.
-    until: Duration,
+    /// How long from now until the running runners' usual ends let the owner or an older job start; `None` where no
+    /// such time is ahead: the room may come at any moment, or no runner's end brings it.
+    until: Option<Duration>,
+    /// Whether a short job may pass (ADR 0151): the owner's room has not come, nor an older job's, even with what passed
+    /// a barrier given back.
+    short: bool,
     /// What a drain leaves past the owner and the caps of what passed a barrier since this one matured.
     spare: Left,
 }
@@ -265,8 +277,8 @@ impl Ending<'_> {
 
 impl<'plan> Backfill<'plan> {
     /// What the `barrier` of a job of `profile` leaves room for, as things stand `around` it. `None` where nothing may
-    /// start behind it: the owner's room comes now, or no end of a running runner brings it, as when something other
-    /// than runners holds it.
+    /// start behind it: no time is known before which the owner's room comes, and it or an older job's room is there but
+    /// for what passed a barrier.
     pub(crate) fn behind(
         barrier: Barrier,
         profile: &'plan str,
@@ -281,6 +293,16 @@ impl<'plan> Backfill<'plan> {
             runners,
             older,
         } = around;
+        // Room that is there now but for what passed: the owner, or an older job with a slot, takes it once that ends,
+        // so a short job must not take it first. A credit that may come is not there yet; the next plan reads it.
+        let mut freed = left;
+        for runner in runners.iter().filter(|runner| runner.passed) {
+            freed.give(runner.memory, runner.cpu);
+        }
+        let waiting_for_passes = freed.fits(barrier.memory, barrier.cpu)
+            || older
+                .iter()
+                .any(|job| job.free_slot && freed.fits(job.memory, job.cpu));
         // The room may come sooner than ends bring it: either credit can grow at any moment, and an end gives back at
         // most what its runner counts. So the time found is the earliest the owner could start. A runner this plan
         // started has no job yet, so it counts as ending now and gives back its whole take at once: what it may later
@@ -298,10 +320,15 @@ impl<'plan> Backfill<'plan> {
             .collect();
         ending.sort_by_key(|(left_to_run, _)| *left_to_run);
         let ending = Ending(ending);
-        let owner = ending.room_in(left, barrier.memory, barrier.cpu)?;
-        let starts = older.iter().filter_map(|job| ending.start_of(job, left));
-        let until = starts.fold(owner, Duration::min);
-        if until.is_zero() {
+        let until = ending
+            .room_in(left, barrier.memory, barrier.cpu)
+            .map(|owner| {
+                let starts = older.iter().filter_map(|job| ending.start_of(job, left));
+                starts.fold(owner, Duration::min)
+            })
+            .filter(|until| !until.is_zero());
+        let short = !waiting_for_passes;
+        if until.is_none() && !short {
             return None;
         }
         let mut spare = Left {
@@ -327,20 +354,29 @@ impl<'plan> Backfill<'plan> {
         Some(Backfill {
             profile,
             until,
+            short,
             spare,
         })
     }
 
-    /// Whether `candidate`, which fits the budgets left and has a free slot, may start behind the barrier; if so, counts
-    /// its caps. It need not move the time found: a runner that usually ends by then gives back what it took.
-    pub(crate) fn admits(&mut self, candidate: Candidate<'_>) -> bool {
-        let caps = candidate.caps;
-        let admitted = candidate.usual.is_some_and(|usual| usual <= self.until)
-            && self.spare.fits(caps.memory, caps.cpu)
-            && (candidate.profile != self.profile || candidate.free_slots > 1);
-        if admitted {
-            self.spare.take(caps.memory, caps.cpu);
-        }
-        admitted
+    /// Whether `candidate` may start behind the barrier once it fits the budgets left and has a free slot: it usually
+    /// ends before the owner's room comes (ADR 0097), or it is a short job of another profile while that room has not
+    /// come (ADR 0151); either way its caps leave the owner its room. A job that may pass but does not fit waits for
+    /// what it lacks, not for the barrier.
+    pub(crate) fn passes(&self, candidate: Candidate<'_>) -> bool {
+        let Some(usual) = candidate.usual else {
+            return false;
+        };
+        let other_profile = candidate.profile != self.profile;
+        let in_time = self.until.is_some_and(|until| usual <= until)
+            && (other_profile || candidate.free_slots > 1);
+        let short = self.short && other_profile && usual <= SHORT_RUN;
+        (in_time || short) && self.spare.fits(candidate.caps.memory, candidate.caps.cpu)
+    }
+
+    /// Counts the caps of `candidate`, which `passes` let start: they need not move the time found, as a runner that
+    /// usually ends by then gives back what it took.
+    pub(crate) fn admit(&mut self, candidate: Candidate<'_>) {
+        self.spare.take(candidate.caps.memory, candidate.caps.cpu);
     }
 }

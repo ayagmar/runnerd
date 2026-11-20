@@ -881,7 +881,8 @@ impl<'run> Replayer<'run> {
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
                     // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
-                    if self.barrier.is_none() {
+                    // One the barrier would let pass does, as there (ADR 0151).
+                    if self.barrier.is_none() || self.may_pass(queued, &listed).is_some() {
                         self.host_needs.push(short.memory);
                     }
                     let first = self.barrier.is_none();
@@ -1034,9 +1035,9 @@ impl<'run> Replayer<'run> {
         (slots as usize).saturating_sub(in_profile)
     }
 
-    /// Whether `queued`, which fits, may start behind the barrier, `listed` being what the pass began with: the usual
+    /// Whether `queued` may start behind the barrier once it fits, `listed` being what the pass began with: the usual
     /// run time it passes by, if so.
-    fn passes(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
+    fn may_pass(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
         let run = queued.run;
         self.backfill.as_ref()?;
         let predictor = &self.predictor;
@@ -1048,14 +1049,33 @@ impl<'run> Replayer<'run> {
                 .map(|other| Key::of(other.run));
             predictor.longest_usual(keys, &run.profile)
         });
-        let candidate = Candidate {
+        let candidate = self.candidate(run, usual);
+        let backfill = self.backfill.as_ref()?;
+        backfill.passes(candidate).then_some(usual).flatten()
+    }
+
+    /// Whether `queued`, which fits, may start behind the barrier, counting it if so: the usual run time it passes by.
+    fn passes(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
+        let usual = self.may_pass(queued, listed)?;
+        let candidate = self.candidate(queued.run, Some(usual));
+        if let Some(backfill) = self.backfill.as_mut() {
+            backfill.admit(candidate);
+        }
+        Some(usual)
+    }
+
+    /// `run`'s runner as a candidate to start behind the barrier, its pool usually done in `usual`.
+    fn candidate<'profile>(
+        &self,
+        run: &'profile Ran,
+        usual: Option<Duration>,
+    ) -> Candidate<'profile> {
+        Candidate {
             profile: &run.profile,
             free_slots: self.free_slots(&run.profile),
             usual,
             caps: self.caps(&run.profile),
-        };
-        let backfill = self.backfill.as_mut()?;
-        backfill.admits(candidate).then_some(usual).flatten()
+        }
     }
 
     /// The budgets left beside what runs.

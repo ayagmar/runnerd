@@ -1,6 +1,7 @@
 # 0131. A job passes a barrier unless what passed would keep its owner out
 
-Status: **Accepted** (2026-11-10). Amends [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md): its rule 4
+Status: **Accepted** (2026-11-10), amended by [0151](0151-a-short-job-of-another-profile-passes-a-barrier.md), whose short
+jobs keep to rule 4. Amends [0097](0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md): its rule 4
 and its second bound. No wire, schema or config change.
 
 ## Context

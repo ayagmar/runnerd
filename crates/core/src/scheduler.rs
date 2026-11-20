@@ -15,7 +15,7 @@ mod waits;
 pub mod warm;
 
 use priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner};
-pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, Scarce};
+pub use priority::{Barrier, Drained, PRIORITY_AFTER, SERVED_PRIORITY_AFTER, SHORT_RUN, Scarce};
 pub use waits::{Wait, Waits};
 
 /// How long a started runner may wait for a job before it counts as surplus: covers the container's start and
@@ -431,8 +431,8 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// memory or CPU is held once for each (`Plan::held`). An idle runner stops once no queued job is left for it,
 /// it is not one of its repository's `warm` runners, and it waited `IDLE_TIMEOUT`. The first such job that waited
 /// long enough, and that draining the running jobs would make room for, puts up the plan's one barrier
-/// (`priority::Barrier`): no younger job starts until a runner of its pool does, unless it fits and `Backfill` says it
-/// costs the owner neither of ADR 0097's bounds. Last, while no job waits for room, each repository short of its `warm`
+/// (`priority::Barrier`): no younger job starts until a runner of its pool does, unless it fits and `Backfill` lets it
+/// pass by its run time (ADR 0097) or as a short job of another profile (ADR 0151). Last, while no job waits for room, each repository short of its `warm`
 /// runners starts them at its profile's caps, one per repository at a time.
 pub fn plan(
     repositories: &[Repository],
@@ -485,10 +485,12 @@ pub fn plan(
         };
         if let Some(barrier) = decided.barrier {
             let free_slots = taken.iter().filter(|taken| !**taken).count();
-            if !fits || !behind.admits(repository, profile, free_slots) {
-                turn.behind(barrier, &mut decided);
+            let passes = behind.passes(repository, profile, free_slots);
+            if !fits || !passes {
+                turn.behind(barrier, passes, &mut decided);
                 continue;
             }
+            behind.admit(repository, profile, free_slots);
         }
         let room = if fits || profile.preparing.is_some() {
             None
@@ -652,17 +654,34 @@ impl<'plan> Behind<'plan> {
         self.backfill = Backfill::behind(barrier, job.profile, around, now);
     }
 
-    /// Whether a runner of `repository` in `profile`, which has `free_slots`, may start behind the barrier, counting it
-    /// if so.
-    fn admits(&mut self, repository: &Repository, profile: &Profile, free_slots: usize) -> bool {
-        let candidate = Candidate {
+    /// What `repository`'s runner in `profile`, which has `free_slots`, is to the barrier's backfill.
+    fn candidate(
+        repository: &'plan Repository,
+        profile: &Profile,
+        free_slots: usize,
+    ) -> Candidate<'plan> {
+        Candidate {
             profile: &repository.profile,
             free_slots,
             usual: repository.usual,
             caps: profile.caps(),
-        };
-        let backfill = self.backfill.as_mut();
-        backfill.is_some_and(|backfill| backfill.admits(candidate))
+        }
+    }
+
+    /// Whether a runner of `repository` in `profile`, which has `free_slots`, may start behind the barrier once it fits.
+    fn passes(&self, repository: &Repository, profile: &Profile, free_slots: usize) -> bool {
+        let candidate = Behind::candidate(repository, profile, free_slots);
+        self.backfill
+            .as_ref()
+            .is_some_and(|backfill| backfill.passes(candidate))
+    }
+
+    /// Counts a runner of `repository` in `profile` that `passes` let start behind the barrier.
+    fn admit(&mut self, repository: &Repository, profile: &Profile, free_slots: usize) {
+        let candidate = Behind::candidate(repository, profile, free_slots);
+        if let Some(backfill) = self.backfill.as_mut() {
+            backfill.admit(candidate);
+        }
     }
 
     /// Notes a runner started now, behind `barrier` if one stands. It has no job yet: GitHub may give it a shorter one
@@ -864,15 +883,17 @@ impl Turn<'_> {
     }
 
     /// Says why the job waits behind `barrier`. A job with no slot keeps saying so, as the barrier is not what holds
-    /// it, but counts for no more slots: another one would not start it. One that lacks memory or CPU itself is held
-    /// all the same and ages behind the barrier, which it does not share: it may go next.
-    fn behind(self, barrier: Barrier, decided: &mut Plan) {
+    /// it, but counts for no more slots: another one would not start it. So does one the barrier `passes` (ADR 0151):
+    /// what it lacks is all that holds it, and a job waiting for the host's memory is one the host's band reads (ADR
+    /// 0102). One that lacks memory or CPU itself is held all the same and ages behind the barrier, which it does not
+    /// share: it may go next.
+    fn behind(self, barrier: Barrier, passes: bool, decided: &mut Plan) {
         if self.free_slot && self.left.fits(self.memory, self.cpu) {
             decided.waiting.insert(self.job, barrier.reason());
             return;
         }
         let (reason, short) = self.why();
-        let reason = if self.free_slot {
+        let reason = if self.free_slot && !passes {
             barrier.reason()
         } else {
             reason

@@ -1081,6 +1081,53 @@ async fn a_runner_that_passed_counts_against_the_room_behind_the_barrier_until_i
     );
 }
 
+/// A short job that may pass the barrier but finds the host's larger margin in force waits for the host, which the band
+/// reads (ADRs 0102 and 0151): it fits the plain margin, so the band goes and the next plan starts it. Said to wait
+/// behind the barrier, it would keep the larger margin up for as long as the barrier stood. A 32G host keeps 2G, or 3G
+/// while short: 12.5G available leaves 10.5G or 9.5G, of which the 8G and 1G runners take 9G.
+#[tokio::test]
+async fn a_short_job_behind_a_barrier_lets_the_hosts_larger_margin_go_and_starts() {
+    let mut fixture = Fixture::new(24 * G).await;
+    fixture.host(25 * G / 2);
+    fixture.queue(vec![big(9), small(1)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert_eq!(fixture.runners_of("o/small"), 1);
+    // Listed busy for the first time, the runners took jobs 9 and 1.
+    fixture.all_busy();
+    fixture.queue(Vec::new());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(
+        matches!(fixture.reason(10), Some(api::Waiting::HostMemory { .. })),
+        "{:?}",
+        fixture.reason(10)
+    );
+    assert!(fixture.engine.host_is_short(), "job 10 fits no margin");
+    fixture.age();
+    fixture.ran("quick", 200, 3, 2).await;
+    fixture.engine.forget_predictor();
+    fixture.queue(vec![big(10), named(11, "quick")]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(
+        fixture.runners_of("o/small"),
+        1,
+        "this plan had the larger one"
+    );
+    assert!(
+        !fixture.engine.host_is_short(),
+        "job 11 fits the plain margin, so the larger one goes"
+    );
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(
+        fixture.runners_of("o/small"),
+        2,
+        "the next plan starts job 11"
+    );
+    assert_eq!(fixture.runners_of("o/big"), 1, "job 10 still waits");
+}
+
 #[tokio::test]
 async fn a_job_that_would_outlast_the_room_or_has_too_few_runs_stays_behind_the_barrier() {
     for name in ["slow", "rare"] {
