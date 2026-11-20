@@ -1127,6 +1127,7 @@ mod tests {
                 paused: true,
                 queued_jobs: 2,
                 listing: None,
+                queue: runnerd_core::api::QueueShown::Listed,
             },
         };
         assert_eq!(

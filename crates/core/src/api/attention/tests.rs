@@ -26,6 +26,7 @@ fn status() -> Status {
                 paused: false,
                 queued_jobs: 0,
                 listing: None,
+                queue: crate::api::QueueShown::Listed,
             })
             .into(),
         queued: Vec::new(),

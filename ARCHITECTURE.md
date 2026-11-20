@@ -48,7 +48,8 @@ flowchart TB
   Insights, Capacity, Settings) each list their `api::Section`s, and `api::attention_items` decides and words what
   needs attention from the status, the doctor's run and the insights
   ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)); `Status::host_wait` says whether a queued job waits
-  for the host's memory, for that list and for `runnerctl status --waiting-for`
+  for the host's memory, for that list and for `runnerctl status --waiting-for`, and is clear only where each
+  repository's `queue` says the status shows its listed jobs
   ([ADR 0150](docs/adr/0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md)). `api::jobs::log` reads a job's log as
   structure: it styles each stored line, builds the outline a line at a time (`Outliner`), tells each step's lines by
   the runner's step headers in order and the steps' times, words a failure from what is stored, and searches a page

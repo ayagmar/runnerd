@@ -310,6 +310,7 @@ async fn a_restart_starts_a_new_revision_and_forgets_why_listings_failed() {
                 since: 1_800_000_000,
                 problem: ListingProblem::Refused { status: 404 },
             }),
+            queue: runnerd_core::api::QueueShown::Listed,
         }];
     });
     let before = until(&daemon, |shown| {

@@ -478,13 +478,13 @@ async fn status(
         ));
     }
     let status: Status = client.get("/v1/status").await?;
-    match status.host_wait(repository) {
+    let answer = status.host_wait(repository);
+    match answer {
         HostWait::Waits => Ok(ExitCode::SUCCESS),
         HostWait::Clear => Ok(ExitCode::FAILURE),
-        HostWait::UnknownRepository => Err(Error::Local(format!(
-            "{}: not a repository runnerd serves",
-            repository.unwrap_or_default()
-        ))),
+        HostWait::Unavailable | HostWait::UnknownRepository => {
+            Err(Error::Local(answer.trouble(repository).unwrap_or_default()))
+        }
     }
 }
 

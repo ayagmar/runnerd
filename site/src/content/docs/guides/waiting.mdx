@@ -59,10 +59,10 @@ It prints nothing and answers in its exit code:
 | Exit code | Meaning |
 |---|---|
 | 0 | A queued job waits for the host's memory: it says *The host is short of memory*, or it waits behind an older job that does. |
-| 1 | No queued job does. |
-| 2 | No answer: the daemon is not running or refused, `--repo` names a repository runnerd does not serve, or the arguments are wrong. The error is on stderr. |
+| 1 | No queued job does, and runnerd listed every repository asked about at its last poll. |
+| 2 | No answer. runnerd cannot see the queue: it just started, its listing of the repository failed or GitHub's rate limit stopped it, or it is stopping. Or the daemon is not running or refused, it is older than this `runnerctl`, `--repo` names a repository runnerd does not serve, or the arguments are wrong. The error is on stderr. |
 
-Without `--repo` it asks about every repository. Treat 2 as unknown, not as clear, so a stopped daemon or a misspelt repository does not let the build take memory a job needs.
+Without `--repo` it asks about every repository. Treat 2 as unknown, not as clear: CI may be waiting where runnerd cannot see it.
 
 ## How long it waited
 
