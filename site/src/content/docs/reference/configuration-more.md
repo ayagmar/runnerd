@@ -21,6 +21,9 @@ The rest of `runnerd.toml`'s keys; [Configuration](../configuration/) has the ru
 | `build.branches` | `[]` | branches besides the default branch whose pushes, schedules and manual runs write to it |
 | `build.directory` | `$XDG_CACHE_HOME/runnerd/build-cache` | its entries |
 | `build.actions_cache` | `true` | it also serves GitHub Actions' cache in place of GitHub's |
+| `actions.enabled` | `true` | runners read the actions their jobs use from runnerd's verified [action archives](../../guides/caches/#action-archives) |
+| `actions.keep` | `"14d"` | how long an archive stays after no served repository pins it any more |
+| `actions.directory` | `$XDG_CACHE_HOME/runnerd/actions` | the archives |
 
 ## `[history]`
 

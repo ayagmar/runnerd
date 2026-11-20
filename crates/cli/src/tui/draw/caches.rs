@@ -1,5 +1,5 @@
 //! The caches view: one row per cache volume, what it holds, its size against its limit, then the build cache's week
-//! as core's figures.
+//! as core's figures and what the action archives hold.
 //! Emptying one is `d`, asked first.
 
 use ratatui::Frame;
@@ -78,11 +78,15 @@ pub(super) fn caches(
         state.offset(),
         caches.volumes.len(),
     );
-    let lines = caches
+    let width = usize::from(build_area.width);
+    let mut lines = caches
         .build
         .as_ref()
-        .map(|build| build_lines(build, usize::from(build_area.width), theme))
+        .map(|build| build_lines(build, width, theme))
         .unwrap_or_default();
+    if let Some(archives) = &caches.actions {
+        lines.extend(archive_lines(archives, now, width, theme));
+    }
     let lines = super::clip(lines, usize::from(build_area.height), theme);
     frame.render_widget(Paragraph::new(lines), build_area);
 }
@@ -128,6 +132,32 @@ fn build_lines(build: &api::BuildCacheStats, width: usize, theme: Theme) -> Vec<
             .into_iter()
             .map(Line::from),
     );
+    lines
+}
+
+/// The action archives' lines: its heading in bold, what they hold, then each failure in its tone, wrapped.
+fn archive_lines(
+    archives: &api::ActionArchives,
+    now: u64,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(""),
+        Line::styled("Action archives", super::bold()),
+    ];
+    lines.extend(
+        super::wrap(&archives.line(now), width)
+            .into_iter()
+            .map(Line::from),
+    );
+    for failure in &archives.failures {
+        lines.extend(
+            super::wrap(&failure.line(), width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.of(archives.tone()))),
+        );
+    }
     lines
 }
 

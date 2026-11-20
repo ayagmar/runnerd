@@ -110,11 +110,33 @@ pub struct JobSummary {
     /// that has not concluded failed, and in records from before it was kept.
     #[serde(default)]
     pub runner_fault: bool,
+    /// What its log says failed it, for a job that concluded failed and whose log shows one of the failures runnerd
+    /// tells apart (`record::failure_cause`): an action the runner could not download or unpack, one it could not
+    /// resolve, or `actions/checkout`. Read once the record is final; `None` for every other job, from a daemon older
+    /// than it, and where the log does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_cause: Option<FailureCause>,
     /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).
     /// `None` for a job without a record note, and from a daemon older than the mark. Not `record`, which a `Job`
     /// that flattens this summary holds in full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_mark: Option<RecordMark>,
+}
+
+/// What a failed job's log says failed it (`record::failure_cause`), apart from its own code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureCause {
+    /// While it set up, the runner could not download an action's archive after its retries, or could not unpack
+    /// the archive it had.
+    ActionArchive,
+    /// While it set up, the runner could not resolve an action: GitHub's API did not say where to download it.
+    ActionResolve,
+    /// The step that failed is `actions/checkout`: the repository could not be fetched.
+    Checkout,
+    /// A cause a newer daemon tells apart.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `GET /v1/jobs/{id}`: a job with its steps.
@@ -975,6 +997,10 @@ pub struct Caches {
     pub volumes: Vec<CacheVolume>,
     /// The shared build cache now, when it is on.
     pub build: Option<BuildCacheStats>,
+    /// The action archives runnerd keeps for its runners, when `[caches.actions]` is on (ADR 0147); absent from an
+    /// older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<super::ActionArchives>,
 }
 
 /// The shared build cache (ADR 0052): its size now, and what it served the jobs of the last 7 days.

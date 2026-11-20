@@ -769,6 +769,33 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
     })
 }
 
+/// Where the action archives are kept: `[caches.actions] directory` or `$XDG_CACHE_HOME/runnerd/actions`, absolute,
+/// as Docker mounts it into each runner. Kept whether `[caches.actions]` is on or not, so a reload can turn it on.
+fn action_archives_directory(config: &Config) -> Option<PathBuf> {
+    let directory = config.caches.actions.directory.clone().or_else(|| {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
+            .map(|dir| dir.join("runnerd/actions"))
+    });
+    let Some(directory) = directory else {
+        warn!(
+            "no action archives: neither XDG_CACHE_HOME nor HOME is set; set caches.actions.directory"
+        );
+        return None;
+    };
+    match std::path::absolute(&directory) {
+        Ok(directory) => Some(directory),
+        Err(error) => {
+            warn!(
+                "no action archives: cannot resolve {}: {error}",
+                directory.display()
+            );
+            None
+        }
+    }
+}
+
 /// The shared build cache: its entries in `[caches.build] directory` or `$XDG_CACHE_HOME/runnerd/build-cache`, each
 /// runner's socket beside the API's. Opened whether `[caches.build]` is on or not, so a reload can turn it on.
 /// Without it runners build without it, which the log says.
@@ -870,6 +897,7 @@ async fn serve(
         .map_err(|error| fail(&format_args!("--web {web}: {error}")))?;
     let proxies = config.web.origins.clone();
     let build_cache = open_build_cache(&config, &socket);
+    let action_archives = action_archives_directory(&config);
     let (engine, handle) = Engine::new(
         config,
         github,
@@ -884,6 +912,7 @@ async fn serve(
             paused,
             paths: Paths::default(),
             build_cache,
+            action_archives,
             unsynced,
             durability: Durability::host(),
         },

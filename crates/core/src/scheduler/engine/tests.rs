@@ -447,6 +447,43 @@ impl FakeGithub {
     }
 }
 
+/// The engine's fakes hold no action archives: the archives' own tests have their fake.
+impl crate::archives::Source for FakeGithub {
+    async fn action_repository(
+        &self,
+        _: &str,
+    ) -> Result<crate::archives::ActionRepository, github::Error> {
+        Err(github::Error::Token("the fakes read no actions".to_owned()))
+    }
+
+    async fn branch_head(&self, _: &str, _: &str) -> Result<String, github::Error> {
+        Err(github::Error::Token("the fakes read no actions".to_owned()))
+    }
+
+    async fn tree(&self, _: &str, _: &str) -> Result<crate::archives::Tree, github::Error> {
+        Err(github::Error::Token("the fakes read no actions".to_owned()))
+    }
+
+    async fn blob(&self, _: &str, _: &str, _: u64) -> Result<Vec<u8>, github::Error> {
+        Err(github::Error::Token("the fakes read no actions".to_owned()))
+    }
+
+    async fn tarball(
+        &self,
+        _: &str,
+        _: &str,
+        _: &std::path::Path,
+        _: u64,
+        _: &std::sync::atomic::AtomicU64,
+    ) -> Result<u64, github::Error> {
+        Err(github::Error::Token("the fakes read no actions".to_owned()))
+    }
+
+    fn spare_requests(&self) -> Option<u64> {
+        None
+    }
+}
+
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
         if let Err(error) = self.blocked() {
@@ -2100,6 +2137,7 @@ fn engine_durable(
                 sys: dir.0.join("sys"),
             },
             build_cache: None,
+            action_archives: None,
             unsynced: dir.0.join("unsynced"),
             durability,
         },
@@ -7669,6 +7707,7 @@ async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the
 
 mod access;
 mod admission;
+mod archives;
 mod build_cache;
 mod cadence;
 mod exit;

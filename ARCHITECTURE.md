@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["actions, admission, buildcache, command, docker, github, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
+        host["actions, admission, archives, buildcache, command, docker, github, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -60,8 +60,8 @@ flowchart TB
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `actions`, `admission`, `boots`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`, `isolation`,
-  `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
+- `actions`, `admission`, `archives`, `boots`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`,
+  `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
   through the engine's own `Github`, off the engine's loop: a preview that reads the run and issues a confirmation,
   then, for a request that carries one, one POST within a deadline, once a permit `Github` asks with the token in hand
@@ -93,7 +93,15 @@ flowchart TB
   [ADR 0103](docs/adr/0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md)), and adds up what
   the window's jobs and the drive's stored windows wrote (`insights::disk`,
   [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)). All three are pure:
-  the engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
+  the engine and the daemon read the store and act on what they return. `archives` keeps the verified action archives
+  runners read in place of downloading them, in a task of its own the engine starts: it reads the served
+  repositories' pins from their parsed YAML (`archives::pins`), downloads anonymously from codeload into `staging/`,
+  reads each archive's tar headers as GNU tar does (`archives::verify`) and publishes it into the store
+  (`archives::store`), which holds an exclusive lock on its directory and whose index, archives and per-repository
+  inventories only its methods write; `archives::state` keeps what failed. The task publishes a ready view only after
+  a check found every file good; a runner's start reads it once, for both the mount and the environment, and the
+  engine shows the task's status ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)).
+  `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.
   `buildcache::decision` owns that answer, with the uploads held until it comes and the scopes that come with it.
@@ -245,7 +253,8 @@ queued → slot → container → removed
    batch is done, up to three plans a tick, rather than holding back the plan's later starts until the next poll. A
    pool a failure holds back mid-batch launches nothing more, and GitHub's rate limit stops the batch; the batch
    folds and checks both again, and the stop, once a launch's caches and name are ready, before its build cache
-   opens. Once a stop is
+   opens. A runner started while the action archives are on mounts their `archives/` read-only and reads its
+   actions from there before it downloads any ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)). Once a stop is
    asked for, no further start, registration or plan runs, and a runner GitHub registered meanwhile is deleted before
    its container starts. Before its plan a tick reads from GitHub only the running jobs admission cannot name yet; it
    reads the others after its last start, once every `poll_interval` however often ticks come, or 2× or 4× that
@@ -294,7 +303,10 @@ queued → slot → container → removed
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`). A job that failed is then
    read for a runner fault: `record::runner_fault` over its stored log, kept in `jobs.runner_fault`, which makes
-   its outcome `runner fault` in every client ([ADR 0120](docs/adr/0120-a-job-its-runner-failed-reads-as-a-runner-fault.md)).
+   its outcome `runner fault` in every client ([ADR 0120](docs/adr/0120-a-job-its-runner-failed-reads-as-a-runner-fault.md)),
+   and for what else failed it: `record::failure_cause`, kept in `jobs.failure_cause`, says whether the runner could
+   not download, unpack or resolve an action while it set the job up, or `actions/checkout` failed, which every client
+   writes under the outcome ([ADR 0148](docs/adr/0148-a-failed-jobs-log-says-whether-an-action-or-checkout-failed-it.md)).
 6. After a job in slot 1, `cache::measure` reads what slot 1's layers changed, read-only beside the profile's runners,
    at most every 10 minutes per profile. When that reaches `[caches] reseed_at`, the last reseed did not finish or the
    measure failed, or the caches' check measured the snapshot over `[caches] snapshot_max`, the profile is due to
@@ -327,6 +339,7 @@ always returns, so the daemon closes and flushes the history.
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>` with the scope's ref and the key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
+| Action archives | files in `[caches.actions] directory`, default `$XDG_CACHE_HOME/runnerd/actions`: `archives/<owner>_<repo>/<sha>.tar.gz` (0644, mounted read-only into runners), `staging/`, `quarantine/` and `index.json` (each archive's SHA-256, size, when fetched and when last pinned; each served repository's pins as last read and the archives they reached when all were last known; refused archives; repositories jobs resolved as immutable packages), and `lock`, held by the one runnerd that owns the directory, kept across restarts; what failed, in memory ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)) |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Job actions | in memory: the confirmations issued and one entry per run while its POST is out in `actions::flights`, each confirmation for 5 minutes; the config's job actions and repositories in `actions::policy`, replaced whole at each reload; a restart forgets them all ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)) |
@@ -377,6 +390,13 @@ always returns, so the daemon closes and flushes the history.
   (`api/notify/send.rs`) that turns a notification into its kind's URL and body; built from the target's config at each
   send, and the shared post adds the headers, so no sender can log them
   ([ADR 0064](docs/adr/0064-each-notify-kind-is-a-sender.md)).
+- A runner reads only action archives runnerd verified: a download reaches `archives/` only after its whole gzip and
+  tar stream passed the checks in `git archive`'s narrow shape and named its commit, by a rename that replaces
+  nothing, and before the index names it; a file the index does not name or whose hash differs moves to `quarantine/`
+  at the next check, and a runner gets the mount only after a check settled every file. What to fetch comes only from
+  the served repositories' default branches, never from a job's log; archives are downloaded without the token, so
+  only a public one can be kept, and an archive is removed only after a refresh knew every pin whole
+  ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
   schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
   commit that branch has, or, where `build_cache_writers = "pull-requests"`, a `pull_request` run of the

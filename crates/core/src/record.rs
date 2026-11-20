@@ -357,6 +357,120 @@ pub fn runner_fault(job: &api::Job, log: &[String]) -> bool {
         .is_some_and(|section| section.output.iter().any(|line| sysbox_fault(line)))
 }
 
+/// What failed a failed job apart from its code, as its log shows it, read only where the runner reports it
+/// (actions/runner 2.338's `ActionManager` and `JobExtension`):
+///
+/// - [`api::FailureCause::ActionArchive`]: `Set up job` failed, and the last error it printed, the one the runner ends
+///   it with, says an action could not be downloaded or unpacked (`Failed to download archive '…' after 3 attempts.`,
+///   `Can't use 'tar -xzf'`, `Can't un-zip archive file`, a download that timed out).
+/// - [`api::FailureCause::ActionResolve`]: `Set up job` failed, and that last error says an action could not be
+///   resolved (`Failed to resolve action download info.`, `Unable to resolve action`).
+/// - [`api::FailureCause::Checkout`]: the step that failed is `actions/checkout`, by its own section of the log: the
+///   section at its place among the job's steps, when the log has one section a step, that runs the action, not a
+///   script, and that printed the checkout's `Syncing repository:` and an error.
+///
+/// A warning a retry printed is no cause: a retry that succeeded prints the same, and what fails after it is not
+/// this. `None` for anything else: a job that did not fail, a post step, or a log that does not say. `log` is the
+/// stored lines.
+pub fn failure_cause(job: &api::Job, log: &[String]) -> Option<api::FailureCause> {
+    let failed = job
+        .steps
+        .iter()
+        .find(|step| step.conclusion.as_deref() == Some("failure"))?;
+    if failed.name == SET_UP {
+        return setup_failure(&setup_lines(log));
+    }
+    let section = own_section(job, log, failed)?;
+    let runs_checkout = section
+        .title
+        .to_ascii_lowercase()
+        .strip_prefix("actions/checkout@")
+        .is_some_and(|reference| !reference.is_empty() && !reference.contains(' '));
+    let script = section
+        .lines
+        .iter()
+        .any(|line| line.trim_start().starts_with("shell: "));
+    let fetched = section
+        .output
+        .iter()
+        .any(|line| line.starts_with("Syncing repository: "));
+    let errored = section
+        .output
+        .iter()
+        .any(|line| line.starts_with("##[error]"));
+    (runs_checkout && !script && fetched && errored).then_some(api::FailureCause::Checkout)
+}
+
+/// The name GitHub gives the step a job sets up in: the runner prepares its actions there.
+const SET_UP: &str = "Set up job";
+
+/// The plain lines a log has before its first step's group: what `Set up job` printed.
+fn setup_lines(log: &[String]) -> Vec<String> {
+    log.iter()
+        .map(|line| plain(line))
+        .take_while(|text| !text.starts_with("##[group]Run ") && text != "Post job cleanup.")
+        .collect()
+}
+
+/// The cause of a failed `Set up job`, from the last error it printed (`failure_cause`).
+fn setup_failure(lines: &[String]) -> Option<api::FailureCause> {
+    let error = lines
+        .iter()
+        .rev()
+        .find(|text| text.starts_with("##[error]"))?;
+    let archive = [
+        "Failed to download archive '",
+        "Failed to download action '",
+        "Can't use 'tar -xzf'",
+        "Can't un-zip archive file",
+        "download has timed out",
+    ];
+    let resolve = [
+        "Failed to resolve action download info",
+        "Unable to resolve action",
+    ];
+    if archive.iter().any(|sign| error.contains(sign)) {
+        Some(api::FailureCause::ActionArchive)
+    } else if resolve.iter().any(|sign| error.contains(sign)) {
+        Some(api::FailureCause::ActionResolve)
+    } else {
+        None
+    }
+}
+
+/// The section of the log a failed main step printed, by its place: only when the log has exactly one `##[group]Run`
+/// section for each step that ran between `Set up job` and the post steps, as a composite action's inner steps or a
+/// step's own groups would shift the places. `None` for a post step, or when the places do not line up.
+fn own_section(job: &api::Job, log: &[String], failed: &api::Step) -> Option<Section> {
+    if failed.name.starts_with("Post ") {
+        return None;
+    }
+    let main: Vec<&api::Step> = job
+        .steps
+        .iter()
+        .filter(|step| {
+            step.name != SET_UP
+                && !step.name.starts_with("Post ")
+                && !step.name.starts_with("Complete job")
+                && !matches!(step.conclusion.as_deref(), Some("skipped") | None)
+        })
+        .collect();
+    let place = main.iter().position(|step| step.number == failed.number)?;
+    let mut sections = sections(&main_lines(log));
+    if sections.len() != main.len() {
+        return None;
+    }
+    Some(sections.swap_remove(place))
+}
+
+/// The lines of a log before its post steps: everything up to its first `Post job cleanup.`.
+fn main_lines(log: &[String]) -> Vec<String> {
+    log.iter()
+        .take_while(|line| plain(line) != "Post job cleanup.")
+        .cloned()
+        .collect()
+}
+
 /// What a call's name is in a line of Sysbox's trouble: the words of `mount`'s family and `openat2`.
 const FAULT_CALLS: [&str; 6] = [
     "mount", "umount", "umount2", "unmount", "mounting", "openat2",
@@ -372,6 +486,32 @@ fn sysbox_fault(text: &str) -> bool {
             .split(|c: char| c.is_whitespace() || ":()\"',".contains(c))
             .any(|word| FAULT_CALLS.contains(&word)))
         || (text.contains("unsafe procfs detected") && text.contains("invalid argument"))
+}
+
+/// The repositories `lines`, stored lines of a job's log, show the runner downloading as an immutable action package
+/// (actions/runner 2.338's `##[group]Download immutable action package 'owner/repo@ref'`), each once, as written.
+/// The runner prints it before it looks in an action archive cache, so it shows a package resolution whether or not
+/// it then read an archive in the package's place.
+pub fn immutable_packages(lines: &[String]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in lines {
+        let text = plain(line);
+        let Some(rest) = text.strip_prefix("##[group]Download immutable action package '") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once('@') else {
+            continue;
+        };
+        let mut parts = name.split('/');
+        let (Some(owner), Some(repo)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let repository = format!("{owner}/{repo}");
+        if !found.contains(&repository) {
+            found.push(repository);
+        }
+    }
+    found
 }
 
 /// A stored log line without its timestamp and colour codes.

@@ -332,6 +332,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             truncated: false,
         },
         runner_fault: false,
+        failure_cause: None,
         record_mark: None,
     };
     (
@@ -568,6 +569,13 @@ impl Fixtures {
             }
         }
         cache_history.sort_by_key(|size| size.at);
+        let action_archives = runnerd_core::api::ActionArchives {
+            entries: 23,
+            bytes: 41 * MIB,
+            refreshed_at: Some(now - 240),
+            failures: Vec::new(),
+            unchecked: 0,
+        };
         let caches = Caches {
             measured_at: Some(now - 900),
             volumes: volumes
@@ -593,6 +601,7 @@ impl Fixtures {
                 },
                 actions_cache: true,
             }),
+            actions: Some(action_archives.clone()),
         };
         let status = Status {
             job_actions: JobActions::On,
@@ -600,6 +609,7 @@ impl Fixtures {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            action_archives: Some(action_archives),
             budget: Budget {
                 admission: runnerd_core::api::AdmissionPolicy::Caps,
                 held: false,

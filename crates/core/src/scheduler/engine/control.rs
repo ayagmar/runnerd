@@ -930,6 +930,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if let Some(cache) = &self.build_cache {
             cache.set_max_size(self.config.caches.build.max_size.0);
         }
+        self.archives.reload(&self.config);
         for (name, profile) in &self.config.profiles {
             let slots = self.slots.entry(name.clone()).or_default();
             if slots.len() < profile.slots as usize {

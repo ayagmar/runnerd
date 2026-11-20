@@ -540,6 +540,7 @@ fn empty(fixtures: &mut fake::Fixtures) {
         measured_at: None,
         volumes: vec![],
         build: None,
+        actions: None,
     };
     fixtures.insights = Some(runnerd_core::api::Insights {
         since: at - 14 * 86_400,

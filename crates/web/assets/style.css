@@ -2376,6 +2376,11 @@ dl.health-figures {
   color: var(--ink);
 }
 
+.job-cause {
+  margin: 0;
+  color: var(--failure-ink);
+}
+
 .facts,
 .totals,
 .headline {

@@ -57,6 +57,7 @@ fn status() -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        action_archives: None,
         budget: Budget {
             admission: runnerd_core::api::AdmissionPolicy::Caps,
             held: false,
@@ -164,6 +165,7 @@ fn job(state: JobState) -> Job {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            failure_cause: None,
             record_mark: None,
         },
         steps: Vec::new(),

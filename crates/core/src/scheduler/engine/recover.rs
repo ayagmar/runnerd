@@ -353,6 +353,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                     slot.place(occupant.clone());
                     running.insert(occupant.runner_name.clone());
+                    self.archives
+                        .adopted(&occupant.runner_name, &container.labels);
                     // Its socket back in the directory its container mounts, if it does; its job's writes are
                     // decided again.
                     drop(self.attach_build_cache(
@@ -382,15 +384,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
-        if let Some(cache) = &self.build_cache {
-            let keep: Vec<&str> = running.iter().map(String::as_str).collect();
-            cache.forget_others(&keep);
-        }
+        self.caches_adopted(&running);
         self.drop_closed_slots();
         self.recover_history(&running).await;
         self.measure_docker_disk();
         self.recover_unsynced();
         Ok(())
+    }
+
+    /// Tells the caches recovery adopted every runner it will, `running`: the build cache forgets every other, and
+    /// the archives' first check may run.
+    fn caches_adopted(&self, running: &BTreeSet<String>) {
+        if let Some(cache) = &self.build_cache {
+            let keep: Vec<&str> = running.iter().map(String::as_str).collect();
+            cache.forget_others(&keep);
+        }
+        self.archives.recovered();
     }
 
     /// Notes whether the host booted again since runners wrote without syncing, with neither a clean stop nor an

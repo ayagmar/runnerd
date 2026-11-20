@@ -129,7 +129,9 @@ pub(super) fn problem(error: &github::Error) -> api::ListingProblem {
             status: status.as_u16(),
         },
         github::Error::Http { .. } => api::ListingProblem::Unreachable,
-        github::Error::Decode { .. } => api::ListingProblem::Unexpected,
+        github::Error::Decode { .. } | github::Error::Download(_) | github::Error::Held(_) => {
+            api::ListingProblem::Unexpected
+        }
         // `tick` takes the rate limit apart before; were one to come here, nothing more is known.
         github::Error::RateLimited { .. } => api::ListingProblem::Unknown,
     }

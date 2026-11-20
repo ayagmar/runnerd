@@ -85,6 +85,7 @@ fn app() -> App {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            action_archives: None,
             budget: Budget {
                 admission: AdmissionPolicy::Caps,
                 held: false,
@@ -144,6 +145,7 @@ fn summary(id: u64, state: JobState) -> JobSummary {
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        failure_cause: None,
         record_mark: None,
     }
 }

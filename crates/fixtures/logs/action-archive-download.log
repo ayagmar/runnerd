@@ -1,0 +1,17 @@
+2026-11-17T15:46:01.1000000Z Current runner version: '2.338.1'
+2026-11-17T15:46:01.1100000Z Runner name: 'runnerd-1a2b3c4d-host-node-2-1763394360'
+2026-11-17T15:46:01.1200000Z ##[group]Operating System
+2026-11-17T15:46:01.1200000Z Ubuntu
+2026-11-17T15:46:01.1200000Z 24.04.3
+2026-11-17T15:46:01.1300000Z ##[endgroup]
+2026-11-17T15:46:01.1400000Z Secret source: Actions
+2026-11-17T15:46:01.1500000Z Prepare workflow directory
+2026-11-17T15:46:01.2000000Z Prepare all required actions
+2026-11-17T15:46:01.2100000Z Getting action download info
+2026-11-17T15:46:01.6000000Z Download action repository 'actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955' (SHA:08eba0b27e820071cde6df949e0beb9ba4906955)
+2026-11-17T15:46:21.7000000Z ##[warning]Failed to download action 'https://api.github.com/repos/actions/checkout/tarball/08eba0b27e820071cde6df949e0beb9ba4906955'. Error: The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing. C2D4:3B9E1:5A2F0E1:5C7D3A2:6919A3C1
+2026-11-17T15:46:21.7100000Z ##[warning]Back off 22.476 seconds before retry.
+2026-11-17T15:46:44.2000000Z ##[warning]Failed to download action 'https://api.github.com/repos/actions/checkout/tarball/08eba0b27e820071cde6df949e0beb9ba4906955'. Error: Response status code does not indicate success: 504 (Gateway Timeout). C2D4:3B9E1:5A2F4B0:5C7D7F1:6919A3D8
+2026-11-17T15:46:44.2100000Z ##[warning]Back off 13.112 seconds before retry.
+2026-11-17T15:46:57.4000000Z ##[error]Response status code does not indicate success: 504 (Gateway Timeout).
+2026-11-17T15:46:57.4100000Z ##[error]Failed to download archive 'https://api.github.com/repos/actions/checkout/tarball/08eba0b27e820071cde6df949e0beb9ba4906955' after 3 attempts.

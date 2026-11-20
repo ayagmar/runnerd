@@ -40,6 +40,7 @@ pub(super) fn engine_with_cache(
                 sys: dir.0.join("sys"),
             },
             build_cache: Some(cache.clone()),
+            action_archives: None,
             unsynced: dir.0.join("unsynced"),
             durability: Durability::new(|| {}, |_| false),
         },

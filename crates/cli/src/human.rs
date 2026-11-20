@@ -407,6 +407,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
         context.push(format!("attempt {}", summary.run_attempt));
     }
     let _ = writeln!(out, "{}", context.join(" · "));
+    if let Some(cause) = summary.failure_line() {
+        let _ = writeln!(out, "{}", paint.paint(tone, cause));
+    }
     if let Some(url) = &summary.url {
         let _ = writeln!(out, "{}", paint.paint(Tone::Dim, url));
     }
@@ -846,6 +849,17 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
         let _ = writeln!(out, "build cache for {}", api::BUILD_CACHE_TOOLS);
         let _ = writeln!(out, "  {}", build.week_line());
         let _ = writeln!(out, "  {}", build.actions_cache_line());
+    }
+    if let Some(archives) = &caches.actions {
+        let _ = writeln!(out, "action archives");
+        let _ = writeln!(out, "  {}", archives.line(now));
+        for failure in &archives.failures {
+            let _ = writeln!(
+                out,
+                "  {}",
+                paint.paint(archives.tone().into(), &failure.line())
+            );
+        }
     }
     out
 }

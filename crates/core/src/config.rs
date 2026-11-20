@@ -305,6 +305,44 @@ pub struct Caches {
     /// The build cache every runner shares.
     #[serde(default)]
     pub build: BuildCache,
+    /// The verified action archives every runner reads.
+    #[serde(default)]
+    pub actions: ActionArchives,
+}
+
+/// `[caches.actions]`: the archives of the actions the served repositories pin, which runnerd downloads, verifies and
+/// keeps for every runner to read instead of downloading them itself (ADR 0147). Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ActionArchives {
+    /// Whether runnerd keeps them and runners read them. Default true.
+    pub enabled: bool,
+    /// Where they are kept; default `$XDG_CACHE_HOME/runnerd/actions`.
+    pub directory: Option<PathBuf>,
+    /// How long an archive no repository pins any longer is kept. Default 14d.
+    #[serde(deserialize_with = "duration")]
+    pub keep: Duration,
+}
+
+impl ActionArchives {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.keep.is_zero() {
+            return Err(ConfigError::ZeroLimit {
+                field: "caches.actions.keep".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for ActionArchives {
+    fn default() -> ActionArchives {
+        ActionArchives {
+            enabled: true,
+            directory: None,
+            keep: Duration::from_hours(14 * 24),
+        }
+    }
 }
 
 /// `[caches.build]`: the build cache every runner shares (ADR 0052): Gradle's, and the other tools' the runner image
@@ -1563,6 +1601,7 @@ impl Config {
         }
         self.check_sizing_bounds()?;
         self.caches.build.validate()?;
+        self.caches.actions.validate()?;
         self.host.check_cpu_overcommit()?;
         self.check_memory_ceiling()?;
         self.web.validate()?;
