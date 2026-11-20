@@ -1,10 +1,10 @@
 //! `/insights`: what the job history says (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on
-//! a re-run, jobs near their memory cap, one card each, warnings first; the last 24 hours in a line; and each
-//! repository's waits this week against the week before. Reads only.
+//! a re-run, jobs near their memory cap, one card each, warnings first; the last 24 hours in a line; why each
+//! profile's jobs queued; and each repository's waits this week against the week before. Reads only.
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, LabelledFigure,
+    Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, LabelledFigure, ProfileQueue,
     RepositoryWaits, RunLink, ShareOwner, Tone, View, WriteTop,
 };
 use runnerd_core::client::{Client, ClientError};
@@ -74,6 +74,9 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
         }
         @if let Some(disk) = &insights.disk {
             (disk_writes(disk))
+        }
+        @if !insights.queue.is_empty() {
+            (queue(&insights.queue))
         }
         @if !insights.waits.is_empty() {
             (waits(&insights.waits))
@@ -222,6 +225,22 @@ fn run_link(run: &RunLink, now: u64) -> Markup {
         ", " (time_ago(run.at, now))
         @if let Some(url) = &run.url {
             " · " a.hit href=(url) rel="noopener" target="_blank" { "on GitHub" }
+        }
+    }
+}
+
+/// Why each profile's jobs queued: core's line for the profile, then what held its jobs as figures.
+fn queue(queue: &[ProfileQueue]) -> Markup {
+    html! {
+        section.queue aria-labelledby="queue-title" {
+            div.section-head {
+                h2 #queue-title { (ProfileQueue::TITLE) }
+                span.muted { "From queued to started, by what each plan held the jobs for." }
+            }
+            @for profile in queue {
+                h3 { (profile.line()) }
+                (figure_list("queue-figures", &profile.figures()))
+            }
         }
     }
 }

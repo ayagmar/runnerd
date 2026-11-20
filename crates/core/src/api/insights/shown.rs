@@ -3,9 +3,10 @@
 //! [`Insights`] and [`Digest`]; the dashboard, `runnerctl`, the TUI and notifications only lay them out.
 
 use super::{
-    Digest, HostHazard, HostSpan, Insight, InsightKind, Insights, LongWait, RepositoryWaits,
-    Severity, WaitSpread,
+    Digest, HostHazard, HostSpan, Insight, InsightKind, Insights, LongWait, ProfileQueue,
+    RepositoryWaits, Severity, WaitSpread,
 };
+use crate::api::LabelledFigure;
 use crate::api::units::short_date;
 use crate::api::{HostMemory, Tone, duration};
 use crate::config::ByteSize;
@@ -368,6 +369,77 @@ impl RepositoryWaits {
         .into_iter()
         .map(|(label, value)| WaitFigure { label, value })
         .collect()
+    }
+}
+
+impl ProfileQueue {
+    /// What the split of the profiles' queue time is called where it shows.
+    pub const TITLE: &'static str = "Why jobs queued";
+    /// The label of the wait before runnerd first listed a job.
+    pub const BEFORE_LISTED: &'static str = "Before runnerd listed it";
+    /// The label of the wait no plan held a job for.
+    pub const UNCOVERED: &'static str = "No plan covered";
+
+    /// It in a line: `jvm: 42 jobs waited 12h 30m in all`, then `; 3 jobs from before runnerd counted why are left
+    /// out` when some are; `jvm: 3 jobs ended from before runnerd counted why jobs wait` when none is counted.
+    pub fn line(&self) -> String {
+        let jobs = |count: u32| {
+            if count == 1 {
+                "1 job".to_owned()
+            } else {
+                format!("{count} jobs")
+            }
+        };
+        if self.jobs == 0 {
+            return format!(
+                "{}: {} ended from before runnerd counted why jobs wait",
+                self.profile,
+                jobs(self.unrecorded)
+            );
+        }
+        let mut line = format!(
+            "{}: {} waited {} in all",
+            self.profile,
+            jobs(self.jobs),
+            duration(self.waited)
+        );
+        if self.unrecorded > 0 {
+            let _ = write!(
+                line,
+                "; {} from before runnerd counted why {} left out",
+                jobs(self.unrecorded),
+                if self.unrecorded == 1 { "is" } else { "are" }
+            );
+        }
+        line
+    }
+
+    /// What held the jobs, longest first, each with its share of their waits: `Host memory` `6h 10m` `49%`; then
+    /// the wait before runnerd listed them and the wait no plan covered, when there was some. Empty when no job was
+    /// counted.
+    pub fn figures(&self) -> Vec<LabelledFigure> {
+        let share = |seconds: u64| {
+            let percent = (u128::from(seconds) * 100 + u128::from(self.waited) / 2)
+                / u128::from(self.waited.max(1));
+            format!("{}%", percent.min(100))
+        };
+        let figure = |label: &str, seconds: u64| {
+            LabelledFigure::new(label, duration(seconds)).of(share(seconds))
+        };
+        let mut figures: Vec<LabelledFigure> = self
+            .causes
+            .iter()
+            .map(|cause| figure(cause.cause.label(), cause.waited))
+            .collect();
+        for (label, seconds) in [
+            (Self::BEFORE_LISTED, self.before_listed),
+            (Self::UNCOVERED, self.uncovered),
+        ] {
+            if seconds > 0 {
+                figures.push(figure(label, seconds));
+            }
+        }
+        figures
     }
 }
 

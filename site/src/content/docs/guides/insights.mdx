@@ -80,6 +80,33 @@ disk writes:
 - When a reading of the runner slice failed, its shares are over the time it was read, and the line says how long that was.
 - The drive is read in windows of up to 10 minutes; the time runnerd was stopped is in none, and the daily rate is over the time read.
 
+### Why jobs queued
+
+Then each profile's queue time over the window, split by what held its jobs. Each plan that holds a queued job adds the time to the next plan to the reason it gave, as `runnerctl status` words it:
+
+<Printed command="runnerctl insights" name="insights" from="why jobs queued:" to="REPOSITORY" />
+
+| Cause | The plan held the job because |
+|---|---|
+| Behind a barrier | An older job waited long enough for memory or CPU that no younger one starts before it. |
+| Behind an older job's start | An older job's runner starts first and takes the room. |
+| No free slot | Every slot of its profile holds a runner. |
+| Memory budget | Its runner does not fit the slice's memory budget. |
+| Host memory | Its runner does not fit what the host's memory has to spare. |
+| CPU budget | Its runner does not fit the CPU budget. |
+| Runner starting | A runner is up or starting for it, waiting for GitHub to hand it a job. |
+| Snapshot, image or cleanup | Its profile rebuilds its snapshot, pulls its image, or empties caches a host crash may have torn. |
+| Repository paused, Runners failing, No profile serves it | Something for you to act on. |
+
+Two parts no cause covers are named rather than spread over the causes. Before runnerd listed it: from GitHub queueing the job to runnerd's first listing of it. No plan covered: after a restart until the first plan, and between a planned start and its runner. Time runnerd was stopped is left out of the wait, as in [how a wait is counted](../sizing/#how-a-wait-is-counted). Jobs that ended before runnerd counted causes are left out and counted apart, never as a wait of 0.
+
+To ask the [job history](../../concepts/terms/#job-history) directly, each job's `wait_causes` holds milliseconds by cause:
+
+```sh
+sqlite3 "file:$HOME/.local/state/runnerd/runnerd.db?mode=ro" \
+  'SELECT key, sum(value) / 1000 AS seconds FROM jobs, json_each(jobs.wait_causes) GROUP BY key'
+```
+
 ## What the minutes would have cost
 
 `runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. Each job is billed as GitHub bills it: minutes rounded up, at the rate of the runner its profile's [`priced_as`](../../reference/configuration/#profilesname) names. Not counted:

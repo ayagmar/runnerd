@@ -103,6 +103,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE INDEX jobs_by_runner ON jobs (runner);",
     ),
     (25, "ALTER TABLE jobs ADD COLUMN failure_cause TEXT;"),
+    (
+        26,
+        "ALTER TABLE jobs ADD COLUMN wait_causes TEXT DEFAULT '{}';\n\
+         UPDATE jobs SET wait_causes = NULL;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -324,6 +329,11 @@ enum Write {
         at: u64,
     },
     HostWaited {
+        jobs: Vec<u64>,
+        ms: u64,
+    },
+    CauseWaited {
+        cause: api::WaitCause,
         jobs: Vec<u64>,
         ms: u64,
     },
@@ -822,6 +832,14 @@ impl Store {
     /// its runner: what auto sizing reads as a wait for a slot (ADR 0090).
     pub fn slot_waited(&self, jobs: Vec<u64>, ms: u64) {
         self.send(Write::SlotWaited { jobs, ms });
+    }
+
+    /// Adds `ms` to how long each of `jobs` waited for `cause` (ADR 0154). A job whose row is from before schema 26
+    /// keeps counting none, so it never reads as a wait of 0.
+    pub fn cause_waited(&self, cause: api::WaitCause, jobs: Vec<u64>, ms: u64) {
+        if ms > 0 && !jobs.is_empty() {
+            self.send(Write::CauseWaited { cause, jobs, ms });
+        }
     }
 
     /// The last host sample sent, stored or not; `None` before the first.

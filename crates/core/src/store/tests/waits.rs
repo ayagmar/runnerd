@@ -313,3 +313,46 @@ async fn an_open_waits_for_a_writer_that_still_holds_the_history() {
     release.join().unwrap();
     assert!(opened.is_ok(), "the open waits: {:?}", opened.err());
 }
+
+// Catches a row from before schema 26 read as a wait of 0 for every cause, a cause added to such a row, two writes of
+// one cause not adding up, and a cause a later runnerd stored failing the read (ADR 0154).
+#[tokio::test]
+async fn a_jobs_causes_add_up_and_a_row_from_before_schema_26_counts_none() {
+    use crate::api::WaitCause;
+    let dir = TestDir::new("store-26");
+    let path = dir.0.join("runnerd.db");
+    history_15(&path);
+    let store = Store::open(&path).unwrap();
+    for id in [2, 3] {
+        store.queued("o/r", &queued(id), 1_000_000);
+    }
+    store.cause_waited(WaitCause::Host, vec![1, 2], 40 * SECOND);
+    store.cause_waited(WaitCause::Host, vec![2], 5 * SECOND);
+    store.cause_waited(WaitCause::NoPool, vec![2], SECOND);
+    store.flush().await;
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE jobs SET state = 'completed', conclusion = 'success', started_at = 1100000, \
+             finished_at = 1200000 WHERE id IN (2, 3);
+             UPDATE jobs SET wait_causes = json_set(wait_causes, '$.later', 7000) WHERE id = 3;",
+        )
+        .unwrap();
+    let history = store.insights(0).await.unwrap();
+    let causes: Vec<_> = history
+        .runs
+        .iter()
+        .map(|run| (run.id, run.causes.clone()))
+        .collect();
+    assert_eq!(
+        causes,
+        [
+            (1, None),
+            (
+                2,
+                Some([(WaitCause::Host, 45 * SECOND), (WaitCause::NoPool, SECOND)].into())
+            ),
+            (3, Some([(WaitCause::Other, 7 * SECOND)].into())),
+        ]
+    );
+}

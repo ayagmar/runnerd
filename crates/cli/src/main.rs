@@ -190,8 +190,8 @@ enum Command {
     },
     /// Show what the history says: what the job minutes would have cost on GitHub's runners, jobs that got slower and
     /// stayed so, fail and pass on a re-run, run near their memory cap or miss the build cache, downloads slowed for
-    /// want of memory, what jobs and the drive wrote, and how long each repository's jobs wait this week against the
-    /// last. One line per insight.
+    /// want of memory, what jobs and the drive wrote, why each profile's jobs queued, and how long each repository's
+    /// jobs wait this week against the last. One line per insight.
     Insights {
         /// Days of history to read [default: 14, at most 90].
         #[arg(long)]

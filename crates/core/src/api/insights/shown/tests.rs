@@ -45,6 +45,7 @@ fn a_warning_reads_the_same_whatever_its_kind() {
         waits: vec![],
         host: vec![],
         disk: None,
+        queue: vec![],
     };
     assert_eq!(insights.warning_count(), 2);
     assert_eq!(insights.window_line(), "from the last 30 days");

@@ -46,6 +46,42 @@ pub struct Insights {
     /// was measured and the daemon read no drive, and from a daemon before 0.1.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<super::DiskWrites>,
+    /// Why each profile's jobs that ended in the window queued, split by what held them (ADR 0154), the profile whose
+    /// jobs waited longest first; empty from a daemon before 0.1.5.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<ProfileQueue>,
+}
+
+/// Why one profile's jobs queued over a window, from what each plan that held them said (ADR 0154). Waits are
+/// seconds, from GitHub queueing a job to its start, less what passed while no runnerd ran, summed over the jobs
+/// counted; the causes and the two parts no cause covers add up to `waited`, give or take rounding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileQueue {
+    /// The profile.
+    pub profile: String,
+    /// The jobs whose waits it splits.
+    pub jobs: u32,
+    /// Their waits together.
+    pub waited: u64,
+    /// What each cause held them for, longest first; none of 0.
+    pub causes: Vec<CauseWait>,
+    /// Of `waited`, what passed before runnerd first listed the jobs queued: GitHub's listing lag and the time to
+    /// runnerd's next listing.
+    pub before_listed: u64,
+    /// Of `waited`, what no plan held them for once listed: after a restart until the first plan, and between a
+    /// planned start and its runner.
+    pub uncovered: u64,
+    /// The jobs left out as their history rows are from before runnerd counted why jobs wait.
+    pub unrecorded: u32,
+}
+
+/// What one cause held a profile's jobs for, in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CauseWait {
+    /// The cause.
+    pub cause: super::WaitCause,
+    /// How long, summed over the jobs.
+    pub waited: u64,
 }
 
 /// What the host's memory came to while CI ran over a window, from the readings the budget's events stored (ADR 0108):

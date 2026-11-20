@@ -1,7 +1,7 @@
 //! The insights view: what the job minutes would have cost on GitHub's runners, then what the history says, one row
 //! per insight in its tone, led by the figure that changed, and what the selected one means: whole, with the runs
 //! that show it, beside the list on a wide terminal and under it on a narrow one. Under the list, the host's memory on
-//! the days CI ran and what jobs and the drive wrote, as core's figures, the drive's shares as one bar and the
+//! the days CI ran, what jobs and the drive wrote and why each profile's jobs queued, as core's figures, the drive's shares as one bar and the
 //! writers that wrote most as ranked bars; as core's sentences where the width does not hold them.
 
 use ratatui::Frame;
@@ -193,8 +193,8 @@ fn waits_lines(waits: &api::RepositoryWaits, width: usize, theme: Theme) -> Vec<
     lines
 }
 
-/// The host's memory on the days CI ran, and what jobs and the drive wrote: each a title, then what it says in
-/// `width`.
+/// The host's memory on the days CI ran, what jobs and the drive wrote, and why each profile's jobs queued: each a
+/// title, then what it says in `width`.
 fn sections(insights: &api::Insights, width: usize, theme: Theme) -> Vec<Vec<Line<'static>>> {
     let mut sections = Vec::new();
     if !insights.host.is_empty() {
@@ -214,6 +214,18 @@ fn sections(insights: &api::Insights, width: usize, theme: Theme) -> Vec<Vec<Lin
             lines.extend(disk_figures(disk, width, theme));
         } else {
             lines.extend(disk_sentences(disk, width, theme));
+        }
+        sections.push(lines);
+    }
+    if !insights.queue.is_empty() {
+        let mut lines = vec![Line::styled(api::ProfileQueue::TITLE, bold())];
+        for profile in &insights.queue {
+            lines.extend(wrap(&profile.line(), width).into_iter().map(Line::raw));
+            lines.extend(figure_rows(
+                profile.figures().iter().map(Into::into),
+                width,
+                theme,
+            ));
         }
         sections.push(lines);
     }

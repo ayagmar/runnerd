@@ -3448,3 +3448,83 @@ async fn a_status_that_cannot_show_the_queue_never_answers_that_nothing_waits_fo
         "a stopping daemon lists nothing"
     );
 }
+
+/// How long each of the jobs 1 to 4 waited for each cause, in ms, as the history's `wait_causes` holds it.
+fn causes(dir: &TestDir) -> Vec<BTreeMap<String, u64>> {
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let mut statement = db
+        .prepare("SELECT wait_causes FROM jobs WHERE id <= 4 ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|text| serde_json::from_str(&text.unwrap()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn each_plan_adds_the_time_to_the_next_to_the_cause_it_held_a_job_for() {
+    // Catches a cause counted twice for one stretch, a job a runner elsewhere took or that was cancelled still
+    // counting, and a started job's wait for GitHub to hand its runner a job left out (ADR 0154). Two slots, four
+    // jobs of 1.25G, and a slice with room for three runners: jobs 1 and 2 start, 3 and 4 wait.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &measured().replace("slots = 4", "slots = 2"),
+    );
+    engine.memory_max = Some(3 * 1280 * M + 100 * M);
+    history(&handle.store, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 0);
+    let began = std::time::Instant::now();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    engine.tick(Shutdown::No).await;
+    // Job 4 is cancelled: the next plan no longer has it.
+    github
+        .0
+        .lock()
+        .unwrap()
+        .queued
+        .retain(|queued| queued.id != 4);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let at_cancel = causes(&dir);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let elapsed = u64::try_from(began.elapsed().as_millis()).unwrap();
+    let causes = causes(&dir);
+    let total = |job: &BTreeMap<String, u64>| job.values().sum::<u64>();
+    for (index, job) in causes.iter().enumerate() {
+        assert!(
+            total(job) <= elapsed,
+            "job {} counts no stretch twice: {job:?} in {elapsed} ms",
+            index + 1
+        );
+    }
+    for started in &causes[..2] {
+        assert!(
+            started.get("booting").is_some_and(|ms| *ms >= 60),
+            "a started job waits for GitHub to hand its runner a job: {causes:?}"
+        );
+    }
+    assert!(
+        total(&causes[2]) >= 90,
+        "job 3 waited each stretch: {causes:?}"
+    );
+    assert!(
+        total(&at_cancel[3]) >= 60,
+        "job 4 waited until it was cancelled: {at_cancel:?}"
+    );
+    assert_eq!(causes[3], at_cancel[3], "a cancelled job counts no more");
+}

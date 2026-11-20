@@ -1,9 +1,59 @@
-//! Which wait a job is in: one at a time, each with its own start, against the rules two sets used to keep.
+//! Which wait a job is in: one at a time, each with its own start, against the rules two sets used to keep; and the
+//! cause each job is held for, against a plain per-job model, without either disturbing the other.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::invariants::Rng;
-use crate::scheduler::engine::open_waits::{OpenWaits, WaitFor, Waited};
+use crate::api::WaitCause;
+use crate::scheduler::engine::open_waits::{CauseWaited, OpenWaits, WaitFor, Waited};
+
+/// The cause rules one job at a time: each job's open cause and since when, and the time each job was counted for
+/// each cause.
+#[derive(Default)]
+struct PerJob {
+    open: BTreeMap<u64, (WaitCause, u64)>,
+    counted: BTreeMap<(u64, WaitCause), u64>,
+}
+
+impl PerJob {
+    fn count(&mut self, job: u64, now: u64) -> Option<(WaitCause, u64)> {
+        let (cause, since) = self.open.remove(&job)?;
+        *self.counted.entry((job, cause)).or_insert(0) += now.saturating_sub(since);
+        Some((cause, since))
+    }
+
+    fn hold(&mut self, held: &BTreeMap<u64, WaitCause>, going_on: &BTreeSet<u64>, now: u64) {
+        let open: Vec<u64> = self.open.keys().copied().collect();
+        for job in open {
+            if let Some((cause, _)) = self.count(job, now)
+                && going_on.contains(&job)
+            {
+                self.open.insert(job, (cause, now));
+            }
+        }
+        for (job, cause) in held {
+            self.open.insert(*job, (*cause, now));
+        }
+    }
+}
+
+/// Adds what `OpenWaits` said to record to `counted`.
+fn add(counted: &mut BTreeMap<(u64, WaitCause), u64>, caused: Vec<CauseWaited>) {
+    for CauseWaited { cause, jobs, ms } in caused {
+        for job in jobs {
+            *counted.entry((job, cause)).or_insert(0) += ms;
+        }
+    }
+}
+
+/// Some of the six jobs, each held for one of a few causes.
+fn some_causes(rng: &mut Rng) -> BTreeMap<u64, WaitCause> {
+    let causes = [WaitCause::Barrier, WaitCause::Host, WaitCause::Slot];
+    some_jobs(rng)
+        .into_iter()
+        .map(|job| (job, causes[usize::try_from(rng.below(3)).unwrap()]))
+        .collect()
+}
 
 /// The rules with one set and one commit time per kind, as `OpenWaits` must go on answering them.
 #[derive(Default)]
@@ -108,19 +158,20 @@ fn some_jobs(rng: &mut Rng) -> BTreeSet<u64> {
 }
 
 #[test]
-fn any_sequence_of_commits_and_starts_records_what_the_two_sets_recorded() {
+fn any_sequence_of_commits_starts_and_causes_records_what_the_models_recorded() {
     for seed in 0..512 {
         let mut rng = Rng(seed);
         let (mut waits, mut sets) = (OpenWaits::default(), TwoSets::default());
+        let (mut model, mut counted) = (PerJob::default(), BTreeMap::new());
         let mut now = 1000_u64;
-        for _ in 0..40 {
+        for _ in 0..60 {
             now = match rng.below(8) {
                 0 => now,
                 // The wall clock can step back.
                 1 => now.saturating_sub(rng.below(50)),
                 _ => now + rng.below(100),
             };
-            match rng.below(10) {
+            match rng.below(15) {
                 0..=3 => {
                     let jobs = some_jobs(&mut rng);
                     assert_eq!(
@@ -146,8 +197,35 @@ fn any_sequence_of_commits_and_starts_records_what_the_two_sets_recorded() {
                         "seed {seed}: job {job} started"
                     );
                 }
-                // A restart: no wait survives one.
-                _ => (waits, sets) = (OpenWaits::default(), TwoSets::default()),
+                9..=11 => {
+                    // A plan holds some jobs and starts runners for others; one may be both, which it holds.
+                    let (held, going_on) = (some_causes(&mut rng), some_jobs(&mut rng));
+                    add(&mut counted, waits.hold(&held, &going_on, now));
+                    model.hold(&held, &going_on, now);
+                }
+                12 => {
+                    let job = rng.below(8) + 1;
+                    add(&mut counted, waits.booting(job, now).into_iter().collect());
+                    model.count(job, now);
+                    model.open.insert(job, (WaitCause::Booting, now));
+                }
+                13 => {
+                    let job = rng.below(8) + 1;
+                    add(&mut counted, waits.taken(job, now).into_iter().collect());
+                    model.count(job, now);
+                }
+                // A restart: no wait survives one, and what was counted stays counted.
+                _ => {
+                    (waits, sets) = (OpenWaits::default(), TwoSets::default());
+                    model.open.clear();
+                }
+            }
+            for job in 1..=8 {
+                assert_eq!(
+                    waits.cause(job),
+                    model.open.get(&job).map(|(cause, _)| *cause),
+                    "seed {seed}: job {job}'s cause"
+                );
             }
             assert_eq!(waits.jobs(WaitFor::Slot), sets.slot.0, "seed {seed}");
             assert_eq!(waits.jobs(WaitFor::Host), sets.host.0, "seed {seed}");
@@ -159,5 +237,16 @@ fn any_sequence_of_commits_and_starts_records_what_the_two_sets_recorded() {
                 "seed {seed}: every wait still open counts from its own start"
             );
         }
+        add(
+            &mut counted,
+            waits.hold(&BTreeMap::new(), &BTreeSet::new(), now + 7),
+        );
+        model.hold(&BTreeMap::new(), &BTreeSet::new(), now + 7);
+        counted.retain(|_, ms| *ms > 0);
+        model.counted.retain(|_, ms| *ms > 0);
+        assert_eq!(
+            counted, model.counted,
+            "seed {seed}: each job counts each stretch once, to the cause it was held for"
+        );
     }
 }

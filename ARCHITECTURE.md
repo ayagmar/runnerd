@@ -96,7 +96,9 @@ flowchart TB
   beside the history ([ADR 0100](docs/adr/0100-an-insight-for-jobs-held-for-the-hosts-memory.md),
   [ADR 0103](docs/adr/0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md)), and adds up what
   the window's jobs and the drive's stored windows wrote (`insights::disk`,
-  [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)). All three are pure:
+  [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and splits each profile's queue
+  time by the causes the engine's plans counted (`insights::queue`,
+  [ADR 0154](docs/adr/0154-a-job-keeps-how-long-each-cause-held-it.md)). All three are pure:
   the engine and the daemon read the store and act on what they return. `archives` keeps the verified action archives
   runners read in place of downloading them, in a task of its own the engine starts: it reads the served
   repositories' pins from their parsed YAML (`archives::pins`), downloads anonymously from codeload into `staging/`,
@@ -170,7 +172,7 @@ client → transport → principal → handler → core
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
    `caches` (reseeds, the mirror, the shared caches), `upkeep` (what each profile's measures and reseeds are doing and have due, one value per profile, [ADR 0116](docs/adr/0116-a-profiles-upkeep-is-one-state.md)), `unsynced` (whether what runners wrote without syncing may be lost to a host crash, kept in a file beside the job history, [ADR 0141](docs/adr/0141-runners-answer-sync-calls-without-syncing.md)), `mirror` (whether the mirror runs and at what cap), `build_cache` (a runner's socket of the build cache, and
    whether its job may write), `records` (records of failed jobs and the shells in them),
-   `history` (what the store records), `ledger` (the jobs followed on GitHub that no runner here runs, queued or closing, one stage per job, [ADR 0118](docs/adr/0118-a-followed-job-is-in-one-stage.md)), `claims` (what each repository's listings may show that this machine's runners took), `admission` (what a new runner reserves, and in `Measured` what admission keeps between plans, sealed, [ADR 0122](docs/adr/0122-what-admission-keeps-is-sealed.md)), `open_waits` (which of a slot's or the host's wait each job is in), `warm` (how many warm runners each
+   `history` (what the store records), `ledger` (the jobs followed on GitHub that no runner here runs, queued or closing, one stage per job, [ADR 0118](docs/adr/0118-a-followed-job-is-in-one-stage.md)), `claims` (what each repository's listings may show that this machine's runners took), `admission` (what a new runner reserves, and in `Measured` what admission keeps between plans, sealed, [ADR 0122](docs/adr/0122-what-admission-keeps-is-sealed.md)), `open_waits` (which of a slot's or the host's wait each job is in, and the cause the last plan held it for, [ADR 0154](docs/adr/0154-a-job-keeps-how-long-each-cause-held-it.md)), `warm` (how many warm runners each
    repository wants, from `scheduler::warm`), `control` (`Control` and the commands), `stop` (how far the daemon's stop has got) and `status` (what it
    publishes).
 

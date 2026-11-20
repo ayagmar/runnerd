@@ -21,7 +21,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::open_waits::{OpenWaits, WaitFor, Waited};
+use super::open_waits::{CauseWaited, OpenWaits, WaitFor, Waited};
 use super::{Engine, Slot};
 use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor, growth, host};
 use crate::api::{self, AdmissionPolicy, Basis};
@@ -50,7 +50,7 @@ const HISTORY: u64 = 30 * 24 * 3600 * 1000;
 pub(super) struct Measured {
     /// What the last plan saw of the host's memory.
     host: host::HostBand,
-    /// The jobs the last plans left waiting for a slot alone or for the host's memory.
+    /// The jobs the last plans left waiting for a slot alone or for the host's memory, and the cause each was held for.
     job_waits: OpenWaits,
     /// What predicts the jobs' peaks and usual run times, and when it read the history.
     predictor: Option<(Predictor, SystemTime)>,
@@ -139,6 +139,26 @@ impl Measured {
     /// `job`'s runner is in its slot: its wait, if any, ended now.
     fn end_wait(&mut self, job: u64, now: u64) -> Option<Waited> {
         self.job_waits.end_wait(job, now)
+    }
+
+    /// A plan holds `held` for their causes from `now` on, and `going_on` for the cause each had.
+    fn hold(
+        &mut self,
+        held: &BTreeMap<u64, api::WaitCause>,
+        going_on: &BTreeSet<u64>,
+        now: u64,
+    ) -> Vec<CauseWaited> {
+        self.job_waits.hold(held, going_on, now)
+    }
+
+    /// A runner is in its slot for `job`: from `now` on it waits for GitHub to hand the runner a job.
+    fn booting(&mut self, job: u64, now: u64) -> Option<CauseWaited> {
+        self.job_waits.booting(job, now)
+    }
+
+    /// A runner took `job` at `now`: it waits no more.
+    fn taken(&mut self, job: u64, now: u64) -> Option<CauseWaited> {
+        self.job_waits.taken(job, now)
     }
 
     /// What predicts the jobs' peaks and usual run times, once the history was read.
@@ -645,10 +665,53 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Ends `job`'s slot or host wait, as its runner is in its slot: it waited from the last commit until now, not
-    /// until the next commit (ADR 0110).
+    /// until the next commit (ADR 0110). From now on its cause is its runner starting (ADR 0154).
     pub(super) fn note_started(&mut self, job: u64) {
-        let waited = self.measured.end_wait(job, time::now_ms());
+        let now = time::now_ms();
+        let waited = self.measured.end_wait(job, now);
         self.record_waited(waited.into_iter().collect());
+        let caused = self.measured.booting(job, now);
+        self.record_causes(caused.into_iter().collect());
+    }
+
+    /// A runner took `job`, whichever it started for: its slot or host wait and its cause end now.
+    pub(super) fn note_taken(&mut self, job: u64) {
+        let now = time::now_ms();
+        let waited = self.measured.end_wait(job, now);
+        self.record_waited(waited.into_iter().collect());
+        let caused = self.measured.taken(job, now);
+        self.record_causes(caused.into_iter().collect());
+    }
+
+    /// Remembers the cause `plan` holds each queued job for, and adds the time since the last commit to the cause each
+    /// had then (ADR 0154). A job the plan starts a runner for keeps the cause it had, its runner starting once that is
+    /// in its slot; a job the plan no longer has, as a runner elsewhere took it or it was cancelled, waits no more.
+    pub(super) fn note_causes(&mut self, plan: &Plan) {
+        let held: BTreeMap<u64, api::WaitCause> = plan
+            .waiting
+            .iter()
+            .map(|(job, waiting)| (*job, waiting.cause()))
+            .collect();
+        let going_on: BTreeSet<u64> = plan
+            .decisions
+            .iter()
+            .filter_map(|decision| match decision {
+                Decision::Start {
+                    for_: StartFor::Job(job),
+                    ..
+                } => Some(*job),
+                _ => None,
+            })
+            .collect();
+        let caused = self.measured.hold(&held, &going_on, time::now_ms());
+        self.record_causes(caused);
+    }
+
+    /// Adds what ended or went on to the history's causes.
+    fn record_causes(&self, caused: Vec<CauseWaited>) {
+        for CauseWaited { cause, jobs, ms } in caused {
+            self.store.cause_waited(cause, jobs, ms);
+        }
     }
 
     /// Adds what ended or went on to the history's waits.

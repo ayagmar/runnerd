@@ -984,7 +984,49 @@ pub fn insights(at: u64) -> api::Insights {
         ],
         waits: Vec::new(),
         disk: Some(disk_writes()),
+        queue: queue(),
     }
+}
+
+/// Why the profiles' jobs queued over the insights' window: jvm's mostly for the host's memory and behind a barrier,
+/// with jobs from before runnerd counted why; node's with a share before runnerd listed them; and a profile whose
+/// jobs all ended before runnerd counted why.
+pub fn queue() -> Vec<api::ProfileQueue> {
+    let cause = |cause: api::WaitCause, waited: u64| api::CauseWait { cause, waited };
+    vec![
+        api::ProfileQueue {
+            profile: "jvm".to_owned(),
+            jobs: 42,
+            waited: 45_100,
+            causes: vec![
+                cause(api::WaitCause::Host, 22_200),
+                cause(api::WaitCause::Barrier, 9_000),
+                cause(api::WaitCause::Slot, 6_300),
+                cause(api::WaitCause::Booting, 1_260),
+            ],
+            before_listed: 840,
+            uncovered: 5_500,
+            unrecorded: 3,
+        },
+        api::ProfileQueue {
+            profile: "node".to_owned(),
+            jobs: 1,
+            waited: 95,
+            causes: vec![cause(api::WaitCause::Budget, 60)],
+            before_listed: 35,
+            uncovered: 0,
+            unrecorded: 0,
+        },
+        api::ProfileQueue {
+            profile: "light".to_owned(),
+            jobs: 0,
+            waited: 0,
+            causes: Vec::new(),
+            before_listed: 0,
+            uncovered: 0,
+            unrecorded: 1,
+        },
+    ]
 }
 
 /// The insights of [`insights`] with the drive's shares read in part: the runner slice over 1 h of the drive's 6 h 36

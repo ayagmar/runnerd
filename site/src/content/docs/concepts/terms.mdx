@@ -55,6 +55,7 @@ runnerd records every job its runners may run in SQLite; [`[history]`](../../ref
 | its timeline (queued, container started, job started, finished) and steps, as GitHub shows them | with the job |
 | the container's CPU, memory and network every 2 s, its CPU throttling and the bytes the Docker Hub mirror served it | samples for `history.samples`; totals and peaks with the job |
 | its log, secrets still masked, up to `history.log_max` | for `history.logs` |
+| how long it waited for each cause runnerd's plans gave, such as the host's memory or a barrier ([why jobs queued](../../guides/insights/#why-jobs-queued)) | with the job |
 
 A job's wait runs from queued to started; the part that passed while runnerd was not running is kept as `unseen` and left out of the waits [sizing](../../guides/sizing/#how-a-wait-is-counted) reads.
 

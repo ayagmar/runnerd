@@ -1,5 +1,7 @@
 //! Insights from synthetic histories of fictional repositories: one `halyard/api` job run a few times a day.
 
+use std::collections::BTreeMap;
+
 use super::{HeldJob, History, HostHold, HostReading, Run, digest, insights};
 use crate::api::{self, AutoNote, InsightKind, JobState, Severity};
 use crate::config::Config;
@@ -67,6 +69,8 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         cpu_periods: None,
         cpu_throttled: None,
         disk: None,
+        seen_at: Some(finished - seconds * 1000 - 15_000),
+        causes: Some(BTreeMap::new()),
     }
 }
 
@@ -694,8 +698,8 @@ fn sizing_raises_app_to(config: &Config, jobs: Vec<crate::sizing::Ran>) -> Optio
         ..crate::sizing::History::default()
     };
     let (last, running) = (
-        std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
     );
     let changes = crate::sizing::auto::changes(
         config,
@@ -1426,4 +1430,73 @@ fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_e
 fn a_window_without_measured_jobs_or_a_read_drive_has_no_disk_writes() {
     let runs = [test_run(1, 1, 60)];
     assert_eq!(insights(&whole(&runs), &config(), 14, NOW).disk, None);
+}
+
+/// A job of profile `profile` queued `waited` seconds before its start, first listed `listed` seconds after it was
+/// queued, held for `causes` (seconds by cause), or from before runnerd counted causes when `None`.
+fn queued_for(
+    n: u64,
+    profile: &str,
+    waited: u64,
+    listed: u64,
+    causes: Option<&[(api::WaitCause, u64)]>,
+) -> Run {
+    let mut run = test_run(n, 1, 60);
+    let started = run.started_at.unwrap();
+    run.queued_at = started - waited * 1000;
+    run.seen_at = Some(run.queued_at + listed * 1000);
+    run.profile = Some(profile.to_owned());
+    run.causes = causes.map(|causes| {
+        causes
+            .iter()
+            .map(|(cause, seconds)| (*cause, seconds * 1000))
+            .collect()
+    });
+    run
+}
+
+// Catches a split that reads a row from before schema 26 as a wait of 0, hides what no cause covers, counts the time
+// no runnerd ran twice, or lets causes counted past a start add up to more than the wait.
+#[test]
+fn a_profiles_queue_time_splits_by_cause_and_names_what_no_cause_covers() {
+    use api::WaitCause::{Barrier, Host, Other, Slot};
+    let mut down = queued_for(4, "app", 100, 50, Some(&[(Host, 50)]));
+    // The daemon was down for the first 40 s: out of the wait, and out of what came before the listing.
+    down.unseen = 40_000;
+    let runs = [
+        queued_for(1, "app", 100, 10, Some(&[(Host, 50), (Barrier, 20)])),
+        queued_for(2, "app", 300, 5, None),
+        // Counted to the plan after its start: 30 s for a slot and 10 s for a cause a later runnerd stored, in 20 s.
+        queued_for(3, "app", 20, 0, Some(&[(Slot, 30), (Other, 10)])),
+        down,
+        queued_for(5, "light", 60, 0, None),
+    ];
+
+    let queue = insights(&whole(&runs), &config(), 14, NOW).queue;
+
+    let app = &queue[0];
+    assert_eq!(app.profile, "app");
+    assert_eq!((app.jobs, app.unrecorded), (3, 1));
+    assert_eq!(app.waited, 100 + 20 + 60);
+    let causes: Vec<(api::WaitCause, u64)> = app
+        .causes
+        .iter()
+        .map(|cause| (cause.cause, cause.waited))
+        .collect();
+    assert_eq!(causes, [(Host, 100), (Barrier, 20), (Slot, 15), (Other, 5)]);
+    assert_eq!((app.before_listed, app.uncovered), (10 + 10, 20));
+    let parts: u64 =
+        causes.iter().map(|(_, waited)| waited).sum::<u64>() + app.before_listed + app.uncovered;
+    assert_eq!(parts, app.waited, "the parts add up to the wait");
+    assert_eq!(
+        app.line(),
+        "app: 3 jobs waited 3m 00s in all; 1 job from before runnerd counted why is left out"
+    );
+    let light = &queue[1];
+    assert_eq!((light.jobs, light.unrecorded), (0, 1));
+    assert!(light.figures().is_empty(), "no job of light was counted");
+    assert_eq!(
+        light.line(),
+        "light: 1 job ended from before runnerd counted why jobs wait"
+    );
 }

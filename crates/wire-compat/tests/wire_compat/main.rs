@@ -320,6 +320,7 @@ documents! {
     new:
     "failure-cause": FailureCause => variants(samples::failure_cause()),
     "archive-failure-kind": ArchiveFailureKind => variants(samples::archive_failure_kind()),
+    "wait-cause": WaitCause => variants(samples::wait_cause()),
 }
 
 /// The previous release's samples, one file per document.

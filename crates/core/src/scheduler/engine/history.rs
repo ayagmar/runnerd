@@ -290,7 +290,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn note_found(&mut self, found: &Found) {
         self.ledger.stop_queued(found.job);
         // GitHub picks which job a runner takes, which may not be the one the plan started it for (ADR 0110).
-        self.note_started(found.job);
+        self.note_taken(found.job);
         let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
             slots
                 .iter_mut()

@@ -429,6 +429,21 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
             assert!(shown.contains(&share), "{share}: {shown}");
         }
     }
+    assert!(
+        shown.contains(runnerd_core::api::ProfileQueue::TITLE),
+        "{shown}"
+    );
+    for profile in &insights.queue {
+        assert!(
+            shown.contains(&profile.line()),
+            "{}: {shown}",
+            profile.line()
+        );
+        for figure in profile.figures() {
+            let said = labelled(&figure);
+            assert!(shown.contains(&said), "{said}: {shown}");
+        }
+    }
 }
 
 /// A drive that wrote nothing has no shares: the page drew an empty bar over a key of 0% that did not add up.

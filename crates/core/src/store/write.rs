@@ -106,6 +106,7 @@ impl Writer<'_> {
             Write::RunnerCancelBy { runner, at } => self.runner_cancel_by(&runner, at),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
             Write::SlotWaited { jobs, ms } => self.slot_waited(&jobs, ms),
+            Write::CauseWaited { cause, jobs, ms } => self.cause_waited(cause, &jobs, ms),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -455,6 +456,21 @@ impl Writer<'_> {
                 self.db.execute(
                     "UPDATE jobs SET slot_waited = slot_waited + ?2 WHERE id = ?1",
                     params![job, ms],
+                ),
+            );
+        }
+    }
+
+    fn cause_waited(&self, cause: api::WaitCause, jobs: &[u64], ms: u64) {
+        let path = format!("$.\"{}\"", cause.word());
+        for job in jobs {
+            logged(
+                "record what a job waited for",
+                self.db.execute(
+                    "UPDATE jobs SET wait_causes = json_set(wait_causes, ?2, \
+                     coalesce(json_extract(wait_causes, ?2), 0) + ?3) \
+                     WHERE id = ?1 AND wait_causes IS NOT NULL",
+                    params![job, path, ms],
                 ),
             );
         }

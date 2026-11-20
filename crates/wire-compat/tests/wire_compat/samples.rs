@@ -36,6 +36,7 @@ use runnerd_core::api::{
     StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View,
     WaitSpread, Waiting, WeekWaits,
 };
+use runnerd_core::api::{CauseWait, ProfileQueue, WaitCause};
 use runnerd_core::api::{
     Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
 };
@@ -1450,7 +1451,53 @@ pub(crate) fn insights() -> Insights {
         }],
         host: vec![host_hazard()],
         disk: Some(disk_writes()),
+        queue: vec![ProfileQueue {
+            profile: "jvm".to_owned(),
+            jobs: 42,
+            waited: 45_100,
+            causes: wait_cause()
+                .into_iter()
+                .map(|cause| CauseWait { cause, waited: 60 })
+                .collect(),
+            before_listed: 840,
+            uncovered: 5_500,
+            unrecorded: 3,
+        }],
     }
+}
+
+pub(crate) fn wait_cause() -> Vec<WaitCause> {
+    let every = vec![
+        WaitCause::Barrier,
+        WaitCause::Start,
+        WaitCause::Slot,
+        WaitCause::Budget,
+        WaitCause::Host,
+        WaitCause::Cpu,
+        WaitCause::Booting,
+        WaitCause::Preparing,
+        WaitCause::Paused,
+        WaitCause::Backoff,
+        WaitCause::NoPool,
+        WaitCause::Other,
+    ];
+    for cause in &every {
+        match cause {
+            WaitCause::Barrier
+            | WaitCause::Start
+            | WaitCause::Slot
+            | WaitCause::Budget
+            | WaitCause::Host
+            | WaitCause::Cpu
+            | WaitCause::Booting
+            | WaitCause::Preparing
+            | WaitCause::Paused
+            | WaitCause::Backoff
+            | WaitCause::NoPool
+            | WaitCause::Other => {}
+        }
+    }
+    every
 }
 
 fn disk_writes() -> DiskWrites {

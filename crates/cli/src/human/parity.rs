@@ -279,6 +279,31 @@ fn insights_state_each_insight_s_severity_kind_and_sentence_as_core_does() {
             assert!(text.contains(line.as_str()), "{line}: {text}");
         }
     }
+    for profile in &shown.queue {
+        let at = text
+            .find(&profile.line())
+            .unwrap_or_else(|| panic!("{}: {text}", profile.line()));
+        for figure in profile.figures() {
+            let row = text[at..]
+                .lines()
+                .find(|line| line.trim_start().starts_with(&figure.label))
+                .unwrap_or_else(|| panic!("no row for {}:\n{text}", figure.label));
+            let cells: Vec<&str> = row
+                .split("  ")
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect();
+            assert_eq!(
+                cells,
+                [
+                    figure.label.as_str(),
+                    &figure.value,
+                    &figure.of.clone().unwrap_or_default()
+                ],
+                "{row}"
+            );
+        }
+    }
 }
 
 #[test]

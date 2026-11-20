@@ -594,6 +594,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.note_pass_waits(&plan, &not_carried_out);
+        self.note_causes(&plan);
         // A plan's waits count whichever path ran it, and only once its starts are done.
         self.note_waits(&plan.held, plan.barrier);
         started
@@ -719,6 +720,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         mode: Shutdown,
         pace: &mut Pace,
     ) -> Applied {
+        self.note_causes(&plan);
         self.note_slots(plan.slot_waiting);
         let mut applied = Applied {
             held: plan.held,
