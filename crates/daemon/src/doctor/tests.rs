@@ -994,7 +994,7 @@ fn an_image_built_for_another_release_warns() {
     assert!(jvm.detail.contains("0.0.1"), "{jvm}");
 }
 
-/// image/mise-tools builds a local tag no registry has, on a published base whose labels it keeps (ADR 0148).
+/// image/mise-tools builds a local tag no registry has, on a published base whose labels it keeps (ADR 0149).
 #[test]
 fn a_local_image_built_on_this_releases_published_base_passes() {
     let derived = "runnerd-mise:mise-2026.10.18-0123456789abcdef";

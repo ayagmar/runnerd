@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds a runner image with a repository's pinned mise and the tools of its mise.lock on one of runnerd's runner
-# images, then proves it with no network (prove.sh). docs/adr/0148 says what it guarantees; the site's "Pinned tools"
+# images, then proves it with no network (prove.sh). docs/adr/0149 says what it guarantees; the site's "Pinned tools"
 # page says how to use it.
 #
 #   image/mise-tools/build.sh --base ghcr.io/ayagmar/runnerd-runner:jvm-0.1.4@sha256:<digest> \

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reads a repository's mise.toml and mise.lock for the mise-tools image (docs/adr/0148).
+"""Reads a repository's mise.toml and mise.lock for the mise-tools image (docs/adr/0149).
 
 check DIR          refuses inputs outside the exact shapes the recipe has verified; prints why, one line each, exit 1
 build-config FILE  prints the config the build installs from: mise.toml's [tools] only, after `check` passed

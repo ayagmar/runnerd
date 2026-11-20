@@ -1,5 +1,5 @@
 #!/bin/bash
-# The proof that a mise-tools image holds the pinned tools (docs/adr/0148). build.sh runs it in the candidate image as
+# The proof that a mise-tools image holds the pinned tools (docs/adr/0149). build.sh runs it in the candidate image as
 # `runner`, with no network. mise, with fresh empty data, cache, state and config dirs, no hooks, and the build's own
 # config (mise.toml's [tools]) with mise.lock, must install nothing; then each locked tool version's program must
 # resolve to a real path inside that version's directory under the system installs, run with a literal argv, and

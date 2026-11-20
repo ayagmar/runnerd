@@ -1,5 +1,5 @@
 #!/bin/bash
-# The mise-tools recipe's test (docs/adr/0148), run by CI's `mise-tools` job and by hand from the repository root:
+# The mise-tools recipe's test (docs/adr/0149), run by CI's `mise-tools` job and by hand from the repository root:
 #
 #   image/mise-tools/test.sh [<base image as name:tag@sha256:digest>]
 #

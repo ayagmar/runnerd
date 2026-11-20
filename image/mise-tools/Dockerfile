@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # check=skip=InvalidDefaultArgInFrom
 # A runner image with a repository's pinned mise and the tools of its mise.lock, on one of runnerd's runner images
-# (docs/adr/0148). build.sh is the way in: it passes the arguments below, the repository's mise.toml and mise.lock as
+# (docs/adr/0149). build.sh is the way in: it passes the arguments below, the repository's mise.toml and mise.lock as
 # the build context `project`, and proves the result with no network. Everything added is root's, outside the slot's
 # layers, so job code, which runs as `runner` without sudo, cannot change it, and no job sees what another changed.
 ARG BASE
@@ -73,7 +73,7 @@ ARG MISE_VERSION
 ARG MISE_SHA256
 ARG LOCK_SHA256
 ARG TOML_SHA256
-# The base's labels stay, runnerd.version among them: the runner's scripts are the base's (docs/adr/0148).
+# The base's labels stay, runnerd.version among them: the runner's scripts are the base's (docs/adr/0149).
 LABEL runnerd.mise.base="${BASE}" \
       runnerd.mise.version="${MISE_VERSION}" \
       runnerd.mise.sha256="${MISE_SHA256}" \

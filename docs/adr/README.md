@@ -153,4 +153,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0144](0144-the-mirror-keeps-no-blob-descriptor-cache.md) | The mirror keeps no blob descriptor cache, and its storage is repaired before it starts | Accepted |
 | [0145](0145-the-dashboard-leads-with-the-lanes.md) | The dashboard leads with the lanes | Accepted |
 | [0146](0146-the-dashboard-paints-the-doctors-last-run.md) | The dashboard paints the doctor's last run while it is no older than the refresh | Accepted |
-| [0148](0148-pinned-mise-and-tools-are-baked-into-a-derived-image.md) | A repository's pinned mise and tools are baked into an image derived from runnerd's | Accepted |
+| [0149](0149-pinned-mise-and-tools-are-baked-into-a-derived-image.md) | A repository's pinned mise and tools are baked into an image derived from runnerd's | Accepted |

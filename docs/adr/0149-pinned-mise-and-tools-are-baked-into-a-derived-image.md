@@ -1,4 +1,4 @@
-# 0148. A repository's pinned mise and tools are baked into an image derived from runnerd's
+# 0149. A repository's pinned mise and tools are baked into an image derived from runnerd's
 
 Status: **Accepted** (2026-11-20). Adds `image/mise-tools`, a recipe the owner runs; the daemon builds nothing. No
 config or API change.
