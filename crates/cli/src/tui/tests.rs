@@ -73,6 +73,7 @@ fn repository(name: &str, profile: &str) -> RepositoryStatus {
         paused: false,
         queued_jobs: 0,
         listing: None,
+        queue: runnerd_core::api::QueueShown::Listed,
     }
 }
 

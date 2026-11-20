@@ -3367,3 +3367,84 @@ async fn a_job_named_without_a_record_makes_its_repository_unknown_though_the_li
         "the copy goes by its profile's p95, as another of its repository's jobs is unknown"
     );
 }
+
+/// Catches a local build's wrapper reading "no job waits for the host's memory" from a status that cannot show one
+/// (ADR 0150): before Docker's recovery and the first listing, while the listing fails or the rate limit stops it, and
+/// once the daemon stops, `Status::queued` leaves the repository's jobs out though GitHub still has them queued.
+#[tokio::test]
+async fn a_status_that_cannot_show_the_queue_never_answers_that_nothing_waits_for_the_host() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let answer = |handle: &Handle| handle.status.borrow().host_wait(Some("o/r"));
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    engine.publish();
+    assert_eq!(
+        answer(&handle),
+        api::HostWait::Unavailable,
+        "Docker's recovery has not run"
+    );
+    history(&handle.store, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    engine.publish();
+    assert_eq!(
+        answer(&handle),
+        api::HostWait::Unavailable,
+        "nothing listed yet"
+    );
+
+    slice_at(&handle.store, 0);
+    // Room for two runners of 1.25G beside the host's other programs: the other two wait for the host.
+    host_at(&handle.store, 0, 4 * G + 2 * 1280 * M + 100 * M, 0);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(answer(&handle), api::HostWait::Waits);
+
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_queued
+        .insert("o/r".to_owned());
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        answer(&handle),
+        api::HostWait::Unavailable,
+        "a failed listing leaves the waiting jobs out"
+    );
+    github.0.lock().unwrap().failed_queued.clear();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(answer(&handle), api::HostWait::Waits, "listed again");
+
+    github.0.lock().unwrap().rate_limited =
+        Some(std::time::SystemTime::now() + Duration::from_secs(60));
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        answer(&handle),
+        api::HostWait::Unavailable,
+        "the rate limit stopped the listing"
+    );
+    github.0.lock().unwrap().rate_limited = None;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        answer(&handle),
+        api::HostWait::Waits,
+        "listed once the limit is over"
+    );
+
+    engine.tick(Shutdown::Graceful).await;
+    engine.publish();
+    assert_eq!(
+        answer(&handle),
+        api::HostWait::Unavailable,
+        "a stopping daemon lists nothing"
+    );
+}

@@ -80,6 +80,7 @@ pub(crate) fn status_empty() -> Status {
     status.budget.cpu = None;
     for repository in &mut status.repositories {
         repository.listing = None;
+        repository.queue = runnerd_core::api::QueueShown::Listed;
     }
     status.budget.slice_cpus = None;
     status.queued[0].profile = None;
@@ -206,6 +207,8 @@ fn repository_status() -> RepositoryStatus {
             since: 1_761_399_000,
             problem: ListingProblem::Refused { status: 404 },
         }),
+        // A failing listing leaves its jobs out.
+        queue: runnerd_core::api::QueueShown::Unlisted,
     }
 }
 

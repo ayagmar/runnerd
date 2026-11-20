@@ -239,22 +239,40 @@ async fn every_check_withdraws_the_runners_view_until_it_returns_good() {
         TestDir::new("archives"),
     );
     boot(&dir, "boot-1");
+    // A kept archive: each refresh asks GitHub whether its repository is still public before it publishes the view.
+    archives::keep(
+        &dir.0.join("actions"),
+        "actions/checkout",
+        "08eba0b27e820071cde6df949e0beb9ba4906955",
+        b"an archive a refresh kept",
+    )
+    .unwrap();
     let (mut engine, _handle) = engine_with_archives(&github, &docker, &dir, CONFIG);
     let _task = engine.archives.start(Arc::new(github.clone())).unwrap();
     engine.recover().await.unwrap();
     until(&engine, "the first view", |link| link.runner().is_some()).await;
     let mut ready = engine.archives.ready_changes();
     ready.borrow_and_update();
+    // The next refresh stays inside its check until the test has seen the view withdrawn.
+    github.hold_actions();
     // A reload that changes the settings refreshes: its check runs again.
     let reloaded = format!("{CONFIG}\n[caches.actions]\nkeep = \"7d\"\n");
     engine.archives.reload(&Config::parse(&reloaded).unwrap());
     let withdrawn = tokio::time::timeout(
         Duration::from_secs(5),
-        // The view is not held: the task must publish again.
+        // Mapped, so the borrow of the view is let go before the task publishes again.
         async { ready.wait_for(Option::is_none).await.map(|_| ()) },
     )
     .await;
-    assert!(withdrawn.is_ok(), "a start during the check gets no view");
+    assert!(
+        matches!(withdrawn, Ok(Ok(()))),
+        "the check withdraws the view"
+    );
+    assert!(
+        engine.archives.runner().is_none(),
+        "a start during the check gets no view"
+    );
+    github.release_actions();
     until(&engine, "the view again", |link| link.runner().is_some()).await;
 }
 

@@ -11,7 +11,13 @@ The other commands are on [runnerctl actions](../runnerctl-actions/).
 
 ## `runnerctl status`
 
-Show the memory and CPU budgets, every slot and what runs in it, the repositories, and why each queued job waits
+Show the memory and CPU budgets, every slot and what runs in it, the repositories, and why each queued job waits.
+
+With --waiting-for, print nothing and answer in the exit code, for scripts: 0 when a queued job waits for it, 1 when none does, 2 when the daemon cannot be asked or the repository is not one it serves.
+
+- `--waiting-for <WAITING_FOR>`: Only answer whether a queued job waits for this
+  - `host-memory`: The host's memory beside its other programs, also behind an older job that waits for it
+- `--repo <REPO>`: With --waiting-for, only this repository's jobs (owner/name)
 
 ## `runnerctl jobs`
 

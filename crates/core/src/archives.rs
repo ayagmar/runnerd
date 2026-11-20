@@ -330,7 +330,8 @@ impl Link {
         }
     }
 
-    /// The runners' view as it changes, every withdrawal included.
+    /// The runners' view as it changes. A receiver sees only the latest value: a withdrawal the task replaces before
+    /// the receiver looks is missed, so a test that must see one holds the task inside its check.
     #[cfg(test)]
     pub(crate) fn ready_changes(&self) -> watch::Receiver<Option<RunnerArchives>> {
         self.ready.subscribe()
@@ -401,6 +402,34 @@ impl Drop for Running {
             task.abort();
         }
     }
+}
+
+/// Keeps `bytes` in the store at `directory` as the archive of `repository` at `sha`, as a refresh left it: the next
+/// check finds it matching, and the next refresh asks GitHub whether its repository is still public.
+#[cfg(test)]
+pub(crate) fn keep(
+    directory: &Path,
+    repository: &str,
+    sha: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut store = ArchiveStore::open(directory)?;
+    let file = store.staging_file()?;
+    std::fs::write(&file, bytes)?;
+    let (sha256, size) = verify::hash_file(&file)?;
+    let key = Key {
+        repository: repository.to_owned(),
+        sha: sha.to_owned(),
+    };
+    let staged = Staged {
+        file,
+        sha256,
+        size,
+        uses: BTreeMap::new(),
+        unread: BTreeSet::new(),
+        actions: BTreeSet::new(),
+    };
+    store.publish(key, staged, unix_now())
 }
 
 fn unix_now() -> u64 {

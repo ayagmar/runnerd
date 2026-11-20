@@ -694,6 +694,7 @@ mod tests {
             paused: false,
             queued_jobs: 1,
             listing: None,
+            queue: runnerd_core::api::QueueShown::Listed,
         });
         let mut queued = summary(JobState::Queued);
         queued.runner = None;

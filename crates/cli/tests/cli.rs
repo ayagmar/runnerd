@@ -22,9 +22,10 @@ use axum::routing::{delete, get, post};
 use runnerd_core::api::{
     Advice, Budget, Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse,
     Event, EventEnvelope, Insights, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary,
-    LogSummary, Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
-    RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob,
-    Sizing, SizingChange, SlotStatus, Spread, Starts, Status, Timeline, Waiting,
+    LogSummary, Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueueShown,
+    QueuedJob, Record, RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize,
+    RunnerStatus, RunningJob, Sizing, SizingChange, SlotStatus, Spread, Starts, Status, Timeline,
+    Waiting,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -114,6 +115,7 @@ fn status() -> Status {
             paused: false,
             queued_jobs: 1,
             listing: None,
+            queue: QueueShown::Listed,
         }],
         queued: vec![QueuedJob {
             id: 9002,
@@ -190,12 +192,15 @@ struct Fake {
     replaced_queries: Vec<Option<String>>,
     /// The confirmations the job action previews issued, in order.
     confirmations: Vec<String>,
+    /// The status served in place of `status()`, as JSON so that it can be an older daemon's.
+    status: Option<serde_json::Value>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
 
-async fn get_status() -> axum::Json<Status> {
-    axum::Json(status())
+async fn get_status(State(fake): State<Shared>) -> axum::Json<serde_json::Value> {
+    let served = fake.lock().unwrap().status.clone();
+    axum::Json(served.unwrap_or_else(|| serde_json::to_value(status()).unwrap()))
 }
 
 async fn get_job(State(fake): State<Shared>) -> axum::Json<Job> {
@@ -868,6 +873,103 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
                 && line.ends_with(&format!(" ago  {reason}"))
         ),
         "the queued job is listed under the repositories with why it waits, as every client says it:\n{text}"
+    );
+}
+
+/// The bug each exit code catches in a local build's wrapper that yields memory to CI: a job behind another
+/// repository's job waiting for the host's memory, a misspelt repository, a stopped daemon, a status that leaves the
+/// queue out (a failed or rate-limited listing, a daemon stopping) or an older daemon that does not say whether it
+/// listed, each read as "nothing waits" (1), so the wrapper takes memory it should leave.
+#[test]
+fn status_waiting_for_host_memory_answers_in_the_exit_code_and_never_reads_trouble_as_clear() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let code = |args: &[&str]| {
+        let output = runnerctl(&socket, args);
+        assert_eq!(stdout(&output), "", "it prints nothing for {args:?}");
+        (output.status.code(), stderr(&output))
+    };
+    let ask = ["status", "--waiting-for", "host-memory"];
+    let ledger = [&ask[..], &["--repo", "halyard/ledger"]].concat();
+
+    // The ledger's job waits for a slot, not for the host.
+    assert_eq!(code(&ask).0, Some(1));
+    assert_eq!(code(&ledger).0, Some(1));
+
+    let mut held = status();
+    held.repositories.push(RepositoryStatus {
+        name: "halyard/storefront".to_owned(),
+        pools: Vec::new(),
+        paused: false,
+        queued_jobs: 1,
+        listing: None,
+        queue: QueueShown::Listed,
+    });
+    let mut older = held.queued[0].clone();
+    older.id = 9000;
+    older.repository = "halyard/storefront".to_owned();
+    older.waiting = Some(Waiting::HostMemory {
+        needs: 8 << 30,
+        free: 0,
+    });
+    held.queued[0].waiting = Some(Waiting::BehindMemory { job: 9000 });
+    held.queued.insert(0, older);
+    let serve_status = |status: &Status| {
+        fake.lock().unwrap().status = Some(serde_json::to_value(status).unwrap());
+    };
+    serve_status(&held);
+    assert_eq!(code(&ask).0, Some(0));
+    assert_eq!(
+        code(&ledger).0,
+        Some(0),
+        "the ledger's job waits behind the storefront's for the host"
+    );
+
+    let (unknown, error) = code(&[&ask[..], &["--repo", "halyard/ledgr"]].concat());
+    assert_eq!(unknown, Some(2));
+    assert!(
+        error.contains("halyard/ledgr: not a repository runnerd serves"),
+        "{error}"
+    );
+    assert_eq!(code(&[&ask[..], &["--json"]].concat()).0, Some(2));
+
+    // The ledger's listing failed, or the rate limit stopped it, after its job waited: the status leaves the job out.
+    let mut unlisted = status();
+    unlisted.queued.clear();
+    unlisted.repositories[0].queue = QueueShown::Unlisted;
+    serve_status(&unlisted);
+    let (code_unlisted, error) = code(&ledger);
+    assert_eq!(code_unlisted, Some(2), "{error}");
+    assert!(
+        error.contains("cannot say whether a job of halyard/ledger waits"),
+        "{error}"
+    );
+    assert_eq!(code(&ask).0, Some(2));
+
+    // A stopping daemon lists no queued job.
+    let mut stopping = status();
+    stopping.queued.clear();
+    stopping.shutting_down = true;
+    serve_status(&stopping);
+    assert_eq!(code(&ledger).0, Some(2));
+
+    // A daemon that predates the queue field says nothing of whether it listed.
+    let mut older = serde_json::to_value(status()).unwrap();
+    older["queued"] = serde_json::json!([]);
+    older["repositories"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("queue");
+    fake.lock().unwrap().status = Some(older);
+    assert_eq!(code(&ledger).0, Some(2));
+
+    let gone = runnerctl(&dir.0.join("none.sock"), &ask);
+    assert_eq!(gone.status.code(), Some(2));
+    assert!(
+        stderr(&gone).contains("runnerd is not running"),
+        "{}",
+        stderr(&gone)
     );
 }
 
