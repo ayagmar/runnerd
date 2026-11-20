@@ -3,7 +3,7 @@
 # images, then proves it with no network (prove.sh). docs/adr/0149 says what it guarantees; the site's "Pinned tools"
 # page says how to use it.
 #
-#   image/mise-tools/build.sh --base ghcr.io/ayagmar/runnerd-runner:jvm-0.1.4@sha256:<digest> \
+#   image/mise-tools/build.sh --base ghcr.io/ayagmar/runnerd-runner:jvm-0.1.5@sha256:<digest> \
 #     --mise-version 2026.10.18 --mise-sha256 <sha256 of the extracted mise binary> \
 #     --project <directory with the reviewed mise.toml and mise.lock> [--name runnerd-mise] \
 #     [--check '<tool>=<version command>']...
