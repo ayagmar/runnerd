@@ -206,6 +206,9 @@ struct Fake {
     unwritten: BTreeMap<String, usize>,
     /// Repositories, lower case, whose lookup GitHub does not answer.
     unanswered: BTreeSet<String>,
+    /// Downloads that send their bytes only once this file is there, as one that finishes after another archive is
+    /// published, by `owner/repo@sha`. The wait blocks the runtime's thread, so no other download moves meanwhile.
+    after: BTreeMap<String, PathBuf>,
 }
 
 impl Fake {
@@ -298,6 +301,18 @@ impl Source for FakeGithub {
         received: &AtomicU64,
     ) -> Result<u64, Error> {
         let label = format!("{repository}@{commit}");
+        let after = self.0.lock().unwrap().after.get(&label).cloned();
+        if let Some(path) = after {
+            let start = std::time::Instant::now();
+            while !path.exists() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "{label} waited for {} in vain",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         let bytes = {
             let mut fake = self.0.lock().unwrap();
             fake.downloads.push(label.clone());
@@ -1388,6 +1403,51 @@ async fn the_store_never_grows_past_its_cap_and_says_when_it_is_full() {
             .iter()
             .any(|(_, kind)| *kind == ArchiveFailureKind::Full),
         "{:?}",
+        failures_of(&archives)
+    );
+}
+
+/// An archive published while other downloads are still starting counts once against the cap: in the store's size,
+/// no longer in flight.
+#[tokio::test(start_paused = true)]
+async fn an_archive_published_as_others_start_is_counted_once_against_the_cap() {
+    let limits = super::Limits {
+        archive: 4096,
+        bytes: 1 << 30,
+        requests: 1000,
+        store: 3 * 4096,
+    };
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/checkout", CHECKOUT_NEXT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    for (repository, sha) in [
+        ("actions/checkout", CHECKOUT),
+        ("actions/checkout", CHECKOUT_NEXT),
+        ("actions/setup-node", NODE),
+    ] {
+        github.set_tarball(&pin(repository, sha), large_archive(sha));
+    }
+    // The downloads start in this order; the second sends its bytes once the first's archive is published, so the
+    // third reserves its place with the first in the store.
+    github.0.lock().unwrap().after.insert(
+        pin("actions/checkout", CHECKOUT_NEXT),
+        dir.0
+            .join("archives")
+            .join("actions_checkout")
+            .join(format!("{CHECKOUT}.tar.gz")),
+    );
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    assert_eq!(
+        archives.status().entries,
+        3,
+        "three archives fit the cap: {:?}",
         failures_of(&archives)
     );
 }
