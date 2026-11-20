@@ -6,6 +6,7 @@
 
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use reqwest::Method;
 use serde::Deserialize;
@@ -142,6 +143,7 @@ impl Source for Github {
         commit: &str,
         to: &Path,
         limit: u64,
+        received: &AtomicU64,
     ) -> Result<u64, Error> {
         // Anonymous, whatever GitHub answers: only what anyone may download is ever kept.
         let path = format!("/{repository}/tar.gz/{commit}");
@@ -173,7 +175,7 @@ impl Source for Github {
                 format_args!("larger than {limit} bytes"),
             ));
         }
-        write_capped(response, &path, to, limit).await
+        write_capped(response, &path, to, limit, received).await
     }
 
     fn spare_requests(&self) -> Option<u64> {
@@ -183,12 +185,13 @@ impl Source for Github {
 }
 
 /// Streams `response`'s body into a new file `to`, readable by its owner only until it is published, failing once it
-/// passes `limit` bytes.
+/// passes `limit` bytes. Every chunk received counts in `received`, the one that passes `limit` too.
 async fn write_capped(
     mut response: reqwest::Response,
     path: &str,
     to: &Path,
     limit: u64,
+    received: &AtomicU64,
 ) -> Result<u64, Error> {
     let io = |error: std::io::Error| download_error(path, error);
     let file = std::fs::OpenOptions::new()
@@ -206,6 +209,7 @@ async fn write_capped(
             source: source.without_url(),
         })?;
         let Some(chunk) = chunk else { break };
+        received.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         written += chunk.len() as u64;
         if written > limit {
             return Err(download_error(

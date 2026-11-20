@@ -474,6 +474,7 @@ impl crate::archives::Source for FakeGithub {
         _: &str,
         _: &std::path::Path,
         _: u64,
+        _: &std::sync::atomic::AtomicU64,
     ) -> Result<u64, github::Error> {
         Err(github::Error::Token("the fakes read no actions".to_owned()))
     }

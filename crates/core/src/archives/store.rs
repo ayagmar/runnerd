@@ -2,8 +2,11 @@
 //! runner looks them up and the only directory runners mount, `staging/` for downloads in progress, `quarantine/` for
 //! archives that no longer match, and `index.json`. The index is what the store should hold and the source of
 //! integrity: each entry's SHA-256 and size as verified, when it was fetched and when a refresh last found it
-//! pinned, and what its action files pin. It also keeps each served repository's last whole inventory, so what a
-//! repository pinned survives a restart while it cannot be read. File times mean nothing to it.
+//! pinned, and what its action files pin. It also keeps each served repository's pins as last read, so an unchanged
+//! head is never read again, and what they reached when all were last known, so a restart while a repository cannot be
+//! read keeps what it pinned; the archives that failed their check or are not there to anyone, so they are not
+//! downloaded again; and the repositories jobs resolved as immutable packages, never kept. File times mean nothing to
+//! it.
 //!
 //! One store has one owner: `open` takes an exclusive lock on `<root>/lock` and holds it for as long as the store
 //! lives, so a second runnerd pointed at the same directory is refused rather than sharing it. An index entry whose
@@ -29,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::pins::Pin;
-use super::state::Wanted;
 use super::verify::hash_file;
 
 /// The directory runners mount: archives only.
@@ -83,26 +85,48 @@ struct Entry {
     /// The directories whose action file could not be read: what they pin is not known.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     unread: BTreeSet<String>,
+    /// The directories that hold an action file at all.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    actions: BTreeSet<String>,
 }
 
-/// A served repository's last whole inventory: its pins at a commit of its default branch, read whole, and every
-/// archive they reach, each held when it was taken.
+/// A served repository's own pins as last read whole: what its workflows and action files pin at a commit of its
+/// default branch, before GitHub is asked which are public. Read again only when the branch moves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Inventory {
+pub(crate) struct Scan {
     /// The commit it was read at.
     pub(crate) head: String,
-    /// What its workflows and action files pin.
-    pub(crate) wanted: BTreeSet<Wanted>,
-    /// Every archive those reach, nested pins included.
-    pub(crate) reached: BTreeSet<Key>,
+    pub(crate) pins: BTreeSet<Pin>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Index {
     entries: Vec<Entry>,
-    /// By served repository, its last whole inventory.
+    /// By served repository, its last scan.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    inventories: BTreeMap<String, Inventory>,
+    scans: BTreeMap<String, Scan>,
+    /// By served repository, every archive its pins reached the last time all of them were known.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    reached: BTreeMap<String, BTreeSet<Key>>,
+    /// Archives that failed their check: the same commit's archive fails it again, so it is not downloaded again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    refused: BTreeSet<Key>,
+    /// Repositories a job resolved as an immutable action package, lower case: never kept.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    packages: BTreeSet<String>,
+}
+
+/// What an archive holds for an action at a path, as a refresh follows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// The store does not hold the archive.
+    Missing,
+    /// It holds no `action.yml` or `action.yaml` there: no action a runner loads.
+    NoFile,
+    /// Its action file there is not one runnerd reads, so what it pins is not followed.
+    Unread,
+    /// What its action file there pins.
+    Pins(Vec<Pin>),
 }
 
 /// An archive verified in `staging/`, ready to publish.
@@ -117,6 +141,8 @@ pub(crate) struct Staged {
     pub(crate) uses: BTreeMap<String, Vec<Pin>>,
     /// The directories whose action file could not be read.
     pub(crate) unread: BTreeSet<String>,
+    /// The directories that hold an action file.
+    pub(crate) actions: BTreeSet<String>,
 }
 
 /// What a check of the kept archives found and moved to quarantine.
@@ -145,13 +171,13 @@ enum Standing {
     Gone,
 }
 
-/// Whether a retention removes what expired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Removal {
-    /// Every served repository's pins were known whole: what no refresh found pinned for `keep` goes.
-    Expired,
-    /// Some were not: nothing goes, as what was not read may still pin it.
-    Held,
+/// What noting a package did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Packaged {
+    /// Whether it was not noted before.
+    pub(crate) new: bool,
+    /// The archives of it removed.
+    pub(crate) removed: Vec<Key>,
 }
 
 /// The store. Its owner is the archives task alone, which the lock it holds makes the only one on this host.
@@ -159,8 +185,10 @@ pub(crate) enum Removal {
 pub(crate) struct ArchiveStore {
     root: PathBuf,
     entries: BTreeMap<Key, Entry>,
-    /// By served repository, its last whole inventory.
-    inventories: BTreeMap<String, Inventory>,
+    scans: BTreeMap<String, Scan>,
+    reached: BTreeMap<String, BTreeSet<Key>>,
+    refused: BTreeSet<Key>,
+    packages: BTreeSet<String>,
     /// `<root>/lock`, locked exclusively until the store is dropped.
     _lock: File,
 }
@@ -213,15 +241,20 @@ impl ArchiveStore {
                 .into_iter()
                 .map(|entry| (entry.key.clone(), entry))
                 .collect(),
-            inventories: index
-                .inventories
+            scans: index
+                .scans
                 .into_iter()
-                .filter(|(repository, inventory)| {
-                    super::pins::repository(repository)
-                        && inventory.wanted.iter().all(|wanted| wanted.key.valid())
-                        && inventory.reached.iter().all(Key::valid)
+                .filter(|(repository, _)| super::pins::repository(repository))
+                .collect(),
+            reached: index
+                .reached
+                .into_iter()
+                .filter(|(repository, keys)| {
+                    super::pins::repository(repository) && keys.iter().all(Key::valid)
                 })
                 .collect(),
+            refused: index.refused.into_iter().filter(Key::valid).collect(),
+            packages: index.packages,
             _lock: lock,
         })
     }
@@ -231,49 +264,90 @@ impl ArchiveStore {
         self.root.join(ARCHIVES)
     }
 
-    /// Whether it holds `key`.
-    pub(crate) fn holds(&self, key: &Key) -> bool {
-        self.entries.contains_key(key)
+    /// What the archive `key` holds for its action at `path`.
+    pub(crate) fn action(&self, key: &Key, path: &str) -> Action {
+        let Some(entry) = self.entries.get(key) else {
+            return Action::Missing;
+        };
+        if entry.unread.contains(path) {
+            Action::Unread
+        } else if !entry.actions.contains(path) && !entry.uses.contains_key(path) {
+            Action::NoFile
+        } else {
+            Action::Pins(entry.uses.get(path).cloned().unwrap_or_default())
+        }
     }
 
-    /// What the archive `key` pins in turn, for its action at `path`.
-    pub(crate) fn uses(&self, key: &Key, path: &str) -> &[Pin] {
-        self.entries
-            .get(key)
-            .and_then(|entry| entry.uses.get(path))
-            .map_or(&[], Vec::as_slice)
+    /// Whether `key`'s archive failed its check before.
+    pub(crate) fn refused(&self, key: &Key) -> bool {
+        self.refused.contains(key)
     }
 
-    /// Whether what the archive `key` pins for its action at `path` is not known: its action file could not be read.
-    pub(crate) fn unread(&self, key: &Key, path: &str) -> bool {
-        self.entries
-            .get(key)
-            .is_some_and(|entry| entry.unread.contains(path))
+    /// Notes that `key`'s archive failed its check.
+    pub(crate) fn refuse(&mut self, key: Key) -> io::Result<()> {
+        if self.refused.insert(key) {
+            self.save()?;
+        }
+        Ok(())
     }
 
-    /// `repository`'s last whole inventory.
-    pub(crate) fn inventory(&self, repository: &str) -> Option<&Inventory> {
-        self.inventories.get(repository)
+    /// Whether a job resolved `repository` as an immutable action package.
+    pub(crate) fn package(&self, repository: &str) -> bool {
+        self.packages.contains(&repository.to_ascii_lowercase())
     }
 
-    /// Every archive the last whole inventories of `served` reached.
-    pub(crate) fn reached(&self, served: &[String]) -> BTreeSet<Key> {
-        served
-            .iter()
-            .filter_map(|repository| self.inventories.get(repository))
-            .flat_map(|inventory| inventory.reached.iter().cloned())
-            .collect()
+    /// Notes that a job resolved `repository` as an immutable action package, and removes every archive of it, file
+    /// and entry: the runner would read one in the package's place. Returns those removed, and whether it is new.
+    pub(crate) fn packaged(&mut self, repository: &str) -> io::Result<Packaged> {
+        let lower = repository.to_ascii_lowercase();
+        let new = self.packages.insert(lower.clone());
+        let held: Vec<String> = self
+            .repositories()
+            .into_iter()
+            .filter(|held| held.to_ascii_lowercase() == lower)
+            .collect();
+        let removed = self.withdraw(&held)?;
+        if new {
+            self.save()?;
+        }
+        Ok(Packaged { new, removed })
     }
 
-    /// Keeps `taken`, by served repository its new whole inventory, and forgets those of repositories no longer
-    /// `served`.
+    /// The repositories jobs resolved as packages, lower case.
+    pub(crate) fn packages(&self) -> Vec<String> {
+        self.packages.iter().cloned().collect()
+    }
+
+    /// `repository`'s last scan.
+    pub(crate) fn scan(&self, repository: &str) -> Option<&Scan> {
+        self.scans.get(repository)
+    }
+
+    /// Keeps `scan` as `repository`'s last.
+    pub(crate) fn scanned(&mut self, repository: &str, scan: Scan) -> io::Result<()> {
+        if self.scans.get(repository) != Some(&scan) {
+            self.scans.insert(repository.to_owned(), scan);
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// Every archive `repository`'s pins reached the last time all of them were known.
+    pub(crate) fn reached(&self, repository: &str) -> BTreeSet<Key> {
+        self.reached.get(repository).cloned().unwrap_or_default()
+    }
+
+    /// Keeps `whole`, by served repository every archive its pins reach now that all of them are known, and forgets
+    /// the scans and reaches of repositories no longer `served`.
     pub(crate) fn record(
         &mut self,
-        taken: BTreeMap<String, Inventory>,
+        whole: BTreeMap<String, BTreeSet<Key>>,
         served: &[String],
     ) -> io::Result<()> {
-        self.inventories.extend(taken);
-        self.inventories
+        self.reached.extend(whole);
+        self.reached
+            .retain(|repository, _| served.contains(repository));
+        self.scans
             .retain(|repository, _| served.contains(repository));
         self.save()
     }
@@ -421,28 +495,27 @@ impl ArchiveStore {
                 pinned_at: now,
                 uses: staged.uses,
                 unread: staged.unread,
+                actions: staged.actions,
             },
         );
         self.save()
     }
 
-    /// Notes that a refresh at `now` found every archive of `pinned` pinned and, with `Removal::Expired`, removes
-    /// each archive no refresh has found pinned for `keep`. Returns those removed. A runner copying one as it goes
-    /// downloads its action itself. Quarantined files go after `keep` either way.
+    /// Notes that a refresh at `now` found every archive of `pinned` pinned, and removes each archive no refresh has
+    /// found pinned for `keep`. Returns those removed. A runner copying one as it goes downloads its action itself.
+    /// Quarantined files go after `keep` too, and refusals of archives no longer pinned.
     pub(crate) fn retain(
         &mut self,
         pinned: &BTreeSet<Key>,
         keep: Duration,
-        removal: Removal,
         now: u64,
     ) -> io::Result<Vec<Key>> {
         let mut removed = Vec::new();
+        self.refused.retain(|key| pinned.contains(key));
         for (key, entry) in &mut self.entries {
             if pinned.contains(key) {
                 entry.pinned_at = now;
-            } else if removal == Removal::Expired
-                && now.saturating_sub(entry.pinned_at) > keep.as_secs()
-            {
+            } else if now.saturating_sub(entry.pinned_at) > keep.as_secs() {
                 removed.push(key.clone());
             }
         }
@@ -471,7 +544,10 @@ impl ArchiveStore {
     fn save(&self) -> io::Result<()> {
         let index = Index {
             entries: self.entries.values().cloned().collect(),
-            inventories: self.inventories.clone(),
+            scans: self.scans.clone(),
+            reached: self.reached.clone(),
+            refused: self.refused.clone(),
+            packages: self.packages.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&index).map_err(io::Error::other)?;
         let temporary = self.root.join(format!("{INDEX}.tmp"));

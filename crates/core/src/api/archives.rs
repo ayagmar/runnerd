@@ -21,13 +21,26 @@ pub struct ActionArchives {
     /// What failed and has not succeeded since, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<ArchiveFailure>,
+    /// Runners a restart adopted with the archives mounted, while no check of this daemon has found those good yet.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unchecked: u64,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` passes a reference"
+)]
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 /// Something the store could not do, which jobs make up for by downloading their actions themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveFailure {
-    /// What failed: a served repository (`owner/name`) for [`ArchiveFailureKind::Pins`], else an action
-    /// (`owner/name@sha`).
+    /// What failed: a served repository (`owner/name`) for [`ArchiveFailureKind::Pins`] and
+    /// [`ArchiveFailureKind::Held`], a repository for [`ArchiveFailureKind::Package`], a runner for
+    /// [`ArchiveFailureKind::Exposed`], the store's directory for [`ArchiveFailureKind::Store`] and
+    /// [`ArchiveFailureKind::Full`], else an action (`owner/name@sha`, `owner/name/path@sha`).
     pub subject: String,
     /// What went wrong.
     pub kind: ArchiveFailureKind,
@@ -36,7 +49,7 @@ pub struct ArchiveFailure {
 }
 
 /// What went wrong with an action archive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArchiveFailureKind {
     /// A served repository's pins could not be read; its last ones are kept.
@@ -47,8 +60,22 @@ pub enum ArchiveFailureKind {
     Rejected,
     /// A kept archive no longer matched what was verified; it was moved to quarantine and is downloaded again.
     Quarantined,
-    /// The store could not be opened or checked whole: runners get no archives until it is.
+    /// The store could not be opened, checked whole, or written: runners get no archives while it cannot be
+    /// checked.
     Store,
+    /// Not all a served repository's pins are known, so every archive it last reached is kept.
+    Held,
+    /// The store is at its size cap: what is missing waits for room.
+    Full,
+    /// The archive holds no action file at the path a pin names: not an action the runner loads.
+    NotAction,
+    /// The archive's action file there is not YAML runnerd reads, so what it pins is not followed.
+    Unreadable,
+    /// A job resolved the repository as an immutable action package, which the runner would replace with an archive
+    /// of the same commit: its archives are removed and never kept.
+    Package,
+    /// A runner a restart adopted with the archives mounted, before the first check moved a file it may have read.
+    Exposed,
     /// A kind from a newer daemon.
     #[serde(other)]
     Unknown,
@@ -68,7 +95,24 @@ impl ArchiveFailure {
                 "its kept archive changed on disk; it was moved to quarantine and is downloaded again"
             }
             ArchiveFailureKind::Store => {
-                "cannot be opened or checked, so runners download their actions themselves"
+                "cannot be opened, checked or written, so runners may download their actions themselves"
+            }
+            ArchiveFailureKind::Held => {
+                "not all its pinned actions are known, so every archive it last reached is kept"
+            }
+            ArchiveFailureKind::Full => "is at its size cap; missing archives wait for room",
+            ArchiveFailureKind::NotAction => {
+                "its archive holds no action there, so it is not kept as one"
+            }
+            ArchiveFailureKind::Unreadable => {
+                "its action file is not YAML runnerd reads, so what it pins is not kept"
+            }
+            ArchiveFailureKind::Package => {
+                "a job resolved it as an immutable action package; its archives are removed and never kept"
+            }
+            ArchiveFailureKind::Exposed => {
+                "kept running across a restart with the archives mounted, and the first check then moved or could \
+                 not read one: its job may have read it"
             }
             ArchiveFailureKind::Unknown => "it failed",
         };
@@ -92,24 +136,42 @@ impl ActionArchives {
             1 => format!("1 action archive, {}", ByteSize(self.bytes)),
             entries => format!("{entries} action archives, {}", ByteSize(self.bytes)),
         };
-        match self.refreshed_at {
+        let line = match self.refreshed_at {
             Some(at) => format!("{held}, refreshed {}", ago(at, now)),
             None => held,
+        };
+        match self.unchecked {
+            0 => line,
+            1 => format!("{line}; 1 adopted runner reads them before a check"),
+            unchecked => format!("{line}; {unchecked} adopted runners read them before a check"),
         }
     }
 
     /// What its failures mean together, in the attention list's words: `runnerd's action archives are not all kept,
-    /// so jobs download those from GitHub: actions/checkout@08eba0b: … and 1 more`. `None` while nothing failed.
+    /// so jobs download those from GitHub: actions/checkout@08eba0b: … and 1 more`, or, when a runner may have read an
+    /// archive a check then moved, `a runner may have read an action archive that changed: runnerd-…: …`. `None`
+    /// while nothing failed.
     pub fn attention_title(&self) -> Option<String> {
-        let first = self.failures.first()?;
+        let exposed = self
+            .failures
+            .iter()
+            .find(|failure| failure.kind == ArchiveFailureKind::Exposed);
+        let first = exposed.or_else(|| self.failures.first())?;
         let more = match self.failures.len() {
             1 => String::new(),
             n => format!(" and {} more", n - 1),
         };
-        Some(format!(
-            "runnerd's action archives are not all kept, so jobs download those from GitHub: {}{more}",
-            first.line()
-        ))
+        Some(if exposed.is_some() {
+            format!(
+                "a runner may have read an action archive that changed: {}{more}",
+                first.line()
+            )
+        } else {
+            format!(
+                "runnerd's action archives are not all kept, so jobs download those from GitHub: {}{more}",
+                first.line()
+            )
+        })
     }
 
     /// The tone its failures take: a warning, as jobs still download what is missing.

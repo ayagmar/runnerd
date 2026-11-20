@@ -17,6 +17,7 @@ mod verify;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -27,14 +28,17 @@ use tracing::{info, warn};
 
 use self::pins::{MAX_DEPTH, Pin};
 use self::state::{Refresher, Wanted};
-use self::store::{ArchiveStore, Key, Staged};
+use self::store::{Action, ArchiveStore, Key, Staged};
 use crate::api;
 use crate::config::Config;
-use crate::github::Error;
+use crate::github::{self, Error};
 use crate::sync::lock;
 
 /// Where a runner container finds the archives.
 pub const MOUNT: &str = "/opt/runnerd/actions";
+
+/// The label of a runner container that mounts the archives: what a restart counts it by.
+pub const LABEL: &str = "runnerd.action-archives";
 
 /// The runner's setting that points it at the archives: `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`.
 pub const ENV: &str = "ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE";
@@ -50,8 +54,10 @@ pub(crate) struct Limits {
     pub(crate) archive: u64,
     /// The most bytes one refresh downloads, failed and refused downloads included; what is left waits for the next.
     pub(crate) bytes: u64,
-    /// The most requests one refresh asks of GitHub's API; what is left waits for the next.
+    /// The most requests one refresh sends to GitHub's API; what is left waits for the next.
     pub(crate) requests: u32,
+    /// The most bytes the store holds: a download that could pass it waits until retention makes room.
+    pub(crate) store: u64,
 }
 
 /// The limits runnerd refreshes by.
@@ -59,6 +65,7 @@ const LIMITS: Limits = Limits {
     archive: 256 << 20,
     bytes: 2 << 30,
     requests: 1000,
+    store: 8 << 30,
 };
 
 /// What a refresh leaves of GitHub's rate limit: below it, it asks nothing more, as runners' registrations and the
@@ -138,13 +145,15 @@ pub trait Source: Send + Sync {
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
     /// Downloads the archive of `repository` at `commit` anonymously (codeload.github.com's `/{owner}/{repo}/tar.gz/
     /// {sha}`) into the new file `to`, at most `limit` bytes, and returns its size. Never with a token: a repository
-    /// that is not public is not there.
+    /// that is not public is not there. Adds every byte of the body it receives to `received`, the one past `limit`
+    /// and a failed download's included.
     fn tarball(
         &self,
         repository: &str,
         commit: &str,
         to: &Path,
         limit: u64,
+        received: &AtomicU64,
     ) -> impl Future<Output = Result<u64, Error>> + Send;
     /// The requests left of GitHub's rate limit before it resets, as last read; `None` when no answer said.
     fn spare_requests(&self) -> Option<u64>;
@@ -172,10 +181,12 @@ impl Settings {
     }
 }
 
-/// The engine's side of the store: where it is, the settings it hands the task, and what the task last published:
-/// what clients show, and what runners get. The task publishes the runners' view only after the store opened and a
-/// check found every file under `archives/` good, and withdraws it when a check does not or the archives go off; a
-/// runner reads it once as it starts. Nothing survives a restart: a new task checks before it publishes.
+/// The engine's side of the store: where it is, the settings it hands the task, what the task last published (what
+/// clients show, and what runners get), the runners a restart adopted with the archives mounted, and the
+/// repositories jobs resolved as immutable action packages. The task publishes the runners' view only after the store
+/// opened and a check found every file under `archives/` good, and withdraws it before every check and while the
+/// archives are off; a runner reads it once as it starts. Nothing survives a restart: a new task checks before it
+/// publishes, and the store keeps the packages.
 #[derive(Debug)]
 pub struct Link {
     /// The store's directory; `None` when the daemon could not name one.
@@ -184,6 +195,31 @@ pub struct Link {
     status: watch::Sender<Option<api::ActionArchives>>,
     /// What a runner gets while the archives are checked good; `None` otherwise.
     ready: watch::Sender<Option<RunnerArchives>>,
+    /// Runners a restart adopted whose container mounts the archives, by name, until each is gone: they read a view
+    /// no check of this daemon validated when they started. `None` until recovery is done, which the first check
+    /// waits for.
+    readers: watch::Sender<Option<BTreeSet<String>>>,
+    /// Repositories jobs resolved as immutable action packages, as their logs named them.
+    packages: Packages,
+}
+
+/// Where a job's log tells the archives task of an immutable action package (`record::immutable_packages`).
+#[derive(Debug, Clone)]
+pub struct Packages(watch::Sender<BTreeSet<String>>);
+
+impl Packages {
+    /// Notes the packages `lines`, stored lines of a job's log, show a runner downloading.
+    pub fn read(&self, lines: &[String]) {
+        let found = crate::record::immutable_packages(lines);
+        if found.is_empty() {
+            return;
+        }
+        self.0.send_if_modified(|known| {
+            let before = known.len();
+            known.extend(found.iter().map(|name| name.to_ascii_lowercase()));
+            known.len() != before
+        });
+    }
 }
 
 impl Link {
@@ -194,6 +230,8 @@ impl Link {
             settings: watch::Sender::new(Settings::of(config)),
             status: watch::Sender::new(None),
             ready: watch::Sender::new(None),
+            readers: watch::Sender::new(None),
+            packages: Packages(watch::Sender::new(BTreeSet::new())),
         }
     }
 
@@ -207,6 +245,8 @@ impl Link {
             Published {
                 status: self.status.clone(),
                 ready: self.ready.clone(),
+                readers: self.readers.subscribe(),
+                packages: self.packages.0.subscribe(),
             },
         ));
         Some(Running(Some(task)))
@@ -226,10 +266,74 @@ impl Link {
         });
     }
 
-    /// What clients show of the store: `None` while it is off or has not opened.
+    /// Notes that a restart adopted `runner`, if its container's `labels` say it mounts the archives.
+    pub fn adopted<S: std::hash::BuildHasher>(
+        &self,
+        runner: &str,
+        labels: &HashMap<String, String, S>,
+    ) {
+        if !labels.contains_key(LABEL) {
+            return;
+        }
+        self.readers.send_if_modified(|readers| {
+            readers
+                .get_or_insert_with(BTreeSet::new)
+                .insert(runner.to_owned())
+        });
+    }
+
+    /// Notes that recovery adopted every runner it will: the first check, which waits for this, then knows every
+    /// runner that reads the archives unchecked.
+    pub fn recovered(&self) {
+        self.readers.send_if_modified(|readers| {
+            let first = readers.is_none();
+            readers.get_or_insert_with(BTreeSet::new);
+            first
+        });
+    }
+
+    /// Notes that `runner` is gone.
+    pub fn released(&self, runner: &str) {
+        self.readers.send_if_modified(|readers| {
+            readers
+                .as_mut()
+                .is_some_and(|readers| readers.remove(runner))
+        });
+    }
+
+    /// Where jobs' logs tell of immutable action packages.
+    pub fn packages(&self) -> Packages {
+        self.packages.clone()
+    }
+
+    /// What clients show of the store: `None` while it is off, or has not opened and no adopted runner reads it.
     pub fn status(&self) -> Option<api::ActionArchives> {
-        let on = self.settings.borrow().enabled;
-        self.status.borrow().clone().filter(|_| on)
+        if !self.settings.borrow().enabled {
+            return None;
+        }
+        let readers = self.readers.borrow().clone().unwrap_or_default();
+        match self.status.borrow().clone() {
+            Some(mut status) => {
+                // A runner that was exposed and is gone is no longer anyone's concern.
+                status.failures.retain(|failure| {
+                    failure.kind != api::ArchiveFailureKind::Exposed
+                        || readers.contains(&failure.subject)
+                });
+                Some(status)
+            }
+            // Before the first check, every adopted reader read a view no check validated.
+            None if !readers.is_empty() => Some(api::ActionArchives {
+                unchecked: readers.len() as u64,
+                ..api::ActionArchives::default()
+            }),
+            None => None,
+        }
+    }
+
+    /// The runners' view as it changes, every withdrawal included.
+    #[cfg(test)]
+    pub(crate) fn ready_changes(&self) -> watch::Receiver<Option<RunnerArchives>> {
+        self.ready.subscribe()
     }
 
     /// What a runner container mounts and its environment gets, read once as it starts: the archives' directory,
@@ -258,10 +362,12 @@ impl RunnerArchives {
     }
 }
 
-/// What the task publishes to its `Link`.
+/// What the task publishes to its `Link`, and what it hears from it.
 struct Published {
     status: watch::Sender<Option<api::ActionArchives>>,
     ready: watch::Sender<Option<RunnerArchives>>,
+    readers: watch::Receiver<Option<BTreeSet<String>>>,
+    packages: watch::Receiver<BTreeSet<String>>,
 }
 
 /// What a runner container gets of the archives.
@@ -304,30 +410,68 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Owns the store at `directory`: refreshes at start, every `REFRESH` and whenever the settings change. Each
-/// refresh opens the store if it is not open yet, checks it, and publishes the runners' view only if that check
-/// found it good, before it downloads anything; then publishes what clients show.
+/// Owns the store at `directory`: refreshes at start, every `REFRESH` and whenever the settings change, and withdraws
+/// what jobs resolved as packages as soon as a log names one. Each refresh withdraws the runners' view, opens the
+/// store if it is not open yet, checks it, withdraws what is no longer public or is a package, and publishes the view
+/// again only if the check found it good; then it downloads, and publishes what clients show.
 async fn run<S: Source + 'static>(
     source: Arc<S>,
     directory: PathBuf,
     mut settings: watch::Receiver<Settings>,
-    published: Published,
+    mut published: Published,
 ) {
     let mut archives = Archives::new(directory.clone());
     let view = RunnerArchives::of(&directory.join(store::ARCHIVES));
+    // The first check names the runners recovery adopted, so it waits for recovery.
+    if published.readers.wait_for(Option::is_some).await.is_err() {
+        return;
+    }
+    let mut first = true;
     loop {
         let now = settings.borrow_and_update().clone();
         if now.enabled {
-            let good = archives.check(unix_now()).await;
-            published.ready.send_replace(good.then(|| view.clone()));
-            archives.update(&*source, &now, unix_now()).await;
+            // A start while the check runs gets nothing, rather than what the check may yet quarantine.
+            published.ready.send_replace(None);
+            let packages = published.packages.borrow_and_update().clone();
+            github::REQUESTS
+                .scope(std::cell::Cell::new(0), async {
+                    let mut round = archives.round();
+                    let checked = archives.check(unix_now()).await;
+                    if first {
+                        let readers = published.readers.borrow().clone().unwrap_or_default();
+                        archives.exposed(&readers, checked, unix_now());
+                        first = false;
+                    }
+                    archives.packages(&packages, unix_now()).await;
+                    archives.vet(&*source, &mut round, unix_now()).await;
+                    published
+                        .ready
+                        .send_replace(checked.good().then(|| view.clone()));
+                    published.status.send_replace(Some(archives.status()));
+                    archives
+                        .update(&*source, &mut round, &now, unix_now())
+                        .await;
+                })
+                .await;
             published.status.send_replace(Some(archives.status()));
         } else {
             published.ready.send_replace(None);
         }
-        tokio::select! {
-            () = tokio::time::sleep(REFRESH) => {}
-            changed = settings.changed() => if changed.is_err() { return },
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(REFRESH) => break,
+                changed = settings.changed() => if changed.is_err() { return } else { break },
+                changed = published.packages.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let packages = published.packages.borrow_and_update().clone();
+                    if settings.borrow().enabled {
+                        archives.packages(&packages, unix_now()).await;
+                        published.status.send_replace(Some(archives.status()));
+                    }
+                }
+            }
         }
     }
 }
@@ -342,6 +486,31 @@ pub(crate) struct Archives {
     store: Option<Arc<Mutex<ArchiveStore>>>,
     refresher: Refresher,
     limits: Limits,
+}
+
+/// What one refresh spends and has asked: its meter and the names GitHub gave.
+#[derive(Debug)]
+pub(crate) struct Round {
+    meter: Meter,
+    names: Names,
+}
+
+/// What a check found, as the task acts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Checked {
+    /// Every file is good, and none was moved.
+    Good,
+    /// Every file is good now, after the check moved some to quarantine.
+    Moved,
+    /// The store did not open, or a file could not be read or moved: what runners would read is not known good.
+    Bad,
+}
+
+impl Checked {
+    /// Whether runners may read the archives.
+    pub(crate) fn good(self) -> bool {
+        self != Checked::Bad
+    }
 }
 
 impl Archives {
@@ -362,6 +531,14 @@ impl Archives {
         self
     }
 
+    /// A new refresh's round.
+    pub(crate) fn round(&self) -> Round {
+        Round {
+            meter: Meter::new(self.limits),
+            names: Names::default(),
+        }
+    }
+
     /// What clients show.
     pub(crate) fn status(&self) -> api::ActionArchives {
         let (entries, bytes) = self
@@ -371,93 +548,183 @@ impl Archives {
         self.refresher.status(entries, bytes)
     }
 
-    /// One refresh at `now`: a check, then an update.
+    /// One refresh at `now`, as the task runs it, without the runners' view.
     #[cfg(test)]
     pub(crate) async fn refresh<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
-        self.check(now).await;
-        self.update(source, settings, now).await;
+        github::REQUESTS
+            .scope(std::cell::Cell::new(0), async {
+                let mut round = self.round();
+                self.check(now).await;
+                self.vet(source, &mut round, now).await;
+                self.update(source, &mut round, settings, now).await;
+            })
+            .await;
     }
 
-    /// Reads the pins of each served repository whose default branch moved, downloads and verifies what is pinned
-    /// and missing, following the pins of each archive as deep as a runner nests actions, and removes what no
-    /// repository pinned for `keep`, but only when every served repository's pins and every archive they reach are
-    /// known whole: what was not read may pin anything. Nothing while the store is not open.
-    pub(crate) async fn update<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
+    /// One update at `now`, without the check before it.
+    #[cfg(test)]
+    pub(crate) async fn refill<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
+        github::REQUESTS
+            .scope(std::cell::Cell::new(0), async {
+                let mut round = self.round();
+                self.update(source, &mut round, settings, now).await;
+            })
+            .await;
+    }
+
+    /// The store's directory, as failures of the store name it.
+    fn subject(&self) -> String {
+        self.directory.display().to_string()
+    }
+
+    /// Notes what the restart's first check means for `readers`, the runners it adopted with the archives mounted:
+    /// when it moved or could not settle a file, each may have read it, and is named until it is gone.
+    pub(crate) fn exposed(&mut self, readers: &BTreeSet<String>, checked: Checked, now: u64) {
+        if readers.is_empty() {
+            return;
+        }
+        if checked == Checked::Good {
+            info!(
+                "{} runners a restart adopted read the action archives; the first check found every one good",
+                readers.len()
+            );
+            return;
+        }
+        for reader in readers {
+            warn!(
+                "{reader} kept running across the restart with the action archives mounted, and the first check found \
+                 one changed or could not read one: its job may have read it"
+            );
+            self.refresher
+                .fail(reader, api::ArchiveFailureKind::Exposed, now);
+        }
+    }
+
+    /// Withdraws every archive of `packages`, repositories jobs resolved as immutable action packages, and keeps them
+    /// out from then on.
+    pub(crate) async fn packages(&mut self, packages: &BTreeSet<String>, now: u64) {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let meter = Meter::new(self.limits);
-        let mut names = Names::default();
+        for package in packages {
+            let noted = {
+                let store = store.clone();
+                let package = package.clone();
+                tokio::task::spawn_blocking(move || lock(&store).packaged(&package)).await
+            };
+            match noted {
+                Ok(Ok(withdrawn)) => {
+                    for key in &withdrawn.removed {
+                        info!(
+                            "action archive {} removed: a job resolved its repository as an immutable package",
+                            key.label()
+                        );
+                    }
+                    if withdrawn.new {
+                        self.refresher
+                            .fail(package, api::ArchiveFailureKind::Package, now);
+                    }
+                }
+                Ok(Err(error)) => {
+                    warn!("cannot remove the action archives of the package {package}: {error}");
+                    self.refresher
+                        .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Reads each served repository's pins, from its tree only when its default branch moved, asks GitHub which are
+    /// public every time, downloads and verifies what is pinned and missing, following the pins of each archive as
+    /// deep as a runner nests actions, and removes what no repository pinned for `keep`. A repository whose pins are
+    /// not all known keeps every archive it last reached; an action that is not supported (not public, a package, an
+    /// archive that failed its check, no action at its path) is known, and kept out. Nothing while the store is not
+    /// open.
+    pub(crate) async fn update<S: Source>(
+        &mut self,
+        source: &S,
+        round: &mut Round,
+        settings: &Settings,
+        now: u64,
+    ) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
         let mut directs: BTreeMap<String, Option<Direct>> = BTreeMap::new();
         for repository in &settings.repositories {
-            let direct = self
-                .read_pins(source, &meter, &store, &mut names, repository, now)
-                .await;
+            let direct = self.read_pins(source, round, &store, repository, now).await;
             directs.insert(repository.clone(), direct);
         }
-        self.withdraw(source, &meter, &store, &mut names).await;
         // Each archive is tried once a refresh: one that failed waits for the next.
         let mut tried: BTreeSet<Key> = BTreeSet::new();
+        // Those the refresh's budget or the store's cap left for later: missing, but not for want of reading.
+        let mut deferred: BTreeSet<Key> = BTreeSet::new();
         // Each round downloads what the last made known, one level deeper: level 0, the repositories' own pins, to
         // level `MAX_DEPTH`.
         for _ in 0..=MAX_DEPTH {
             let mut wanted = BTreeSet::new();
             for direct in directs.values().flatten() {
-                let reach = closure(source, &meter, &store, &mut names, &direct.wanted).await;
-                wanted.extend(reach.keys);
+                let reach = closure(source, round, &store, &direct.wanted).await;
+                wanted.extend(reach.missing);
             }
-            let missing: Vec<Key> = wanted
-                .iter()
-                .filter(|key| !tried.contains(*key) && !lock(&store).holds(key))
-                .cloned()
-                .collect();
+            let missing: Vec<Key> = wanted.difference(&tried).cloned().collect();
             if missing.is_empty() {
                 break;
             }
             tried.extend(missing.iter().cloned());
-            self.fetch_all(source, &meter, &store, missing, now).await;
+            deferred.extend(self.fetch_all(source, round, &store, missing, now).await);
         }
         let mut whole = BTreeMap::new();
-        let mut removal = store::Removal::Expired;
-        let mut wanted = BTreeSet::new();
+        let mut pinned = BTreeSet::new();
+        let mut unsupported = BTreeMap::new();
+        let mut refused = BTreeSet::new();
         for (repository, direct) in &directs {
-            let Some(direct) = direct else {
-                removal = store::Removal::Held;
-                continue;
+            let (complete, waiting) = match direct {
+                Some(direct) => {
+                    let reach = closure(source, round, &store, &direct.wanted).await;
+                    unsupported.extend(reach.unsupported);
+                    refused.extend(reach.refused);
+                    pinned.extend(reach.keys.iter().cloned());
+                    let read = direct.known && reach.answered;
+                    let complete = read && reach.missing.is_empty();
+                    let waiting = read && reach.missing.is_subset(&deferred);
+                    if complete {
+                        whole.insert(repository.clone(), reach.keys);
+                    }
+                    (complete, waiting)
+                }
+                None => (false, false),
             };
-            let reach = closure(source, &meter, &store, &mut names, &direct.wanted).await;
-            if direct.read && reach.complete {
-                whole.insert(
-                    repository.clone(),
-                    store::Inventory {
-                        head: direct.head.clone(),
-                        wanted: direct.wanted.clone(),
-                        reached: reach.keys.clone(),
-                    },
-                );
-            } else {
-                removal = store::Removal::Held;
+            if complete || waiting {
+                self.refresher
+                    .succeed_kind(repository, api::ArchiveFailureKind::Held);
             }
-            wanted.extend(reach.keys);
+            if !complete {
+                // What it reached when all its pins were last known stays: what was not read may pin it.
+                pinned.extend(lock(&store).reached(repository));
+                // Only waiting for downloads is no news: the next refresh goes on with them.
+                if !waiting {
+                    info!(
+                        "{repository}: not all its pins are known; the archives it last reached are kept"
+                    );
+                    self.refresher
+                        .fail(repository, api::ArchiveFailureKind::Held, now);
+                }
+            }
         }
-        if removal == store::Removal::Held {
-            info!(
-                "some pins of the served repositories are not known whole; no action archive is removed this refresh"
-            );
+        for (subject, kind) in &unsupported {
+            self.refresher.fail(subject, *kind, now);
         }
         let retained = {
             let store = store.clone();
             let keep = settings.keep;
             let served = settings.repositories.clone();
-            let reached = wanted.clone();
+            let pinned = pinned.clone();
             tokio::task::spawn_blocking(move || {
                 let mut store = lock(&store);
                 store.record(whole, &served)?;
-                // What the last whole inventories reached stays too: while a repository cannot be read, what it
-                // pinned when it last could is all that is known of it.
-                let mut pinned = store.reached(&served);
-                pinned.extend(reached);
-                store.retain(&pinned, keep, removal, now)
+                store.retain(&pinned, keep, now)
             })
             .await
         };
@@ -471,35 +738,47 @@ impl Archives {
                     );
                 }
             }
-            Ok(Err(error)) => warn!("cannot remove action archives no longer pinned: {error}"),
+            Ok(Err(error)) => {
+                warn!("cannot remove action archives no longer pinned: {error}");
+                self.refresher
+                    .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
+            }
             Err(_) => {}
         }
-        self.refresher.finish(&settings.repositories, &wanted, now);
+        let mut subjects: BTreeSet<String> = pinned.iter().map(Key::label).collect();
+        subjects.extend(unsupported.into_keys());
+        subjects.extend(refused);
+        self.refresher
+            .finish(&settings.repositories, &subjects, &self.subject(), now);
     }
 
     /// Opens the store if it is not open, and checks every kept archive against the index: what changed is
-    /// quarantined, and fetched again by the next update. Whether every file under `archives/` is now good: `false`
-    /// while the store cannot open, or the check could not read or move a file.
-    pub(crate) async fn check(&mut self, now: u64) -> bool {
-        let subject = self.directory.display().to_string();
+    /// quarantined, and fetched again by the next update.
+    pub(crate) async fn check(&mut self, now: u64) -> Checked {
+        let subject = self.subject();
         let store = match self.open().await {
             Ok(store) => store,
             Err(error) => {
                 warn!("no action archives: cannot open {subject}: {error}");
                 self.refresher
                     .fail(&subject, api::ArchiveFailureKind::Store, now);
-                return false;
+                return Checked::Bad;
             }
         };
+        // What jobs resolved as packages stays reported, a restart included.
+        for package in lock(&store).packages() {
+            self.refresher
+                .fail(&package, api::ArchiveFailureKind::Package, now);
+        }
         let checked = match tokio::task::spawn_blocking(move || lock(&store).check(now)).await {
             Ok(Ok(checked)) => checked,
             Ok(Err(error)) => {
                 warn!("cannot check the action archives: {error}");
                 self.refresher
                     .fail(&subject, api::ArchiveFailureKind::Store, now);
-                return false;
+                return Checked::Bad;
             }
-            Err(_) => return false,
+            Err(_) => return Checked::Bad,
         };
         for key in &checked.changed {
             self.refresher
@@ -511,37 +790,44 @@ impl Archives {
         for error in &checked.errors {
             warn!("cannot check the action archive {error}; runners get no archives until it is");
         }
-        if checked.clean() {
-            self.refresher.succeed(&subject);
-        } else {
+        if !checked.clean() {
             self.refresher
                 .fail(&subject, api::ArchiveFailureKind::Store, now);
+            return Checked::Bad;
         }
-        checked.clean()
+        self.refresher.succeed(&subject);
+        if checked.changed.is_empty() && checked.strangers.is_empty() {
+            Checked::Good
+        } else {
+            Checked::Moved
+        }
     }
 
-    /// Removes every kept archive whose repository GitHub now says is not public, or not there: anything a runner
-    /// reads is what anyone may download, whether or not a repository still pins it. A repository GitHub does not
-    /// answer for is left as it is.
-    async fn withdraw<S: Source>(
-        &mut self,
-        source: &S,
-        meter: &Meter,
-        store: &Arc<Mutex<ArchiveStore>>,
-        names: &mut Names,
-    ) {
-        let repositories = lock(store).repositories();
+    /// Removes every kept archive whose repository GitHub now says is not public, or not there, before runners get
+    /// the view: anything a runner reads is what anyone may download, whether or not a repository still pins it. A
+    /// repository GitHub does not answer for is left as it is.
+    pub(crate) async fn vet<S: Source>(&mut self, source: &S, round: &mut Round, now: u64) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let repositories = lock(&store).repositories();
         let mut hidden = Vec::new();
         for repository in repositories {
-            if let Ok(None) = names.public(source, meter, &repository).await {
+            if let Ok(None) = round
+                .names
+                .public(source, &round.meter, &store, &repository)
+                .await
+            {
                 hidden.push(repository);
             }
         }
         if hidden.is_empty() {
             return;
         }
-        let store = store.clone();
-        let withdrawn = tokio::task::spawn_blocking(move || lock(&store).withdraw(&hidden)).await;
+        let withdrawn = {
+            let store = store.clone();
+            tokio::task::spawn_blocking(move || lock(&store).withdraw(&hidden)).await
+        };
         match withdrawn {
             Ok(Ok(keys)) => {
                 for key in keys {
@@ -551,7 +837,11 @@ impl Archives {
                     );
                 }
             }
-            Ok(Err(error)) => warn!("cannot remove action archives no longer public: {error}"),
+            Ok(Err(error)) => {
+                warn!("cannot remove action archives no longer public: {error}");
+                self.refresher
+                    .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
+            }
             Err(_) => {}
         }
     }
@@ -570,49 +860,93 @@ impl Archives {
         Ok(store)
     }
 
-    /// The pins of `repository` this refresh goes by: read now when its default branch moved since its last whole
-    /// inventory, that inventory's when it has not. When they cannot be read, the last inventory's, not read now, or
-    /// `None` without one.
+    /// The pins of `repository` this refresh goes by, each asked of GitHub for its name and visibility: its last
+    /// scan's when its default branch has not moved, read from its tree when it has, and the last scan's, not known
+    /// whole, when it cannot be read. `None` when it cannot be read and never was.
     async fn read_pins<S: Source>(
         &mut self,
         source: &S,
-        meter: &Meter,
+        round: &mut Round,
         store: &Arc<Mutex<ArchiveStore>>,
-        names: &mut Names,
         repository: &str,
         now: u64,
     ) -> Option<Direct> {
-        let last = lock(store).inventory(repository).cloned();
-        match pins_of(source, meter, names, repository, last.as_ref()).await {
-            Ok(direct) => {
+        let last = lock(store).scan(repository).cloned();
+        let (scan, known) = match scan_of(source, &round.meter, repository, last.as_ref()).await {
+            Ok(scan) => {
                 self.refresher.succeed(repository);
-                Some(direct)
+                if last.as_ref() != Some(&scan) {
+                    let saved = {
+                        let store = store.clone();
+                        let repository = repository.to_owned();
+                        let scan = scan.clone();
+                        tokio::task::spawn_blocking(move || lock(&store).scanned(&repository, scan))
+                            .await
+                    };
+                    if let Ok(Err(error)) = saved {
+                        warn!("cannot keep {repository}'s pins: {error}");
+                        self.refresher
+                            .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
+                    }
+                }
+                (scan, true)
             }
             Err(error) => {
                 warn!(
-                    "{repository}: cannot read the actions it pins; keeping the last read and every archive: {}",
+                    "{repository}: cannot read the actions it pins; keeping the last read and every archive they \
+                     reached: {}",
                     error.brief()
                 );
                 self.refresher
                     .fail(repository, api::ArchiveFailureKind::Pins, now);
-                last.map(|inventory| Direct {
-                    head: inventory.head,
-                    wanted: inventory.wanted,
-                    read: false,
-                })
+                (last?, false)
+            }
+        };
+        let mut direct = Direct {
+            wanted: BTreeSet::new(),
+            known,
+        };
+        for pin in scan.pins {
+            match round
+                .names
+                .public(source, &round.meter, store, &pin.repository)
+                .await
+            {
+                Ok(Some(name)) => {
+                    direct.wanted.insert(Wanted {
+                        key: Key {
+                            repository: name,
+                            sha: pin.sha,
+                        },
+                        path: pin.path,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        "cannot read {}, which {repository} pins: {}",
+                        pin.repository,
+                        error.brief()
+                    );
+                    direct.known = false;
+                }
             }
         }
+        Some(direct)
     }
 
-    /// Downloads, verifies and publishes each of `missing`, a few at a time; returns the bytes downloaded.
+    /// Downloads, verifies and publishes each of `missing`, a few at a time. Returns those left for a later refresh,
+    /// by its budget or the store's cap.
     async fn fetch_all<S: Source>(
         &mut self,
         source: &S,
-        meter: &Meter,
+        round: &Round,
         store: &Arc<Mutex<ArchiveStore>>,
         missing: Vec<Key>,
         now: u64,
-    ) {
+    ) -> BTreeSet<Key> {
+        let mut deferred = BTreeSet::new();
+        let meter = &round.meter;
         let results: Vec<(Key, Result<u64, Fetch>)> = futures_util::stream::iter(missing)
             .map(|key| async move {
                 let result = fetch(source, meter, store, &key, now).await;
@@ -625,7 +959,18 @@ impl Archives {
             let label = key.label();
             match result {
                 Ok(_) => self.refresher.succeed(&label),
-                Err(Fetch::Deferred) => {}
+                Err(Fetch::Deferred) => {
+                    deferred.insert(key);
+                }
+                Err(Fetch::Full) => {
+                    deferred.insert(key);
+                    warn!(
+                        "the action archives are at their size cap; {label} waits for room, and jobs download it \
+                         themselves"
+                    );
+                    self.refresher
+                        .fail(&self.subject(), api::ArchiveFailureKind::Full, now);
+                }
                 Err(Fetch::Download(error)) => {
                     warn!(
                         "cannot download the action archive {label}; jobs download it themselves: {}",
@@ -634,19 +979,40 @@ impl Archives {
                     self.refresher
                         .fail(&label, api::ArchiveFailureKind::Download, now);
                 }
+                Err(Fetch::Gone) => {
+                    warn!(
+                        "the action archive {label} is not there to anyone; it is not asked for again while pinned"
+                    );
+                    self.refusal(store, key, now).await;
+                    self.refresher
+                        .fail(&label, api::ArchiveFailureKind::Download, now);
+                }
                 Err(Fetch::Rejected(why)) => {
                     warn!(
                         "the action archive {label} {why}; not kept, jobs download it themselves"
                     );
+                    self.refusal(store, key, now).await;
                     self.refresher
                         .fail(&label, api::ArchiveFailureKind::Rejected, now);
                 }
                 Err(Fetch::Store(error)) => {
                     warn!("cannot keep the action archive {label}: {error}");
                     self.refresher
-                        .fail(&label, api::ArchiveFailureKind::Download, now);
+                        .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
                 }
             }
+        }
+        deferred
+    }
+
+    /// Notes that `key`'s archive is not one to download again.
+    async fn refusal(&mut self, store: &Arc<Mutex<ArchiveStore>>, key: Key, now: u64) {
+        let store = store.clone();
+        if let Ok(Err(error)) = tokio::task::spawn_blocking(move || lock(&store).refuse(key)).await
+        {
+            warn!("cannot keep a refused action archive's note: {error}");
+            self.refresher
+                .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
         }
     }
 }
@@ -654,23 +1020,21 @@ impl Archives {
 /// A served repository's own pins, as one refresh goes by them.
 #[derive(Debug)]
 struct Direct {
-    /// The commit of its default branch they are of.
-    head: String,
+    /// Those public, by GitHub's names.
     wanted: BTreeSet<Wanted>,
-    /// Whether they are known whole at `head`: read now, or the last whole inventory at the same head.
-    read: bool,
+    /// Whether they are known whole: its files read in full at its head, and every repository they name answered.
+    known: bool,
 }
 
-/// `repository`'s pins at its default branch's head: the inventory `last`'s when the head has not moved, read whole
-/// from its tree when it has. A tree GitHub cut short, more files than are read, a file too large or not YAML, and a
-/// repository a pin names that GitHub does not answer for each fail it: what was not read may pin anything.
-async fn pins_of<S: Source>(
+/// `repository`'s pins at its default branch's head: `last`'s when the head has not moved, read whole from its tree
+/// when it has. A tree GitHub cut short, more files than are read, and a file too large or not YAML each fail it: what
+/// was not read may pin anything.
+async fn scan_of<S: Source>(
     source: &S,
     meter: &Meter,
-    names: &mut Names,
     repository: &str,
-    last: Option<&store::Inventory>,
-) -> Result<Direct, PinsError> {
+    last: Option<&store::Scan>,
+) -> Result<store::Scan, PinsError> {
     meter.ask(source)?;
     let details = source.action_repository(repository).await?;
     meter.ask(source)?;
@@ -678,11 +1042,7 @@ async fn pins_of<S: Source>(
         .branch_head(repository, &details.default_branch)
         .await?;
     if let Some(last) = last.filter(|last| last.head == head) {
-        return Ok(Direct {
-            head,
-            wanted: last.wanted.clone(),
-            read: true,
-        });
+        return Ok(last.clone());
     }
     meter.ask(source)?;
     let tree = source.tree(repository, &head).await?;
@@ -697,7 +1057,7 @@ async fn pins_of<S: Source>(
     if files.len() > PIN_FILES {
         return Err(PinsError::Files(files.len()));
     }
-    let mut pinned: BTreeSet<Pin> = BTreeSet::new();
+    let mut pins: BTreeSet<Pin> = BTreeSet::new();
     for file in files {
         if file.size > PIN_FILE_BYTES {
             return Err(PinsError::Large(file.path.clone()));
@@ -708,47 +1068,40 @@ async fn pins_of<S: Source>(
             path: file.path.clone(),
             why,
         })?;
-        pinned.extend(found);
+        pins.extend(found);
     }
-    let mut wanted = BTreeSet::new();
-    for pin in pinned {
-        if let Some(name) = names.public(source, meter, &pin.repository).await? {
-            wanted.insert(Wanted {
-                key: Key {
-                    repository: name,
-                    sha: pin.sha,
-                },
-                path: pin.path,
-            });
-        }
-    }
-    Ok(Direct {
-        head,
-        wanted,
-        read: true,
-    })
+    Ok(store::Scan { head, pins })
 }
 
-/// Every archive `direct` reaches, through the pins of the archives held: level 0 is `direct`, and the pins of each
-/// level's archives are the next, to level `MAX_DEPTH`, the deepest a runner nests.
-#[derive(Debug)]
+/// What a repository's pins reach now, through the pins of the archives held: level 0 is its own, and the pins of
+/// each level's archives are the next, to level `MAX_DEPTH`, the deepest a runner nests.
+#[derive(Debug, Default)]
 struct Reach {
+    /// Every archive reached: held, to download, or refused.
     keys: BTreeSet<Key>,
-    /// Whether every pin on the way is known: each archive is held, its action file was read, and each repository
-    /// it pins answered.
-    complete: bool,
+    /// Those not held, to download: while any is left, what it pins is not known.
+    missing: BTreeSet<Key>,
+    /// Actions reached that are not supported, by subject: known, and kept out.
+    unsupported: BTreeMap<String, api::ArchiveFailureKind>,
+    /// Archives reached that failed their check or are not there to anyone, by label: known, and not downloaded
+    /// again.
+    refused: BTreeSet<String>,
+    /// Whether every repository a nested pin names answered.
+    answered: bool,
 }
 
 /// What `direct` reaches now (`Reach`).
 async fn closure<S: Source>(
     source: &S,
-    meter: &Meter,
+    round: &mut Round,
     store: &Arc<Mutex<ArchiveStore>>,
-    names: &mut Names,
     direct: &BTreeSet<Wanted>,
 ) -> Reach {
+    let mut reach = Reach {
+        answered: true,
+        ..Reach::default()
+    };
     let mut seen: BTreeSet<Wanted> = BTreeSet::new();
-    let mut complete = true;
     let mut level: BTreeSet<Wanted> = direct.clone();
     for depth in 0..=MAX_DEPTH {
         let mut next = BTreeSet::new();
@@ -756,24 +1109,56 @@ async fn closure<S: Source>(
             if !seen.insert(wanted.clone()) {
                 continue;
             }
-            let (held, unread, nested) = {
+            let (refused, action) = {
                 let store = lock(store);
                 (
-                    store.holds(&wanted.key),
-                    store.unread(&wanted.key, &wanted.path),
-                    store.uses(&wanted.key, &wanted.path).to_vec(),
+                    store.refused(&wanted.key),
+                    store.action(&wanted.key, &wanted.path),
                 )
             };
-            if !held || unread {
-                complete = false;
-                continue;
-            }
+            let subject = wanted.subject();
+            let nested = match action {
+                // Refused before: the runner downloads it itself, and runnerd does not again.
+                Action::Missing if refused => {
+                    // Still reached: its refusal stays while it is.
+                    reach.keys.insert(wanted.key.clone());
+                    reach.refused.insert(wanted.key.label());
+                    continue;
+                }
+                Action::Missing => {
+                    reach.keys.insert(wanted.key.clone());
+                    reach.missing.insert(wanted.key.clone());
+                    continue;
+                }
+                Action::NoFile => {
+                    reach.keys.insert(wanted.key.clone());
+                    reach
+                        .unsupported
+                        .insert(subject, api::ArchiveFailureKind::NotAction);
+                    continue;
+                }
+                Action::Unread => {
+                    reach.keys.insert(wanted.key.clone());
+                    reach
+                        .unsupported
+                        .insert(subject, api::ArchiveFailureKind::Unreadable);
+                    continue;
+                }
+                Action::Pins(nested) => {
+                    reach.keys.insert(wanted.key.clone());
+                    nested
+                }
+            };
             // A runner nests no deeper: what the deepest level pins, it never runs.
             if depth == MAX_DEPTH {
                 continue;
             }
             for pin in nested {
-                match names.public(source, meter, &pin.repository).await {
+                match round
+                    .names
+                    .public(source, &round.meter, store, &pin.repository)
+                    .await
+                {
                     Ok(Some(name)) => {
                         next.insert(Wanted {
                             key: Key {
@@ -785,7 +1170,7 @@ async fn closure<S: Source>(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        complete = false;
+                        reach.answered = false;
                         warn!(
                             "cannot read {}, which {} pins: {}",
                             pin.repository,
@@ -801,68 +1186,101 @@ async fn closure<S: Source>(
         }
         level = next;
     }
-    Reach {
-        keys: seen.into_iter().map(|wanted| wanted.key).collect(),
-        complete,
-    }
+    reach
 }
 
 /// Why an archive is not kept.
 #[derive(Debug)]
 enum Fetch {
     Download(Error),
+    /// Not there to anyone: codeload does not send it anonymously.
+    Gone,
     Rejected(String),
     Store(std::io::Error),
     /// Not tried, or not again: the refresh's bytes are spent, or GitHub's rate limit is.
     Deferred,
+    /// Not tried: the store is at its size cap.
+    Full,
 }
 
-/// What one refresh may still spend: requests to GitHub's API, and bytes downloaded. Each download reserves the
-/// largest archive's bytes before it starts and gives back what it did not use once it ends, whether it succeeded
-/// or not, so the downloads in flight together never pass what is left.
+/// What one refresh may still spend: requests to GitHub's API, as sent (`github::REQUESTS`, a request sent again
+/// with a new token included), and bytes received. Each download reserves the largest archive's bytes before it starts
+/// and gives back what it did not receive once it ends, whether it succeeded or not, so the downloads in flight
+/// together never pass what is left, nor, with what the store holds, its cap.
 #[derive(Debug)]
 struct Meter {
     limits: Limits,
-    requests: Mutex<u32>,
-    bytes: Mutex<u64>,
+    bytes: Mutex<Bytes>,
+}
+
+/// The bytes a refresh has left to receive, and those downloads in flight may still add to the store.
+#[derive(Debug)]
+struct Bytes {
+    left: u64,
+    in_flight: u64,
+}
+
+/// Why a download may not start.
+enum Refused {
+    /// The refresh's bytes are spent.
+    Spent,
+    /// The store, with what is in flight, would pass its cap.
+    Full,
+}
+
+/// A download's place in the store's cap, given back when it ends: by then what it kept is in the store's size.
+struct InFlight<'meter>(&'meter Meter);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut bytes = lock(&self.0.bytes);
+        bytes.in_flight = bytes.in_flight.saturating_sub(self.0.limits.archive);
+    }
 }
 
 impl Meter {
     fn new(limits: Limits) -> Meter {
         Meter {
             limits,
-            requests: Mutex::new(limits.requests),
-            bytes: Mutex::new(limits.bytes),
+            bytes: Mutex::new(Bytes {
+                left: limits.bytes,
+                in_flight: 0,
+            }),
         }
     }
 
-    /// Takes one request to GitHub's API, if the refresh and the rate limit have one to spare.
+    /// Lets one more request go to GitHub's API, if the refresh and the rate limit have one to spare.
     fn ask<S: Source>(&self, source: &S) -> Result<(), Error> {
         if source.spare_requests().is_some_and(|spare| spare < RESERVE) {
             return Err(Error::Held(
                 "what is left of GitHub's rate limit is kept for runners",
             ));
         }
-        let mut left = lock(&self.requests);
-        *left = left
-            .checked_sub(1)
-            .ok_or(Error::Held("this refresh's requests to GitHub are spent"))?;
+        // A request may be sent twice, once more with a new token after a 401.
+        if github::requests_sent() + 2 > u64::from(self.limits.requests) {
+            return Err(Error::Held("this refresh's requests to GitHub are spent"));
+        }
         Ok(())
     }
 
-    /// Reserves a download's bytes, if the refresh has them left.
-    fn reserve(&self) -> bool {
-        let mut left = lock(&self.bytes);
-        let reserved = *left >= self.limits.archive;
-        if reserved {
-            *left -= self.limits.archive;
+    /// Reserves a download's bytes, if the refresh has them left and the store, holding `held` bytes, has room for
+    /// them beside the downloads in flight. The place in the cap is held until what it returns is dropped.
+    fn reserve(&self, held: u64) -> Result<InFlight<'_>, Refused> {
+        let mut bytes = lock(&self.bytes);
+        if held + bytes.in_flight + self.limits.archive > self.limits.store {
+            return Err(Refused::Full);
         }
-        reserved
+        if bytes.left < self.limits.archive {
+            return Err(Refused::Spent);
+        }
+        bytes.left -= self.limits.archive;
+        bytes.in_flight += self.limits.archive;
+        Ok(InFlight(self))
     }
 
-    /// Gives back what a download reserved and did not use, `used` being what it wrote.
-    fn spend(&self, used: u64) {
-        *lock(&self.bytes) += self.limits.archive - used.min(self.limits.archive);
+    /// Gives back what a download reserved and did not receive.
+    fn spend(&self, received: u64) {
+        lock(&self.bytes).left += self.limits.archive - received.min(self.limits.archive);
     }
 }
 
@@ -877,21 +1295,28 @@ async fn fetch<S: Source>(
 ) -> Result<u64, Fetch> {
     let file = lock(store).staging_file().map_err(Fetch::Store)?;
     let mut last = None;
+    // Held until the archive is published or given up on.
+    let mut place = None;
     for wait in ATTEMPTS {
         tokio::time::sleep(wait).await;
-        if !meter.reserve() {
-            return Err(Fetch::Deferred);
-        }
+        drop(place.take());
+        let held = lock(store).size().1;
+        place = Some(match meter.reserve(held) {
+            Ok(place) => place,
+            Err(Refused::Full) => return Err(Fetch::Full),
+            Err(Refused::Spent) => return Err(Fetch::Deferred),
+        });
+        let received = AtomicU64::new(0);
         let result = source
-            .tarball(&key.repository, &key.sha, &file, meter.limits.archive)
+            .tarball(
+                &key.repository,
+                &key.sha,
+                &file,
+                meter.limits.archive,
+                &received,
+            )
             .await;
-        let used = match &result {
-            Ok(size) => *size,
-            Err(_) => tokio::fs::metadata(&file)
-                .await
-                .map_or(0, |metadata| metadata.len()),
-        };
-        meter.spend(used);
+        meter.spend(received.load(Ordering::Relaxed));
         match result {
             Ok(_) => {
                 last = None;
@@ -902,12 +1327,11 @@ async fn fetch<S: Source>(
                 if matches!(error, Error::RateLimited { .. } | Error::Held(_)) {
                     return Err(Fetch::Deferred);
                 }
-                let gone = error.is_gone();
-                last = Some(error);
                 // Asking again gets the same answer.
-                if gone {
-                    break;
+                if error.is_gone() {
+                    return Err(Fetch::Gone);
                 }
+                last = Some(error);
             }
         }
     }
@@ -924,6 +1348,7 @@ async fn fetch<S: Source>(
             let size = verified.size;
             let mut uses: BTreeMap<String, Vec<Pin>> = BTreeMap::new();
             let mut unread = BTreeSet::new();
+            let actions: BTreeSet<String> = verified.actions.keys().cloned().collect();
             for (dir, action) in &verified.actions {
                 match action.bytes.as_deref().map(pins::action_file_pins) {
                     Some(Ok(found)) if found.is_empty() => {}
@@ -941,6 +1366,7 @@ async fn fetch<S: Source>(
                 size,
                 uses,
                 unread,
+                actions,
             };
             lock(&store)
                 .publish(key, staged, now)
@@ -987,28 +1413,35 @@ impl PinsError {
     }
 }
 
-/// The canonical names of the repositories pins name, as asked in one refresh: `None` for one that is not public or
-/// not there.
+/// The canonical names of the repositories pins name, as asked in one refresh: `None` for one that is not public, not
+/// there, or a package.
 #[derive(Debug, Default)]
 struct Names(HashMap<String, Option<String>>);
 
 impl Names {
-    /// `repository`'s canonical name, if it is public and its name is one a file may be named by.
+    /// `repository`'s canonical name, if it is public, no job resolved it as a package, and its name is one a file
+    /// may be named by.
     async fn public<S: Source>(
         &mut self,
         source: &S,
         meter: &Meter,
+        store: &Arc<Mutex<ArchiveStore>>,
         repository: &str,
     ) -> Result<Option<String>, Error> {
         let asked = repository.to_ascii_lowercase();
         if let Some(name) = self.0.get(&asked) {
             return Ok(name.clone());
         }
+        if lock(store).package(&asked) {
+            self.0.insert(asked, None);
+            return Ok(None);
+        }
         meter.ask(source)?;
         let name = match source.action_repository(repository).await {
-            Ok(found) => {
-                (found.public && pins::repository(&found.full_name)).then_some(found.full_name)
-            }
+            Ok(found) => (found.public
+                && pins::repository(&found.full_name)
+                && !lock(store).package(&found.full_name))
+            .then_some(found.full_name),
             Err(error) if error.is_gone() => None,
             Err(error) => return Err(error),
         };

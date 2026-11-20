@@ -60,6 +60,8 @@ async fn first_runner(
     boot(&dir, "boot-1");
     let (mut engine, _handle) = engine_with_archives(&github, &docker, &dir, config);
     let _task = checked.then(|| engine.archives.start(Arc::new(github.clone())).unwrap());
+    // The first check waits for recovery.
+    engine.recover().await.unwrap();
     if checked && Config::parse(config).unwrap().caches.actions.enabled {
         for _ in 0..1000 {
             if engine.archives.runner().is_some() {
@@ -72,7 +74,6 @@ async fn first_runner(
             "the file no check saw went to quarantine before runners got the archives"
         );
     }
-    engine.recover().await.unwrap();
     {
         let mut state = github.0.lock().unwrap();
         state.queued = vec![job(1)];
@@ -116,4 +117,178 @@ async fn a_runner_gets_no_archives_while_they_are_off_or_before_their_first_chec
         assert_eq!(mount, None, "no mount");
         assert!(env.is_empty(), "no archive setting: {env:?}");
     }
+}
+
+/// Waits until `until` holds of the engine's archives, or fails naming `what`.
+async fn until(
+    engine: &Engine<FakeGithub, FakeDocker>,
+    what: &str,
+    until: impl Fn(&archives::Link) -> bool,
+) {
+    for _ in 0..1000 {
+        if until(&engine.archives) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("{what} never came");
+}
+
+/// A runner a previous daemon started with the archives mounted, still running, whose capture prints `output`.
+fn reader_left_running(github: &FakeGithub, docker: &FakeDocker, output: &str) -> String {
+    let mut container = runner_container(1, 7, true);
+    container
+        .labels
+        .insert(archives::LABEL.to_owned(), "1".to_owned());
+    let name = container.name.clone();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.memory.insert(container.id.clone(), 4 << 30);
+        state.containers = vec![container];
+        state
+            .captures
+            .insert(("1".to_owned(), "0".to_owned()), output.to_owned());
+    }
+    github.0.lock().unwrap().runners = vec![runner(7, &name, true)];
+    name
+}
+
+#[tokio::test]
+async fn a_restart_counts_the_runners_reading_the_archives_unchecked_and_names_them_if_the_first_check_moves_a_file()
+ {
+    for moved in [true, false] {
+        let (github, docker, dir) = (
+            FakeGithub::default(),
+            FakeDocker::default(),
+            TestDir::new("archives"),
+        );
+        if moved {
+            let unchecked = dir.0.join(UNCHECKED);
+            std::fs::create_dir_all(unchecked.parent().unwrap()).unwrap();
+            std::fs::write(&unchecked, b"not what any check verified").unwrap();
+        }
+        let reader = reader_left_running(&github, &docker, "");
+        boot(&dir, "boot-1");
+        let (mut engine, _handle) = engine_with_archives(&github, &docker, &dir, CONFIG);
+        engine.recover().await.unwrap();
+        let status = engine.archives.status().expect("a status before any check");
+        assert_eq!(
+            status.unchecked, 1,
+            "the adopted runner reads them unchecked"
+        );
+        assert!(
+            status
+                .line(0)
+                .ends_with("1 adopted runner reads them before a check"),
+            "{}",
+            status.line(0)
+        );
+        let _task = engine.archives.start(Arc::new(github.clone())).unwrap();
+        until(&engine, "the first check", |link| {
+            link.status().is_some_and(|status| status.unchecked == 0)
+        })
+        .await;
+        let status = engine.archives.status().unwrap();
+        let exposed: Vec<&str> = status
+            .failures
+            .iter()
+            .filter(|failure| failure.kind == api::ArchiveFailureKind::Exposed)
+            .map(|failure| failure.subject.as_str())
+            .collect();
+        if moved {
+            assert_eq!(exposed, vec![reader.as_str()], "named, and left running");
+            assert!(
+                status.attention_title().is_some_and(
+                    |title| title.starts_with("a runner may have read an action archive")
+                ),
+                "{:?}",
+                status.attention_title()
+            );
+            assert!(
+                docker
+                    .0
+                    .lock()
+                    .unwrap()
+                    .containers
+                    .iter()
+                    .any(|c| c.name == reader && c.running),
+                "it is not killed"
+            );
+            engine.archives.released(&reader);
+            assert!(
+                engine
+                    .archives
+                    .status()
+                    .unwrap()
+                    .failures
+                    .iter()
+                    .all(|failure| failure.kind != api::ArchiveFailureKind::Exposed),
+                "gone, it is no longer named"
+            );
+        } else {
+            assert!(exposed.is_empty(), "the check moved nothing: {exposed:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_check_withdraws_the_runners_view_until_it_returns_good() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("archives"),
+    );
+    boot(&dir, "boot-1");
+    let (mut engine, _handle) = engine_with_archives(&github, &docker, &dir, CONFIG);
+    let _task = engine.archives.start(Arc::new(github.clone())).unwrap();
+    engine.recover().await.unwrap();
+    until(&engine, "the first view", |link| link.runner().is_some()).await;
+    let mut ready = engine.archives.ready_changes();
+    ready.borrow_and_update();
+    // A reload that changes the settings refreshes: its check runs again.
+    let reloaded = format!("{CONFIG}\n[caches.actions]\nkeep = \"7d\"\n");
+    engine.archives.reload(&Config::parse(&reloaded).unwrap());
+    let withdrawn = tokio::time::timeout(
+        Duration::from_secs(5),
+        // The view is not held: the task must publish again.
+        async { ready.wait_for(Option::is_none).await.map(|_| ()) },
+    )
+    .await;
+    assert!(withdrawn.is_ok(), "a start during the check gets no view");
+    until(&engine, "the view again", |link| link.runner().is_some()).await;
+}
+
+#[tokio::test]
+async fn a_job_log_that_shows_an_immutable_package_keeps_its_repository_out_of_the_archives() {
+    let line = "2026-11-20T10:00:00.0000000Z ##[group]Download immutable action package 'actions/checkout@v6'";
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("archives"),
+    );
+    reader_left_running(
+        &github,
+        &docker,
+        &format!("@@job 1 1\n@@page 1 0 {}\n{line}\n", line.len() + 1),
+    );
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    boot(&dir, "boot-1");
+    let (mut engine, _handle) = engine_with_archives(&github, &docker, &dir, CONFIG);
+    let _task = engine.archives.start(Arc::new(github.clone())).unwrap();
+    // Recovery adopts the runner and captures its log.
+    engine.recover().await.unwrap();
+    until(&engine, "the package's report", |link| {
+        link.status().is_some_and(|status| {
+            status.failures.iter().any(|failure| {
+                failure.kind == api::ArchiveFailureKind::Package
+                    && failure.subject == "actions/checkout"
+            })
+        })
+    })
+    .await;
 }

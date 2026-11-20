@@ -643,6 +643,7 @@ fn action_archives() -> api::ActionArchives {
             kind: api::ArchiveFailureKind::Rejected,
             since: NOW - 600,
         }],
+        unchecked: 0,
     }
 }
 

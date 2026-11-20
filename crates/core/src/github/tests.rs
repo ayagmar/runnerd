@@ -3,7 +3,7 @@
 //! never shows in `Debug` output or errors.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -490,7 +490,7 @@ async fn a_secondary_rate_limit_waits_for_retry_after() {
 }
 
 #[tokio::test]
-async fn a_rejected_token_is_read_again_once() {
+async fn a_rejected_token_is_read_again_once_and_both_sends_count_as_requests() {
     let (url, seen) = fake_github(|request| {
         if request
             .headers
@@ -515,9 +515,18 @@ async fn a_rejected_token_is_read_again_once() {
         }),
     )
     .unwrap();
-    assert_eq!(github.runners("o/r").await.unwrap(), []);
+    let sent = crate::github::REQUESTS
+        .scope(std::cell::Cell::new(0), async {
+            assert_eq!(github.runners("o/r").await.unwrap(), []);
+            crate::github::requests_sent()
+        })
+        .await;
     assert_eq!(*reads.lock().unwrap(), 2);
     assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(
+        sent, 2,
+        "the send after the 401 counts against a refresh's budget"
+    );
 }
 
 /// A client whose token source counts its reads and gives `old` first, `new` after.
@@ -1940,6 +1949,11 @@ async fn an_archive_is_downloaded_without_the_token_and_never_asked_again_with_i
             [("location", "/elsewhere/a.tar.gz?token=SIGNATURE")],
         )
             .into_response(),
+        "/o/big/tar.gz/abc" => axum::body::Body::from_stream(futures_util::stream::iter(
+            [b"archive ".as_slice(), b"bytes"]
+                .map(|part| Ok::<_, std::io::Error>(axum::body::Bytes::from_static(part))),
+        ))
+        .into_response(),
         "/o/cut/tar.gz/abc" => axum::body::Body::from_stream(futures_util::stream::iter([
             Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"part of it")),
             Err(std::io::Error::other("connection reset")),
@@ -1952,11 +1966,14 @@ async fn an_archive_is_downloaded_without_the_token_and_never_asked_again_with_i
     let dir = crate::testdir::TestDir::new("tarball");
 
     let to = dir.0.join("a");
-    let written = github.tarball("actions/checkout", "abc", &to, 1024).await;
+    let ignored = AtomicU64::new(0);
+    let written = github
+        .tarball("actions/checkout", "abc", &to, 1024, &ignored)
+        .await;
     assert_eq!(written.ok(), Some(13), "the archive is written whole");
     assert_eq!(std::fs::read(&to).unwrap(), b"archive bytes");
     let private = github
-        .tarball("o/private", "abc", &dir.0.join("b"), 1024)
+        .tarball("o/private", "abc", &dir.0.join("b"), 1024, &ignored)
         .await
         .unwrap_err();
     assert!(
@@ -1964,22 +1981,27 @@ async fn an_archive_is_downloaded_without_the_token_and_never_asked_again_with_i
         "a private repository is not there anonymously"
     );
     let refused = github
-        .tarball("o/refused", "abc", &dir.0.join("c"), 1024)
+        .tarball("o/refused", "abc", &dir.0.join("c"), 1024, &ignored)
         .await;
     assert!(
         refused.is_err(),
         "a 401 is a failure, never a cue to send the token"
     );
+    let received = AtomicU64::new(0);
     let capped = github
-        .tarball("actions/checkout", "abc", &dir.0.join("d"), 4)
+        .tarball("o/big", "abc", &dir.0.join("d"), 4, &received)
         .await
         .unwrap_err();
+    assert!(
+        received.load(Ordering::Relaxed) > 4,
+        "a streamed chunk past the cap counts, though it was never written"
+    );
     let moved = github
-        .tarball("o/moved", "abc", &dir.0.join("e"), 1024)
+        .tarball("o/moved", "abc", &dir.0.join("e"), 1024, &ignored)
         .await
         .unwrap_err();
     let cut = github
-        .tarball("o/cut", "abc", &dir.0.join("f"), 1024)
+        .tarball("o/cut", "abc", &dir.0.join("f"), 1024, &ignored)
         .await
         .unwrap_err();
     let requests = lock(&seen).clone();

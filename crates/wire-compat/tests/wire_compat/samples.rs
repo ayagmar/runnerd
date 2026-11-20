@@ -64,6 +64,7 @@ pub(crate) fn status_empty() -> Status {
         bytes: 0,
         refreshed_at: None,
         failures: Vec::new(),
+        unchecked: 0,
     });
     if let Some(host) = &mut status.budget.host {
         host.memory.holders = Vec::new();
@@ -995,6 +996,7 @@ fn action_archives() -> ActionArchives {
                 since: 1_761_399_000,
             })
             .collect(),
+        unchecked: 2,
     }
 }
 
@@ -1005,6 +1007,12 @@ pub(crate) fn archive_failure_kind() -> Vec<ArchiveFailureKind> {
         ArchiveFailureKind::Rejected,
         ArchiveFailureKind::Quarantined,
         ArchiveFailureKind::Store,
+        ArchiveFailureKind::Held,
+        ArchiveFailureKind::Full,
+        ArchiveFailureKind::NotAction,
+        ArchiveFailureKind::Unreadable,
+        ArchiveFailureKind::Package,
+        ArchiveFailureKind::Exposed,
     ];
     for kind in &every {
         match kind {
@@ -1013,6 +1021,12 @@ pub(crate) fn archive_failure_kind() -> Vec<ArchiveFailureKind> {
             | ArchiveFailureKind::Rejected
             | ArchiveFailureKind::Quarantined
             | ArchiveFailureKind::Store
+            | ArchiveFailureKind::Held
+            | ArchiveFailureKind::Full
+            | ArchiveFailureKind::NotAction
+            | ArchiveFailureKind::Unreadable
+            | ArchiveFailureKind::Package
+            | ArchiveFailureKind::Exposed
             // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
             | ArchiveFailureKind::Unknown => {}
         }

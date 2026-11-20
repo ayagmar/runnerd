@@ -33,6 +33,17 @@ mod token;
 mod workflows;
 
 use requests::Counter;
+
+tokio::task_local! {
+    /// The requests sent to GitHub's API within a scope, each send counted, a send again with a new token after a 401
+    /// included: what the archives task's refresh is held to (ADR 0147). Outside a scope, nothing counts.
+    pub static REQUESTS: std::cell::Cell<u64>;
+}
+
+/// How many requests went to GitHub's API in this task's `REQUESTS` scope; 0 outside one.
+pub fn requests_sent() -> u64 {
+    REQUESTS.try_with(std::cell::Cell::get).unwrap_or(0)
+}
 pub use requests::{Class, RateLimit, Report, Spend, Tally};
 
 /// The public API's address.
@@ -1047,6 +1058,7 @@ impl Github {
             if let Some(etag) = etag {
                 request = request.header(header::IF_NONE_MATCH, etag.clone());
             }
+            let _ = REQUESTS.try_with(|sent| sent.set(sent.get() + 1));
             let response = request.send().await.map_err(|source| Error::Http {
                 method: method.clone(),
                 path: path.to_owned(),

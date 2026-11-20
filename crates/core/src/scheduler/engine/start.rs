@@ -186,8 +186,9 @@ fn container_labels(
     runner_id: u64,
     labels: &[String],
     image: &str,
+    archives: bool,
 ) -> std::collections::BTreeMap<String, String> {
-    std::collections::BTreeMap::from([
+    let mut found = std::collections::BTreeMap::from([
         ("runnerd.job".to_owned(), name.to_owned()),
         ("runnerd.repository".to_owned(), repository.to_owned()),
         ("runnerd.slot".to_owned(), slot.to_string()),
@@ -195,7 +196,12 @@ fn container_labels(
         (super::runners::LABELS.to_owned(), labels.join(",")),
         (super::runners::IMAGE.to_owned(), image.to_owned()),
         (super::runners::SPEC.to_owned(), THIS_SPEC.to_owned()),
-    ])
+    ]);
+    // What a restart counts as a runner reading the archives before its first check.
+    if archives {
+        found.insert(crate::archives::LABEL.to_owned(), "1".to_owned());
+    }
+    found
 }
 
 /// What a start's task sends GitHub and Docker.
@@ -282,6 +288,11 @@ async fn run<G: GithubApi, D: DockerApi>(
             runner.id,
             &request.labels,
             &request.spec.image,
+            request
+                .spec
+                .mounts
+                .iter()
+                .any(|mount| mount.target.as_deref() == Some(crate::archives::MOUNT)),
         ),
         jit_config: Some(jit_config),
         ..request.spec

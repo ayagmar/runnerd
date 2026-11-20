@@ -15,6 +15,7 @@ use super::ledger::{ReadFailure, Unanswered, Wait};
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Meanwhile, Occupant, Slot, watches};
 use crate::admission::Key;
+use crate::archives;
 use crate::docker::{
     self, DockerApi, RunnerState, is_declined, is_log_gone, is_not_found, is_not_running,
 };
@@ -173,7 +174,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             occupant.container.clone(),
             position,
             self.config.history.log_max.0,
-            self.found.0.clone(),
+            Told {
+                found: self.found.0.clone(),
+                packages: self.archives.packages(),
+            },
         ));
         self.watches.start(&occupant.runner_name, task);
     }
@@ -648,6 +652,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.store
             .runner_removed(&occupant.runner_name, time::ms(now));
         self.watches.forget(&occupant.runner_name);
+        self.archives.released(&occupant.runner_name);
         self.tracked.send_modify(|tracked| {
             tracked.retain(|container| container.runner != occupant.runner_name);
         });
@@ -659,6 +664,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 }
 
+/// Where a capture tells what it read: the job it found, and the immutable packages its log shows.
+struct Told {
+    found: mpsc::UnboundedSender<Found>,
+    packages: archives::Packages,
+}
+
 /// Runs a runner's log capture until its container stops: reports the job it took, and stores the job's log.
 async fn capture_job<D: DockerApi>(
     docker: Arc<D>,
@@ -667,7 +678,7 @@ async fn capture_job<D: DockerApi>(
     container: String,
     position: LogPosition,
     max_bytes: u64,
-    found: mpsc::UnboundedSender<Found>,
+    told: Told,
 ) -> Capture {
     let mut output = match docker.exec(&container, capture::command(position)).await {
         Ok(output) => output,
@@ -697,7 +708,7 @@ async fn capture_job<D: DockerApi>(
                     if job.is_none() {
                         job = Some(id);
                         store.claimed(id, run_id, &runner, time::now_ms());
-                        let _ = found.send(Found {
+                        let _ = told.found.send(Found {
                             runner: runner.clone(),
                             job: id,
                             run_id,
@@ -714,6 +725,7 @@ async fn capture_job<D: DockerApi>(
                 Captured::Lines { lines, position } => {
                     if let Some(job) = job {
                         sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
+                        told.packages.read(&lines);
                         store.log(job, lines, position, max_bytes).await;
                         resume = Some(position);
                         if sent > max_bytes {

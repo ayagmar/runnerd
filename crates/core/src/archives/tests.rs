@@ -19,6 +19,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -188,6 +189,8 @@ struct Fake {
     down: bool,
     /// Requests to GitHub's API answered.
     requests: u32,
+    /// Requests sent to GitHub's API, each send of one counted.
+    sent: u64,
     /// What GitHub's rate limit has left, as its last answer said.
     spare: Option<u64>,
     /// Bytes the downloads wrote, failed ones included.
@@ -196,6 +199,20 @@ struct Fake {
     partial: BTreeMap<String, usize>,
     /// Repositories that turn private as their archive is asked for, between the lookup and the download.
     private_at_download: BTreeSet<String>,
+    /// Whether GitHub refuses each request's first token, so each is sent twice, as `Github` does after a 401.
+    refusing: bool,
+    /// Downloads that fail after receiving this many bytes and writing none, as one whose last chunk passed the cap,
+    /// by `owner/repo@sha`.
+    unwritten: BTreeMap<String, usize>,
+}
+
+impl Fake {
+    /// Counts a request sent to GitHub's API, as `Github` counts it in `github::REQUESTS`.
+    fn send(&mut self) {
+        let sends = if self.refusing { 2 } else { 1 };
+        self.sent += sends;
+        let _ = crate::github::REQUESTS.try_with(|sent| sent.set(sent.get() + sends));
+    }
 }
 
 /// A fake GitHub; clones share it.
@@ -219,6 +236,7 @@ impl Source for FakeGithub {
     async fn action_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
         let mut fake = self.0.lock().unwrap();
         fake.requests += 1;
+        fake.send();
         if fake.down {
             return Err(unreachable());
         }
@@ -231,6 +249,7 @@ impl Source for FakeGithub {
     async fn branch_head(&self, _: &str, _: &str) -> Result<String, Error> {
         let mut fake = self.0.lock().unwrap();
         fake.requests += 1;
+        fake.send();
         if fake.down {
             return Err(unreachable());
         }
@@ -240,6 +259,7 @@ impl Source for FakeGithub {
     async fn tree(&self, _: &str, commit: &str) -> Result<Tree, Error> {
         let mut fake = self.0.lock().unwrap();
         fake.requests += 1;
+        fake.send();
         if fake.down {
             return Err(unreachable());
         }
@@ -262,6 +282,7 @@ impl Source for FakeGithub {
     async fn blob(&self, _: &str, blob: &str, _: u64) -> Result<Vec<u8>, Error> {
         let mut fake = self.0.lock().unwrap();
         fake.requests += 1;
+        fake.send();
         let (commit, path) = blob.split_once(':').unwrap();
         Ok(fake.trees[commit].files[path].clone().into_bytes())
     }
@@ -272,6 +293,7 @@ impl Source for FakeGithub {
         commit: &str,
         to: &Path,
         limit: u64,
+        received: &AtomicU64,
     ) -> Result<u64, Error> {
         let label = format!("{repository}@{commit}");
         let bytes = {
@@ -294,6 +316,12 @@ impl Source for FakeGithub {
             if let Some(&cut) = fake.partial.get(&label) {
                 fs::write(to, vec![0_u8; cut]).unwrap();
                 fake.written += cut as u64;
+                received.fetch_add(cut as u64, Ordering::Relaxed);
+                return Err(unreachable());
+            }
+            if let Some(&cut) = fake.unwritten.get(&label) {
+                fake.written += cut as u64;
+                received.fetch_add(cut as u64, Ordering::Relaxed);
                 return Err(unreachable());
             }
             if fake.down || fake.failing.contains(&label) {
@@ -305,6 +333,7 @@ impl Source for FakeGithub {
         };
         assert!(bytes.len() as u64 <= limit);
         fs::write(to, &bytes).unwrap();
+        received.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(bytes.len() as u64)
     }
 
@@ -690,7 +719,7 @@ async fn a_refresh_killed_midway_leaves_nothing_a_runner_reads_and_recovers_at_t
     fs::write(&renamed, &archive(CHECKOUT, "runs: {}\n")[..40]).unwrap();
     let mut archives = open(&dir.0);
     assert!(
-        archives.check(T0).await,
+        archives.check(T0).await.good(),
         "the start's check leaves only what the index names"
     );
     assert_eq!(
@@ -703,7 +732,7 @@ async fn a_refresh_killed_midway_leaves_nothing_a_runner_reads_and_recovers_at_t
         1,
         "the file the index never named"
     );
-    archives.update(&github, &settings(), T0).await;
+    archives.refill(&github, &settings(), T0).await;
     assert_eq!(github.downloads().len(), 1);
     assert_eq!(
         on_disk(&dir.0),
@@ -747,8 +776,8 @@ async fn a_store_that_cannot_open_says_so_and_opens_once_it_can() {
     fs::write(&root, b"not a directory").unwrap();
     let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
     let mut archives = open(&root);
-    assert!(!archives.check(T0).await, "nothing is good to read");
-    archives.update(&github, &settings(), T0).await;
+    assert!(!archives.check(T0).await.good(), "nothing is good to read");
+    archives.refill(&github, &settings(), T0).await;
     let failures = archives.status().failures;
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_eq!(failures[0].kind, ArchiveFailureKind::Store);
@@ -787,9 +816,12 @@ async fn a_check_goes_past_what_it_cannot_read_and_quarantines_whatever_sits_at_
     let last = bytes.len() - 1;
     bytes[last] ^= 0xff;
     fs::write(&node, bytes).unwrap();
-    assert!(archives.check(T0 + 600).await, "both were moved aside");
+    assert!(
+        archives.check(T0 + 600).await.good(),
+        "both were moved aside"
+    );
     assert_eq!(count(&dir.0, "quarantine"), 2);
-    archives.update(&github, &settings(), T0 + 600).await;
+    archives.refill(&github, &settings(), T0 + 600).await;
     assert_eq!(github.downloads().len(), 4, "both fetched again");
     check_invariants(&dir.0, "after the check");
     // A file it cannot read leaves the store not good, and the rest checked.
@@ -798,7 +830,7 @@ async fn a_check_goes_past_what_it_cannot_read_and_quarantines_whatever_sits_at_
         let stray = dir.0.join("archives/actions_checkout/stray.tar.gz");
         fs::write(&stray, b"x").unwrap();
         assert!(
-            !archives.check(T0 + 1200).await,
+            !archives.check(T0 + 1200).await.good(),
             "one archive cannot be read"
         );
         assert!(!stray.exists(), "the stranger was still moved aside");
@@ -887,6 +919,7 @@ async fn a_refresh_downloads_no_more_than_its_bytes_and_leaves_the_rest_to_the_n
         archive: 4096,
         bytes: 2 * 4096,
         requests: 1000,
+        store: 8 << 30,
     };
     let dir = TestDir::new("archives");
     let github = FakeGithub::new(
@@ -949,6 +982,7 @@ async fn a_refresh_asks_github_no_more_than_its_requests_and_nothing_once_the_li
         archive: 256 << 20,
         bytes: 2 << 30,
         requests: 3,
+        store: 8 << 30,
     };
     let dir = TestDir::new("archives");
     let github = FakeGithub::new(
@@ -993,10 +1027,20 @@ async fn a_tree_cut_short_or_a_failed_read_keeps_the_last_pins() {
         .unwrap()
         .truncated = true;
     archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
-    let failures = archives.status().failures;
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_eq!(failures[0].kind, ArchiveFailureKind::Pins);
-    assert_eq!(failures[0].subject, SERVED);
+    let failures: Vec<(String, ArchiveFailureKind)> = archives
+        .status()
+        .failures
+        .into_iter()
+        .map(|failure| (failure.subject, failure.kind))
+        .collect();
+    assert_eq!(
+        failures,
+        vec![
+            (SERVED.to_owned(), ArchiveFailureKind::Pins),
+            (SERVED.to_owned(), ArchiveFailureKind::Held),
+        ],
+        "its pins could not be read, and the archives it last reached are kept"
+    );
     github.0.lock().unwrap().down = true;
     archives.refresh(&github, &settings(), T0 + 40 * DAY).await;
     assert_eq!(
@@ -1042,8 +1086,19 @@ async fn an_outage_across_a_restart_removes_nothing_the_last_whole_inventory_rea
     );
 }
 
+/// The subjects and kinds of `archives`' failures.
+fn failures_of(archives: &Archives) -> Vec<(String, ArchiveFailureKind)> {
+    archives
+        .status()
+        .failures
+        .into_iter()
+        .map(|failure| (failure.subject, failure.kind))
+        .collect()
+}
+
 #[tokio::test(start_paused = true)]
-async fn pins_beyond_what_is_read_remove_nothing_while_they_stay_unread() {
+async fn a_repository_whose_pins_are_not_all_read_keeps_what_it_last_reached_and_retention_goes_on()
+{
     let dir = TestDir::new("archives");
     let github = FakeGithub::new(
         "c1",
@@ -1056,7 +1111,7 @@ async fn pins_beyond_what_is_read_remove_nothing_while_they_stay_unread() {
     archives.refresh(&github, &settings(), T0).await;
     github.push("c2", &[&pin("actions/setup-node", NODE)]);
     archives.refresh(&github, &settings(), T0 + DAY).await;
-    // c3 has more workflows than are read; the last of them pins checkout again.
+    // c3 has more workflows than are read.
     github.push("c3", &[&pin("actions/setup-node", NODE)]);
     {
         let mut fake = github.0.lock().unwrap();
@@ -1067,24 +1122,22 @@ async fn pins_beyond_what_is_read_remove_nothing_while_they_stay_unread() {
                 "on: push\n".to_owned(),
             );
         }
-        files.insert(
-            ".github/workflows/z.yml".to_owned(),
-            format!(
-                "jobs:\n  test:\n    steps:\n      - uses: {}\n",
-                pin("actions/checkout", CHECKOUT)
-            ),
-        );
     }
     archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
-    assert!(
-        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
-        "a file left unread may pin it"
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("actions/setup-node", NODE)]),
+        "what o/app last reached stays; what nothing reached for 14 days still goes"
     );
-    let failures = archives.status().failures;
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_eq!(failures[0].kind, ArchiveFailureKind::Pins);
+    assert_eq!(
+        failures_of(&archives),
+        vec![
+            (SERVED.to_owned(), ArchiveFailureKind::Pins),
+            (SERVED.to_owned(), ArchiveFailureKind::Held),
+        ]
+    );
     // A workflow that is not YAML a runner reads is no more read as pinning nothing.
-    github.push("c4", &[&pin("actions/setup-node", NODE)]);
+    github.push("c4", &[]);
     github
         .0
         .lock()
@@ -1097,22 +1150,25 @@ async fn pins_beyond_what_is_read_remove_nothing_while_they_stay_unread() {
             ".github/workflows/bad.yml".to_owned(),
             "jobs: [\n".to_owned(),
         );
-    archives.refresh(&github, &settings(), T0 + 21 * DAY).await;
-    assert!(
-        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
-        "a file that does not parse may pin it"
-    );
-    github.push("c5", &[&pin("actions/setup-node", NODE)]);
-    archives.refresh(&github, &settings(), T0 + 22 * DAY).await;
+    archives.refresh(&github, &settings(), T0 + 40 * DAY).await;
     assert_eq!(
         on_disk(&dir.0),
         BTreeSet::from([file_of("actions/setup-node", NODE)]),
-        "read whole again, what no pin kept for 14 days goes"
+        "what o/app last reached stays while a file of it does not parse"
+    );
+    github.push("c5", &[]);
+    archives.refresh(&github, &settings(), T0 + 41 * DAY).await;
+    assert_eq!(failures_of(&archives), Vec::new(), "read whole again");
+    archives.refresh(&github, &settings(), T0 + 56 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::new(),
+        "known whole, what nothing pinned for 14 days since went"
     );
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_archive_whose_action_file_is_unread_or_missing_removes_nothing() {
+async fn an_action_runnerd_does_not_support_is_reported_and_holds_nothing() {
     let dir = TestDir::new("archives");
     let github = FakeGithub::new(
         "c1",
@@ -1123,19 +1179,44 @@ async fn an_archive_whose_action_file_is_unread_or_missing_removes_nothing() {
     );
     let mut archives = open(&dir.0);
     archives.refresh(&github, &settings(), T0).await;
-    // c2 drops checkout and pins mise at a commit whose action file is not YAML: what it pins is not known.
+    // mise at a commit whose action file is not YAML, and checkout's archive at a path with no action file.
     github.set_tarball(
         &format!("jdx/mise-action@{NODE}"),
         archive(NODE, "runs: [\n"),
     );
-    github.push("c2", &[&pin("jdx/mise-action", NODE)]);
+    github.push(
+        "c2",
+        &[
+            &pin("jdx/mise-action", NODE),
+            &pin("actions/checkout/sub", CHECKOUT_NEXT),
+        ],
+    );
     archives.refresh(&github, &settings(), T0 + DAY).await;
     archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
-    assert!(
-        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
-        "the unread action file may pin it"
+    let supported = BTreeSet::from([
+        file_of("jdx/mise-action", NODE),
+        file_of("actions/checkout", CHECKOUT_NEXT),
+    ]);
+    assert_eq!(
+        on_disk(&dir.0),
+        supported,
+        "neither holds retention: the c1 archives went after 14 days"
     );
-    // c3 pins one whose download keeps failing: what it pins is not known either.
+    assert_eq!(
+        failures_of(&archives),
+        vec![
+            (
+                format!("actions/checkout/sub@{CHECKOUT_NEXT}"),
+                ArchiveFailureKind::NotAction
+            ),
+            (
+                format!("jdx/mise-action@{NODE}"),
+                ArchiveFailureKind::Unreadable
+            ),
+        ],
+        "each is reported for what it is, not read as pinning nothing"
+    );
+    // c3 pins one whose download keeps failing: o/app's pins are not all known for now.
     github.push("c3", &[&pin("actions/setup-node", NODE)]);
     github
         .0
@@ -1144,21 +1225,337 @@ async fn an_archive_whose_action_file_is_unread_or_missing_removes_nothing() {
         .failing
         .insert(pin("actions/setup-node", NODE));
     archives.refresh(&github, &settings(), T0 + 40 * DAY).await;
-    assert!(
-        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
-        "an archive not held may pin it"
-    );
-    github.0.lock().unwrap().failing.clear();
-    archives.refresh(&github, &settings(), T0 + 41 * DAY).await;
-    assert!(
-        on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT)),
-        "what the last whole inventory reached was pinned until it was replaced"
-    );
-    archives.refresh(&github, &settings(), T0 + 56 * DAY).await;
     assert_eq!(
         on_disk(&dir.0),
-        BTreeSet::from([file_of("actions/setup-node", NODE)]),
-        "known whole again, what no pin kept for 14 days went"
+        supported,
+        "what o/app reached when its pins were last all known stays"
+    );
+    assert!(
+        failures_of(&archives).contains(&(SERVED.to_owned(), ArchiveFailureKind::Held)),
+        "the held retention is reported: {:?}",
+        failures_of(&archives)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pin_whose_repository_turns_private_is_never_asked_for_at_the_same_head_and_comes_back_once_public()
+ {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    let visibility = |public: bool| {
+        github
+            .0
+            .lock()
+            .unwrap()
+            .repositories
+            .get_mut("actions/setup-node")
+            .unwrap()
+            .public = public;
+    };
+    visibility(false);
+    for refresh in 1..=3 {
+        archives
+            .refresh(&github, &settings(), T0 + refresh * 600)
+            .await;
+    }
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("actions/checkout", CHECKOUT)]),
+        "withdrawn"
+    );
+    assert_eq!(github.downloads().len(), 2, "never asked for again");
+    assert_eq!(
+        failures_of(&archives),
+        Vec::new(),
+        "a private action is no failure, and holds no retention"
+    );
+    assert_eq!(
+        github.0.lock().unwrap().trees_read,
+        1,
+        "the head did not move"
+    );
+    visibility(true);
+    archives.refresh(&github, &settings(), T0 + 4 * 600).await;
+    assert!(
+        on_disk(&dir.0).contains(&file_of("actions/setup-node", NODE)),
+        "public again at the same head, it is kept again"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_archive_that_fails_its_check_is_downloaded_once_and_its_head_read_once() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    let top = format!("o-r-{}/", &NODE[..7]);
+    let file = format!("{top}action.yml");
+    let link = format!("{top}link");
+    github.set_tarball(
+        &pin("actions/setup-node", NODE),
+        gzip(&tar_of(
+            NODE,
+            &[
+                Item::Dir(&top),
+                Item::File(&file, "runs: {}\n"),
+                Item::Symlink(&link, "action.yml"),
+            ],
+        )),
+    );
+    github.push(
+        "c2",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    for refresh in 1..=4 {
+        archives
+            .refresh(&github, &settings(), T0 + refresh * 600)
+            .await;
+    }
+    let node = pin("actions/setup-node", NODE);
+    assert_eq!(
+        github
+            .downloads()
+            .iter()
+            .filter(|label| **label == node)
+            .count(),
+        1,
+        "the same commit's archive fails its check again"
+    );
+    assert_eq!(
+        github.0.lock().unwrap().trees_read,
+        2,
+        "each head's tree is read once"
+    );
+    assert_eq!(
+        failures_of(&archives),
+        vec![(node, ArchiveFailureKind::Rejected)],
+        "reported, and no retention held for it"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_store_never_grows_past_its_cap_and_says_when_it_is_full() {
+    let limits = super::Limits {
+        archive: 4096,
+        bytes: 1 << 30,
+        requests: 1000,
+        store: 2 * 4096,
+    };
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/checkout", CHECKOUT_NEXT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    for (repository, sha) in [
+        ("actions/checkout", CHECKOUT),
+        ("actions/checkout", CHECKOUT_NEXT),
+        ("actions/setup-node", NODE),
+    ] {
+        github.set_tarball(&pin(repository, sha), large_archive(sha));
+    }
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    let status = archives.status();
+    assert!(
+        status.bytes <= limits.store,
+        "{} bytes, past the cap of {}",
+        status.bytes,
+        limits.store
+    );
+    assert_eq!(
+        status.entries, 2,
+        "three downloads at once still fit the cap"
+    );
+    assert!(
+        failures_of(&archives)
+            .iter()
+            .any(|(_, kind)| *kind == ArchiveFailureKind::Full),
+        "{:?}",
+        failures_of(&archives)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_counts_the_bytes_it_received_though_it_wrote_none() {
+    let limits = super::Limits {
+        archive: 4096,
+        bytes: 2 * 4096,
+        requests: 1000,
+        store: 1 << 30,
+    };
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/checkout", CHECKOUT_NEXT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    {
+        let mut fake = github.0.lock().unwrap();
+        for label in [
+            pin("actions/checkout", CHECKOUT),
+            pin("actions/checkout", CHECKOUT_NEXT),
+            pin("actions/setup-node", NODE),
+        ] {
+            fake.unwritten.insert(label, 4096);
+        }
+    }
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    let received = github.0.lock().unwrap().written;
+    assert!(
+        received <= limits.bytes,
+        "{received} bytes received, past the refresh's {}",
+        limits.bytes
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_sent_again_after_a_401_counts_against_the_refresh() {
+    let limits = super::Limits {
+        archive: 256 << 20,
+        bytes: 2 << 30,
+        requests: 10,
+        store: 8 << 30,
+    };
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+            &pin("jdx/mise-action", MISE),
+            &pin("tailscale/github-action/oauth", OAUTH),
+        ],
+    );
+    github.0.lock().unwrap().refusing = true;
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    let sent = github.0.lock().unwrap().sent;
+    assert!(
+        sent <= u64::from(limits.requests),
+        "{sent} requests sent, past the refresh's {}",
+        limits.requests
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_removal_that_fails_shows_in_the_caches_health() {
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    let store = dir.0.display().to_string();
+    let locked = |name: &str, mode: u32| {
+        fs::set_permissions(
+            dir.0.join("archives").join(name),
+            fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+    };
+    // Retention: checkout is no longer pinned, and cannot be removed.
+    github.push("c2", &[&pin("actions/setup-node", NODE)]);
+    locked("actions_checkout", 0o555);
+    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    locked("actions_checkout", 0o755);
+    assert!(
+        failures_of(&archives).contains(&(store.clone(), ArchiveFailureKind::Store)),
+        "a retention that failed: {:?}",
+        failures_of(&archives)
+    );
+    // Withdrawal: setup-node turns private, and cannot be removed.
+    archives.refresh(&github, &settings(), T0 + 21 * DAY).await;
+    github
+        .0
+        .lock()
+        .unwrap()
+        .repositories
+        .get_mut("actions/setup-node")
+        .unwrap()
+        .public = false;
+    locked("actions_setup-node", 0o555);
+    archives
+        .refresh(&github, &settings(), T0 + 21 * DAY + 600)
+        .await;
+    locked("actions_setup-node", 0o755);
+    assert!(
+        failures_of(&archives).contains(&(store, ArchiveFailureKind::Store)),
+        "a withdrawal that failed: {:?}",
+        failures_of(&archives)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_repository_a_job_resolved_as_a_package_is_withdrawn_never_kept_again_and_reported() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("tailscale/github-action/oauth", OAUTH),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    assert!(on_disk(&dir.0).contains(&file_of("actions/checkout", CHECKOUT_NEXT)));
+    archives
+        .packages(&BTreeSet::from(["actions/checkout".to_owned()]), T0 + 60)
+        .await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("Tailscale/github-action", OAUTH)]),
+        "every archive of it goes, the nested pin's too"
+    );
+    assert_eq!(
+        failures_of(&archives),
+        vec![("actions/checkout".to_owned(), ArchiveFailureKind::Package)],
+        "reported"
+    );
+    let downloads = github.downloads().len();
+    for refresh in 1..=2 {
+        archives
+            .refresh(&github, &settings(), T0 + refresh * 600)
+            .await;
+    }
+    assert_eq!(github.downloads().len(), downloads, "never kept again");
+    drop(archives);
+    let mut restarted = open(&dir.0);
+    restarted.refresh(&github, &settings(), T0 + 1800).await;
+    assert_eq!(
+        github.downloads().len(),
+        downloads,
+        "not after a restart either"
+    );
+    assert_eq!(
+        failures_of(&restarted),
+        vec![("actions/checkout".to_owned(), ArchiveFailureKind::Package)],
+        "and still reported"
     );
 }
 

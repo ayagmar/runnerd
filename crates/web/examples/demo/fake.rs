@@ -574,6 +574,7 @@ impl Fixtures {
             bytes: 41 * MIB,
             refreshed_at: Some(now - 240),
             failures: Vec::new(),
+            unchecked: 0,
         };
         let caches = Caches {
             measured_at: Some(now - 900),
