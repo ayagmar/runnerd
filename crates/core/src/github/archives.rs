@@ -1,22 +1,22 @@
 //! What the action archives read from GitHub (`archives::Source`, ADR 0147): a repository's canonical name and
-//! visibility, its default branch's head, its tree and files, and an action's archive. An archive's download sends the
-//! token to the API alone: GitHub answers with a redirect to a signed codeload.github.com address, which is followed
-//! here without the token, and only to codeload.github.com or the API's own origin. The signed address is never
-//! logged or put in an error.
+//! visibility, its default branch's head, its tree and files, with the token through the API, and an action's archive,
+//! downloaded from codeload.github.com without it. An archive's download never carries the token, is never asked again
+//! with it, and follows no redirect: what a private repository holds cannot reach the store, whatever its visibility
+//! was when it was looked up.
 
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
-use reqwest::{Method, StatusCode, Url, header};
+use reqwest::Method;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 
-use super::{Class, Error, Github, Token, rate_limited_until};
+use super::{Error, Github, GithubApi as _};
 use crate::archives::{ActionRepository, Source, Tree, TreeFile};
 use crate::sync::lock;
 
-/// The host GitHub redirects an archive's download to.
-const CODELOAD: &str = "codeload.github.com";
+/// Where action archives are downloaded from, anonymously.
+pub(super) const CODELOAD: &str = "https://codeload.github.com";
 
 /// How long one archive's download may take, its redirect included.
 pub(super) const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -143,63 +143,18 @@ impl Source for Github {
         to: &Path,
         limit: u64,
     ) -> Result<u64, Error> {
-        let path = format!("/repos/{repository}/tarball/{commit}");
-        if let Some(until) = self.blocked_until() {
-            return Err(Error::RateLimited { until });
-        }
-        let mut refused: Option<Token> = None;
-        let response = loop {
-            let token = self.tokens.get(refused.as_ref()).await?;
-            let response = self
-                .downloads
-                .get(format!("{}{path}", self.base))
-                .bearer_auth(&token.0)
-                .send()
-                .await
-                .map_err(|source| Error::Http {
-                    method: Method::GET,
-                    path: path.clone(),
-                    source: source.without_url(),
-                })?;
-            let status = response.status();
-            self.count(Class::Other, status, response.headers());
-            if status == StatusCode::UNAUTHORIZED && refused.is_none() {
-                refused = Some(token);
-                continue;
-            }
-            if let Some(until) =
-                rate_limited_until(status, response.headers(), std::time::SystemTime::now())
-            {
-                *lock(&self.blocked_until) = Some(until);
-                if matches!(
-                    status,
-                    StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-                ) {
-                    return Err(Error::RateLimited { until });
-                }
-            }
-            break response;
-        };
-        let response = if response.status().is_redirection() {
-            let location = response
-                .headers()
-                .get(header::LOCATION)
-                .and_then(|location| location.to_str().ok())
-                .ok_or_else(|| download_error(&path, "a redirect without a location"))?;
-            let target = self.archive_target(location, &path)?;
-            // Without the token: the address is signed, and it is not GitHub's API.
-            self.downloads
-                .get(target)
-                .send()
-                .await
-                .map_err(|source| Error::Http {
-                    method: Method::GET,
-                    path: path.clone(),
-                    source: source.without_url(),
-                })?
-        } else {
-            response
-        };
+        // Anonymous, whatever GitHub answers: only what anyone may download is ever kept.
+        let path = format!("/{repository}/tar.gz/{commit}");
+        let response = self
+            .downloads
+            .get(format!("{}{path}", self.codeload))
+            .send()
+            .await
+            .map_err(|source| Error::Http {
+                method: Method::GET,
+                path: path.clone(),
+                source: source.without_url(),
+            })?;
         let status = response.status();
         if !status.is_success() {
             return Err(Error::Status {
@@ -220,28 +175,10 @@ impl Source for Github {
         }
         write_capped(response, &path, to, limit).await
     }
-}
 
-impl Github {
-    /// Where a redirect for an archive at `path` may go: an `https` address on codeload.github.com, or one on the API's
-    /// own origin, as a test server or an Enterprise Server answers.
-    fn archive_target(&self, location: &str, path: &str) -> Result<Url, Error> {
-        let base = Url::parse(&self.base).map_err(|error| download_error(path, error))?;
-        let target = base
-            .join(location)
-            .map_err(|_| download_error(path, "a redirect to an address that does not parse"))?;
-        let codeload = target.scheme() == "https" && target.host_str() == Some(CODELOAD);
-        if codeload || target.origin() == base.origin() {
-            Ok(target)
-        } else {
-            Err(download_error(
-                path,
-                format_args!(
-                    "a redirect to {}, neither {CODELOAD} nor GitHub's API",
-                    target.host_str().unwrap_or("no host")
-                ),
-            ))
-        }
+    fn spare_requests(&self) -> Option<u64> {
+        let rate_limit = self.spend().rate_limit?;
+        (rate_limit.reset > std::time::SystemTime::now()).then_some(rate_limit.remaining)
     }
 }
 

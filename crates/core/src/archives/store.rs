@@ -211,6 +211,37 @@ impl ArchiveStore {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The repositories it holds archives of, each once.
+    pub(crate) fn repositories(&self) -> Vec<String> {
+        let mut repositories: Vec<String> = self
+            .entries
+            .keys()
+            .map(|key| key.repository.clone())
+            .collect();
+        repositories.dedup();
+        repositories
+    }
+
+    /// Removes every archive of `repositories`, file and entry. Returns those removed.
+    pub(crate) fn withdraw(&mut self, repositories: &[String]) -> io::Result<Vec<Key>> {
+        let removed: Vec<Key> = self
+            .entries
+            .keys()
+            .filter(|key| repositories.contains(&key.repository))
+            .cloned()
+            .collect();
+        let archives = self.archives();
+        for key in &removed {
+            match fs::remove_file(archives.join(key.file())) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+            self.entries.remove(key);
+        }
+        self.save()?;
+        Ok(removed)
+    }
+
     /// How many archives it holds, and their bytes.
     pub(crate) fn size(&self) -> (u64, u64) {
         (

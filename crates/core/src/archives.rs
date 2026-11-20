@@ -42,11 +42,27 @@ pub const ENV: &str = "ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE";
 /// each, which costs GitHub's rate limit nothing while it is unchanged.
 const REFRESH: Duration = Duration::from_secs(600);
 
-/// The largest archive downloaded: far above any action's.
-const MAX_ARCHIVE: u64 = 256 << 20;
+/// What one refresh may spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Limits {
+    /// The largest archive downloaded: far above any action's.
+    pub(crate) archive: u64,
+    /// The most bytes one refresh downloads, failed and refused downloads included; what is left waits for the next.
+    pub(crate) bytes: u64,
+    /// The most requests one refresh asks of GitHub's API; what is left waits for the next.
+    pub(crate) requests: u32,
+}
 
-/// The most bytes one refresh downloads; what is left waits for the next.
-const REFRESH_BYTES: u64 = 2 << 30;
+/// The limits runnerd refreshes by.
+const LIMITS: Limits = Limits {
+    archive: 256 << 20,
+    bytes: 2 << 30,
+    requests: 1000,
+};
+
+/// What a refresh leaves of GitHub's rate limit: below it, it asks nothing more, as runners' registrations and the
+/// scheduler's reads come first.
+const RESERVE: u64 = 1000;
 
 /// How many archives download at once.
 const DOWNLOADS: usize = 3;
@@ -119,8 +135,9 @@ pub trait Source: Send + Sync {
         blob: &str,
         limit: u64,
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
-    /// Downloads the archive of `repository` at `commit` (`GET /repos/{owner}/{repo}/tarball/{sha}`) into the file
-    /// `to`, at most `limit` bytes, and returns its size.
+    /// Downloads the archive of `repository` at `commit` anonymously (codeload.github.com's `/{owner}/{repo}/tar.gz/
+    /// {sha}`) into the new file `to`, at most `limit` bytes, and returns its size. Never with a token: a repository
+    /// that is not public is not there.
     fn tarball(
         &self,
         repository: &str,
@@ -128,6 +145,8 @@ pub trait Source: Send + Sync {
         to: &Path,
         limit: u64,
     ) -> impl Future<Output = Result<u64, Error>> + Send;
+    /// The requests left of GitHub's rate limit before it resets, as last read; `None` when no answer said.
+    fn spare_requests(&self) -> Option<u64>;
 }
 
 /// What the store goes by, from the config: replaced whole at each reload.
@@ -321,6 +340,7 @@ pub(crate) struct Archives {
     /// `None` until it opens: each refresh tries again.
     store: Option<Arc<Mutex<ArchiveStore>>>,
     refresher: Refresher,
+    limits: Limits,
 }
 
 impl Archives {
@@ -330,7 +350,15 @@ impl Archives {
             directory,
             store: None,
             refresher: Refresher::default(),
+            limits: LIMITS,
         }
+    }
+
+    /// These archives, refreshed within `limits`.
+    #[cfg(test)]
+    pub(crate) fn with_limits(mut self, limits: Limits) -> Archives {
+        self.limits = limits;
+        self
     }
 
     /// What clients show.
@@ -356,27 +384,29 @@ impl Archives {
         let Some(store) = self.store.clone() else {
             return;
         };
+        let meter = Meter::new(self.limits);
         let mut names = Names::default();
         for repository in &settings.repositories {
-            self.read_pins(source, &mut names, repository, now).await;
+            self.read_pins(source, &meter, &mut names, repository, now)
+                .await;
         }
-        let mut fetched_bytes = 0;
+        self.withdraw(source, &meter, &store, &mut names).await;
         let mut wanted = BTreeSet::new();
         // Each archive is tried once a refresh: one that failed waits for the next.
         let mut tried: BTreeSet<Key> = BTreeSet::new();
         // Each round downloads what the last made known, one level deeper.
         for _ in 0..=MAX_DEPTH {
-            wanted = self.closure(source, &store, &mut names).await;
+            wanted = self.closure(source, &meter, &store, &mut names).await;
             let missing: Vec<Key> = wanted
                 .iter()
                 .filter(|key| !tried.contains(*key) && !lock(&store).holds(key))
                 .cloned()
                 .collect();
-            if missing.is_empty() || fetched_bytes >= REFRESH_BYTES {
+            if missing.is_empty() {
                 break;
             }
             tried.extend(missing.iter().cloned());
-            fetched_bytes += self.fetch_all(source, &store, missing, now).await;
+            self.fetch_all(source, &meter, &store, missing, now).await;
         }
         let retained = {
             let store = store.clone();
@@ -443,6 +473,42 @@ impl Archives {
         checked.clean()
     }
 
+    /// Removes every kept archive whose repository GitHub now says is not public, or not there: anything a runner
+    /// reads is what anyone may download, whether or not a repository still pins it. A repository GitHub does not
+    /// answer for is left as it is.
+    async fn withdraw<S: Source>(
+        &mut self,
+        source: &S,
+        meter: &Meter,
+        store: &Arc<Mutex<ArchiveStore>>,
+        names: &mut Names,
+    ) {
+        let repositories = lock(store).repositories();
+        let mut hidden = Vec::new();
+        for repository in repositories {
+            if let Ok(None) = names.public(source, meter, &repository).await {
+                hidden.push(repository);
+            }
+        }
+        if hidden.is_empty() {
+            return;
+        }
+        let store = store.clone();
+        let withdrawn = tokio::task::spawn_blocking(move || lock(&store).withdraw(&hidden)).await;
+        match withdrawn {
+            Ok(Ok(keys)) => {
+                for key in keys {
+                    info!(
+                        "action archive {} removed: its repository is not public",
+                        key.label()
+                    );
+                }
+            }
+            Ok(Err(error)) => warn!("cannot remove action archives no longer public: {error}"),
+            Err(_) => {}
+        }
+    }
+
     /// The store, opened now if it is not yet.
     async fn open(&mut self) -> std::io::Result<Arc<Mutex<ArchiveStore>>> {
         if let Some(store) = &self.store {
@@ -462,11 +528,12 @@ impl Archives {
     async fn read_pins<S: Source>(
         &mut self,
         source: &S,
+        meter: &Meter,
         names: &mut Names,
         repository: &str,
         now: u64,
     ) {
-        match self.pins_of(source, names, repository).await {
+        match self.pins_of(source, meter, names, repository).await {
             Ok(Some((head, wanted))) => {
                 self.refresher.read(repository, head, wanted);
                 self.refresher.succeed(repository);
@@ -474,7 +541,8 @@ impl Archives {
             Ok(None) => self.refresher.succeed(repository),
             Err(error) => {
                 warn!(
-                    "{repository}: cannot read the actions it pins; keeping the last read: {error}"
+                    "{repository}: cannot read the actions it pins; keeping the last read: {}",
+                    error.brief()
                 );
                 self.refresher
                     .fail(repository, api::ArchiveFailureKind::Pins, now);
@@ -487,16 +555,20 @@ impl Archives {
     async fn pins_of<S: Source>(
         &self,
         source: &S,
+        meter: &Meter,
         names: &mut Names,
         repository: &str,
     ) -> Result<Option<(String, BTreeSet<Wanted>)>, PinsError> {
+        meter.ask(source)?;
         let details = source.action_repository(repository).await?;
+        meter.ask(source)?;
         let head = source
             .branch_head(repository, &details.default_branch)
             .await?;
         if self.refresher.head(repository) == Some(head.as_str()) {
             return Ok(None);
         }
+        meter.ask(source)?;
         let tree = source.tree(repository, &head).await?;
         if tree.truncated {
             return Err(PinsError::Truncated);
@@ -508,12 +580,13 @@ impl Archives {
             .filter(|file| pins::read_for_pins(&file.path) && file.size <= PIN_FILE_BYTES)
             .take(PIN_FILES);
         for file in files {
+            meter.ask(source)?;
             let bytes = source.blob(repository, &file.blob, PIN_FILE_BYTES).await?;
             pinned.extend(pins::pins(&String::from_utf8_lossy(&bytes)));
         }
         let mut wanted = BTreeSet::new();
         for pin in pinned {
-            if let Some(name) = names.public(source, &pin.repository).await? {
+            if let Some(name) = names.public(source, meter, &pin.repository).await? {
                 wanted.insert(Wanted {
                     key: Key {
                         repository: name,
@@ -531,6 +604,7 @@ impl Archives {
     async fn closure<S: Source>(
         &self,
         source: &S,
+        meter: &Meter,
         store: &Arc<Mutex<ArchiveStore>>,
         names: &mut Names,
     ) -> BTreeSet<Key> {
@@ -544,7 +618,7 @@ impl Archives {
                 }
                 let nested: Vec<Pin> = lock(store).uses(&wanted.key, &wanted.path).to_vec();
                 for pin in nested {
-                    match names.public(source, &pin.repository).await {
+                    match names.public(source, meter, &pin.repository).await {
                         Ok(Some(name)) => {
                             next.insert(Wanted {
                                 key: Key {
@@ -556,9 +630,10 @@ impl Archives {
                         }
                         Ok(None) => {}
                         Err(error) => warn!(
-                            "cannot read {}, which {} pins: {error}",
+                            "cannot read {}, which {} pins: {}",
                             pin.repository,
-                            wanted.key.label()
+                            wanted.key.label(),
+                            error.brief()
                         ),
                     }
                 }
@@ -575,29 +650,28 @@ impl Archives {
     async fn fetch_all<S: Source>(
         &mut self,
         source: &S,
+        meter: &Meter,
         store: &Arc<Mutex<ArchiveStore>>,
         missing: Vec<Key>,
         now: u64,
-    ) -> u64 {
+    ) {
         let results: Vec<(Key, Result<u64, Fetch>)> = futures_util::stream::iter(missing)
             .map(|key| async move {
-                let result = fetch(source, store, &key, now).await;
+                let result = fetch(source, meter, store, &key, now).await;
                 (key, result)
             })
             .buffer_unordered(DOWNLOADS)
             .collect()
             .await;
-        let mut bytes = 0;
         for (key, result) in results {
             let label = key.label();
             match result {
-                Ok(size) => {
-                    bytes += size;
-                    self.refresher.succeed(&label);
-                }
+                Ok(_) => self.refresher.succeed(&label),
+                Err(Fetch::Deferred) => {}
                 Err(Fetch::Download(error)) => {
                     warn!(
-                        "cannot download the action archive {label}; jobs download it themselves: {error}"
+                        "cannot download the action archive {label}; jobs download it themselves: {}",
+                        error.brief()
                     );
                     self.refresher
                         .fail(&label, api::ArchiveFailureKind::Download, now);
@@ -616,7 +690,6 @@ impl Archives {
                 }
             }
         }
-        bytes
     }
 }
 
@@ -626,12 +699,64 @@ enum Fetch {
     Download(Error),
     Rejected(String),
     Store(std::io::Error),
+    /// Not tried, or not again: the refresh's bytes are spent, or GitHub's rate limit is.
+    Deferred,
+}
+
+/// What one refresh may still spend: requests to GitHub's API, and bytes downloaded. Each download reserves the
+/// largest archive's bytes before it starts and gives back what it did not use once it ends, whether it succeeded
+/// or not, so the downloads in flight together never pass what is left.
+#[derive(Debug)]
+struct Meter {
+    limits: Limits,
+    requests: Mutex<u32>,
+    bytes: Mutex<u64>,
+}
+
+impl Meter {
+    fn new(limits: Limits) -> Meter {
+        Meter {
+            limits,
+            requests: Mutex::new(limits.requests),
+            bytes: Mutex::new(limits.bytes),
+        }
+    }
+
+    /// Takes one request to GitHub's API, if the refresh and the rate limit have one to spare.
+    fn ask<S: Source>(&self, source: &S) -> Result<(), Error> {
+        if source.spare_requests().is_some_and(|spare| spare < RESERVE) {
+            return Err(Error::Held(
+                "what is left of GitHub's rate limit is kept for runners",
+            ));
+        }
+        let mut left = lock(&self.requests);
+        *left = left
+            .checked_sub(1)
+            .ok_or(Error::Held("this refresh's requests to GitHub are spent"))?;
+        Ok(())
+    }
+
+    /// Reserves a download's bytes, if the refresh has them left.
+    fn reserve(&self) -> bool {
+        let mut left = lock(&self.bytes);
+        let reserved = *left >= self.limits.archive;
+        if reserved {
+            *left -= self.limits.archive;
+        }
+        reserved
+    }
+
+    /// Gives back what a download reserved and did not use, `used` being what it wrote.
+    fn spend(&self, used: u64) {
+        *lock(&self.bytes) += self.limits.archive - used.min(self.limits.archive);
+    }
 }
 
 /// Downloads `key`'s archive into `staging/`, a few attempts, verifies it whole, and publishes it. Whatever fails, its
 /// staged file goes.
 async fn fetch<S: Source>(
     source: &S,
+    meter: &Meter,
     store: &Arc<Mutex<ArchiveStore>>,
     key: &Key,
     now: u64,
@@ -640,16 +765,29 @@ async fn fetch<S: Source>(
     let mut last = None;
     for wait in ATTEMPTS {
         tokio::time::sleep(wait).await;
-        match source
-            .tarball(&key.repository, &key.sha, &file, MAX_ARCHIVE)
-            .await
-        {
+        if !meter.reserve() {
+            return Err(Fetch::Deferred);
+        }
+        let result = source
+            .tarball(&key.repository, &key.sha, &file, meter.limits.archive)
+            .await;
+        let used = match &result {
+            Ok(size) => *size,
+            Err(_) => tokio::fs::metadata(&file)
+                .await
+                .map_or(0, |metadata| metadata.len()),
+        };
+        meter.spend(used);
+        match result {
             Ok(_) => {
                 last = None;
                 break;
             }
             Err(error) => {
                 let _ = tokio::fs::remove_file(&file).await;
+                if matches!(error, Error::RateLimited { .. } | Error::Held(_)) {
+                    return Err(Fetch::Deferred);
+                }
                 let gone = error.is_gone();
                 last = Some(error);
                 // Asking again gets the same answer.
@@ -708,23 +846,38 @@ enum PinsError {
     Truncated,
 }
 
+impl PinsError {
+    /// What failed, as a log line about another's repository says it (`Error::brief`).
+    fn brief(&self) -> String {
+        match self {
+            PinsError::Github(error) => error.brief(),
+            PinsError::Truncated => self.to_string(),
+        }
+    }
+}
+
 /// The canonical names of the repositories pins name, as asked in one refresh: `None` for one that is not public or
 /// not there.
 #[derive(Debug, Default)]
 struct Names(HashMap<String, Option<String>>);
 
 impl Names {
+    /// `repository`'s canonical name, if it is public and its name is one a file may be named by.
     async fn public<S: Source>(
         &mut self,
         source: &S,
+        meter: &Meter,
         repository: &str,
     ) -> Result<Option<String>, Error> {
         let asked = repository.to_ascii_lowercase();
         if let Some(name) = self.0.get(&asked) {
             return Ok(name.clone());
         }
+        meter.ask(source)?;
         let name = match source.action_repository(repository).await {
-            Ok(found) => found.public.then_some(found.full_name),
+            Ok(found) => {
+                (found.public && pins::repository(&found.full_name)).then_some(found.full_name)
+            }
             Err(error) if error.is_gone() => None,
             Err(error) => return Err(error),
         };

@@ -139,6 +139,25 @@ fn archive(sha: &str, action: &str) -> Vec<u8> {
     ))
 }
 
+/// An archive of `sha` holding 3000 bytes gzip cannot shrink, so it is about that large.
+fn large_archive(sha: &str) -> Vec<u8> {
+    let mut lcg = Lcg(u64::from_str_radix(&sha[..8], 16).unwrap());
+    let noise: String = (0..3000)
+        .map(|_| char::from(b'!' + u8::try_from(lcg.next(90)).unwrap()))
+        .collect();
+    let top = format!("o-r-{}/", &sha[..7]);
+    let file = format!("{top}action.yml");
+    let blob = format!("{top}blob.txt");
+    gzip(&tar_of(
+        sha,
+        &[
+            Item::Dir(&top),
+            Item::File(&file, "runs: {}\n"),
+            Item::File(&blob, &noise),
+        ],
+    ))
+}
+
 /// A repository's tree as GitHub lists it, with its files and their text.
 #[derive(Debug, Clone, Default)]
 struct Files {
@@ -164,6 +183,16 @@ struct Fake {
     failing: BTreeSet<String>,
     /// Whether every read fails, as GitHub down.
     down: bool,
+    /// Requests to GitHub's API answered.
+    requests: u32,
+    /// What GitHub's rate limit has left, as its last answer said.
+    spare: Option<u64>,
+    /// Bytes the downloads wrote, failed ones included.
+    written: u64,
+    /// Downloads that fail after writing this many bytes, by `owner/repo@sha`.
+    partial: BTreeMap<String, usize>,
+    /// Repositories that turn private as their archive is asked for, between the lookup and the download.
+    private_at_download: BTreeSet<String>,
 }
 
 /// A fake GitHub; clones share it.
@@ -174,25 +203,31 @@ fn unreachable() -> Error {
     Error::Download("GitHub did not answer".to_owned())
 }
 
+fn not_found(path: String) -> Error {
+    Error::Status {
+        method: reqwest::Method::GET,
+        path,
+        status: reqwest::StatusCode::NOT_FOUND,
+        message: "Not Found".to_owned(),
+    }
+}
+
 impl Source for FakeGithub {
     async fn action_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
-        let fake = self.0.lock().unwrap();
+        let mut fake = self.0.lock().unwrap();
+        fake.requests += 1;
         if fake.down {
             return Err(unreachable());
         }
         fake.repositories
             .get(&repository.to_ascii_lowercase())
             .cloned()
-            .ok_or_else(|| Error::Status {
-                method: reqwest::Method::GET,
-                path: format!("/repos/{repository}"),
-                status: reqwest::StatusCode::NOT_FOUND,
-                message: "Not Found".to_owned(),
-            })
+            .ok_or_else(|| not_found(format!("/repos/{repository}")))
     }
 
     async fn branch_head(&self, _: &str, _: &str) -> Result<String, Error> {
-        let fake = self.0.lock().unwrap();
+        let mut fake = self.0.lock().unwrap();
+        fake.requests += 1;
         if fake.down {
             return Err(unreachable());
         }
@@ -201,6 +236,7 @@ impl Source for FakeGithub {
 
     async fn tree(&self, _: &str, commit: &str) -> Result<Tree, Error> {
         let mut fake = self.0.lock().unwrap();
+        fake.requests += 1;
         if fake.down {
             return Err(unreachable());
         }
@@ -221,7 +257,8 @@ impl Source for FakeGithub {
     }
 
     async fn blob(&self, _: &str, blob: &str, _: u64) -> Result<Vec<u8>, Error> {
-        let fake = self.0.lock().unwrap();
+        let mut fake = self.0.lock().unwrap();
+        fake.requests += 1;
         let (commit, path) = blob.split_once(':').unwrap();
         Ok(fake.trees[commit].files[path].clone().into_bytes())
     }
@@ -237,14 +274,39 @@ impl Source for FakeGithub {
         let bytes = {
             let mut fake = self.0.lock().unwrap();
             fake.downloads.push(label.clone());
+            let lower = repository.to_ascii_lowercase();
+            if fake.private_at_download.remove(&lower)
+                && let Some(found) = fake.repositories.get_mut(&lower)
+            {
+                found.public = false;
+            }
+            // Anonymous: a repository that is not public is not there.
+            if !fake
+                .repositories
+                .get(&lower)
+                .is_some_and(|found| found.public)
+            {
+                return Err(not_found(format!("/{repository}/tar.gz/{commit}")));
+            }
+            if let Some(&cut) = fake.partial.get(&label) {
+                fs::write(to, vec![0_u8; cut]).unwrap();
+                fake.written += cut as u64;
+                return Err(unreachable());
+            }
             if fake.down || fake.failing.contains(&label) {
                 return Err(unreachable());
             }
-            fake.tarballs.get(&label).cloned().unwrap()
+            let bytes = fake.tarballs.get(&label).cloned().unwrap();
+            fake.written += bytes.len() as u64;
+            bytes
         };
         assert!(bytes.len() as u64 <= limit);
         fs::write(to, &bytes).unwrap();
         Ok(bytes.len() as u64)
+    }
+
+    fn spare_requests(&self) -> Option<u64> {
+        self.0.lock().unwrap().spare
     }
 }
 
@@ -758,6 +820,158 @@ async fn an_index_that_names_a_path_outside_archives_is_never_followed() {
     archives.refresh(&github, &settings(), T0).await;
     assert_eq!(fs::read(&outside).unwrap(), b"keep me");
     assert_eq!(archives.status().entries, 1, "only the archive fetched");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_archive_whose_repository_turns_private_is_withdrawn_and_never_fetched_again() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+            &pin("jdx/mise-action", MISE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    assert_eq!(on_disk(&dir.0).len(), 3);
+    let private = |name: &str| {
+        github
+            .0
+            .lock()
+            .unwrap()
+            .repositories
+            .get_mut(name)
+            .unwrap()
+            .public = false;
+    };
+    // Its default branch has not moved: the pins are as they were.
+    private("actions/checkout");
+    // Changed on disk as well, so a refresh would fetch it again.
+    private("actions/setup-node");
+    let node = dir
+        .0
+        .join("archives")
+        .join(file_of("actions/setup-node", NODE));
+    fs::write(&node, b"changed").unwrap();
+    archives.refresh(&github, &settings(), T0 + 600).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("jdx/mise-action", MISE)]),
+        "what is no longer public is gone, whatever pins it"
+    );
+    // Public when looked up, private by the time its archive is asked for.
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new("c1", &[&pin("jdx/mise-action", MISE)]);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .private_at_download
+        .insert("jdx/mise-action".to_owned());
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    assert!(
+        on_disk(&dir.0).is_empty(),
+        "an anonymous download of it finds nothing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_downloads_no_more_than_its_bytes_and_leaves_the_rest_to_the_next() {
+    let limits = super::Limits {
+        archive: 4096,
+        bytes: 2 * 4096,
+        requests: 1000,
+    };
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+            &pin("jdx/mise-action", MISE),
+            &pin("actions/checkout", CHECKOUT_NEXT),
+        ],
+    );
+    for (repository, sha) in [
+        ("actions/checkout", CHECKOUT),
+        ("actions/setup-node", NODE),
+        ("jdx/mise-action", MISE),
+        ("actions/checkout", CHECKOUT_NEXT),
+    ] {
+        github.set_tarball(&pin(repository, sha), large_archive(sha));
+    }
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    assert_eq!(
+        github.downloads().len(),
+        2,
+        "two downloads' worth of bytes, no more"
+    );
+    assert_eq!(
+        archives.status().failures,
+        Vec::new(),
+        "what waits is no failure"
+    );
+    archives.refresh(&github, &settings(), T0 + 600).await;
+    assert_eq!(
+        on_disk(&dir.0).len(),
+        4,
+        "the next refresh fetched the rest"
+    );
+    // A download that fails midway, each attempt, counts what it wrote.
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .partial
+        .insert(pin("actions/checkout", CHECKOUT), 3000);
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    let written = github.0.lock().unwrap().written;
+    assert!(
+        written <= limits.bytes,
+        "{written} bytes written past the refresh's {}",
+        limits.bytes
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_asks_github_no_more_than_its_requests_and_nothing_once_the_limit_is_low() {
+    let limits = super::Limits {
+        archive: 256 << 20,
+        bytes: 2 << 30,
+        requests: 3,
+    };
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    let mut archives = open(&dir.0).with_limits(limits);
+    archives.refresh(&github, &settings(), T0).await;
+    assert!(
+        github.0.lock().unwrap().requests <= 3,
+        "within the refresh's requests"
+    );
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new("c1", &[&pin("actions/checkout", CHECKOUT)]);
+    github.0.lock().unwrap().spare = Some(10);
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    assert_eq!(
+        github.0.lock().unwrap().requests,
+        0,
+        "the rest of the limit is the runners'"
+    );
+    assert_eq!(github.downloads(), Vec::<String>::new());
 }
 
 #[tokio::test(start_paused = true)]

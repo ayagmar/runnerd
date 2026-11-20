@@ -157,9 +157,23 @@ pub enum Error {
     /// An action archive or a file could not be downloaded whole: what failed, never an address or the token.
     #[error("{0}")]
     Download(String),
+    /// Not sent: runnerd held it back, to keep GitHub's rate limit for what runners need.
+    #[error("not sent: {0}")]
+    Held(&'static str),
 }
 
 impl Error {
+    /// What failed, without GitHub's own words or anything it sent back: for a log line about action archives, whose
+    /// repositories are not runnerd's.
+    pub fn brief(&self) -> String {
+        match self {
+            Error::Status { status, path, .. } => format!("GitHub answered {status} to {path}"),
+            Error::Http { path, .. } => format!("{path}: no answer"),
+            Error::Decode { path, .. } => format!("{path}: an answer that does not parse"),
+            other => other.to_string(),
+        }
+    }
+
     /// Whether GitHub answered that what was asked is not there for this token: deleted, or the token cannot see it.
     /// Asking again gets the same answer.
     pub fn is_gone(&self) -> bool {
@@ -432,7 +446,9 @@ impl ActionFailure {
             },
             Error::Http { source, .. } if source.is_connect() => ActionFailure::Unreachable,
             Error::Http { source, .. } if source.is_timeout() => ActionFailure::TimedOut,
-            Error::Http { .. } | Error::Decode { .. } | Error::Download(_) => ActionFailure::Broken,
+            Error::Http { .. } | Error::Decode { .. } | Error::Download(_) | Error::Held(_) => {
+                ActionFailure::Broken
+            }
         }
     }
 }
@@ -529,9 +545,11 @@ pub trait GithubApi: crate::archives::Source + Send + Sync {
 /// answer costs no rate limit.
 pub struct Github {
     http: reqwest::Client,
-    /// The action archives' downloads (ADR 0147): no redirect followed on its own, a longer timeout.
+    /// The action archives' downloads (ADR 0147): anonymous, no redirect followed, a longer timeout.
     downloads: reqwest::Client,
     base: String,
+    /// Where the action archives are downloaded from, anonymously: codeload.github.com, or a test server.
+    codeload: String,
     /// The token, read on a thread of its own: `gh` may wait on a keyring for seconds.
     tokens: Tokens,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
@@ -784,6 +802,7 @@ impl Github {
             http,
             downloads,
             base: base.trim_end_matches('/').to_owned(),
+            codeload: archives::CODELOAD.to_owned(),
             tokens: Tokens::new(Arc::from(token_source)),
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
             workflows: Mutex::new(Workflows::default()),
@@ -791,6 +810,13 @@ impl Github {
             blocked_until: Mutex::new(None),
             requests: Mutex::new(Counter::new(Instant::now(), requests::WINDOW)),
         })
+    }
+
+    /// This client with the action archives downloaded from `url` in place of codeload.github.com.
+    #[cfg(test)]
+    pub(crate) fn with_codeload(mut self, url: &str) -> Github {
+        url.trim_end_matches('/').clone_into(&mut self.codeload);
+        self
     }
 
     /// What the requests of this client counted since its last line was logged, and the rate limit as last read.

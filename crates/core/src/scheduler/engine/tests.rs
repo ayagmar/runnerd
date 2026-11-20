@@ -477,6 +477,10 @@ impl crate::archives::Source for FakeGithub {
     ) -> Result<u64, github::Error> {
         Err(github::Error::Token("the fakes read no actions".to_owned()))
     }
+
+    fn spare_requests(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl GithubApi for FakeGithub {
