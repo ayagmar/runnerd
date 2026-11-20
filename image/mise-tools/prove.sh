@@ -63,7 +63,9 @@ while IFS=$'\t' read -r tool request locked version name; do
     *) fail "$tool@$request: $program is $path, outside $dir" ;;
   esac
 
-  output=$("$path" "${argv[@]:1}" 2>&1) || fail "$tool@$request: $path ${argv[*]:1} failed: $output"
+  hint=''
+  [ "${argv[*]:1}" != --version ] || hint="; if its version command is another, build with --check '$tool=<program> <argument>...'"
+  output=$("$path" "${argv[@]:1}" 2>&1) || fail "$tool@$request: $path ${argv[*]:1} failed: $output$hint"
   printed=$(grep -oE '[0-9]+(\.[0-9]+)+' <<<"$output" | head -n 1 || true)
   [ "$printed" = "$version" ] || fail "$tool@$request: $path printed version '$printed', not $version: $output"
   echo "ok $tool@$request $path $printed"

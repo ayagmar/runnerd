@@ -21,7 +21,8 @@ tools would not be at the paths they were installed to.
 - `image/mise-tools/build.sh` builds an image on one of runnerd's runner images, named by digest
   (`<name>:<tag>@sha256:<digest>`), from a mise version, the SHA-256 of the extracted `mise` binary (what
   mise-action's `sha256` input checks) and a directory holding the repository's reviewed `mise.toml` and `mise.lock`.
-  It never fetches a branch.
+  It never fetches a branch. It refuses a Docker Engine older than 28.3.0: BuildKit before it looks a base's digest
+  up on the registry even when Docker holds the image, so a locally built base is not found.
 - The version and SHA-256 must be a row of `image/mise-tools/tested-mise.txt`; today that is only mise 2026.10.18 at
   `e97c3897…6942`. Any other pair is refused before anything is downloaded. A new mise version joins the list only
   after `test.sh` passes on it, every wrong-digest build included, since each lock shape's refusal of wrong bytes is a

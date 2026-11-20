@@ -14,7 +14,7 @@
 # container named runnerd-mise-promote-<key> that only one build at a time can create, waiting up to
 # MISE_TOOLS_PROMOTION_WAIT seconds (600) for another. Prints the release tag pinned to the image ID last
 # (<name>:<tag>@sha256:<id>), as a profile's `image` names it. The mise version and digest must be in
-# tested-mise.txt.
+# tested-mise.txt. It needs Docker Engine 28.3.0 or newer.
 set -euo pipefail
 
 recipe=$(cd "$(dirname "$0")" && pwd)
@@ -45,6 +45,14 @@ while [ $# -gt 0 ]; do
   shift 2
 done
 [ -n "$base" ] && [ -n "$mise_version" ] && [ -n "$mise_sha256" ] && [ -n "$project" ] || usage
+
+# BuildKit before Docker Engine 28.3.0 looks a base's digest up on the registry even when Docker holds the image, so
+# a locally built base would not be found.
+engine=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || refuse "cannot reach the Docker Engine"
+IFS=. read -r major minor _ <<<"$engine"
+if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || [ "$major" -lt 28 ] || { [ "$major" -eq 28 ] && [ "$minor" -lt 3 ]; }; then
+  refuse "Docker Engine $engine is older than 28.3.0, which the recipe needs"
+fi
 
 [[ "$base" =~ @sha256:[0-9a-f]{64}$ ]] || refuse "--base $base is not pinned by digest (<name>@sha256:<digest>)"
 [[ "$mise_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || refuse "--mise-version $mise_version is not an exact version"
