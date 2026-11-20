@@ -60,14 +60,42 @@ pub struct RunnerFault {
     pub attempt: u32,
 }
 
+/// What claiming an automatic re-run came to (ADR 0153).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The attempt is this caller's to send.
+    Claimed,
+    /// An earlier send claimed it, in this daemon's life or a past one: it is never sent again.
+    Taken,
+    /// The claim could not be stored: nothing may be sent.
+    Unstored,
+}
+
+/// One attempt of a repository's run, as a claim names it.
+#[derive(Debug)]
+pub(super) struct Attempt {
+    /// `owner/name`.
+    pub(super) repository: String,
+    /// The workflow run.
+    pub(super) run: u64,
+    /// Its attempt.
+    pub(super) attempt: u32,
+}
+
+/// How long a claim is kept: far longer than a fault is read back.
+pub(super) const CLAIM_KEPT_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// The most faults a restart reads back: far more than a day has ever had.
 const FAULTS_MAX: u32 = 500;
 
-/// The jobs their runner failed, final at or after `since` ms and not re-run by runnerd, oldest first.
+/// The jobs their runner failed, final at or after `since` ms, whose attempt runnerd neither re-ran nor claimed,
+/// oldest first.
 pub(super) fn runner_faults(db: &Connection, since: u64) -> rusqlite::Result<Vec<RunnerFault>> {
     db.prepare_cached(
         "SELECT id, repository, run_id, run_attempt FROM jobs WHERE runner_fault = 1 AND state = 'completed' \
-         AND rerun_at IS NULL AND run_id != 0 AND coalesce(finished_at, queued_at) >= ?1 ORDER BY id LIMIT ?2",
+         AND rerun_at IS NULL AND run_id != 0 AND coalesce(finished_at, queued_at) >= ?1 AND NOT EXISTS \
+         (SELECT 1 FROM rerun_claims c WHERE c.repository = jobs.repository AND c.run_id = jobs.run_id \
+         AND c.attempt = jobs.run_attempt) ORDER BY id LIMIT ?2",
     )?
     .query_map(params![since, FAULTS_MAX], |row| {
         Ok(RunnerFault {

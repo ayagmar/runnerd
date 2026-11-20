@@ -32,7 +32,7 @@ mod read;
 mod run;
 mod write;
 
-pub use run::{RunJobs, RunnerFault};
+pub use run::{Claim, RunJobs, RunnerFault};
 
 /// The schema a new database is created with, at [`VERSION`].
 const SCHEMA: &str = include_str!("store/schema.sql");
@@ -108,7 +108,12 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "ALTER TABLE jobs ADD COLUMN wait_causes TEXT;\n\
          ALTER TABLE jobs ADD COLUMN unseen_unlisted INTEGER NOT NULL DEFAULT 0;",
     ),
-    (27, "ALTER TABLE jobs ADD COLUMN rerun_at INTEGER;"),
+    (
+        27,
+        "ALTER TABLE jobs ADD COLUMN rerun_at INTEGER;\n\
+         CREATE TABLE rerun_claims (repository TEXT NOT NULL, run_id INTEGER NOT NULL, attempt INTEGER NOT NULL, \
+         claimed_at INTEGER NOT NULL, PRIMARY KEY (repository, run_id, attempt)) WITHOUT ROWID;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -459,6 +464,12 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
+    ClaimRerun {
+        attempt: run::Attempt,
+        at: u64,
+        done: oneshot::Sender<Claim>,
+    },
+    ReleaseRerun(run::Attempt),
     Flush(oneshot::Sender<()>),
 }
 
@@ -861,6 +872,37 @@ impl Store {
         self.send(Write::Reran { jobs, at });
     }
 
+    /// Claims the automatic re-run of `repository`'s run `run` from attempt `attempt`, at `at` ms, before runnerd sends
+    /// it (ADR 0153), synced to disk: a restart reads no fault of a claimed attempt back, and a second claim of it is
+    /// [`Claim::Taken`]. A claim outlives the history's mark, which only a re-run GitHub accepted writes. Claims a day
+    /// older than `at` go with it: no fault that old is read back.
+    pub async fn claim_rerun(&self, repository: &str, run: u64, attempt: u32, at: u64) -> Claim {
+        let (done, claimed) = oneshot::channel();
+        self.send(Write::ClaimRerun {
+            attempt: run::Attempt {
+                repository: repository.to_owned(),
+                run,
+                attempt,
+            },
+            at,
+            done,
+        });
+        // Waited for on a blocking thread, as `runner_named` is.
+        tokio::task::spawn_blocking(move || claimed.blocking_recv().unwrap_or(Claim::Unstored))
+            .await
+            .unwrap_or(Claim::Unstored)
+    }
+
+    /// Releases the claim [`Store::claim_rerun`] made, once nothing of the re-run reached GitHub: the permit stopped
+    /// it, or GitHub refused it. A release lost to a crash leaves the attempt claimed, never sent.
+    pub fn release_rerun(&self, repository: &str, run: u64, attempt: u32) {
+        self.send(Write::ReleaseRerun(run::Attempt {
+            repository: repository.to_owned(),
+            run,
+            attempt,
+        }));
+    }
+
     /// The last host sample sent, stored or not; `None` before the first.
     pub fn latest_host_sample(&self) -> Option<api::HostSample> {
         lock(&self.latest_host).clone()
@@ -1070,8 +1112,8 @@ impl Store {
         self.read(move |db| read::job(db, id)).await
     }
 
-    /// The jobs their runner failed (`runner_fault`) whose records became final at or after `since` ms and that
-    /// runnerd has not re-run, oldest first: what a restarted daemon may still re-run (ADR 0153).
+    /// The jobs their runner failed (`runner_fault`) whose records became final at or after `since` ms and whose
+    /// attempt runnerd has neither re-run nor claimed, oldest first: what a restarted daemon may still re-run (ADR 0153).
     pub async fn runner_faults(&self, since: u64) -> Result<Vec<RunnerFault>, StoreError> {
         self.read(move |db| run::runner_faults(db, since)).await
     }

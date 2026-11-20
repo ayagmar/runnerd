@@ -507,7 +507,7 @@ async fn three_runs(rig: &Rig) {
 }
 
 #[tokio::test]
-async fn a_send_github_answers_without_saying_is_never_sent_again() {
+async fn a_send_github_answers_without_saying_is_never_sent_again_nor_credited() {
     // GitHub did not act: the run stays at its attempt, and nothing tells runnerd the request will not land later.
     let rig = rig();
     ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
@@ -527,7 +527,7 @@ async fn a_send_github_answers_without_saying_is_never_sent_again() {
         "an unstated outcome is not sent again"
     );
 
-    // GitHub acted and answered with a timeout: the run moved on, so the re-run landed.
+    // GitHub acted and answered with a timeout: the run moved on, but a person may have moved it.
     let rig = self::rig();
     ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
     rig.store.flush().await;
@@ -538,7 +538,104 @@ async fn a_send_github_answers_without_saying_is_never_sent_again() {
     start(&rig).await;
     rig.store.flush().await;
     let summary = rig.store.job(1).await.unwrap().unwrap().summary;
-    assert!(summary.rerun_at.is_some(), "a re-run that landed is noted");
+    assert_eq!(
+        summary.rerun_at, None,
+        "only a re-run GitHub accepted is noted as runnerd's"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_while_a_send_is_unanswered_never_sends_it_again() {
+    // The request reached GitHub, which has not answered, nor acted yet, when the daemon stops.
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Hang;
+    let crashed = rig.actions();
+    let pass = tokio::spawn(async move {
+        crashed.read_faults(Instant::now()).await;
+        crashed.pass(Instant::now()).await;
+    });
+    while rig.reruns_sent() == 0 {
+        tokio::task::yield_now().await;
+    }
+    pass.abort();
+    let _ = pass.await;
+    rig.store.flush().await;
+
+    // A restart, and a check after a later fault of the same attempt.
+    *rig.github.reply.lock().unwrap() = Reply::Status(201);
+    let actions = start(&rig).await;
+    ran(&rig.store, "o/app", 2, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    actions.read_faults(Instant::now()).await;
+    actions.pass(Instant::now() + Duration::from_hours(1)).await;
+    assert_eq!(
+        rig.reruns_sent(),
+        1,
+        "the claimed attempt is never sent again"
+    );
+
+    // One that GitHub answered with a 502 is claimed as well.
+    let rig = self::rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Status(502);
+    start(&rig).await;
+    rig.store.flush().await;
+    *rig.github.reply.lock().unwrap() = Reply::Status(201);
+    start(&rig).await;
+    assert_eq!(rig.reruns_sent(), 1, "a restart after a 502 sends nothing");
+}
+
+#[tokio::test]
+async fn a_refused_send_releases_its_claim_for_a_later_check() {
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Status(409);
+    start(&rig).await;
+    rig.store.flush().await;
+    *rig.github.reply.lock().unwrap() = Reply::Status(201);
+    start(&rig).await;
+    assert_eq!(
+        rig.reruns_sent(),
+        2,
+        "GitHub refused the first, so a restart may send it"
+    );
+}
+
+#[tokio::test]
+async fn a_read_after_an_unanswered_send_is_rate_limited_and_refused_as_any_other() {
+    let rig = rig();
+    three_runs(&rig).await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Status(502);
+    *rig.github.run_after_send.lock().unwrap() = Some(Err(ActionFailure::Status { status: 429 }));
+    start(&rig).await;
+    // The run's read, its jobs, the permit's read, and the read after the send.
+    assert_eq!(rig.reads(), 4, "the other runs wait out the 429");
+    assert_eq!(rig.reruns_sent(), 1);
+
+    let rig = self::rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Status(502);
+    *rig.github.run_after_send.lock().unwrap() = Some(Err(ActionFailure::Status { status: 403 }));
+    let actions = start(&rig).await;
+    assert!(
+        actions.rerun_refused("o/app").is_some(),
+        "a refused read after the send holds the repository"
+    );
 }
 
 #[tokio::test]
@@ -656,29 +753,56 @@ async fn an_owners_rerun_in_flight_is_not_noted_as_automatic() {
 }
 
 #[tokio::test]
-async fn a_reload_withdraws_an_automatic_send_still_waiting_for_its_connection() {
+async fn a_reload_before_the_permit_withdraws_an_automatic_send() {
     let rig = rig();
     ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
     rig.store.flush().await;
     rig.github.set_run(Ok(completed(1)));
     *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
-    rig.github
-        .transport
-        .forget_permits(tokio::sync::Semaphore::MAX_PERMITS);
+    rig.github.hold();
     let actions = rig.actions();
     let automatic = actions.clone();
     let pass = tokio::spawn(async move {
         automatic.read_faults(Instant::now()).await;
         automatic.pass(Instant::now()).await;
     });
-    while rig.github.permitted.load(Ordering::SeqCst) == 0 {
-        tokio::task::yield_now().await;
-    }
+    rig.github.entered(1).await;
     rig.control.set_action_policy(api_allowed(&["o/app"], &[]));
     tokio::time::sleep(Duration::from_millis(20)).await;
-    rig.github
-        .transport
-        .add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+    rig.github.release();
     pass.await.unwrap();
     assert_eq!(rig.reruns_sent(), 0, "withdrawn by the reload");
+}
+
+#[tokio::test]
+async fn a_reload_after_github_took_the_send_leaves_it_unanswered_and_never_sent_again() {
+    let rig = rig();
+    ran(&rig.store, "o/app", 1, 500, 1, Ended::RunnerFault).await;
+    rig.store.flush().await;
+    rig.github.set_run(Ok(completed(1)));
+    *rig.github.jobs.lock().unwrap() = Ok(vec![job(1, "failure")]);
+    *rig.github.reply.lock().unwrap() = Reply::Hang;
+    let actions = rig.actions();
+    let automatic = actions.clone();
+    let pass = tokio::spawn(async move {
+        automatic.read_faults(Instant::now()).await;
+        automatic.pass(Instant::now()).await;
+    });
+    while rig.reruns_sent() == 0 {
+        tokio::task::yield_now().await;
+    }
+    // A reload that changes something else: `o/app`'s faults are still re-run.
+    rig.control
+        .set_action_policy(api_allowed(&["o/app", "o/web"], &["o/app"]));
+    tokio::time::timeout(Duration::from_secs(5), pass)
+        .await
+        .expect("the reload ends the wait")
+        .unwrap();
+    *rig.github.reply.lock().unwrap() = Reply::Status(201);
+    actions.pass(Instant::now() + Duration::from_hours(1)).await;
+    assert_eq!(
+        rig.reruns_sent(),
+        1,
+        "a send GitHub may act on is never sent again"
+    );
 }

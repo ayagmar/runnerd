@@ -57,6 +57,8 @@ struct Fake {
     permitted: AtomicUsize,
     /// Whether GitHub acts on a send that reaches it, whatever it answers: the run moves to its next attempt.
     acts: std::sync::atomic::AtomicBool,
+    /// What a read of the run says once a send reached GitHub, when set.
+    run_after_send: Mutex<Option<Result<RunNow, ActionFailure>>>,
 }
 
 impl Fake {
@@ -75,6 +77,7 @@ impl Fake {
             transport: Semaphore::new(Semaphore::MAX_PERMITS),
             permitted: AtomicUsize::new(0),
             acts: std::sync::atomic::AtomicBool::new(false),
+            run_after_send: Mutex::new(None),
         })
     }
 
@@ -160,6 +163,9 @@ impl ActionsGithub for Fake {
                 .lock()
                 .unwrap()
                 .push((repository.to_owned(), request));
+            if let Some(after) = *self.run_after_send.lock().unwrap() {
+                *self.run.lock().unwrap() = after;
+            }
             if self.acts.load(Ordering::SeqCst) {
                 let mut run = self.run.lock().unwrap();
                 if let Ok(now) = *run {

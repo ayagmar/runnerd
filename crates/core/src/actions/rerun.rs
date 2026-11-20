@@ -2,20 +2,25 @@
 //! GitHub's re-run of the run's failed jobs, without a preview, on the engine's own GitHub client. Off unless a
 //! repository's `rerun_runner_faults` asks: a runner fault is read from the job's own output.
 //!
-//! A run is re-run only while GitHub says its current attempt is the one the fault happened in and it completed as
-//! `failure`, and every job of that attempt that failed or was cancelled is one the runner failed; the permit reads
-//! the attempt and the run's conclusion once more right before the send. Once GitHub accepted, the run is at a later
-//! attempt, so neither this daemon nor a restarted one sends it again. GitHub's re-run names no attempt, so a person's
-//! re-run between the permit and the send can still be followed by runnerd's: one more re-run at most, within the
-//! attempt cap. A send whose outcome GitHub did not state is never sent again: a read of the run says whether it
-//! landed. Faults of a repository whose `rerun_runner_faults` or `[github] job_actions` is off, or that the config no
-//! longer has, wait unread until a reload turns them on or the run is no longer followed. A read or send GitHub refuses
-//! in a way asking again soon cannot change, such as a token without Actions: write, holds the repository's re-runs
-//! for an hour or until the config changes, with one attention item; a rate limit stops every run's reads until it
-//! resets.
+//! runnerd decides to re-run a run only while GitHub says its current attempt is the one the fault happened in and it
+//! completed as `failure`, every job of that attempt that failed or was cancelled is one the runner failed, and the
+//! attempt is the first or the second; the permit reads the attempt and the run's conclusion once more right before
+//! the send. The rule binds runnerd's decision, not the request: GitHub's re-run names no attempt, so one that a
+//! person's re-run overtakes re-runs whatever attempt is current when GitHub handles it.
 //!
-//! It must not re-run a run from its third attempt on, send a held repository's re-run, send while the rate limit
-//! answered, read GitHub for a run more than once a minute, or write the history beyond noting a re-run that landed.
+//! Before the send, the attempt is claimed in the history, synced to disk; neither this daemon nor a restarted one
+//! sends a claimed attempt again. The claim goes only when nothing reached GitHub: the permit stopped it, a reload
+//! withdrew it before the permit, or GitHub refused it. A send GitHub did not answer, or that a reload stopped after
+//! the permit let it go, keeps its claim; a read of the run says whether it moved, but not who moved it, so only an
+//! accepted re-run is noted as runnerd's. Faults of a repository whose `rerun_runner_faults` or `[github] job_actions`
+//! is off, or that the config no longer has, wait unread until a reload turns them on or the run is no longer
+//! followed. A read GitHub refuses in a way asking again soon cannot change, such as a token without Actions: write,
+//! holds the repository's re-runs for an hour or until the config changes, with one attention item; a rate limit
+//! stops every run's reads until it resets. A read after an unanswered send does the same.
+//!
+//! It must not send an attempt it claimed before, decide on a run from its third attempt on, send a held repository's
+//! re-run, send while the rate limit answered, read GitHub for a run more than once a minute, or write the history
+//! beyond its claims and the note of a re-run GitHub accepted.
 
 use std::time::Duration;
 
@@ -32,6 +37,7 @@ use crate::api::{
     OutcomeKind, RerunRefused, RunSeen, Superseded,
 };
 use crate::github::{ActionFailure, AttemptJob};
+use crate::store::Claim;
 use crate::time;
 
 /// How far back a start reads the history's faults: as long as a run is followed.
@@ -215,6 +221,33 @@ impl JobActions {
     /// GitHub's answer comes to.
     async fn send_rerun(&self, due: &Due, faulted: &[u64], revision: u64) -> Checked {
         let RunKey { repository, run } = &due.key;
+        match self
+            .store
+            .claim_rerun(repository, *run, due.attempt, time::now_ms())
+            .await
+        {
+            Claim::Claimed => {}
+            Claim::Taken => {
+                info!(
+                    "{repository}: not re-running run {run}: runnerd sent the re-run of attempt {} already",
+                    due.attempt
+                );
+                return Checked::Settled;
+            }
+            Claim::Unstored => {
+                warn!(
+                    "{repository}: cannot claim the re-run of run {run} in the history; not sent"
+                );
+                return Checked::Failed;
+            }
+        }
+        self.send_claimed(due, faulted, revision).await
+    }
+
+    /// Sends the re-run `send_rerun` claimed, and releases the claim if nothing of it reached GitHub.
+    async fn send_claimed(&self, due: &Due, faulted: &[u64], revision: u64) -> Checked {
+        let RunKey { repository, run } = &due.key;
+        let release = || self.store.release_rerun(repository, *run, due.attempt);
         let issued = Issued {
             target: ActionTarget {
                 action: JobAction::RerunFailed,
@@ -228,7 +261,10 @@ impl JobActions {
             origin: Origin::Automatic,
         };
         let answer = match self.flights.board(&issued) {
-            Boarding::Busy(_) => return Checked::Wait(POLL),
+            Boarding::Busy(_) => {
+                release();
+                return Checked::Wait(POLL);
+            }
             Boarding::Follow(answer) => answer,
             Boarding::Lead { landing, answer } => {
                 let landed = self.dispatch(&issued).await;
@@ -236,7 +272,13 @@ impl JobActions {
                 answer
             }
         };
-        let result = match wait(answer, &issued.target).await {
+        let landed = wait(answer, &issued.target).await;
+        // Only an answer that may mean GitHub acted keeps the claim.
+        if !matches!(&landed, Landed::Done(result) if matches!(result.outcome, ActionOutcome::Accepted | ActionOutcome::Unknown))
+        {
+            release();
+        }
+        let result = match landed {
             Landed::Done(result) => result,
             Landed::Repreview {
                 why: Superseded::AttemptChanged,
@@ -334,19 +376,32 @@ impl JobActions {
     ) -> Checked {
         let RunKey { repository, run } = &due.key;
         match (result.outcome, result.refusal) {
-            (ActionOutcome::Accepted | ActionOutcome::AlreadyFinished, _) => {
+            (ActionOutcome::Accepted, _) => {
                 self.noted(due, faulted);
                 Checked::Settled
             }
-            // GitHub did not say: never sent again, as it may land yet. A read says whether it did.
+            // GitHub did not say: the claim stays, so it is never sent again, as it may land yet. A read says whether
+            // the run moved, not who moved it, so nothing is noted as runnerd's; a refused read holds or cools as
+            // any other.
             (ActionOutcome::Unknown, _) => {
                 match self.read(self.github.run(repository, *run)).await {
-                    Ok(read) if read.attempt > due.attempt => self.noted(due, faulted),
-                    _ => warn!(
+                    Ok(read) if read.attempt > due.attempt => info!(
+                        "{repository}: run {run} moved to attempt {} after a re-run GitHub did not answer; it may be \
+                         runnerd's or a person's",
+                        read.attempt
+                    ),
+                    Ok(_) => warn!(
                         "{repository}: GitHub did not say whether it re-ran run {run} (status {:?}); runnerd does not \
                          ask again",
                         result.status
                     ),
+                    Err(failure) => {
+                        warn!(
+                            "{repository}: GitHub did not say whether it re-ran run {run}, nor answered a read of it; \
+                             runnerd does not ask again"
+                        );
+                        let _ = self.refused(due, failure, revision);
+                    }
                 }
                 Checked::Settled
             }

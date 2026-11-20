@@ -256,6 +256,16 @@ CREATE TABLE meta (
     value INTEGER NOT NULL
 ) WITHOUT ROWID;
 
+-- The attempts runnerd claimed to re-run automatically, each before its request went out (ADR 0153): a restart
+-- never sends one again, whatever GitHub answered. A claim goes when nothing reached GitHub, or after a day.
+CREATE TABLE rerun_claims (
+    repository TEXT NOT NULL,
+    run_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    claimed_at INTEGER NOT NULL,
+    PRIMARY KEY (repository, run_id, attempt)
+) WITHOUT ROWID;
+
 -- The repositories paused through the API, so a restart keeps them paused. A reload that removes a repository from
 -- the config removes its row.
 CREATE TABLE paused (

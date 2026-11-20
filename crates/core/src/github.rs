@@ -426,7 +426,7 @@ pub struct AttemptJob {
 /// The jobs of an attempt, as GitHub lists them.
 #[derive(Deserialize)]
 struct AttemptJobs {
-    /// How many jobs the attempt has, every page's.
+    /// How many jobs the attempt has, every page's. Required: a listing without it cannot be known whole.
     total_count: Option<usize>,
     jobs: Vec<AttemptJob>,
 }
@@ -1442,14 +1442,21 @@ impl GithubApi for Github {
         // Read once per re-run: nothing asks for these pages again.
         lock(&self.etags).retain(|cached| !cached.starts_with(&path));
         let pages = read.map_err(|error| ActionFailure::of(&error))?;
-        let total = pages.iter().filter_map(|page| page.total_count).max();
+        // Every page says how many jobs the attempt has, and they agree: a page without the count, or a count that
+        // moved between pages, is no whole listing.
+        let mut totals = pages.iter().map(|page| page.total_count);
+        let total = match totals.next().flatten() {
+            Some(total) if totals.all(|other| other == Some(total)) => total,
+            _ => return Err(ActionFailure::Broken),
+        };
         let mut jobs: Vec<AttemptJob> = pages.into_iter().flat_map(|page| page.jobs).collect();
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
         // A job left unread could be one that vetoes the re-run: all of them, or a failed read.
-        match total {
-            Some(total) if total != jobs.len() => Err(ActionFailure::Broken),
-            _ => Ok(jobs),
+        if total == jobs.len() {
+            Ok(jobs)
+        } else {
+            Err(ActionFailure::Broken)
         }
     }
 

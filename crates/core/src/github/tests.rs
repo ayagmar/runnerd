@@ -2055,7 +2055,7 @@ async fn an_archive_is_downloaded_without_the_token_and_never_asked_again_with_i
 /// An attempt's jobs are all of them or none: a listing cut at the page cap, or one with fewer jobs than GitHub counts,
 /// is a failed read, as a job left unread could be one that failed in its code.
 #[tokio::test]
-async fn an_attempts_jobs_cut_short_are_a_failed_read() {
+async fn an_attempts_jobs_cut_short_or_uncounted_are_a_failed_read() {
     let (url, _) = fake_github(|request| {
         if request.uri.starts_with("/repos/o/r/actions/runs/5/attempts/1/jobs") {
             // Every page links a next one, past the cap.
@@ -2082,6 +2082,14 @@ async fn an_attempts_jobs_cut_short_are_a_failed_read() {
                 false,
             );
         }
+        // No count and no next page: the jobs shown may be a few of many.
+        if request.uri.starts_with("/repos/o/r/actions/runs/8/attempts/1/jobs") {
+            return page(
+                request,
+                r#"{"jobs":[{"id":1,"status":"completed","conclusion":"failure"}]}"#,
+                false,
+            );
+        }
         StatusCode::NOT_FOUND.into_response()
     })
     .await;
@@ -2093,6 +2101,10 @@ async fn an_attempts_jobs_cut_short_are_a_failed_read() {
     assert!(
         github.attempt_jobs("o/r", 6, 1).await.is_err(),
         "a listing short of its total_count is refused"
+    );
+    assert!(
+        github.attempt_jobs("o/r", 8, 1).await.is_err(),
+        "a listing without a total_count is refused"
     );
     assert_eq!(
         github

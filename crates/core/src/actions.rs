@@ -382,10 +382,15 @@ impl JobActions {
         };
         // Why the permit said no, when it did.
         let withheld: std::sync::Mutex<Option<Landed>> = std::sync::Mutex::new(None);
+        // Whether the permit let a send go: from then on the request may be on its way.
+        let opened = std::sync::atomic::AtomicBool::new(false);
         let permit = || -> BoxFuture<'_, bool> {
             Box::pin(async {
                 let why = self.verify(issued).await;
                 let go = why.is_none();
+                if go {
+                    opened.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 *crate::sync::lock(&withheld) = why;
                 go
             })
@@ -395,11 +400,18 @@ impl JobActions {
         let sent = async {
             match issued.origin {
                 Origin::Owner => self.github.send(repository, request, &permit).await,
-                // A reload that lands while the request waits for its connection withdraws it; one already on the
-                // wire cannot be recalled (ADR 0153).
+                // A reload stops the request where it is. Before the permit let it go, nothing was sent: it is
+                // withdrawn. After, it may have reached GitHub, which may act on it yet: its outcome is unknown, as
+                // for a broken connection, and it is never sent again (ADR 0153).
                 Origin::Automatic => tokio::select! {
                     biased;
-                    () = self.control.policy_moved(issued.revision) => Err(ActionFailure::Withdrawn),
+                    () = self.control.policy_moved(issued.revision) => {
+                        if opened.load(std::sync::atomic::Ordering::SeqCst) {
+                            Err(ActionFailure::Broken)
+                        } else {
+                            Err(ActionFailure::Withdrawn)
+                        }
+                    }
                     sent = self.github.send(repository, request, &permit) => sent,
                 },
             }
