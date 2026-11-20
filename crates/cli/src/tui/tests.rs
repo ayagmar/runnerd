@@ -2651,6 +2651,7 @@ fn the_insights_view_lists_each_insight_in_its_tone_and_the_health_line_leaves_t
         waits: Vec::new(),
         host: Vec::new(),
         disk: None,
+        queue: Vec::new(),
     };
     let heading = insights.heading().to_string();
     app.update(Msg::Insights(Ok(Box::new(insights))));

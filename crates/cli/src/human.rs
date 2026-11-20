@@ -870,7 +870,7 @@ fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
 }
 
 /// `runnerctl insights`: one line per insight, warnings first, then the host's memory on each day CI ran, what jobs
-/// and the drive wrote, then each repository's waits this week against the last.
+/// and the drive wrote, why each profile's jobs queued, then each repository's waits this week against the last.
 pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     let mut out = String::new();
     if insights.insights.is_empty() {
@@ -902,6 +902,25 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
                 let _ = writeln!(out, "    {line}");
             }
         }
+    }
+    if !insights.queue.is_empty() {
+        let _ = writeln!(out, "\n{}:", api::ProfileQueue::TITLE.to_lowercase());
+    }
+    for profile in &insights.queue {
+        let _ = writeln!(out, "  {}", profile.line());
+        let figures = profile.figures();
+        if figures.is_empty() {
+            continue;
+        }
+        let mut table = Table::new(&["WAITED FOR", "TIME", "SHARE"]).right(&[1, 2]);
+        for figure in figures {
+            table.row(vec![
+                plain(figure.label),
+                plain(figure.value),
+                plain(figure.of.unwrap_or_default()),
+            ]);
+        }
+        out.push_str(&table.render(paint, "    "));
     }
     if insights.waits.is_empty() {
         return out;

@@ -593,7 +593,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 not_carried_out.remove(job);
             }
         }
+        // The takes captures reported while the batch ran end their jobs' waits first, at their times: the plan, made
+        // before them, opens none of those again (ADR 0154).
+        self.take_found();
         self.note_pass_waits(&plan, &not_carried_out);
+        self.note_causes(&plan);
         // A plan's waits count whichever path ran it, and only once its starts are done.
         self.note_waits(&plan.held, plan.barrier);
         started
@@ -719,7 +723,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         mode: Shutdown,
         pace: &mut Pace,
     ) -> Applied {
-        self.note_slots(plan.slot_waiting);
+        // The takes captures reported since the tick last read them end their jobs' waits first: the plan, made before
+        // it read them, opens none of those again, and committing its causes forgets them (ADR 0154).
+        self.take_found();
+        self.note_slots(plan.slot_waiting.clone());
+        self.note_causes(&plan);
         let mut applied = Applied {
             held: plan.held,
             barrier: plan.barrier,

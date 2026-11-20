@@ -95,10 +95,10 @@ pub use disk::{
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use figure::LabelledFigure;
 pub use insights::{
-    AutoNote, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight,
-    InsightFigure, InsightKind, Insights, InsightsHeading, InsightsQuery, LongWait, Notification,
-    NotifyEvent, NotifyTest, NotifyTestQuery, Priority, RepositoryWaits, RunLink, Severity,
-    WaitFigure, WaitSpread, WeekWaits,
+    AutoNote, CauseWait, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX,
+    Insight, InsightFigure, InsightKind, Insights, InsightsHeading, InsightsQuery, LongWait,
+    Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Priority, ProfileQueue,
+    RepositoryWaits, RunLink, Severity, WaitFigure, WaitSpread, WeekWaits,
 };
 #[cfg(feature = "host")]
 pub(crate) use jobs::SAMPLE_GAP_INTERVALS;
@@ -129,7 +129,7 @@ pub use jobs::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
-pub use queue::HostWait;
+pub use queue::{HostWait, WaitCause};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,

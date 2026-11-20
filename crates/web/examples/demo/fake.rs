@@ -1080,6 +1080,7 @@ fn insights(fixtures: &Fixtures) -> Insights {
         ],
         host: Vec::new(),
         disk: Some(disk_writes()),
+        queue: runnerd_fixtures::queue(),
     };
     // In the order the daemon serves them (`Insights::insights`): warnings first, then by repository, workflow and job.
     shown.insights.sort_by(|a, b| {

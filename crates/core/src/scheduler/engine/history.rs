@@ -63,6 +63,9 @@ pub(super) struct Found {
     runner: String,
     job: u64,
     run_id: u64,
+    /// When (ms) the capture found it, which the history takes as its start until GitHub says: what its wait for a
+    /// cause counts up to, however late the engine reads this (ADR 0154).
+    at: u64,
 }
 
 #[cfg(test)]
@@ -73,6 +76,15 @@ impl Found {
             runner,
             job,
             run_id: job,
+            at: time::now_ms(),
+        }
+    }
+
+    /// That `runner` took `job`, as its capture found at `at` (ms).
+    pub(super) fn named_at(runner: String, job: u64, at: u64) -> Found {
+        Found {
+            at,
+            ..Found::named(runner, job)
         }
     }
 }
@@ -249,12 +261,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         };
         if let Some((job, run_id)) = claim {
-            let runner = occupant.runner_name.clone();
-            self.store.claimed(job, run_id, &runner, time::now_ms());
+            let (runner, at) = (occupant.runner_name.clone(), time::now_ms());
+            self.store.claimed(job, run_id, &runner, at);
             self.note_found(&Found {
                 runner,
                 job,
                 run_id,
+                at,
             });
             // A left runner is in no slot, so no `forget` closes what the claim opened.
             let held = self
@@ -290,7 +303,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn note_found(&mut self, found: &Found) {
         self.ledger.stop_queued(found.job);
         // GitHub picks which job a runner takes, which may not be the one the plan started it for (ADR 0110).
-        self.note_started(found.job);
+        self.note_taken(found.job, found.at);
         let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
             slots
                 .iter_mut()
@@ -446,11 +459,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 _ => None,
             };
             if let Some((runner, run_id)) = unclaimed {
-                self.store.claimed(id, run_id, &runner, time::now_ms());
+                let at = time::now_ms();
+                self.store.claimed(id, run_id, &runner, at);
                 let _ = self.found.0.send(Found {
                     runner,
                     job: id,
                     run_id,
+                    at,
                 });
                 continue;
             }
@@ -707,11 +722,13 @@ async fn capture_job<D: DockerApi>(
                 Captured::Job { id, run_id } => {
                     if job.is_none() {
                         job = Some(id);
-                        store.claimed(id, run_id, &runner, time::now_ms());
+                        let at = time::now_ms();
+                        store.claimed(id, run_id, &runner, at);
                         let _ = told.found.send(Found {
                             runner: runner.clone(),
                             job: id,
                             run_id,
+                            at,
                         });
                         // After a restart, the part stored before.
                         if let Ok(Some(stored)) = store.job(id).await {

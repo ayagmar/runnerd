@@ -68,7 +68,14 @@ CREATE TABLE jobs (
     -- What its log says failed it (`record::failure_cause`): 'action-archive', 'action-resolve' or 'checkout', read
     -- once the record is final for a job that concluded failed. NULL for every other job, and in rows from before
     -- schema 25.
-    failure_cause TEXT
+    failure_cause TEXT,
+    -- How long it waited for each cause runnerd counts (`api::WaitCause`, ADR 0154), in ms by the cause's word, such
+    -- as {"host": 120000, "barrier": 4000}: each plan that held it adds the time to the next plan to the cause it
+    -- named. Written '{}' when the row is made; NULL in rows from before schema 26, which counted none.
+    wait_causes TEXT,
+    -- Of `unseen`, what passed before runnerd first listed it: the downtime its first listing found, which later
+    -- restarts add to `unseen` and not to this (ADR 0154). 0 in rows from before schema 26.
+    unseen_unlisted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

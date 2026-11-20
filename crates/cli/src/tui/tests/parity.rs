@@ -1926,6 +1926,42 @@ fn opens_at_its_failed_step(id: u64) {
 }
 
 #[test]
+fn the_insights_view_draws_why_each_profile_s_jobs_queued_as_core_words_it() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let insights = runnerd_fixtures::insights(NOW);
+    let queue = insights.queue.clone();
+    app.update(Msg::Insights(Ok(Box::new(insights))));
+    app.update(super::tab(View::Insights));
+    for width in [80, 130] {
+        let (rows, _) = frame_of(&app, width, 160);
+        let all = rows.join("\n");
+        assert!(
+            shows(&rows, runnerd_core::api::ProfileQueue::TITLE),
+            "{all}"
+        );
+        // Wrapped where it does not fit, so read as the words of the rows in turn.
+        let words = rows
+            .iter()
+            .flat_map(|row| row.split_whitespace())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for profile in &queue {
+            assert!(
+                width > 80 || words.contains(&profile.line()),
+                "{}: {all}",
+                profile.line()
+            );
+            assert!(shows(&rows, &format!("{}: ", profile.profile)), "{all}");
+            for figure in profile.figures() {
+                assert!(shows(&rows, &figure.label), "{}: {all}", figure.label);
+                assert!(shows(&rows, &figure.value), "{}: {all}", figure.value);
+            }
+        }
+    }
+}
+
+#[test]
 fn the_insights_view_draws_what_jobs_and_the_drive_wrote_as_core_s_figures() {
     let (daemon, _) = fixtures();
     let mut app = app(&daemon);

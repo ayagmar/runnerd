@@ -38,6 +38,13 @@ pub(super) struct Started {
     pub(super) session: i64,
 }
 
+/// The downtime a job's wait went through (ms): all of it, and the part before its first listing.
+#[derive(Debug, Clone, Copy)]
+struct Unseen {
+    unseen: u64,
+    unlisted: u64,
+}
+
 pub(super) fn run(
     started: Started,
     mut queue: mpsc::UnboundedReceiver<Write>,
@@ -106,6 +113,11 @@ impl Writer<'_> {
             Write::RunnerCancelBy { runner, at } => self.runner_cancel_by(&runner, at),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
             Write::SlotWaited { jobs, ms } => self.slot_waited(&jobs, ms),
+            Write::CausesWaited(waits) => {
+                self.change("record what jobs waited for", |_| {
+                    self.causes_waited(&waits)
+                });
+            }
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -460,6 +472,39 @@ impl Writer<'_> {
         }
     }
 
+    /// Adds `waits` to their jobs' `wait_causes`: one read and one write of each job's row.
+    fn causes_waited(&self, waits: &[super::CauseWait]) -> rusqlite::Result<()> {
+        let mut by_job: BTreeMap<u64, Vec<&super::CauseWait>> = BTreeMap::new();
+        for wait in waits.iter().filter(|wait| wait.ms > 0) {
+            by_job.entry(wait.job).or_default().push(wait);
+        }
+        for (job, waits) in by_job {
+            let stored: Option<Option<String>> = self
+                .db
+                .query_row("SELECT wait_causes FROM jobs WHERE id = ?1", [job], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            // No row, or one from before schema 26: nothing to add to.
+            let Some(Some(stored)) = stored else {
+                continue;
+            };
+            let mut causes: BTreeMap<String, u64> =
+                serde_json::from_str(&stored).unwrap_or_default();
+            for wait in waits {
+                let counted = causes.entry(wait.cause.word().to_owned()).or_insert(0);
+                *counted = counted.saturating_add(wait.ms);
+            }
+            let causes = serde_json::to_string(&causes)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            self.db.execute(
+                "UPDATE jobs SET wait_causes = ?2 WHERE id = ?1",
+                params![job, causes],
+            )?;
+        }
+        Ok(())
+    }
+
     fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {
         logged(
             "record the build cache's counts",
@@ -563,7 +608,8 @@ impl Writer<'_> {
         let unseen = self.downtime.map_or(0, |downtime| downtime.of(queued_at));
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, workflow, name, branch, url, labels, state, \
-             queued_at, unseen, seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11, ?12) \
+             queued_at, unseen, seen_at, wait_causes, unseen_unlisted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11, ?12, '{}', ?11) \
              ON CONFLICT (id) DO NOTHING",
             params![
                 job.id,
@@ -604,7 +650,7 @@ impl Writer<'_> {
         // A job the daemon never saw queued: GitHub's listing lagged, or it was queued before the daemon started.
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, runner, queued_at, \
-             started_at) SELECT ?1, repository, ?2, 1, '', '[]', 'running', name, ?3, ?3 FROM runners \
+             started_at, wait_causes) SELECT ?1, repository, ?2, 1, '', '[]', 'running', name, ?3, ?3, '{}' FROM runners \
              WHERE name = ?4 ON CONFLICT (id) DO NOTHING",
             params![job, run_id, at, runner],
         )?;
@@ -637,9 +683,12 @@ impl Writer<'_> {
         let completed = details.status == "completed";
         let labels = serde_json::to_string(&details.labels).unwrap_or_else(|_| "[]".to_owned());
         let started_at = timestamp(details.started_at.as_deref());
+        let queued_at = timestamp(details.created_at.as_deref());
+        let captured_first = self.captured_first(details.id, queued_at, started_at)?;
         // A runner that outlived the last daemon may have started it while none ran: what the downtime gave it
         // after that start was no wait. Once, when GitHub's start first says so.
         let after_start = match (self.downtime, started_at) {
+            _ if captured_first.is_some() => 0,
             (Some(downtime), Some(started_at)) if started_at < downtime.until => self
                 .db
                 .query_row(
@@ -656,7 +705,8 @@ impl Writer<'_> {
             "UPDATE jobs SET run_id = ?2, run_attempt = ?3, name = ?4, workflow = ?5, branch = ?6, url = ?7, \
              labels = ?8, queued_at = coalesce(?9, queued_at), started_at = coalesce(?10, started_at), \
              finished_at = CASE WHEN ?11 THEN coalesce(?12, finished_at) ELSE finished_at END, \
-             conclusion = ?13, github_completed = ?11, unseen = max(unseen - ?14, 0) \
+             conclusion = ?13, github_completed = ?11, \
+             unseen = coalesce(?15, max(unseen - ?14, 0)), unseen_unlisted = coalesce(?16, unseen_unlisted) \
              WHERE id = ?1 AND state = 'running'",
             params![
                 details.id,
@@ -667,12 +717,14 @@ impl Writer<'_> {
                 details.head_branch,
                 details.html_url,
                 labels,
-                timestamp(details.created_at.as_deref()),
+                queued_at,
                 started_at,
                 completed,
                 timestamp(details.completed_at.as_deref()),
                 details.conclusion,
                 after_start,
+                captured_first.map(|unseen| unseen.unseen),
+                captured_first.map(|unseen| unseen.unlisted),
             ],
         )?;
         if updated != 1 {
@@ -687,6 +739,38 @@ impl Writer<'_> {
             }
         }
         self.close_if_done(details.id, announced)
+    }
+
+    /// The downtime a job a runner's capture recorded first waited through, once GitHub's times for it first come:
+    /// its row took the capture's time as its queueing and its start, so the restart gave it none (ADR 0154). The
+    /// part before its first listing is all of it unless a listing saw it. `None` for any other row, or once its
+    /// queueing is known, so a later read gives none again.
+    fn captured_first(
+        &self,
+        job: u64,
+        queued_at: Option<u64>,
+        started_at: Option<u64>,
+    ) -> rusqlite::Result<Option<Unseen>> {
+        let (Some(downtime), Some(queued_at)) = (self.downtime, queued_at) else {
+            return Ok(None);
+        };
+        let row = self
+            .db
+            .query_row(
+                "SELECT started_at, seen_at FROM jobs WHERE id = ?1 AND state = 'running' \
+                 AND queued_at = started_at AND unseen = 0",
+                [job],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<u64>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(captured, seen_at)| {
+            let started_at = started_at.unwrap_or(captured);
+            let listed = seen_at.map_or(started_at, |seen_at| seen_at.min(started_at));
+            Unseen {
+                unseen: downtime.during(queued_at, started_at),
+                unlisted: downtime.during(queued_at, listed),
+            }
+        }))
     }
 
     /// Stores a step; returns it if it is new or changed.

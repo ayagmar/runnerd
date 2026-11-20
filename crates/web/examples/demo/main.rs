@@ -549,6 +549,7 @@ fn empty(fixtures: &mut fake::Fixtures) {
         waits: vec![],
         host: vec![],
         disk: None,
+        queue: vec![],
     });
     for profile in &mut fixtures.status.profiles {
         for slot in &mut profile.slots {

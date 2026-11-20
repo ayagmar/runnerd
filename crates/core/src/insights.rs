@@ -18,6 +18,7 @@ use crate::sizing::{HELD, Throttling, spread};
 
 mod disk;
 mod host;
+mod queue;
 
 const SECOND: u64 = 1000;
 const DAY: u64 = 24 * 3600 * SECOND;
@@ -110,6 +111,12 @@ pub struct Run {
     pub disk: Option<api::DiskWritten>,
     /// How much of its wait passed while no runnerd ran.
     pub unseen: u64,
+    /// When runnerd first listed it queued; `None` when no listing did.
+    pub seen_at: Option<u64>,
+    /// Of `unseen`, what passed before runnerd first listed it: the downtime its first listing found.
+    pub unseen_unlisted: u64,
+    /// How long it waited for each cause, in ms (ADR 0154); `None` for a row from before runnerd counted them.
+    pub causes: Option<BTreeMap<api::WaitCause, u64>>,
 }
 
 impl Run {
@@ -287,6 +294,7 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         waits,
         host: host_days,
         disk: disk::writes(&window, &history.disk, since, now),
+        queue: queue::split(&window, history.kept_since),
     }
 }
 

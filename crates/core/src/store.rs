@@ -103,6 +103,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE INDEX jobs_by_runner ON jobs (runner);",
     ),
     (25, "ALTER TABLE jobs ADD COLUMN failure_cause TEXT;"),
+    (
+        26,
+        "ALTER TABLE jobs ADD COLUMN wait_causes TEXT;\n\
+         ALTER TABLE jobs ADD COLUMN unseen_unlisted INTEGER NOT NULL DEFAULT 0;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -172,6 +177,17 @@ impl StoreError {
     pub fn is_shutdown(&self) -> bool {
         matches!(self, StoreError::Join(join) if join.is_cancelled())
     }
+}
+
+/// A stretch of one job's wait for one cause, which the history adds to the job's `wait_causes` (ADR 0154).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CauseWait {
+    /// The job.
+    pub job: u64,
+    /// What held it.
+    pub cause: api::WaitCause,
+    /// For how long, in ms.
+    pub ms: u64,
 }
 
 /// A runner container as the history records it.
@@ -327,6 +343,7 @@ enum Write {
         jobs: Vec<u64>,
         ms: u64,
     },
+    CausesWaited(Vec<CauseWait>),
     SlotWaited {
         jobs: Vec<u64>,
         ms: u64,
@@ -822,6 +839,15 @@ impl Store {
     /// its runner: what auto sizing reads as a wait for a slot (ADR 0090).
     pub fn slot_waited(&self, jobs: Vec<u64>, ms: u64) {
         self.send(Write::SlotWaited { jobs, ms });
+    }
+
+    /// Adds what each wait in `waits` lasted to its job's time for its cause (ADR 0154), all in one transaction and
+    /// with one write of each job's row. A job whose row is from before schema 26 keeps counting none, so it never
+    /// reads as a wait of 0.
+    pub fn causes_waited(&self, waits: Vec<CauseWait>) {
+        if waits.iter().any(|wait| wait.ms > 0) {
+            self.send(Write::CausesWaited(waits));
+        }
     }
 
     /// The last host sample sent, stored or not; `None` before the first.
@@ -1512,6 +1538,11 @@ impl Downtime {
     /// How much of it a job queued at `queued_at` (ms) waited through.
     fn of(self, queued_at: u64) -> u64 {
         self.until.saturating_sub(queued_at.max(self.from))
+    }
+
+    /// How much of it passed from `from` to `until` (ms).
+    fn during(self, from: u64, until: u64) -> u64 {
+        until.min(self.until).saturating_sub(from.max(self.from))
     }
 
     /// How much of what [`Downtime::of`] gave a job queued at `queued_at` came after it started at `started_at`

@@ -1365,8 +1365,8 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
          r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
-         j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure \
-         FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.seen_at, \
+         j.wait_causes, j.unseen_unlisted FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
     .query_map([since], |row| {
@@ -1404,6 +1404,11 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             cpu_periods: row.get(25)?,
             cpu_throttled: row.get(26)?,
             disk: stored_disk(row, 27)?,
+            seen_at: row.get(31)?,
+            unseen_unlisted: row.get(33)?,
+            causes: row
+                .get::<_, Option<String>>(32)?
+                .map(|text| stored_causes(&text)),
         })
     })?
     .collect::<rusqlite::Result<_>>()?;
@@ -1415,6 +1420,17 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
         readings: host_readings(db, since)?,
         disk: disk_windows(db, since)?,
     })
+}
+
+/// A job's `wait_causes`: ms by cause, a word this build does not know counted as [`api::WaitCause::Other`]. Text
+/// that is no such object counts nothing.
+fn stored_causes(text: &str) -> BTreeMap<api::WaitCause, u64> {
+    let stored: BTreeMap<String, u64> = serde_json::from_str(text).unwrap_or_default();
+    let mut causes = BTreeMap::new();
+    for (word, ms) in stored {
+        *causes.entry(api::WaitCause::from_word(&word)).or_insert(0) += ms;
+    }
+    causes
 }
 
 /// The windows of what the disks under Docker's root wrote that end at or after `since` (ms), oldest first.

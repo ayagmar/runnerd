@@ -1,7 +1,130 @@
 //! What holds the queue as a whole, for a script to ask in one call: whether a queued job waits for the host's
-//! memory. It reads the status the daemon served; it decides nothing about scheduling.
+//! memory; and what a job's wait is counted under in the history, [`WaitCause`] (ADR 0154). It reads the status the
+//! daemon served; it decides nothing about scheduling.
+
+use serde::{Deserialize, Serialize};
 
 use super::{QueueShown, QueuedJob, RepositoryStatus, Status, Waiting};
+
+/// What a queued job's wait is counted under in the history, one per [`Waiting`] reason or a few of them together
+/// (ADR 0154): each plan that holds a job adds the time to the next plan to its cause. Stored by [`WaitCause::word`],
+/// so a cause a later runnerd adds reads as [`WaitCause::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitCause {
+    /// Behind an older job that waited long enough for memory or CPU that no younger one starts before it
+    /// (`Waiting::BehindMemory`, `Waiting::BehindCpu`).
+    Barrier,
+    /// Behind an older job's runner starting first (`Waiting::BehindStart`).
+    Start,
+    /// Every slot of its profile held a runner (`Waiting::NoSlot`).
+    Slot,
+    /// Its runner did not fit the slice's memory budget (`Waiting::Memory`).
+    Budget,
+    /// Its runner did not fit what the host's memory has to spare (`Waiting::HostMemory`).
+    Host,
+    /// Its runner did not fit the CPU budget (`Waiting::Cpu`).
+    Cpu,
+    /// A runner was up or starting for it, waiting for GitHub to hand it a job (`Waiting::RunnerStarting`).
+    Booting,
+    /// Its profile rebuilt its snapshot, pulled its image, or emptied what a host crash may have torn
+    /// (`Waiting::Reseeding`, `Waiting::PullingImage`, `Waiting::Torn`).
+    Preparing,
+    /// Its repository was paused (`Waiting::Paused`).
+    Paused,
+    /// Runners of its repository failed, so none started for a while (`Waiting::Backoff`).
+    Backoff,
+    /// No pool served its labels (`Waiting::NoPool`).
+    NoPool,
+    /// A reason this build does not know: a `Waiting` from a newer daemon, or a cause a later runnerd stored.
+    #[serde(other)]
+    Other,
+}
+
+impl WaitCause {
+    /// Every cause, in the order a split lists them when two took as long.
+    pub const ALL: [WaitCause; 12] = [
+        WaitCause::Barrier,
+        WaitCause::Start,
+        WaitCause::Slot,
+        WaitCause::Budget,
+        WaitCause::Host,
+        WaitCause::Cpu,
+        WaitCause::Booting,
+        WaitCause::Preparing,
+        WaitCause::Paused,
+        WaitCause::Backoff,
+        WaitCause::NoPool,
+        WaitCause::Other,
+    ];
+
+    /// Its name as one word, the history's key and the API's: `barrier`, `start`, `slot`, `budget`, `host`, `cpu`,
+    /// `booting`, `preparing`, `paused`, `backoff`, `no-pool` or `other`.
+    pub fn word(self) -> &'static str {
+        match self {
+            WaitCause::Barrier => "barrier",
+            WaitCause::Start => "start",
+            WaitCause::Slot => "slot",
+            WaitCause::Budget => "budget",
+            WaitCause::Host => "host",
+            WaitCause::Cpu => "cpu",
+            WaitCause::Booting => "booting",
+            WaitCause::Preparing => "preparing",
+            WaitCause::Paused => "paused",
+            WaitCause::Backoff => "backoff",
+            WaitCause::NoPool => "no-pool",
+            WaitCause::Other => "other",
+        }
+    }
+
+    /// The cause `word` names; [`WaitCause::Other`] for a word this build does not know.
+    pub fn from_word(word: &str) -> WaitCause {
+        WaitCause::ALL
+            .into_iter()
+            .find(|cause| cause.word() == word)
+            .unwrap_or(WaitCause::Other)
+    }
+
+    /// What it is, as a label: `Behind a barrier`, `Host memory`.
+    pub fn label(self) -> &'static str {
+        match self {
+            WaitCause::Barrier => "Behind a barrier",
+            WaitCause::Start => "Behind an older job's start",
+            WaitCause::Slot => "No free slot",
+            WaitCause::Budget => "Memory budget",
+            WaitCause::Host => "Host memory",
+            WaitCause::Cpu => "CPU budget",
+            WaitCause::Booting => "Runner starting",
+            WaitCause::Preparing => "Snapshot, image or cleanup",
+            WaitCause::Paused => "Repository paused",
+            WaitCause::Backoff => "Runners failing",
+            WaitCause::NoPool => "No profile serves it",
+            WaitCause::Other => "Another reason",
+        }
+    }
+}
+
+impl Waiting {
+    /// What a wait for it is counted under in the history.
+    pub fn cause(&self) -> WaitCause {
+        match self {
+            Waiting::BehindMemory { .. } | Waiting::BehindCpu { .. } => WaitCause::Barrier,
+            Waiting::BehindStart { .. } => WaitCause::Start,
+            Waiting::NoSlot { .. } => WaitCause::Slot,
+            Waiting::Memory { .. } => WaitCause::Budget,
+            Waiting::HostMemory { .. } => WaitCause::Host,
+            Waiting::Cpu { .. } => WaitCause::Cpu,
+            Waiting::RunnerStarting => WaitCause::Booting,
+            Waiting::Reseeding { .. } | Waiting::PullingImage { .. } | Waiting::Torn { .. } => {
+                WaitCause::Preparing
+            }
+            Waiting::Paused => WaitCause::Paused,
+            Waiting::Backoff { .. } => WaitCause::Backoff,
+            Waiting::NoPool { .. } => WaitCause::NoPool,
+            Waiting::Unknown => WaitCause::Other,
+        }
+    }
+}
 
 impl QueuedJob {
     /// Whether it waits for the host's memory: it does not fit what the host has to spare beside its other programs

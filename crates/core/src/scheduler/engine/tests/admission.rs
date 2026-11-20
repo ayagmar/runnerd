@@ -3448,3 +3448,243 @@ async fn a_status_that_cannot_show_the_queue_never_answers_that_nothing_waits_fo
         "a stopping daemon lists nothing"
     );
 }
+
+/// How long each of the jobs 1 to 4 waited for each cause, in ms, as the history's `wait_causes` holds it.
+fn causes(dir: &TestDir) -> Vec<BTreeMap<String, u64>> {
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let mut statement = db
+        .prepare("SELECT wait_causes FROM jobs WHERE id <= 4 ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|text| serde_json::from_str(&text.unwrap()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn identical_plans_write_no_cause_and_a_take_or_a_cancel_writes_the_stretch_it_ends() {
+    // Catches every plan rewriting every waiting job's row on an SSD that already writes too much, a stretch counted
+    // twice, and a take or a cancel losing the stretch it ends (ADR 0154). Two slots, four jobs of 1.25G, and a slice
+    // with room for three runners: jobs 1 and 2 start, 3 and 4 wait.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &measured().replace("slots = 4", "slots = 2"),
+    );
+    engine.memory_max = Some(3 * 1280 * M + 100 * M);
+    history(&handle.store, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 0);
+    let began = std::time::Instant::now();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let settled = causes(&dir);
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    handle.store.flush().await;
+    assert_eq!(
+        causes(&dir),
+        settled,
+        "plans that hold each job for the same cause write nothing"
+    );
+    // A runner takes job 1, and job 4 is cancelled: each writes the stretch it ends.
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine.note_found(&crate::scheduler::engine::history::Found::named(runner, 1));
+    github
+        .0
+        .lock()
+        .unwrap()
+        .queued
+        .retain(|queued| queued.id != 4);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let elapsed = u64::try_from(began.elapsed().as_millis()).unwrap();
+    let ended = causes(&dir);
+    let total = |job: &BTreeMap<String, u64>| job.values().sum::<u64>();
+    for (index, job) in ended.iter().enumerate() {
+        assert!(
+            total(job) <= elapsed,
+            "job {} counts no stretch twice: {job:?} in {elapsed} ms",
+            index + 1
+        );
+    }
+    assert!(
+        ended[0].get("booting").is_some_and(|ms| *ms >= 90),
+        "a taken job counts its wait for GitHub to hand its runner a job: {ended:?}"
+    );
+    assert!(
+        total(&ended[3]) >= 120,
+        "job 4 counts every stretch until it was cancelled: {ended:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_take_the_engine_reads_late_counts_the_jobs_cause_only_up_to_when_its_capture_found_it() {
+    // Catches the time between a runner taking a job and the engine reading that being charged to the job's cause,
+    // past its start (ADR 0154).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let began = std::time::Instant::now();
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let found_at = time::now_ms();
+    let until_found = u64::try_from(began.elapsed().as_millis()).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine.note_found(&crate::scheduler::engine::history::Found::named_at(
+        runner, 3, found_at,
+    ));
+    handle.store.flush().await;
+    let third: u64 = causes(&dir)[2].values().sum();
+    assert!(
+        third > 0 && third <= until_found,
+        "job 3's cause counts up to its capture: {third} ms of {until_found}"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_writes_every_cause_still_open() {
+    // Catches a graceful stop losing the open causes it never wrote, now that a cause that goes on is written only
+    // when it changes or ends, or at a checkpoint (ADR 0154).
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let before: u64 = causes(&dir)[2].values().sum();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    engine.tick(Shutdown::Graceful).await;
+    handle.store.flush().await;
+    let after: u64 = causes(&dir)[2].values().sum();
+    assert!(
+        after >= before + 50,
+        "the stop wrote job 3's open cause: {before} ms, then {after} ms"
+    );
+}
+
+#[tokio::test]
+async fn a_signals_detach_writes_every_open_cause_after_the_takes_it_was_told_of() {
+    // Catches SIGTERM's detach, which removes idle runners and plans nothing, losing every cause it never wrote, and a
+    // take the engine had not read yet being written as more wait (ADR 0154). Runners start for jobs 1 and 2; job 3
+    // waits for a slot, until a capture finds that a runner took it.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let began = std::time::Instant::now();
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (found_at, until_found) = (
+        time::now_ms(),
+        u64::try_from(began.elapsed().as_millis()).unwrap(),
+    );
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine
+        .found
+        .0
+        .send(crate::scheduler::engine::history::Found::named_at(
+            runner, 3, found_at,
+        ))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let before_stop = u64::try_from(began.elapsed().as_millis()).unwrap();
+    handle.control.shutdown(Shutdown::Detach);
+    tokio::time::timeout(Duration::from_secs(10), engine.schedule())
+        .await
+        .unwrap();
+    handle.store.flush().await;
+    let causes = causes(&dir);
+    let total = |job: usize| causes[job].values().sum::<u64>();
+    assert!(
+        total(0) >= before_stop - until_found,
+        "job 1's open cause was written at the stop: {causes:?}"
+    );
+    assert!(
+        total(2) <= until_found,
+        "job 3 counts up to its take, which the stop read first: {causes:?} in {until_found} ms"
+    );
+}
+
+/// The milliseconds the history counts for `job`'s causes.
+fn caused(dir: &TestDir, job: u64) -> u64 {
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let text: String = db
+        .query_row("SELECT wait_causes FROM jobs WHERE id = ?1", [job], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    serde_json::from_str::<BTreeMap<String, u64>>(&text)
+        .unwrap()
+        .values()
+        .sum()
+}
+
+#[tokio::test]
+async fn a_take_reported_while_a_pass_starts_runners_ends_the_cause_there_even_at_a_checkpoint() {
+    // Catches a pass committing its plan, made before its start batch, past a take a capture reported during the batch:
+    // at a checkpoint it wrote the taken job's cause up to then, and reopened it (ADR 0154). Job 3 of the paused o/s
+    // is held; the pass starts job 1's runner, which takes 400 ms, and 100 ms in a runner elsewhere takes job 3.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.pause(&one("o/s"), RunningJobs::Keep).await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(3)];
+        state.queued_on.insert(3, "o/s".to_owned());
+    }
+    let began = time::now_ms();
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().latency.start = Duration::from_millis(400);
+    engine.set_listed("o/r", vec![job(1)]);
+    engine.checkpoint_due();
+    let sender = engine.found.0.clone();
+    let took = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let at = time::now_ms();
+        sender
+            .send(crate::scheduler::engine::history::Found::named_at(
+                "elsewhere".to_owned(),
+                3,
+                at,
+            ))
+            .unwrap();
+        at
+    });
+    assert_eq!(engine.refill().await, 1, "job 1's runner starts");
+    let took_at = took.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    engine.note_stop_causes();
+    handle.store.flush().await;
+    let third = caused(&dir, 3);
+    assert!(
+        third > 0 && third <= took_at - began,
+        "job 3 counts up to its take: {third} ms of {} ms",
+        took_at - began
+    );
+}

@@ -29,6 +29,21 @@ disk writes:
     halyard/storefront CI / e2e: 96G over 270 jobs, 364.09M a job
     halyard/ledger images / image-api: 41G over 26 jobs, 1.58G a job
 
+why jobs queued:
+  jvm: 42 jobs waited 12h 31m in all; 3 jobs from before runnerd counted why are left out; 2 jobs' causes are estimates, scaled into their waits
+    WAITED FOR                   TIME  SHARE
+    Host memory                6h 10m    49%
+    Behind a barrier           2h 30m    20%
+    No free slot               1h 45m    14%
+    Runner starting           21m 00s     3%
+    Before runnerd listed it  14m 00s     2%
+    No plan covered            1h 31m    12%
+  node: 1 job waited 1m 35s in all
+    WAITED FOR                  TIME  SHARE
+    Memory budget             1m 00s    63%
+    Before runnerd listed it     35s    37%
+  light: 1 job ended from before runnerd counted why jobs wait
+
 REPOSITORY          JOBS  WAIT P50     P95  WARM P50  COLD P50  P95 WEEK BEFORE
 halyard/ledger       184        3s     41s        2s       24s              44s
 halyard/storefront   212        9s  4m 10s        2s       47s           1m 30s
