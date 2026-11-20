@@ -76,6 +76,7 @@ jobs:
               - '.github/workflows/ci.yml'
             image:
               - 'image/**'
+              - '.github/scripts/docker-containerd-store.sh'
               - '.github/workflows/ci.yml'
             site:
               - 'site/**'
@@ -190,23 +191,23 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.stage }}
           cache-to: type=gha,mode=max,scope=${{ matrix.stage }}
 
-  # Builds image/mise-tools' fixture on the base stage, proves it with no network, and checks its refusals. Docker's
-  # containerd image store gives the locally built base a digest to pin, which the recipe requires.
+  # Builds image/mise-tools' fixture on the base stage, proves it with no network, and checks its refusals and that
+  # mise refuses wrong bytes for each accepted lock shape. Docker's containerd image store gives the locally built
+  # base a digest to pin, which the recipe requires. Runs only on GitHub's disposable hosted runners, whose Docker it
+  # reconfigures; never on a self-hosted runner or a trigger with secrets.
   mise-tools:
     name: mise-tools
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Use the containerd image store
-        run: |
-          config=$(sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}')
-          jq '.features["containerd-snapshotter"] = true' <<<"$config" | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
+      - run: .github/scripts/docker-containerd-store.sh
       - run: image/mise-tools/test.sh
+        timeout-minutes: 30
 
   # Every runnerd and runnerctl command, subcommand and option the README and the site's docs show exists. Builds the
   # two binaries only, on the rust job's cache, so a docs-only pull request checks its commands too.
