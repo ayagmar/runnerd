@@ -40,6 +40,17 @@ pub fn reseeded(profile: &str, error: Option<&str>) -> String {
     }
 }
 
+/// The line of a reseed's `output`, as `cache.reseeded` carries it, that says what it did: the one that started the
+/// snapshot or some of its layers over from the image, else its last. Empty for no output.
+pub fn reseed_outcome(output: &str) -> &str {
+    let mut lines = output.trim().lines();
+    lines
+        .clone()
+        .find(|line| line.contains("over from the image"))
+        .or_else(|| lines.next_back())
+        .unwrap_or_default()
+}
+
 impl RemovedRecords {
     /// What it freed: `no record removed`, `removed 1 record, 3G freed` or `removed 4 records, 9G freed`.
     pub fn line(&self) -> String {

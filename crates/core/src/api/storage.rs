@@ -75,8 +75,8 @@ pub struct CacheLimit {
     pub limit: u64,
     /// Whether the volume is past it, so runnerd acts on it.
     pub over: bool,
-    /// What runnerd does at it: `emptied above 5G`, `trimmed to 20G`, or for a snapshot `started over at its next
-    /// reseed above 30G`.
+    /// What runnerd does at it: `emptied above 5G`, `trimmed to 20G`, or for a snapshot `cut back at its next
+    /// reseed above 30G`, by what the image's seed script drops (the reseed's output says what).
     pub label: String,
 }
 
@@ -94,7 +94,7 @@ impl CacheVolume {
         let size = ByteSize(limit);
         let label = match self.kind {
             CacheKind::Build => format!("trimmed to {size}"),
-            CacheKind::Snapshot { .. } => format!("started over at its next reseed above {size}"),
+            CacheKind::Snapshot { .. } => format!("cut back at its next reseed above {size}"),
             CacheKind::Slot { .. } | CacheKind::Pnpm | CacheKind::Maven | CacheKind::Mirror => {
                 format!("emptied above {size}")
             }

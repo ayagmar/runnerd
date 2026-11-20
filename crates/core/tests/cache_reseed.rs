@@ -291,6 +291,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     let capped = reseed("0K", "3M");
     fitting_snapshot(docker, names, &capped).await?;
     capped_snapshot(docker, names, &capped).await?;
+    tools_first(docker, names, &capped).await?;
     interrupted_reseed(docker, names, &reseed("1T", "1T"), &measure).await?;
     closed_slot(docker, names, &reseed("0K", "1T")).await?;
     image_entries_hidden(docker, names, &reseed("0K", "1T")).await
@@ -691,6 +692,71 @@ async fn capped_snapshot(
     if code != 0 {
         return Err(format!(
             "slot 2 kept changes to a snapshot layer that started over (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
+}
+
+/// A snapshot over its limit by less than its tools layer starts only that layer over: the cache layer slot 1's job
+/// read and wrote stays whole but for a Python environment that ran from the tools, and every slot's changes to the
+/// tools go with their snapshot.
+async fn tools_first(docker: &Docker, names: &Names, capped: &Reseed<'_>) -> Result<(), String> {
+    let (code, output) = run(
+        docker,
+        names,
+        2,
+        Snapshot::Writable,
+        "",
+        &format!(
+            "mkdir -p /base/tools && head -c 2M /dev/zero > /base/tools/superseded \
+             && {AS_RUNNER} sh -c 'echo slot-2 > /home/runner/_work/_tool/slot-2'"
+        ),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "planting a tools snapshot exited {code}:\n{output}"
+        ));
+    }
+    // 2M of tools and 1.5M of cache pass the 3M limit; the cache alone does not.
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        1,
+        &format!(
+            "{AS_RUNNER} sh -c 'head -c 1536K /dev/zero > /home/runner/.cache/kept \
+             && mkdir -p /home/runner/.cache/pipx/venvs/tool/bin \
+             && echo \"home = /home/runner/_work/_tool/Python/3.12.7/x64/bin\" \
+                > /home/runner/.cache/pipx/venvs/tool/pyvenv.cfg \
+             && ln -s /home/runner/_work/_tool/Python/3.12.7/x64/bin/python3 \
+                /home/runner/.cache/pipx/venvs/tool/bin/python'"
+        ),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+    }
+    let output = cache::reseed(docker, capped)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    if !runnerd_core::api::reseed_outcome(&output).contains("started tools over from the image") {
+        return Err(format!(
+            "the reseed did not report starting tools over:\n{output}"
+        ));
+    }
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        "test -s /home/runner/.cache/kept && test ! -e /base/tools \
+         && test ! -e /home/runner/.cache/pipx/venvs/tool \
+         && test ! -e /home/runner/_work/_tool/superseded && test ! -e /home/runner/_work/_tool/slot-2",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "a snapshot over its limit by its tools did not keep its cache and drop its tools (exit {code}):\n{output}"
         ));
     }
     Ok(())

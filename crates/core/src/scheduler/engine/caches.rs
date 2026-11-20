@@ -434,9 +434,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Makes the profiles whose snapshot `sizes` measured over `snapshot_max` due for a reseed, which then starts
-    /// the snapshot over (docs/adr/0041): slot 1 may never change enough to reach `reseed_at`. A reseed running now,
-    /// or one that finished after the check started, may have replaced the snapshot after it was measured.
+    /// Makes the profiles whose snapshot `sizes` measured over `snapshot_max` due for a reseed, which then cuts the
+    /// snapshot back, by what the image's seed script drops (docs/adr/0041, docs/adr/0152): slot 1 may never change
+    /// enough to reach `reseed_at`. A reseed running now, or one that finished after the check started, may have
+    /// replaced the snapshot after it was measured.
     fn mark_oversized(&mut self, sizes: &BTreeMap<String, u64>) {
         let max = self.config.caches.snapshot_max;
         for profile in self.config.profiles.keys() {
@@ -449,8 +450,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .snapshot_unchanged_since(profile, self.checked_at)
             {
                 info!(
-                    "{profile}: the snapshot holds {}, over snapshot_max ({max}): it starts over at the next reseed, \
-                     once the profile is idle",
+                    "{profile}: the snapshot holds {}, over snapshot_max ({max}): it is cut back at the next reseed, once \
+                     the profile is idle",
                     ByteSize(size)
                 );
                 self.upkeep.mark(profile, Due::Oversized);

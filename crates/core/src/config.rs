@@ -298,8 +298,8 @@ pub struct Caches {
     /// layers become the profile's new snapshot.
     #[serde(default = "default_reseed_at")]
     pub reseed_at: ByteSize,
-    /// A reseed that would make a profile's snapshot larger than this starts it over from slot 1's changes alone,
-    /// or from the image when those are larger too.
+    /// A reseed that would make a profile's snapshot larger than this starts its tool cache over from the image,
+    /// then its Android SDK, and the whole snapshot when the cache layer alone is still larger.
     #[serde(default = "default_snapshot_max")]
     pub snapshot_max: ByteSize,
     /// The build cache every runner shares.

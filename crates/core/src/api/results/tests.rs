@@ -46,3 +46,23 @@ fn a_written_resize_names_its_cpus_only_when_it_changes_them() {
         "jvm: memory 6G, 2 slots, 8 cpus written; the daemon runs with them"
     );
 }
+
+/// A reseed that started a layer over goes on to seed the others, so its last line would hide the start-over.
+#[test]
+fn a_reseed_reports_its_start_over_rather_than_its_last_seeded_layer() {
+    let started_tools_over = "the snapshot would hold 10931923458 bytes, over its limit of 10737418240: \
+        started tools over from the image, keeping 9131923458 bytes\nseeded cache: 7.3G\nseeded android: 299M\n";
+    assert_eq!(
+        crate::api::reseed_outcome(started_tools_over),
+        "the snapshot would hold 10931923458 bytes, over its limit of 10737418240: \
+        started tools over from the image, keeping 9131923458 bytes"
+    );
+    // What an older image's seed script prints, a whole start-over, still reads as one.
+    let whole = "the snapshot would hold 11445207681 bytes, over its limit of 10737418240: started over from the image";
+    assert_eq!(crate::api::reseed_outcome(whole), whole);
+    assert_eq!(
+        crate::api::reseed_outcome("seeded cache: 5.2G\nseeded tools: 1.7G\nseeded android: 0"),
+        "seeded android: 0"
+    );
+    assert_eq!(crate::api::reseed_outcome("  \n"), "");
+}

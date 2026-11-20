@@ -21,7 +21,7 @@ fn a_snapshot_past_its_limit_starts_over_at_its_reseed_and_a_slot_is_emptied() {
     })
     .limit_status()
     .unwrap();
-    assert_eq!(snapshot.label, "started over at its next reseed above 5G");
+    assert_eq!(snapshot.label, "cut back at its next reseed above 5G");
     assert_eq!(snapshot.tone(), Tone::Warn, "past its limit");
     let slot = volume(CacheKind::Slot {
         profile: "jvm".to_owned(),

@@ -963,6 +963,67 @@ async fn a_docker_error_on_a_torn_volume_counts_no_refusal() {
 }
 
 #[tokio::test]
+async fn a_start_over_docker_cannot_say_ended_keeps_the_caches_torn_and_the_tick_returns() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unsynced-start-over-refused");
+    boot(&dir, "boot-1");
+    std::fs::write(dir.0.join("unsynced"), "since boot-0\n").unwrap();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.holders.insert(
+            "runnerd-app-slot-1".to_owned(),
+            vec![Container {
+                id: "someones-own".to_owned(),
+                name: "someones-own".to_owned(),
+                running: true,
+                labels: HashMap::new(),
+            }],
+        );
+        state.start_over_outage = Outage::Refused;
+    }
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued.push(job(1));
+    let runner_started = |docker: &FakeDocker| {
+        docker
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("start ") && !call.ends_with("-start-over"))
+    };
+    for _ in 0..super::super::unsynced::REFUSALS + 3 {
+        tokio::time::timeout(Duration::from_secs(5), engine.tick(Shutdown::No))
+            .await
+            .expect("the tick returns while Docker refuses the start-over container");
+    }
+    let starts = docker
+        .calls()
+        .iter()
+        .filter(|call| *call == "start runnerd-start-over")
+        .count();
+    assert_eq!(
+        starts, 1,
+        "the container Docker cannot say ended is never replaced while it may still delete"
+    );
+    assert!(
+        !runner_started(&docker),
+        "no runner starts on the torn caches"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("unsynced")).unwrap(),
+        "torn\n",
+        "and the caches stay torn"
+    );
+
+    // Docker answers again: the container is removed, the layers start over, and runners start.
+    docker.0.lock().unwrap().start_over_outage = Outage::None;
+    engine.tick(Shutdown::No).await;
+    assert!(
+        runner_started(&docker),
+        "runners start once the layers were started over"
+    );
+}
+
+#[tokio::test]
 async fn a_slot_volume_held_past_the_last_try_has_its_layers_started_over_before_any_runner() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let dir = TestDir::new("unsynced-held-slot");
