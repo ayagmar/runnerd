@@ -267,10 +267,13 @@ async fn a_request_without_a_confirmation_this_runnerd_issued_is_previewed_and_s
     );
     assert_eq!(first.confirm_label, "Cancel run");
     let token = first.confirm.unwrap();
-    assert_eq!(token.len(), 32, "128 random bits: {token}");
+    // Opaque: 128 random bits as lowercase hex, so nothing of the run's scope is spelled in it.
     assert!(
-        !token.contains("o/app") && !token.contains("500"),
-        "opaque: {token}"
+        token.len() == 32
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "32 lowercase hex characters: {token}"
     );
     let second = confirm(&setup, JobAction::Cancel).await;
     assert_ne!(token, second, "each preview issues its own");

@@ -136,6 +136,8 @@ struct GithubState {
     held_deletes: tokio::sync::watch::Sender<bool>,
     /// While true, runner registrations do not answer.
     held_registrations: tokio::sync::watch::Sender<bool>,
+    /// While true, the action archives' repository lookups do not answer.
+    held_actions: tokio::sync::watch::Sender<bool>,
     /// While `Some(n)`, the next `n` registrations are answered, and those after them are made but not answered, as
     /// when GitHub's answer is late, until `None`.
     answered: tokio::sync::watch::Sender<Option<u32>>,
@@ -314,6 +316,15 @@ impl FakeGithub {
             .send_replace(false);
     }
 
+    /// Holds the action archives' repository lookups until `release_actions`.
+    fn hold_actions(&self) {
+        self.0.lock().unwrap().held_actions.send_replace(true);
+    }
+
+    fn release_actions(&self) {
+        self.0.lock().unwrap().held_actions.send_replace(false);
+    }
+
     /// Holds the queued jobs listings of `repository` until `release_queued`.
     fn hold_queued(&self, repository: &str) {
         self.0.lock().unwrap().held_queued.send_modify(|held| {
@@ -453,6 +464,7 @@ impl crate::archives::Source for FakeGithub {
         &self,
         _: &str,
     ) -> Result<crate::archives::ActionRepository, github::Error> {
+        self.wait(|state| &state.held_actions).await;
         Err(github::Error::Token("the fakes read no actions".to_owned()))
     }
 
