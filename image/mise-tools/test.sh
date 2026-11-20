@@ -3,8 +3,9 @@
 #
 #   image/mise-tools/test.sh [<base image as name:tag@sha256:digest>]
 #
-# Without a base it builds image/Dockerfile's `base` stage, which needs Docker's containerd image store so that a
-# local image has a digest to pin. It checks:
+# Like build.sh it needs Docker Engine 28.3.0 or newer; CI runs it against a pinned docker:dind
+# (.github/scripts/docker-dind.sh). Without a base it builds image/Dockerfile's `base` stage, which needs Docker's
+# containerd image store so that a local image has a digest to pin. It checks:
 # - the fixture builds, passes its no-network proof, carries its labels and SHA256SUMS, and did not run the
 #   repository's hook; another lock makes another tag; a release tag on another image is never replaced;
 # - refusals before any download: a missing digest, a tool option, a plugin, a templated version in both forms, a
