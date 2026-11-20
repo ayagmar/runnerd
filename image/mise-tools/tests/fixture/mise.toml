@@ -1,0 +1,12 @@
+# Two small tools, one per backend kind: aqua and github. The hook proves the build never runs the repository's
+# hooks as root: the image must not have the file it writes.
+[tools]
+jq = "1.8.1"
+"github:junegunn/fzf" = "0.75.0"
+
+[settings]
+lockfile = true
+lockfile_platforms = ["linux-x64"]
+
+[hooks]
+postinstall = "touch /usr/local/share/mise/hook-ran"

@@ -1,0 +1,3 @@
+# The mise versions and linux-x64 binary SHA-256s (of the extracted `mise`) the recipe builds with. A row joins only
+# after image/mise-tools/test.sh passed with it, every wrong-digest build included (docs/adr/0149).
+2026.10.18 e97c38973336aa2ff350fea50f47b412b266fe263b102b7200ff1e9b118c6942

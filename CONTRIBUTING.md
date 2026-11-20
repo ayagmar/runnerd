@@ -14,6 +14,7 @@ starts only the jobs those paths can affect:
 | `dashboard-browser`: builds the dashboard's demo and runs `crates/web/tests/browser.mjs` in the runner image's Chrome: the attention strip opens and closes, the editor's caret stays clear of its bars, a first visit to Settings shifts nothing | the same paths as `rust` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
+| `mise-tools`: builds `image/mise-tools`' fixture on the `base` stage, proves it with no network, checks its refusals and that mise refuses a wrong lock digest for each accepted shape (`image/mise-tools/test.sh`), against the pinned docker:dind, since the hosted runner's Docker is older than the 28.3.0 it needs | `image/**`, `.github/scripts/docker-dind.sh` |
 | `site-build`: Astro build, then a check that every internal link and `#anchor` of the built pages resolves | `site/**`, `.github/scripts/check-site-links.py` |
 | `lint`: shellcheck, actionlint, zizmor | `.github/**`, any `*.sh` |
 | `text`: typos, `taplo fmt --check` | any file |

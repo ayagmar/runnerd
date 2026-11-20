@@ -994,6 +994,28 @@ fn an_image_built_for_another_release_warns() {
     assert!(jvm.detail.contains("0.0.1"), "{jvm}");
 }
 
+/// image/mise-tools builds a local tag no registry has, on a published base whose labels it keeps (ADR 0149).
+#[test]
+fn a_local_image_built_on_this_releases_published_base_passes() {
+    let derived = "runnerd-mise:mise-2026.10.18-0123456789abcdef";
+    let config = config_with(
+        &format!("image = \"{}\"", published("jvm")),
+        &format!("image = \"{derived}\""),
+    );
+    let mut host = ready_host(ARCH);
+    host.images.insert(
+        derived.to_owned(),
+        Ok(ImageFound::Present {
+            version: Some(VERSION.to_owned()),
+            syncs: config::ImageSyncs::Skips,
+        }),
+    );
+    let checks = checks(&host, Some(&config));
+    assert_eq!(failed(&checks), Vec::<&str>::new());
+    let image = image_check(&checks, derived);
+    assert_eq!(image.status, Status::Pass, "{image}");
+}
+
 #[test]
 fn an_amd64_only_image_fails_on_an_arm64_docker_with_the_local_build() {
     let config = config("sysbox");
