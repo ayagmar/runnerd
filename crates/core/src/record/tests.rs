@@ -900,3 +900,24 @@ mod causes {
         assert_eq!(failure_cause(&job, &lines(CHECKOUT)), None);
     }
 }
+
+#[test]
+fn a_log_names_the_repositories_its_runner_downloaded_as_immutable_packages_and_nothing_else() {
+    let log: Vec<String> = [
+        "2026-11-20T10:00:00.0000000Z ##[group]Download immutable action package 'actions/checkout@v6'",
+        "2026-11-20T10:00:00.0000000Z Version: 6.0.0",
+        "2026-11-20T10:00:00.0000000Z Digest: sha256:abc",
+        "2026-11-20T10:00:00.0000000Z ##[endgroup]",
+        "2026-11-20T10:00:01.0000000Z Download action repository 'actions/setup-node@v5' (SHA:49933ea5288caeca8642d1e84afbd3f7d6820020)",
+        "2026-11-20T10:00:02.0000000Z ##[group]Download immutable action package 'actions/checkout@v6'",
+        "2026-11-20T10:00:03.0000000Z ##[group]Run echo \"##[group]Download immutable action package 'o/fake@v1'\"",
+        "##[group]Download immutable action package 'Tailscale/github-action@v4'",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert_eq!(
+        super::immutable_packages(&log),
+        vec!["actions/checkout", "Tailscale/github-action"],
+        "each package once, as written; a source download or a script's text is none"
+    );
+}

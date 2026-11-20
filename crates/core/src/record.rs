@@ -488,6 +488,32 @@ fn sysbox_fault(text: &str) -> bool {
         || (text.contains("unsafe procfs detected") && text.contains("invalid argument"))
 }
 
+/// The repositories `lines`, stored lines of a job's log, show the runner downloading as an immutable action package
+/// (actions/runner 2.338's `##[group]Download immutable action package 'owner/repo@ref'`), each once, as written.
+/// The runner prints it before it looks in an action archive cache, so it shows a package resolution whether or not
+/// it then read an archive in the package's place.
+pub fn immutable_packages(lines: &[String]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in lines {
+        let text = plain(line);
+        let Some(rest) = text.strip_prefix("##[group]Download immutable action package '") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once('@') else {
+            continue;
+        };
+        let mut parts = name.split('/');
+        let (Some(owner), Some(repo)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let repository = format!("{owner}/{repo}");
+        if !found.contains(&repository) {
+            found.push(repository);
+        }
+    }
+    found
+}
+
 /// A stored log line without its timestamp and colour codes.
 fn plain(line: &str) -> String {
     let text = match line.split_once(' ') {
