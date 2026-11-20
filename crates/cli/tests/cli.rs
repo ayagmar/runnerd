@@ -190,12 +190,14 @@ struct Fake {
     replaced_queries: Vec<Option<String>>,
     /// The confirmations the job action previews issued, in order.
     confirmations: Vec<String>,
+    /// The status served in place of `status()`.
+    status: Option<Status>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
 
-async fn get_status() -> axum::Json<Status> {
-    axum::Json(status())
+async fn get_status(State(fake): State<Shared>) -> axum::Json<Status> {
+    axum::Json(fake.lock().unwrap().status.clone().unwrap_or_else(status))
 }
 
 async fn get_job(State(fake): State<Shared>) -> axum::Json<Job> {
@@ -868,6 +870,68 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
                 && line.ends_with(&format!(" ago  {reason}"))
         ),
         "the queued job is listed under the repositories with why it waits, as every client says it:\n{text}"
+    );
+}
+
+/// The bug each exit code catches in a local build's wrapper that yields memory to CI: a job behind another
+/// repository's job waiting for the host's memory read as "nothing waits", a misspelt repository or a stopped
+/// daemon read as "nothing waits" (1), so the wrapper takes memory it should leave.
+#[test]
+fn status_waiting_for_host_memory_answers_in_the_exit_code_and_never_reads_trouble_as_clear() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let code = |args: &[&str]| {
+        let output = runnerctl(&socket, args);
+        assert_eq!(stdout(&output), "", "it prints nothing for {args:?}");
+        (output.status.code(), stderr(&output))
+    };
+    let ask = ["status", "--waiting-for", "host-memory"];
+    let ledger = [&ask[..], &["--repo", "halyard/ledger"]].concat();
+
+    // The ledger's job waits for a slot, not for the host.
+    assert_eq!(code(&ask).0, Some(1));
+    assert_eq!(code(&ledger).0, Some(1));
+
+    let mut held = status();
+    held.repositories.push(RepositoryStatus {
+        name: "halyard/storefront".to_owned(),
+        pools: Vec::new(),
+        paused: false,
+        queued_jobs: 1,
+        listing: None,
+    });
+    let mut older = held.queued[0].clone();
+    older.id = 9000;
+    older.repository = "halyard/storefront".to_owned();
+    older.waiting = Some(Waiting::HostMemory {
+        needs: 8 << 30,
+        free: 0,
+    });
+    held.queued[0].waiting = Some(Waiting::BehindMemory { job: 9000 });
+    held.queued.insert(0, older);
+    fake.lock().unwrap().status = Some(held);
+    assert_eq!(code(&ask).0, Some(0));
+    assert_eq!(
+        code(&ledger).0,
+        Some(0),
+        "the ledger's job waits behind the storefront's for the host"
+    );
+
+    let (unknown, error) = code(&[&ask[..], &["--repo", "halyard/ledgr"]].concat());
+    assert_eq!(unknown, Some(2));
+    assert!(
+        error.contains("halyard/ledgr: not a repository runnerd serves"),
+        "{error}"
+    );
+    assert_eq!(code(&[&ask[..], &["--json"]].concat()).0, Some(2));
+
+    let gone = runnerctl(&dir.0.join("none.sock"), &ask);
+    assert_eq!(gone.status.code(), Some(2));
+    assert!(
+        stderr(&gone).contains("runnerd is not running"),
+        "{}",
+        stderr(&gone)
     );
 }
 

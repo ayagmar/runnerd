@@ -58,6 +58,7 @@ mod figure;
 mod insights;
 mod jobs;
 mod labels;
+mod queue;
 mod records;
 mod results;
 mod savings;
@@ -128,6 +129,7 @@ pub use jobs::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
+pub use queue::HostWait;
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,

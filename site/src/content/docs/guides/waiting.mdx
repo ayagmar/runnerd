@@ -46,6 +46,24 @@ Close them, or wait: runnerd starts the job once the host has room. The figure a
 
 A job that has waited 30 minutes or more for the host's memory, while the host lacks room for one that waits now, is also listed as needing attention, an [insight](../insights/) and a notification, with the same programs named.
 
+### Let local builds yield to CI
+
+A script that builds on the same host can ask before it takes more memory:
+
+```sh
+runnerctl status --waiting-for host-memory --repo halyard/ledger
+```
+
+It prints nothing and answers in its exit code:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | A queued job waits for the host's memory: it says *The host is short of memory*, or it waits behind an older job that does. |
+| 1 | No queued job does. |
+| 2 | No answer: the daemon is not running or refused, `--repo` names a repository runnerd does not serve, or the arguments are wrong. The error is on stderr. |
+
+Without `--repo` it asks about every repository. Treat 2 as unknown, not as clear, so a stopped daemon or a misspelt repository does not let the build take memory a job needs.
+
 ## How long it waited
 
 A job's page splits its wait at when runnerd first saw it queued (*Seen by runnerd*) and when its runner started: time before runnerd knew of it, time to start a runner, and the runner's boot. A job that finds no runner waits 15 to 25 seconds for the next poll, a registration and a container start; a [warm runner](../../concepts/terms/#warm-runner) takes it within a second or two.
