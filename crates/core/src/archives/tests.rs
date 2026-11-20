@@ -204,6 +204,8 @@ struct Fake {
     /// Downloads that fail after receiving this many bytes and writing none, as one whose last chunk passed the cap,
     /// by `owner/repo@sha`.
     unwritten: BTreeMap<String, usize>,
+    /// Repositories, lower case, whose lookup GitHub does not answer.
+    unanswered: BTreeSet<String>,
 }
 
 impl Fake {
@@ -237,7 +239,7 @@ impl Source for FakeGithub {
         let mut fake = self.0.lock().unwrap();
         fake.requests += 1;
         fake.send();
-        if fake.down {
+        if fake.down || fake.unanswered.contains(&repository.to_ascii_lowercase()) {
             return Err(unreachable());
         }
         fake.repositories
@@ -1427,12 +1429,59 @@ async fn a_refresh_counts_the_bytes_it_received_though_it_wrote_none() {
     );
 }
 
+/// A pin whose repository GitHub does not answer for this refresh is not known, so what the served repository last
+/// reached is kept past `keep` and the hold is reported; once it answers, retention goes on.
+#[tokio::test(start_paused = true)]
+async fn a_pin_not_read_this_refresh_keeps_what_its_repository_last_reached() {
+    let dir = TestDir::new("archives");
+    let github = FakeGithub::new(
+        "c1",
+        &[
+            &pin("actions/checkout", CHECKOUT),
+            &pin("actions/setup-node", NODE),
+        ],
+    );
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+    let both = BTreeSet::from([
+        file_of("actions/checkout", CHECKOUT),
+        file_of("actions/setup-node", NODE),
+    ]);
+    assert_eq!(on_disk(&dir.0), both);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .unanswered
+        .insert("actions/checkout".to_owned());
+    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        both,
+        "checkout's lookup failed, so what o/app last reached stays past 14 days"
+    );
+    assert!(
+        failures_of(&archives).contains(&(SERVED.to_owned(), ArchiveFailureKind::Held)),
+        "the hold is reported: {:?}",
+        failures_of(&archives)
+    );
+    github.0.lock().unwrap().unanswered.clear();
+    github.push("c2", &[&pin("actions/setup-node", NODE)]);
+    archives.refresh(&github, &settings(), T0 + 35 * DAY).await;
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("actions/setup-node", NODE)]),
+        "known whole again, what nothing pinned for 14 days went"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_request_sent_again_after_a_401_counts_against_the_refresh() {
     let limits = super::Limits {
         archive: 256 << 20,
         bytes: 2 << 30,
-        requests: 10,
+        // Odd: a request sent twice must not start when only one is left.
+        requests: 9,
         store: 8 << 30,
     };
     let dir = TestDir::new("archives");
