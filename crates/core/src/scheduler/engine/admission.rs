@@ -156,9 +156,19 @@ impl Measured {
         self.job_waits.booting(job, now)
     }
 
+    /// A stop: every open cause ends at `now`.
+    fn end_causes(&mut self, now: u64) -> Vec<CauseWaited> {
+        self.job_waits.end_causes(now)
+    }
+
     /// `job`'s cause ends at `at`.
     fn end_cause(&mut self, job: u64, at: u64) -> Option<CauseWaited> {
         self.job_waits.end_cause(job, at)
+    }
+
+    /// A runner took `job` at `at`: its cause ends then, and a plan made before opens none again.
+    fn taken(&mut self, job: u64, at: u64) -> Option<CauseWaited> {
+        self.job_waits.taken(job, at)
     }
 
     /// What predicts the jobs' peaks and usual run times, once the history was read.
@@ -220,6 +230,11 @@ impl Measured {
         if self.host == host::HostBand::Plain {
             self.host = host::HostBand::Larger;
         }
+    }
+
+    /// The next commit of causes is a checkpoint, as it would be five minutes on.
+    pub(super) fn checkpoint_due(&mut self) {
+        self.job_waits.checkpoint_due();
     }
 
     pub(super) fn wait_for_the_host(&mut self, job: u64) {
@@ -677,16 +692,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.record_causes(caused.into_iter().collect());
     }
 
-    /// `job`'s cause ends at `at` (ms): a start for it failed, or a runner took it then.
+    /// `job`'s cause ends at `at` (ms), as a start for it failed.
     pub(super) fn note_cause_ended(&mut self, job: u64, at: u64) {
         let caused = self.measured.end_cause(job, at);
         self.record_causes(caused.into_iter().collect());
     }
 
-    /// A runner took `job` at `at` (ms), whichever it started for: its slot or host wait ends now, its cause at `at`.
+    /// A stop was asked for: the takes the captures reported end their jobs' causes at their times, then every cause
+    /// still open ends now and is written, before the stop's Docker and GitHub calls, so neither a detach, which plans
+    /// nothing, nor the stop's deadline loses what was not written yet (ADR 0154). Again it writes nothing.
+    pub(super) fn note_stop_causes(&mut self) {
+        self.take_found();
+        let caused = self.measured.end_causes(time::now_ms());
+        self.record_causes(caused);
+    }
+
+    /// A runner took `job` at `at` (ms), whichever it started for: its slot or host wait ends now, its cause at `at`,
+    /// and a plan made before the take, as a pass's that was starting runners, opens neither again (ADR 0154).
     pub(super) fn note_taken(&mut self, job: u64, at: u64) {
         self.note_in_slot(job);
-        self.note_cause_ended(job, at);
+        let caused = self.measured.taken(job, at);
+        self.record_causes(caused.into_iter().collect());
     }
 
     /// Remembers the cause `plan` holds each queued job for, and records the causes that changed or ended up to now,

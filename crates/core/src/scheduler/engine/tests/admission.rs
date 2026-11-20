@@ -3581,3 +3581,110 @@ async fn a_stop_writes_every_cause_still_open() {
         "the stop wrote job 3's open cause: {before} ms, then {after} ms"
     );
 }
+
+#[tokio::test]
+async fn a_signals_detach_writes_every_open_cause_after_the_takes_it_was_told_of() {
+    // Catches SIGTERM's detach, which removes idle runners and plans nothing, losing every cause it never wrote, and a
+    // take the engine had not read yet being written as more wait (ADR 0154). Runners start for jobs 1 and 2; job 3
+    // waits for a slot, until a capture finds that a runner took it.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let began = std::time::Instant::now();
+    let (mut engine, handle) = third_job_waits_for_a_slot(&github, &docker, &dir).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let (found_at, until_found) = (
+        time::now_ms(),
+        u64::try_from(began.elapsed().as_millis()).unwrap(),
+    );
+    let runner = engine.occupied().next().unwrap().1.runner_name.clone();
+    engine
+        .found
+        .0
+        .send(crate::scheduler::engine::history::Found::named_at(
+            runner, 3, found_at,
+        ))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let before_stop = u64::try_from(began.elapsed().as_millis()).unwrap();
+    handle.control.shutdown(Shutdown::Detach);
+    tokio::time::timeout(Duration::from_secs(10), engine.schedule())
+        .await
+        .unwrap();
+    handle.store.flush().await;
+    let causes = causes(&dir);
+    let total = |job: usize| causes[job].values().sum::<u64>();
+    assert!(
+        total(0) >= before_stop - until_found,
+        "job 1's open cause was written at the stop: {causes:?}"
+    );
+    assert!(
+        total(2) <= until_found,
+        "job 3 counts up to its take, which the stop read first: {causes:?} in {until_found} ms"
+    );
+}
+
+/// The milliseconds the history counts for `job`'s causes.
+fn caused(dir: &TestDir, job: u64) -> u64 {
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let text: String = db
+        .query_row("SELECT wait_causes FROM jobs WHERE id = ?1", [job], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    serde_json::from_str::<BTreeMap<String, u64>>(&text)
+        .unwrap()
+        .values()
+        .sum()
+}
+
+#[tokio::test]
+async fn a_take_reported_while_a_pass_starts_runners_ends_the_cause_there_even_at_a_checkpoint() {
+    // Catches a pass committing its plan, made before its start batch, past a take a capture reported during the batch:
+    // at a checkpoint it wrote the taken job's cause up to then, and reopened it (ADR 0154). Job 3 of the paused o/s
+    // is held; the pass starts job 1's runner, which takes 400 ms, and 100 ms in a runner elsewhere takes job 3.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.pause(&one("o/s"), RunningJobs::Keep).await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(3)];
+        state.queued_on.insert(3, "o/s".to_owned());
+    }
+    let began = time::now_ms();
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().latency.start = Duration::from_millis(400);
+    engine.set_listed("o/r", vec![job(1)]);
+    engine.checkpoint_due();
+    let sender = engine.found.0.clone();
+    let took = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let at = time::now_ms();
+        sender
+            .send(crate::scheduler::engine::history::Found::named_at(
+                "elsewhere".to_owned(),
+                3,
+                at,
+            ))
+            .unwrap();
+        at
+    });
+    assert_eq!(engine.refill().await, 1, "job 1's runner starts");
+    let took_at = took.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    engine.note_stop_causes();
+    handle.store.flush().await;
+    let third = caused(&dir, 3);
+    assert!(
+        third > 0 && third <= took_at - began,
+        "job 3 counts up to its take: {third} ms of {} ms",
+        took_at - began
+    );
+}

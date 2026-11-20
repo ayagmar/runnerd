@@ -24,15 +24,24 @@ budget's events. Yet each plan already says why it holds each queued job (`api::
   the same time the history takes as its start until GitHub says, not when the engine reads it. A job the plan no
   longer has, cancelled or taken by a runner elsewhere, waits no more. The open causes live with the waits sizing
   reads, in one map by job (`OpenWaits`), each job's two clocks on their own.
-- A cause that goes on is not written. Its time is written when it changes or ends, and at a checkpoint: a plan five
-  minutes or more after the last checkpoint writes every open cause up to then. The host's drive already writes too
-  much (ADR 0143), and a plan every few seconds rewriting every queued job's row would add hundreds of thousands of
-  row writes a day. Each commit's writes go in one transaction, with at most one update of each job's row.
+- A cause that goes on is not written. Its time is written when it changes or ends, and at a checkpoint: the first
+  plan five minutes or more after the last checkpoint writes every open cause up to then. The checkpoint rides on the
+  plans, with no timer of its own, so an open cause goes unwritten for up to five minutes plus the time to the next
+  plan: `[host] poll_interval`, 15 s by default, and the tick's own time. The host's drive already writes too much
+  (ADR 0143), and a plan every few seconds rewriting every queued job's row would add hundreds of thousands of row
+  writes a day. Each commit's writes go in one transaction, with at most one update of each job's row.
+- The takes a runner's capture reported are read before a commit writes anything: before a tick commits its plan,
+  before a pass commits its plan after its starts, and before a start's outcome changes its job's cause. A plan made
+  before a take does not open a cause or a wait sizing reads for that job again; the next commit forgets the take.
 - The history keeps them in `jobs.wait_causes`, schema 26: a JSON object of milliseconds by cause's word. The column is
   added nullable with no default, so the migration rewrites no row: a row from before schema 26 is NULL and takes no
   cause, so it reads as not counted, never as a wait of 0, and a new row is written `{}`. Asking the history why its
   jobs queued is one query over `json_each`. `jobs.unseen_unlisted` keeps the part of `unseen` its first listing found,
-  the downtime before that listing; a later restart while the job queues adds to `unseen` only.
+  the downtime before that listing; a later restart while the job queues adds to `unseen` only. A job a runner's
+  capture recorded first, as one a runner that outlived the last daemon took while none ran, has the capture's time as
+  its queueing and its start until GitHub's times come: when they first do, its `unseen` becomes the downtime's
+  overlap with its wait, and `unseen_unlisted` the part before a listing that saw it, all of it if none did. A later
+  read of GitHub's times gives none again.
 - Insights split each profile's queue time over the window by cause (`api::ProfileQueue`), and name the two parts no
   cause covers: the time before runnerd first listed the job (GitHub's listing lag and runnerd's listing pace, less the
   downtime in it), which is known on its own and kept whole, and the time no plan held it once listed. The wait is the
@@ -42,9 +51,11 @@ budget's events. Yet each plan already says why it holds each queued job (`api::
 
 ## Consequences
 
-- Nothing of an open cause survives a restart: what passed since it was last written, up to five minutes, and the
-  time to the first plan after the restart are in "No plan covered", next to the time `unseen` already leaves out. A
-  stop asked for plans no job, which ends and writes every cause, so a graceful stop loses none. A reload keeps the
+- Nothing of an open cause survives a crash: what passed since it was last written, up to five minutes plus the time
+  to the next plan, and the time to the first plan after the restart are in "No plan covered", next to the time
+  `unseen` already leaves out. A stop asked for, graceful, detach or forced, reads the pending takes and then ends and
+  writes every open cause before its Docker and GitHub calls, and again when its deadline passes, so a stop that is
+  not a crash loses none. A reload keeps the
   open causes; a job of a repository the reload removed ends at the next commit.
 - A job's causes can still pass its start, as when GitHub's start comes before the capture's. The split then scales
   them into the wait the listing leaves, keeping their shares, and the profile's line says how many jobs' causes are

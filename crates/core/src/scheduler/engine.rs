@@ -790,6 +790,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 STOP_DEADLINE.as_secs()
             ),
         }
+        // Written at the stop's start already, unless the deadline cut a tick short before the loop saw the stop.
+        self.note_stop_causes();
         // Letting go of the tracked containers stops the sampler, which stores the drive's window it was adding up:
         // the daemon closes its history right after this returns.
         drop(self);
@@ -831,6 +833,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut scope = Scope::Every;
         let mode = loop {
             let mode = self.control.mode();
+            if mode != Shutdown::No && shown == Shutdown::No {
+                self.note_stop_causes();
+            }
             // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
             // Docker: until then status would show a daemon that is not stopping.
             if mode != shown {

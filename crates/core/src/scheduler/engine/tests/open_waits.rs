@@ -9,11 +9,12 @@ use crate::scheduler::engine::open_waits::{
     CAUSE_CHECKPOINT, CauseWaited, OpenWaits, WaitFor, Waited,
 };
 
-/// The cause rules one job at a time: each job's open cause and since when, and the time each job was counted for
-/// each cause.
+/// The cause rules one job at a time: each job's open cause and since when, the jobs runners took since the last
+/// commit, and the time each job was counted for each cause.
 #[derive(Default)]
 struct PerJob {
     open: BTreeMap<u64, (WaitCause, u64)>,
+    taken: BTreeSet<u64>,
     counted: BTreeMap<(u64, WaitCause), u64>,
 }
 
@@ -34,8 +35,11 @@ impl PerJob {
             }
         }
         for (job, cause) in held {
-            self.open.insert(*job, (*cause, now));
+            if !self.taken.contains(job) {
+                self.open.insert(*job, (*cause, now));
+            }
         }
+        self.taken.clear();
     }
 }
 
@@ -184,18 +188,21 @@ fn any_sequence_of_commits_starts_and_causes_records_what_the_models_recorded() 
             };
             match rng.below(15) {
                 0..=3 => {
+                    // A job a runner took since the last commit of causes opens no wait.
                     let jobs = some_jobs(&mut rng);
+                    let opened = &jobs - &model.taken;
                     assert_eq!(
-                        waits.open_wait(WaitFor::Slot, jobs.clone(), now),
-                        sets.commit(WaitFor::Slot, jobs, now),
+                        waits.open_wait(WaitFor::Slot, jobs, now),
+                        sets.commit(WaitFor::Slot, opened, now),
                         "seed {seed}: a commit of slot waits"
                     );
                 }
                 4..=7 => {
                     let jobs = some_jobs(&mut rng);
+                    let opened = &jobs - &model.taken;
                     assert_eq!(
-                        waits.open_wait(WaitFor::Host, jobs.clone(), now),
-                        sets.commit(WaitFor::Host, jobs, now),
+                        waits.open_wait(WaitFor::Host, jobs, now),
+                        sets.commit(WaitFor::Host, opened, now),
                         "seed {seed}: a commit of host waits"
                     );
                 }
@@ -215,23 +222,31 @@ fn any_sequence_of_commits_starts_and_causes_records_what_the_models_recorded() 
                     model.hold(&held, &going_on, now);
                 }
                 12 => {
+                    // A runner that starts for a job a runner took already changes nothing.
                     let job = rng.below(8) + 1;
                     add(&mut counted, waits.booting(job, now).into_iter().collect());
-                    model.count(job, now);
-                    model.open.insert(job, (WaitCause::Booting, now));
+                    if !model.taken.contains(&job) {
+                        model.count(job, now);
+                        model.open.insert(job, (WaitCause::Booting, now));
+                    }
                 }
                 13 => {
+                    // A failed start, or a take: a plan made before the take opens nothing for that job.
                     let job = rng.below(8) + 1;
-                    add(
-                        &mut counted,
-                        waits.end_cause(job, now).into_iter().collect(),
-                    );
+                    let ended = if rng.below(2) == 0 {
+                        waits.end_cause(job, now)
+                    } else {
+                        model.taken.insert(job);
+                        waits.taken(job, now)
+                    };
+                    add(&mut counted, ended.into_iter().collect());
                     model.count(job, now);
                 }
                 // A restart: no wait survives one, and what was counted stays counted.
                 _ if rough => {
                     (waits, sets) = (OpenWaits::default(), TwoSets::default());
                     model.open.clear();
+                    model.taken.clear();
                     exact = false;
                 }
                 _ => {}

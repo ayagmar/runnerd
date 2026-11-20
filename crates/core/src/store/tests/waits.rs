@@ -3,7 +3,7 @@
 
 use rusqlite::Connection;
 
-use super::{keep_since, queued, user_version};
+use super::{keep_since, queued, runner, user_version};
 use crate::api::{Bucket, HostSample, StatsQuery};
 use crate::config::Config;
 use crate::github::QueuedJob;
@@ -407,5 +407,76 @@ async fn only_the_downtime_a_jobs_first_listing_found_came_before_that_listing()
         unseen,
         [(down, 0), (HOUR - 30 * SECOND, HOUR - 30 * SECOND)],
         "job 1's downtime came after its listing; job 2's before"
+    );
+}
+
+// Catches the downtime of a job a capture recorded first being reported as GitHub's listing lag: its row starts with
+// the capture's time as both its queueing and its start, so the restart gave it no downtime, and GitHub's real times,
+// when they came, only took downtime off (ADR 0154). A runner that outlived the first daemon took job 7 and job 8
+// while none ran; job 8's queued listing, taken before the capture, comes after it.
+#[tokio::test]
+async fn a_job_a_capture_recorded_first_leaves_out_the_downtime_its_wait_went_through() {
+    let dir = TestDir::new("store-capture-first");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let first = Store::open_at(&path, start).unwrap();
+    keep_since(&path, start);
+    first.host_sample(HostSample {
+        at: (start + 20 * SECOND) / SECOND,
+        cpu: 0,
+        memory: 0,
+    });
+    first.flush().await;
+    drop(first);
+    let restart = start + HOUR;
+    let second = Store::open_at(&path, restart).unwrap();
+    second.runner_started(runner("r", restart));
+    let captured = restart + 5 * SECOND;
+    second.claimed(7, 10, "r", captured);
+    second.claimed(8, 10, "r", captured);
+    second.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: start + 60 * SECOND,
+            ..queued(8)
+        },
+        captured - SECOND,
+    );
+    for job in [7, 8] {
+        let details = crate::github::JobDetails {
+            id: job,
+            run_id: 10,
+            run_attempt: 1,
+            name: "build".to_owned(),
+            workflow_name: None,
+            head_branch: None,
+            html_url: None,
+            labels: Vec::new(),
+            created_at: Some(rfc3339(start + 60 * SECOND)),
+            status: "in_progress".to_owned(),
+            conclusion: None,
+            started_at: Some(rfc3339(start + 180 * SECOND)),
+            completed_at: None,
+            runner_name: Some("r".to_owned()),
+            steps: Vec::new(),
+        };
+        // GitHub is read again: the downtime is not given twice.
+        second.details(details.clone());
+        second.details(details);
+    }
+    second.flush().await;
+    let unseen: Vec<(u64, u64)> = Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT unseen, unseen_unlisted FROM jobs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let waited = 120 * SECOND;
+    assert_eq!(
+        unseen,
+        [(waited, waited), (waited, waited)],
+        "both waited out the downtime whole, before any listing"
     );
 }

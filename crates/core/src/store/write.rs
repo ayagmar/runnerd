@@ -38,6 +38,13 @@ pub(super) struct Started {
     pub(super) session: i64,
 }
 
+/// The downtime a job's wait went through (ms): all of it, and the part before its first listing.
+#[derive(Debug, Clone, Copy)]
+struct Unseen {
+    unseen: u64,
+    unlisted: u64,
+}
+
 pub(super) fn run(
     started: Started,
     mut queue: mpsc::UnboundedReceiver<Write>,
@@ -676,9 +683,12 @@ impl Writer<'_> {
         let completed = details.status == "completed";
         let labels = serde_json::to_string(&details.labels).unwrap_or_else(|_| "[]".to_owned());
         let started_at = timestamp(details.started_at.as_deref());
+        let queued_at = timestamp(details.created_at.as_deref());
+        let captured_first = self.captured_first(details.id, queued_at, started_at)?;
         // A runner that outlived the last daemon may have started it while none ran: what the downtime gave it
         // after that start was no wait. Once, when GitHub's start first says so.
         let after_start = match (self.downtime, started_at) {
+            _ if captured_first.is_some() => 0,
             (Some(downtime), Some(started_at)) if started_at < downtime.until => self
                 .db
                 .query_row(
@@ -695,7 +705,8 @@ impl Writer<'_> {
             "UPDATE jobs SET run_id = ?2, run_attempt = ?3, name = ?4, workflow = ?5, branch = ?6, url = ?7, \
              labels = ?8, queued_at = coalesce(?9, queued_at), started_at = coalesce(?10, started_at), \
              finished_at = CASE WHEN ?11 THEN coalesce(?12, finished_at) ELSE finished_at END, \
-             conclusion = ?13, github_completed = ?11, unseen = max(unseen - ?14, 0) \
+             conclusion = ?13, github_completed = ?11, \
+             unseen = coalesce(?15, max(unseen - ?14, 0)), unseen_unlisted = coalesce(?16, unseen_unlisted) \
              WHERE id = ?1 AND state = 'running'",
             params![
                 details.id,
@@ -706,12 +717,14 @@ impl Writer<'_> {
                 details.head_branch,
                 details.html_url,
                 labels,
-                timestamp(details.created_at.as_deref()),
+                queued_at,
                 started_at,
                 completed,
                 timestamp(details.completed_at.as_deref()),
                 details.conclusion,
                 after_start,
+                captured_first.map(|unseen| unseen.unseen),
+                captured_first.map(|unseen| unseen.unlisted),
             ],
         )?;
         if updated != 1 {
@@ -726,6 +739,38 @@ impl Writer<'_> {
             }
         }
         self.close_if_done(details.id, announced)
+    }
+
+    /// The downtime a job a runner's capture recorded first waited through, once GitHub's times for it first come:
+    /// its row took the capture's time as its queueing and its start, so the restart gave it none (ADR 0154). The
+    /// part before its first listing is all of it unless a listing saw it. `None` for any other row, or once its
+    /// queueing is known, so a later read gives none again.
+    fn captured_first(
+        &self,
+        job: u64,
+        queued_at: Option<u64>,
+        started_at: Option<u64>,
+    ) -> rusqlite::Result<Option<Unseen>> {
+        let (Some(downtime), Some(queued_at)) = (self.downtime, queued_at) else {
+            return Ok(None);
+        };
+        let row = self
+            .db
+            .query_row(
+                "SELECT started_at, seen_at FROM jobs WHERE id = ?1 AND state = 'running' \
+                 AND queued_at = started_at AND unseen = 0",
+                [job],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<u64>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(captured, seen_at)| {
+            let started_at = started_at.unwrap_or(captured);
+            let listed = seen_at.map_or(started_at, |seen_at| seen_at.min(started_at));
+            Unseen {
+                unseen: downtime.during(queued_at, started_at),
+                unlisted: downtime.during(queued_at, listed),
+            }
+        }))
     }
 
     /// Stores a step; returns it if it is new or changed.

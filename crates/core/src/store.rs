@@ -1540,6 +1540,11 @@ impl Downtime {
         self.until.saturating_sub(queued_at.max(self.from))
     }
 
+    /// How much of it passed from `from` to `until` (ms).
+    fn during(self, from: u64, until: u64) -> u64 {
+        until.min(self.until).saturating_sub(from.max(self.from))
+    }
+
     /// How much of what [`Downtime::of`] gave a job queued at `queued_at` came after it started at `started_at`
     /// (ms), as for a job a runner that outlived the last daemon took while none ran.
     fn after(self, queued_at: u64, started_at: u64) -> u64 {

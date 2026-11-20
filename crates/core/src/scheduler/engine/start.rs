@@ -885,6 +885,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some(job) = launched.job else {
             return;
         };
+        // A take a capture reported while the start ran comes first: a job a runner took already waits no more.
+        self.take_found();
         let (slot, repository) = (&launched.slot, &launched.repository);
         if self.holds_runner(slot) {
             self.note_in_slot(job);

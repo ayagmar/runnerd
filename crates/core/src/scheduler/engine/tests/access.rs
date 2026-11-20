@@ -313,6 +313,10 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
         self.measured.wait_for_the_host(job);
     }
 
+    pub(super) fn checkpoint_due(&mut self) {
+        self.measured.checkpoint_due();
+    }
+
     pub(super) fn raise(&mut self, runner: String) {
         self.measured.raise(runner);
     }
