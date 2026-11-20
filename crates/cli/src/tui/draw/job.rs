@@ -48,9 +48,20 @@ pub(super) fn job(
         Reading::Read(outline) => outline.failure.as_ref(),
         Reading::Unread(_) => None,
     };
-    let failure_lines = failure.map_or_else(Vec::new, |failure| {
-        failure_lines(failure, job, width, theme)
-    });
+    // What failed it, as core read it from its log, comes before what the log shows of it.
+    let mut failure_lines: Vec<Line<'static>> = summary
+        .failure_line()
+        .map(|cause| {
+            Line::styled(
+                fit(cause, width).trim_end().to_owned(),
+                theme.tone(Tone::Bad),
+            )
+        })
+        .into_iter()
+        .collect();
+    failure_lines.extend(failure.map_or_else(Vec::new, |failure| {
+        failure_lines_of(failure, job, width, theme)
+    }));
     let failure_height = length(failure_lines.len()).min(area.height / 3);
     // A queued job has no steps yet, nor their heading.
     let steps_wanted = if job.steps.is_empty() {
@@ -166,7 +177,7 @@ fn head_lines(frame: &mut Frame<'_>, head: Rect, app: &App, job: &Job, now: u64,
 
 /// A failed job's failure as its log says it: core's headline in the failure's colour, the step's last lines, and
 /// the command that opens a shell in its record while it is kept.
-fn failure_lines(
+fn failure_lines_of(
     failure: &FailureSummary,
     job: &Job,
     width: usize,

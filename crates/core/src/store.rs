@@ -102,6 +102,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
          device TEXT NOT NULL, store TEXT, drive INTEGER, slice INTEGER, daemon INTEGER, commits INTEGER) WITHOUT ROWID;\n\
          CREATE INDEX jobs_by_runner ON jobs (runner);",
     ),
+    (25, "ALTER TABLE jobs ADD COLUMN failure_cause TEXT;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.

@@ -10,13 +10,14 @@
 //! - Every enum gets one item per variant, and a `match` that fails to compile when a variant is added.
 
 use runnerd_core::api::{
-    ActionOutcome, ActionPreview, ActionQuery, ActionRefusal, ActionResult, Activity,
-    ActivityQuery, Admission, AdmissionPolicy, Advice, Attention, AttentionItem, AttentionKind,
-    AutoNote, AutoPlan, BarEnd, Baseline, Basis, Bucket, Budget, BuildCacheCounts, BuildCacheStats,
-    Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check,
-    CheckStatus, Color, CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission,
-    CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorQuery, DoctorState, ErrorResponse, Event,
-    EventEnvelope, EventQuery, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause, Holder,
+    ActionArchives, ActionOutcome, ActionPreview, ActionQuery, ActionRefusal, ActionResult,
+    Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, ArchiveFailure,
+    ArchiveFailureKind, Attention, AttentionItem, AttentionKind, AutoNote, AutoPlan, BarEnd,
+    Baseline, Basis, Bucket, Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory,
+    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check, CheckStatus, Color,
+    CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission, CpuBudget, Dashboard,
+    Delivery, Digest, Doctor, DoctorQuery, DoctorState, ErrorResponse, Event, EventEnvelope,
+    EventQuery, FailureCause, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause, Holder,
     HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples,
     HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobAction, JobActions,
     JobComparison, JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort,
@@ -46,6 +47,7 @@ pub(crate) fn status() -> Status {
         shutting_down: true,
         stopping: Some(Stopping::LeavesJobs),
         github_limited_until: Some(1_790_000_000),
+        action_archives: Some(action_archives()),
         budget: budget(),
         profiles: vec![profile_status()],
         repositories: vec![repository_status()],
@@ -57,6 +59,13 @@ pub(crate) fn status() -> Status {
 /// budget, a growth count resting with no brake, a queued job without a pool or a reason.
 pub(crate) fn status_empty() -> Status {
     let mut status = status();
+    status.action_archives = Some(ActionArchives {
+        entries: 0,
+        bytes: 0,
+        refreshed_at: None,
+        failures: Vec::new(),
+        unchecked: 0,
+    });
     if let Some(host) = &mut status.budget.host {
         host.memory.holders = Vec::new();
         host.memory.ceiling = None;
@@ -562,6 +571,7 @@ pub(crate) fn attention_kind() -> Vec<AttentionKind> {
         AttentionKind::GithubListing,
         AttentionKind::GithubAuth,
         AttentionKind::RateLimited,
+        AttentionKind::ActionArchives,
     ];
     for kind in &every {
         match kind {
@@ -573,6 +583,7 @@ pub(crate) fn attention_kind() -> Vec<AttentionKind> {
             | AttentionKind::GithubListing
             | AttentionKind::GithubAuth
             | AttentionKind::RateLimited
+            | AttentionKind::ActionArchives
             // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
             | AttentionKind::Unknown => {}
         }
@@ -789,6 +800,7 @@ pub(crate) fn job_summary() -> JobSummary {
             truncated: false,
         },
         runner_fault: true,
+        failure_cause: Some(FailureCause::ActionArchive),
         record_mark: Some(RecordMark::Kept),
     }
 }
@@ -967,7 +979,59 @@ pub(crate) fn caches() -> Caches {
             week: build_cache_counts(),
             actions_cache: true,
         }),
+        actions: Some(action_archives()),
     }
+}
+
+fn action_archives() -> ActionArchives {
+    ActionArchives {
+        entries: 8,
+        bytes: 12 << 20,
+        refreshed_at: Some(1_761_400_000),
+        failures: archive_failure_kind()
+            .into_iter()
+            .map(|kind| ArchiveFailure {
+                subject: "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955".to_owned(),
+                kind,
+                since: 1_761_399_000,
+            })
+            .collect(),
+        unchecked: 2,
+    }
+}
+
+pub(crate) fn archive_failure_kind() -> Vec<ArchiveFailureKind> {
+    let every = vec![
+        ArchiveFailureKind::Pins,
+        ArchiveFailureKind::Download,
+        ArchiveFailureKind::Rejected,
+        ArchiveFailureKind::Quarantined,
+        ArchiveFailureKind::Store,
+        ArchiveFailureKind::Held,
+        ArchiveFailureKind::Full,
+        ArchiveFailureKind::NotAction,
+        ArchiveFailureKind::Unreadable,
+        ArchiveFailureKind::Package,
+        ArchiveFailureKind::Exposed,
+    ];
+    for kind in &every {
+        match kind {
+            ArchiveFailureKind::Pins
+            | ArchiveFailureKind::Download
+            | ArchiveFailureKind::Rejected
+            | ArchiveFailureKind::Quarantined
+            | ArchiveFailureKind::Store
+            | ArchiveFailureKind::Held
+            | ArchiveFailureKind::Full
+            | ArchiveFailureKind::NotAction
+            | ArchiveFailureKind::Unreadable
+            | ArchiveFailureKind::Package
+            | ArchiveFailureKind::Exposed
+            // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
+            | ArchiveFailureKind::Unknown => {}
+        }
+    }
+    every
 }
 
 fn cache_kind() -> Vec<CacheKind> {
@@ -2018,6 +2082,14 @@ pub(crate) fn job_list() -> JobList {
 
 pub(crate) fn record_mark() -> Vec<RecordMark> {
     vec![RecordMark::Kept, RecordMark::Removed, RecordMark::Skipped]
+}
+
+pub(crate) fn failure_cause() -> Vec<FailureCause> {
+    vec![
+        FailureCause::ActionArchive,
+        FailureCause::ActionResolve,
+        FailureCause::Checkout,
+    ]
 }
 
 pub(crate) fn record_filter() -> Vec<RecordFilter> {

@@ -4483,7 +4483,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
                     found.invariant, found.step, found.detail
                 );
                 let (invariant, detail) = (found.invariant, found.detail.clone());
-                let (shortest, violation) = shrink(steps, found).await;
+                let (shortest, violation) = Box::pin(shrink(steps, found)).await;
                 panic!(
                     "seed {seed} breaks {invariant}: {detail}\nshrunk to {shortest:#?}\nwhich breaks it at step {}: {}",
                     violation.step, violation.detail

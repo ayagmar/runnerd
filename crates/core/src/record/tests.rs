@@ -5,7 +5,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use super::{banner, expired, failed, listed, make_room, runner_fault, secrets_left};
+use super::{
+    banner, expired, failed, failure_cause, listed, make_room, runner_fault, secrets_left,
+};
 use crate::api::{self, RecordRemoval};
 use crate::config::{ByteSize, Records};
 use crate::testdir::TestDir;
@@ -627,4 +629,295 @@ fn only_the_step_that_failed_is_read() {
     let job = job_of(&[("cargo test", "success")]);
     let log = logged("cargo test", &[], &[signature]);
     assert!(!runner_fault(&job, &log), "no failed step");
+}
+
+/// The fixture logs of failures runnerd tells apart (`crates/fixtures/logs`), as the runner 2.338.1 writes them.
+mod causes {
+    use super::{failure_cause, step};
+    use crate::api::{self, FailureCause};
+
+    const ARCHIVE_DOWNLOAD: &str =
+        include_str!("../../../fixtures/logs/action-archive-download.log");
+    const ARCHIVE_INVALID: &str = include_str!("../../../fixtures/logs/action-archive-invalid.log");
+    const RESOLVE: &str = include_str!("../../../fixtures/logs/action-resolve.log");
+    const CHECKOUT: &str = include_str!("../../../fixtures/logs/checkout.log");
+    const RECOVERED: &str = include_str!("../../../fixtures/logs/recovered-then-tests.log");
+
+    fn lines(log: &str) -> Vec<String> {
+        log.lines().map(str::to_owned).collect()
+    }
+
+    /// A job that failed in `Set up job`, as GitHub lists its steps then.
+    fn failed_setting_up() -> api::Job {
+        let mut job = super::failed_job();
+        job.steps = vec![step(1, "Set up job", "failure")];
+        job
+    }
+
+    /// A job that set up, then ran steps named `name` that concluded as `conclusions` say.
+    fn failed_at(name: &str, conclusions: &[&str]) -> api::Job {
+        let mut job = super::failed_job();
+        job.steps = vec![step(1, "Set up job", "success")];
+        for (number, conclusion) in (2..).zip(conclusions) {
+            job.steps.push(step(number, name, conclusion));
+        }
+        job
+    }
+
+    #[test]
+    fn a_job_whose_set_up_could_not_download_or_unpack_an_action_reads_as_an_action_archive_failure()
+     {
+        for log in [ARCHIVE_DOWNLOAD, ARCHIVE_INVALID] {
+            assert_eq!(
+                failure_cause(&failed_setting_up(), &lines(log)),
+                Some(FailureCause::ActionArchive),
+                "{log}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_job_whose_set_up_could_not_resolve_an_action_reads_as_a_resolve_failure_not_an_archive_one()
+     {
+        assert_eq!(
+            failure_cause(&failed_setting_up(), &lines(RESOLVE)),
+            Some(FailureCause::ActionResolve)
+        );
+    }
+
+    #[test]
+    fn a_failed_checkout_reads_as_checkout_by_the_action_it_runs_whatever_its_name() {
+        let named = failed_at("checkout", &["failure"]);
+        assert_eq!(
+            failure_cause(&named, &lines(CHECKOUT)),
+            Some(FailureCause::Checkout)
+        );
+        let unnamed = failed_at(
+            "Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+            &["failure"],
+        );
+        assert_eq!(
+            failure_cause(&unnamed, &lines(CHECKOUT)),
+            Some(FailureCause::Checkout)
+        );
+    }
+
+    #[test]
+    fn a_download_that_recovered_on_a_retry_says_nothing_of_the_tests_that_failed_after_it() {
+        let mut job = failed_at(
+            "Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+            &["success"],
+        );
+        job.steps.push(step(3, "Run ./gradlew test", "failure"));
+        assert_eq!(failure_cause(&job, &lines(RECOVERED)), None);
+        // Nor does it make a failed set-up an archive failure when the set-up failed for another reason after it.
+        let mut other = lines(RECOVERED);
+        other.truncate(
+            other
+                .iter()
+                .position(|line| line.contains("Complete job name"))
+                .unwrap(),
+        );
+        other.extend(
+            [
+                "##[group]Pull down action image 'ghcr.io/halyard/lint:1'",
+                "##[command]/usr/bin/docker pull ghcr.io/halyard/lint:1",
+                "Error response from daemon: unauthorized",
+                "##[endgroup]",
+                "##[error]Docker pull failed with exit code 1",
+            ]
+            .map(|text| format!("2026-11-17T15:46:46.0000000Z {text}")),
+        );
+        assert_eq!(failure_cause(&failed_setting_up(), &other), None);
+    }
+
+    /// `log`'s lines up to `Complete job name`, then `tail`: a `Set up job` that went on after its retries and failed.
+    fn set_up_then(log: &str, tail: &[&str]) -> Vec<String> {
+        let mut lines = lines(log);
+        if let Some(at) = lines
+            .iter()
+            .position(|line| line.contains("Complete job name"))
+        {
+            lines.truncate(at);
+        }
+        lines.extend(
+            tail.iter()
+                .map(|text| format!("2026-11-17T15:46:46.0000000Z {text}")),
+        );
+        lines
+    }
+
+    #[test]
+    fn a_retry_that_recovered_says_nothing_of_a_set_up_that_failed_for_another_reason_right_after()
+    {
+        // The download's second attempt succeeded, quietly, and the action's manifest failed to load.
+        let manifest = set_up_then(
+            RECOVERED,
+            &[
+                "##[error]Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '/home/runner/_work/_actions/o/lint/v1'.",
+            ],
+        );
+        assert_eq!(failure_cause(&failed_setting_up(), &manifest), None);
+        // A resolve that recovered, then an immutable package and an image pull that failed.
+        let resolved = set_up_then(
+            RESOLVE,
+            &[
+                "##[group]Download immutable action package 'actions/setup-node@v5'",
+                "##[endgroup]",
+                "##[group]Pull down action image 'ghcr.io/halyard/lint:1'",
+                "##[endgroup]",
+                "##[error]Docker pull failed with exit code 1",
+            ],
+        );
+        let resolved: Vec<String> = resolved
+            .into_iter()
+            .filter(|line| {
+                !line.contains("##[error]Response status")
+                    && !line.contains("##[error]Failed to resolve")
+            })
+            .collect();
+        assert_eq!(failure_cause(&failed_setting_up(), &resolved), None);
+    }
+
+    /// A job that set up, checked out with `actions/checkout`, then ran `steps` (name, conclusion); its log has a
+    /// section per step after the checkout, `sections`.
+    fn after_checkout(steps: &[(&str, &str)], sections: &[Vec<String>]) -> (api::Job, Vec<String>) {
+        let mut job = super::failed_job();
+        job.steps = vec![
+            step(1, "Set up job", "success"),
+            step(2, "Run actions/checkout@v7", "success"),
+        ];
+        for (number, (name, conclusion)) in (3..).zip(steps) {
+            job.steps.push(step(number, name, conclusion));
+        }
+        let mut log = lines(RECOVERED);
+        log.truncate(
+            log.iter()
+                .position(|line| line.contains("Run ./gradlew"))
+                .unwrap(),
+        );
+        for section in sections {
+            log.extend(section.iter().cloned());
+        }
+        (job, log)
+    }
+
+    #[test]
+    fn a_failed_step_reads_as_checkout_only_by_its_own_section_running_actions_checkout() {
+        // A script step its workflow named as the checkout's display name: its own section runs a shell.
+        let (job, log) = after_checkout(
+            &[(
+                "Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+                "failure",
+            )],
+            &[super::logged(
+                "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+                &["shell: /usr/bin/bash -e {0}"],
+                &[super::ERROR],
+            )],
+        );
+        assert_eq!(
+            failure_cause(&job, &log),
+            None,
+            "a script, not the checkout"
+        );
+        // A composite action's first inner step checked out, its second failed: its sections are not one a step.
+        let (job, log) = after_checkout(
+            &[("Setup", "failure")],
+            &[
+                super::logged(
+                    "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+                    &["with:"],
+                    &["Syncing repository: halyard/tools"],
+                ),
+                super::logged(
+                    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+                    &["with:"],
+                    &["##[error]Unable to find Node version '99'"],
+                ),
+            ],
+        );
+        assert_eq!(
+            failure_cause(&job, &log),
+            None,
+            "the composite's setup-node failed"
+        );
+        // A checkout's post step failed after the job's steps passed.
+        let mut job = super::failed_job();
+        job.steps = vec![
+            step(1, "Set up job", "success"),
+            step(2, "Run actions/checkout@v7", "success"),
+            step(3, "Post Run actions/checkout@v7", "failure"),
+        ];
+        let mut log = lines(RECOVERED);
+        log.truncate(
+            log.iter()
+                .position(|line| line.contains("Run ./gradlew"))
+                .unwrap(),
+        );
+        log.push("2026-11-17T15:47:31.5000000Z Post job cleanup.".to_owned());
+        log.extend(super::logged(
+            "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+            &[],
+            &["##[error]The process '/usr/bin/git' failed with exit code 128"],
+        ));
+        assert_eq!(
+            failure_cause(&job, &log),
+            None,
+            "its post step, not the fetch"
+        );
+        // An earlier step allowed to fail ended with an exit code; the checkout after it failed.
+        let (mut job, mut log) = after_checkout(
+            &[("Run ./lint", "success")],
+            &[super::logged(
+                "./lint",
+                &["shell: /usr/bin/bash -e {0}"],
+                &[super::ERROR],
+            )],
+        );
+        job.steps.push(step(4, "Checkout tools", "failure"));
+        log.extend(
+            lines(CHECKOUT)
+                .into_iter()
+                .skip_while(|line| !line.contains("##[group]Run actions/checkout")),
+        );
+        assert_eq!(
+            failure_cause(&job, &log),
+            Some(FailureCause::Checkout),
+            "the checkout's own section failed"
+        );
+    }
+
+    #[test]
+    fn a_job_that_failed_with_no_cause_in_its_log_reads_as_none() {
+        // Setting up failed with nothing logged, or a test failed: no rule claims it.
+        assert_eq!(failure_cause(&failed_setting_up(), &[]), None);
+        let job = failed_at("Run ./gradlew test", &["failure"]);
+        let log = super::logged("./gradlew test", &[], &[super::ERROR]);
+        assert_eq!(failure_cause(&job, &log), None);
+        // No step failed.
+        let job = failed_at("Run actions/checkout@v7", &["success"]);
+        assert_eq!(failure_cause(&job, &lines(CHECKOUT)), None);
+    }
+}
+
+#[test]
+fn a_log_names_the_repositories_its_runner_downloaded_as_immutable_packages_and_nothing_else() {
+    let log: Vec<String> = [
+        "2026-11-20T10:00:00.0000000Z ##[group]Download immutable action package 'actions/checkout@v6'",
+        "2026-11-20T10:00:00.0000000Z Version: 6.0.0",
+        "2026-11-20T10:00:00.0000000Z Digest: sha256:abc",
+        "2026-11-20T10:00:00.0000000Z ##[endgroup]",
+        "2026-11-20T10:00:01.0000000Z Download action repository 'actions/setup-node@v5' (SHA:49933ea5288caeca8642d1e84afbd3f7d6820020)",
+        "2026-11-20T10:00:02.0000000Z ##[group]Download immutable action package 'actions/checkout@v6'",
+        "2026-11-20T10:00:03.0000000Z ##[group]Run echo \"##[group]Download immutable action package 'o/fake@v1'\"",
+        "##[group]Download immutable action package 'Tailscale/github-action@v4'",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert_eq!(
+        super::immutable_packages(&log),
+        vec!["actions/checkout", "Tailscale/github-action"],
+        "each package once, as written; a source download or a script's text is none"
+    );
 }

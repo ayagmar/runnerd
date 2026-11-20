@@ -3,7 +3,8 @@
 //! which workflow each run is of and what it is named (`workflows`, ADR 0140),
 //! the pages of a listing, conditional requests and the answers kept for them, rate-limit backoff, and the count of
 //! what it asks and the limit it last read. It must never put the token in a log line, a `Debug` output or an error,
-//! nor send it anywhere but its base URL, and it decides nothing about scheduling. A job action's request is read for
+//! nor send it anywhere but its base URL, and it decides nothing about scheduling. It also reads what the action
+//! archives need (`archives`, ADR 0147). A job action's request is read for
 //! its status and headers only: its body is never read, and what it returns is a class and a status, never text.
 
 use std::collections::{HashMap, HashSet};
@@ -26,11 +27,23 @@ use crate::docker::JitConfig;
 use crate::sync::lock;
 use crate::time;
 
+mod archives;
 mod requests;
 mod token;
 mod workflows;
 
 use requests::Counter;
+
+tokio::task_local! {
+    /// The requests sent to GitHub's API within a scope, each send counted, a send again with a new token after a 401
+    /// included: what the archives task's refresh is held to (ADR 0147). Outside a scope, nothing counts.
+    pub static REQUESTS: std::cell::Cell<u64>;
+}
+
+/// How many requests went to GitHub's API in this task's `REQUESTS` scope; 0 outside one.
+pub fn requests_sent() -> u64 {
+    REQUESTS.try_with(std::cell::Cell::get).unwrap_or(0)
+}
 pub use requests::{Class, RateLimit, Report, Spend, Tally};
 
 /// The public API's address.
@@ -152,9 +165,26 @@ pub enum Error {
     /// No token could be read.
     #[error("no GitHub token: {0}")]
     Token(String),
+    /// An action archive or a file could not be downloaded whole: what failed, never an address or the token.
+    #[error("{0}")]
+    Download(String),
+    /// Not sent: runnerd held it back, to keep GitHub's rate limit for what runners need.
+    #[error("not sent: {0}")]
+    Held(&'static str),
 }
 
 impl Error {
+    /// What failed, without GitHub's own words or anything it sent back: for a log line about action archives, whose
+    /// repositories are not runnerd's.
+    pub fn brief(&self) -> String {
+        match self {
+            Error::Status { status, path, .. } => format!("GitHub answered {status} to {path}"),
+            Error::Http { path, .. } => format!("{path}: no answer"),
+            Error::Decode { path, .. } => format!("{path}: an answer that does not parse"),
+            other => other.to_string(),
+        }
+    }
+
     /// Whether GitHub answered that what was asked is not there for this token: deleted, or the token cannot see it.
     /// Asking again gets the same answer.
     pub fn is_gone(&self) -> bool {
@@ -427,7 +457,9 @@ impl ActionFailure {
             },
             Error::Http { source, .. } if source.is_connect() => ActionFailure::Unreachable,
             Error::Http { source, .. } if source.is_timeout() => ActionFailure::TimedOut,
-            Error::Http { .. } | Error::Decode { .. } => ActionFailure::Broken,
+            Error::Http { .. } | Error::Decode { .. } | Error::Download(_) | Error::Held(_) => {
+                ActionFailure::Broken
+            }
         }
     }
 }
@@ -436,7 +468,7 @@ impl ActionFailure {
 struct Withdrawn;
 
 /// The GitHub calls the scheduler makes. `Github` is the real client; the engine's tests use a fake.
-pub trait GithubApi: Send + Sync {
+pub trait GithubApi: crate::archives::Source + Send + Sync {
     /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
     fn queued_jobs(
         &self,
@@ -524,7 +556,11 @@ pub trait GithubApi: Send + Sync {
 /// answer costs no rate limit.
 pub struct Github {
     http: reqwest::Client,
+    /// The action archives' downloads (ADR 0147): anonymous, no redirect followed, a longer timeout.
+    downloads: reqwest::Client,
     base: String,
+    /// Where the action archives are downloaded from, anonymously: codeload.github.com, or a test server.
+    codeload: String,
     /// The token, read on a thread of its own: `gh` may wait on a keyring for seconds.
     tokens: Tokens,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
@@ -763,9 +799,21 @@ impl Github {
                 path: base.to_owned(),
                 source,
             })?;
+        let downloads = reqwest::Client::builder()
+            .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(archives::DOWNLOAD_TIMEOUT)
+            .build()
+            .map_err(|source| Error::Http {
+                method: Method::GET,
+                path: base.to_owned(),
+                source,
+            })?;
         Ok(Github {
             http,
+            downloads,
             base: base.trim_end_matches('/').to_owned(),
+            codeload: archives::CODELOAD.to_owned(),
             tokens: Tokens::new(Arc::from(token_source)),
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
             workflows: Mutex::new(Workflows::default()),
@@ -773,6 +821,13 @@ impl Github {
             blocked_until: Mutex::new(None),
             requests: Mutex::new(Counter::new(Instant::now(), requests::WINDOW)),
         })
+    }
+
+    /// This client with the action archives downloaded from `url` in place of codeload.github.com.
+    #[cfg(test)]
+    pub(crate) fn with_codeload(mut self, url: &str) -> Github {
+        url.trim_end_matches('/').clone_into(&mut self.codeload);
+        self
     }
 
     /// What the requests of this client counted since its last line was logged, and the rate limit as last read.
@@ -1003,6 +1058,7 @@ impl Github {
             if let Some(etag) = etag {
                 request = request.header(header::IF_NONE_MATCH, etag.clone());
             }
+            let _ = REQUESTS.try_with(|sent| sent.set(sent.get() + 1));
             let response = request.send().await.map_err(|source| Error::Http {
                 method: method.clone(),
                 path: path.to_owned(),

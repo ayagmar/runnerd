@@ -86,6 +86,9 @@ pub enum AttentionKind {
     GithubAuth,
     /// GitHub's rate limit is used up: no runner starts until it resets.
     RateLimited,
+    /// Action archives runnerd should keep for its runners failed to be read, downloaded or kept (ADR 0147): jobs
+    /// download those actions themselves.
+    ActionArchives,
     /// A kind from a newer daemon than this client knows: draw it by its title.
     #[serde(other)]
     Unknown,
@@ -218,6 +221,7 @@ pub fn attention_items(
             .filter_map(insight_item),
     );
     items.extend(github(status, now));
+    items.extend(action_archives(status));
     items.sort_by(|a, b| {
         rank(a.tone)
             .cmp(&rank(b.tone))
@@ -456,6 +460,20 @@ fn insight_item(insight: &Insight) -> Option<AttentionItem> {
 }
 
 /// The listings GitHub fails or refuses, and its rate limit.
+/// The action archives' failures, as one warning: jobs still run, downloading what is missing.
+fn action_archives(status: &Status) -> Option<AttentionItem> {
+    let archives = status.action_archives.as_ref()?;
+    Some(AttentionItem {
+        key: "action-archives".to_owned(),
+        kind: AttentionKind::ActionArchives,
+        tone: archives.tone(),
+        title: archives.attention_title()?,
+        subject: Subject::Github,
+        since: archives.failing_since(),
+        fix: None,
+    })
+}
+
 fn github(status: &Status, now: u64) -> Vec<AttentionItem> {
     let failing: Vec<_> = status
         .repositories

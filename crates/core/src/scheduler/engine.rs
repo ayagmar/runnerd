@@ -83,6 +83,7 @@ use super::SlotRef;
 use crate::actions::JobActions;
 use crate::admission::Key;
 use crate::api;
+use crate::archives;
 use crate::buildcache::BuildCache;
 use crate::cache::{self, Names, Trimmed};
 use crate::config::Config;
@@ -221,6 +222,9 @@ pub struct Setup {
     pub paths: Paths,
     /// The shared build cache, unless the daemon could not open it.
     pub build_cache: Option<BuildCache>,
+    /// Where the action archives are kept (`[caches.actions] directory` or its default), unless the daemon could not
+    /// name a directory: then runners download their actions themselves.
+    pub action_archives: Option<PathBuf>,
     /// Where the engine keeps whether what runners wrote without syncing may be lost to a host crash (ADR 0141), such
     /// as `unsynced` beside the job history.
     pub unsynced: PathBuf,
@@ -545,6 +549,8 @@ pub struct Engine<G = Github, D = Docker> {
     warm: warm::Warm,
     /// The shared build cache.
     build_cache: Option<BuildCache>,
+    /// The action archives' store: where it is, its settings and what it last published (ADR 0147).
+    archives: archives::Link,
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
     /// cache when `[caches.build] branches` names none.
     default_branches: BTreeMap<String, build_cache::DefaultBranch>,
@@ -608,6 +614,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             paused,
             paths,
             build_cache,
+            action_archives,
             unsynced,
             durability,
         } = setup;
@@ -666,10 +673,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // What clients resuming after the last run's events have, so the first publish announces the difference.
             repositories: announced.repositories,
             queued: Vec::new(),
+            action_archives: None,
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();
         let (docker_disk, disk_receiver) = watch::channel(None);
+        let archives = archives::Link::new(action_archives, &config);
         let mut engine = Engine {
             clock: Clock::default(),
             isolation: isolation::backend(config.host.isolation),
@@ -720,6 +729,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             warm: warm::Warm::default(),
             records,
             build_cache: build_cache.clone(),
+            archives,
             default_branches: BTreeMap::new(),
             ended_uploads: BTreeMap::new(),
             visibility_due: Arc::default(),
@@ -766,6 +776,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             disk_read,
         ));
         tokio::spawn(disk_target(self.docker.clone(), self.paths.clone(), disk));
+        // Stopped when this returns, as `archives` goes with it.
+        let archives = self.archives.start(self.github.clone());
         let control = self.control.clone();
         let deadline = async {
             control.hurried().await;
@@ -781,6 +793,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Letting go of the tracked containers stops the sampler, which stores the drive's window it was adding up:
         // the daemon closes its history right after this returns.
         drop(self);
+        if let Some(archives) = archives {
+            archives.stop().await;
+        }
         let _ = sampler.await;
     }
 

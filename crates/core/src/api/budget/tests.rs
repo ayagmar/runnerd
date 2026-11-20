@@ -29,6 +29,7 @@ fn status(admission: AdmissionPolicy, memory_max: Option<u64>) -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        action_archives: None,
         budget: Budget {
             slice: "ci.slice".to_owned(),
             memory_max,
@@ -433,6 +434,7 @@ fn job(memory_cap: Option<u64>, cpu_cap: Option<u64>) -> Job {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            failure_cause: None,
             record_mark: None,
         },
         steps: vec![],

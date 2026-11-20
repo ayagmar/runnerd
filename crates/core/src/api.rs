@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 
 mod actions;
 mod admission;
+mod archives;
 mod attention;
 mod budget;
 mod control;
@@ -74,6 +75,7 @@ pub use actions::{
     actions_not_configured, actions_off,
 };
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
+pub use archives::{ActionArchives, ArchiveFailure, ArchiveFailureKind};
 pub use attention::{
     ATTENTION_MAX, Attention, AttentionItem, AttentionKind, Fix, Subject, attention_items,
 };
@@ -104,9 +106,9 @@ pub(crate) use jobs::TITLE_SOURCE_MAX;
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
-    ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource, Limits,
-    LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
+    ChartLines, FailureCause, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job,
+    JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource,
+    Limits, LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
     Swap, Timeline, Total, host_margin, job_title,
 };
@@ -192,6 +194,10 @@ pub struct Status {
     /// [`JobActions::Unsupported`].
     #[serde(default)]
     pub job_actions: JobActions,
+    /// The action archives runnerd keeps for its runners (ADR 0147); absent while `[caches.actions]` is off, before
+    /// the store opened, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_archives: Option<ActionArchives>,
 }
 
 /// The memory budget runners and the mirror share, in bytes.

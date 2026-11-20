@@ -153,3 +153,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0144](0144-the-mirror-keeps-no-blob-descriptor-cache.md) | The mirror keeps no blob descriptor cache, and its storage is repaired before it starts | Accepted |
 | [0145](0145-the-dashboard-leads-with-the-lanes.md) | The dashboard leads with the lanes | Accepted |
 | [0146](0146-the-dashboard-paints-the-doctors-last-run.md) | The dashboard paints the doctor's last run while it is no older than the refresh | Accepted |
+| [0147](0147-runners-read-verified-action-archives-from-runnerds-cache.md) | Runners read verified action archives from runnerd's cache | Accepted |
+| [0148](0148-a-failed-jobs-log-says-whether-an-action-or-checkout-failed-it.md) | A failed job's log says whether an action or its checkout failed it | Accepted |
