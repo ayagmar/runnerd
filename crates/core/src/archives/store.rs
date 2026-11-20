@@ -2,7 +2,8 @@
 //! runner looks them up and the only directory runners mount, `staging/` for downloads in progress, `quarantine/` for
 //! archives that no longer match, and `index.json`. The index is what the store should hold and the source of
 //! integrity: each entry's SHA-256 and size as verified, when it was fetched and when a refresh last found it
-//! pinned. File times mean nothing to it.
+//! pinned, and what its action files pin. It also keeps each served repository's last whole inventory, so what a
+//! repository pinned survives a restart while it cannot be read. File times mean nothing to it.
 //!
 //! One store has one owner: `open` takes an exclusive lock on `<root>/lock` and holds it for as long as the store
 //! lives, so a second runnerd pointed at the same directory is refused rather than sharing it. An index entry whose

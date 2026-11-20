@@ -1,12 +1,13 @@
 //! The action archives runnerd keeps for its runners (ADR 0147): it reads which actions each served repository's
-//! default branch pins by commit, downloads each public one's archive through GitHub's API, verifies it, and keeps it
-//! where every runner reads it, read-only, as `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`, so a job copies it instead of
-//! downloading it from codeload.github.com. An archive it does not hold, a job downloads itself, as without it.
+//! default branch pins by commit, downloads each public one's archive from codeload without a credential, verifies it,
+//! and keeps it where every runner reads it, read-only, as `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`, so a job copies it
+//! instead of downloading it. An archive it does not hold, a job downloads itself, as without it.
 //!
 //! One task owns the store (`run`), off the scheduling path: it refreshes at start and every `REFRESH`, reading a
-//! repository's tree and files only when its default branch moved. It never fetches a private action (runnerd's
-//! token is not the job's, and every repository's runners read the same directory), never takes what to fetch from a
-//! job's log, and never sets `ACTIONS_RUNNER_SYMLINK_CACHED_ACTIONS`. The token stays in `github::Github`.
+//! repository's tree and files only when its default branch moved, and publishes the view runners mount only after a
+//! check found every kept file good. It removes an archive only after a refresh that knew every pin whole. It never
+//! fetches a private action, never takes what to fetch from a job's log, and never sets
+//! `ACTIONS_RUNNER_SYMLINK_CACHED_ACTIONS`. The token stays in `github::Github` and is never sent for an archive.
 
 mod pins;
 mod state;
