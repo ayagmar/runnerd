@@ -454,3 +454,39 @@ fn a_tar_ends_in_two_zero_blocks_and_nothing_but_zeros_after() {
         assert!(result.is_err(), "{case} is refused: {result:?}");
     }
 }
+
+#[test]
+fn a_pax_record_with_a_control_character_is_refused_where_gnu_tar_reads_another_name() {
+    let dir = TestDir::new("verify");
+    let nul = archive(|out| {
+        entry(out, &format!("{TOP}a"), b'0', b"a", 0o664);
+        let path = format!("{TOP}a\0b");
+        entry(out, "x", b'x', &records(&[("path", &path)]), 0o644);
+        entry(out, &format!("{TOP}c"), b'0', b"c", 0o664);
+    });
+    let path = dir.0.join("nul.tar.gz");
+    fs::write(&path, gzip(&nul)).unwrap();
+    let tar = Command::new("tar").arg("-tzf").arg(&path).output().unwrap();
+    let listed = String::from_utf8_lossy(&tar.stdout).into_owned();
+    assert_eq!(
+        listed.matches(&format!("{TOP}a\n")).count(),
+        2,
+        "GNU tar ends the path at its NUL, so it unpacks a second file of the first one's name: {listed:?}"
+    );
+    assert!(
+        matches!(verify(&path, SHA, BUDGET), Err(Rejected::Header(_))),
+        "the verifier refuses what GNU tar reads otherwise"
+    );
+    for control in ["\u{1}", "\t", "\u{7f}", "\r"] {
+        let tar = archive(|out| {
+            let path = format!("{TOP}a{control}b");
+            entry(out, "x", b'x', &records(&[("path", &path)]), 0o644);
+            entry(out, &format!("{TOP}c"), b'0', b"c", 0o664);
+        });
+        let result = check(&dir, &tar);
+        assert!(
+            result.is_err(),
+            "{control:?} in a record is refused: {result:?}"
+        );
+    }
+}

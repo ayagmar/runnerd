@@ -366,7 +366,13 @@ fn records(data: &[u8]) -> Result<Vec<(&str, &str)>, Rejected> {
         if length <= space + 1 || length > rest.len() || rest[length - 1] != b'\n' {
             return Err(malformed);
         }
-        let record = std::str::from_utf8(&rest[space + 1..length - 1])
+        let record = &rest[space + 1..length - 1];
+        // GNU tar ends a path at a NUL, so a name with one would unpack as another; no control character belongs in
+        // a name `git archive` writes.
+        if record.iter().any(|&byte| byte.is_ascii_control()) {
+            return Err(Rejected::Header("a PAX record holds a control character"));
+        }
+        let record = std::str::from_utf8(record)
             .map_err(|_| Rejected::Header("its PAX records are malformed"))?;
         let (key, value) = record
             .split_once('=')
