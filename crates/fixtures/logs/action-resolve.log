@@ -13,3 +13,4 @@
 2026-11-17T15:46:19.5000000Z Failed to resolve action download info. Error: Response status code does not indicate success: 502 (Bad Gateway).
 2026-11-17T15:46:19.5100000Z Retrying in 24.02 seconds
 2026-11-17T15:46:43.6000000Z ##[error]Response status code does not indicate success: 502 (Bad Gateway).
+2026-11-17T15:46:43.6100000Z ##[error]Failed to resolve action download info.

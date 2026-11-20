@@ -731,6 +731,163 @@ mod causes {
         assert_eq!(failure_cause(&failed_setting_up(), &other), None);
     }
 
+    /// `log`'s lines up to `Complete job name`, then `tail`: a `Set up job` that went on after its retries and failed.
+    fn set_up_then(log: &str, tail: &[&str]) -> Vec<String> {
+        let mut lines = lines(log);
+        if let Some(at) = lines
+            .iter()
+            .position(|line| line.contains("Complete job name"))
+        {
+            lines.truncate(at);
+        }
+        lines.extend(
+            tail.iter()
+                .map(|text| format!("2026-11-17T15:46:46.0000000Z {text}")),
+        );
+        lines
+    }
+
+    #[test]
+    fn a_retry_that_recovered_says_nothing_of_a_set_up_that_failed_for_another_reason_right_after()
+    {
+        // The download's second attempt succeeded, quietly, and the action's manifest failed to load.
+        let manifest = set_up_then(
+            RECOVERED,
+            &[
+                "##[error]Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '/home/runner/_work/_actions/o/lint/v1'.",
+            ],
+        );
+        assert_eq!(failure_cause(&failed_setting_up(), &manifest), None);
+        // A resolve that recovered, then an immutable package and an image pull that failed.
+        let resolved = set_up_then(
+            RESOLVE,
+            &[
+                "##[group]Download immutable action package 'actions/setup-node@v5'",
+                "##[endgroup]",
+                "##[group]Pull down action image 'ghcr.io/halyard/lint:1'",
+                "##[endgroup]",
+                "##[error]Docker pull failed with exit code 1",
+            ],
+        );
+        let resolved: Vec<String> = resolved
+            .into_iter()
+            .filter(|line| {
+                !line.contains("##[error]Response status")
+                    && !line.contains("##[error]Failed to resolve")
+            })
+            .collect();
+        assert_eq!(failure_cause(&failed_setting_up(), &resolved), None);
+    }
+
+    /// A job that set up, checked out with `actions/checkout`, then ran `steps` (name, conclusion); its log has a
+    /// section per step after the checkout, `sections`.
+    fn after_checkout(steps: &[(&str, &str)], sections: &[Vec<String>]) -> (api::Job, Vec<String>) {
+        let mut job = super::failed_job();
+        job.steps = vec![
+            step(1, "Set up job", "success"),
+            step(2, "Run actions/checkout@v7", "success"),
+        ];
+        for (number, (name, conclusion)) in (3..).zip(steps) {
+            job.steps.push(step(number, name, conclusion));
+        }
+        let mut log = lines(RECOVERED);
+        log.truncate(
+            log.iter()
+                .position(|line| line.contains("Run ./gradlew"))
+                .unwrap(),
+        );
+        for section in sections {
+            log.extend(section.iter().cloned());
+        }
+        (job, log)
+    }
+
+    #[test]
+    fn a_failed_step_reads_as_checkout_only_by_its_own_section_running_actions_checkout() {
+        // A script step its workflow named as the checkout's display name: its own section runs a shell.
+        let (job, log) = after_checkout(
+            &[(
+                "Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+                "failure",
+            )],
+            &[super::logged(
+                "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+                &["shell: /usr/bin/bash -e {0}"],
+                &[super::ERROR],
+            )],
+        );
+        assert_eq!(
+            failure_cause(&job, &log),
+            None,
+            "a script, not the checkout"
+        );
+        // A composite action's first inner step checked out, its second failed: its sections are not one a step.
+        let (job, log) = after_checkout(
+            &[("Setup", "failure")],
+            &[
+                super::logged(
+                    "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+                    &["with:"],
+                    &["Syncing repository: halyard/tools"],
+                ),
+                super::logged(
+                    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+                    &["with:"],
+                    &["##[error]Unable to find Node version '99'"],
+                ),
+            ],
+        );
+        assert_eq!(
+            failure_cause(&job, &log),
+            None,
+            "the composite's setup-node failed"
+        );
+        // A checkout's post step failed after the job's steps passed.
+        let mut job = super::failed_job();
+        job.steps = vec![
+            step(1, "Set up job", "success"),
+            step(2, "Run actions/checkout@v7", "success"),
+            step(3, "Post Run actions/checkout@v7", "failure"),
+        ];
+        let mut log = lines(RECOVERED);
+        log.truncate(
+            log.iter()
+                .position(|line| line.contains("Run ./gradlew"))
+                .unwrap(),
+        );
+        log.push("2026-11-17T15:47:31.5000000Z Post job cleanup.".to_owned());
+        log.extend(super::logged(
+            "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+            &[],
+            &["##[error]The process '/usr/bin/git' failed with exit code 128"],
+        ));
+        assert_eq!(
+            failure_cause(&job, &log),
+            None,
+            "its post step, not the fetch"
+        );
+        // An earlier step allowed to fail ended with an exit code; the checkout after it failed.
+        let (mut job, mut log) = after_checkout(
+            &[("Run ./lint", "success")],
+            &[super::logged(
+                "./lint",
+                &["shell: /usr/bin/bash -e {0}"],
+                &[super::ERROR],
+            )],
+        );
+        job.steps.push(step(4, "Checkout tools", "failure"));
+        log.extend(
+            lines(CHECKOUT)
+                .into_iter()
+                .skip_while(|line| !line.contains("##[group]Run actions/checkout")),
+        );
+        assert_eq!(
+            failure_cause(&job, &log),
+            Some(FailureCause::Checkout),
+            "the checkout's own section failed"
+        );
+    }
+
     #[test]
     fn a_job_that_failed_with_no_cause_in_its_log_reads_as_none() {
         // Setting up failed with nothing logged, or a test failed: no rule claims it.

@@ -11,29 +11,33 @@ knows only Sysbox's signatures). The owner could not tell at a glance which fail
 the code's, nor see whether runnerd's own archives ([ADR 0147](0147-runners-read-verified-action-archives-from-runnerds-cache.md))
 cut the first kind down.
 
-The runner 2.338.1 (`ActionManager.cs`) reports its own failures in `Set up job`. A download that fails is retried
-three times; each failed attempt but the last prints `##[warning]Failed to download action '…'. Error: …` and
-`##[warning]Back off … seconds before retry.`, and the last one ends the step with `##[error]` and the attempt's own
-message, which may say nothing of a download (`Response status code does not indicate success: 504`). An archive
-`tar -xzf` cannot unpack ends it with `Can't use 'tar -xzf' extract archive file: …`. An action GitHub's API does not
-resolve prints `Failed to resolve action download info. Error: …` and `Retrying in … seconds` before each retry and
-ends with the API's own error. The categories it files these under (`resolve_action`, `error_download_action`,
-`invalid_action_download`) are not in the log.
+The runner 2.338.1 (`ActionManager.cs`, `JobExtension.cs`) reports its own failures in `Set up job`. A download that
+fails is retried three times; each failed attempt but the last prints `##[warning]Failed to download action '…'.
+Error: …` and `##[warning]Back off … seconds before retry.`. The last one prints the attempt's own message as an
+error, which may say nothing of a download (`Response status code does not indicate success: 504`), and then
+`JobExtension` ends the step with the exception's message: `##[error]Failed to download archive '…' after 3
+attempts.`. An archive `tar -xzf` cannot unpack ends it with `Can't use 'tar -xzf' extract archive file: …`. An action
+GitHub's API does not resolve prints `Failed to resolve action download info. Error: …` and `Retrying in … seconds`
+before each retry, and ends with `##[error]Failed to resolve action download info.`. A retry that succeeds prints
+nothing, so its warnings stay in the log above whatever fails next. The categories the runner files these under
+(`resolve_action`, `error_download_action`, `invalid_action_download`) are not in the log.
 
 ## Decision
 
-- **A failed job's log is read for one of three causes**, by `record::failure_cause`, beside `runner_fault` and with
-  the same scoping: only the step GitHub reports as `failure` counts.
-  - `action-archive`: the failed step is `Set up job`, and the last `##[error]` it printed names a download or an
-    archive (`Failed to download archive`, `Failed to download action`, `InvalidActionArchiveException`, `Can't use
-    'tar -xzf'`, `download has timed out`), or comes right after the `Back off … seconds before retry.` warning that
-    precedes a download's last attempt.
-  - `action-resolve`: the failed step is `Set up job`, and that error names resolving an action, or comes after
-    `Failed to resolve action download info` with no download begun since.
-  - `checkout`: the failed step's group in the log runs `actions/checkout@…`, by the action it runs, not by the
-    step's name.
-  Anything else has no cause. A download that failed and then succeeded on a retry prints the same warnings, but
-  `Set up job` succeeds, so a test that fails after it is not an archive failure.
+- **A failed job's log is read for one of three causes**, by `record::failure_cause`, beside `runner_fault`: only the
+  step GitHub reports as `failure` counts, and only a diagnostic that ends it.
+  - `action-archive`: the failed step is `Set up job`, and the last `##[error]` it printed, the one `JobExtension`
+    ends it with, names a download or an archive (`Failed to download archive '…' after 3 attempts.`, `Failed to
+    download action`, `Can't use 'tar -xzf'`, `Can't un-zip archive file`, `download has timed out`).
+  - `action-resolve`: the failed step is `Set up job`, and that last error is `Failed to resolve action download
+    info.` or `Unable to resolve action`.
+  - `checkout`: the failed step's own section of the log runs `actions/checkout@…`. Its section is the one at its
+    place among the steps that ran, and only when the log has exactly one `##[group]Run` section a step before its
+    post steps, so a composite action's inner groups or a step's own groups leave it unknown. The section must run
+    the action, not a script (no `shell:` line in its group), print the checkout's `Syncing repository:` and an
+    `##[error]`. A post step never counts.
+  Anything else has no cause. A retry's warnings never count, whether the retry then succeeded or not: a download or
+  resolve that recovered prints the same warnings, and what fails after it is something else.
 - **It is read once, when the job's record is final**, and kept in `jobs.failure_cause` (schema 25, NULL in older rows,
   which are not read again). A 0.1.4 daemon refuses a schema 25 history, as after every migration.
 - **`runner_fault` stays as it is.** It decides the outcome (`runner fault`); a cause does not change the outcome, the

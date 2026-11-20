@@ -14,3 +14,4 @@
 2026-11-17T15:46:44.2000000Z ##[warning]Failed to download action 'https://api.github.com/repos/actions/checkout/tarball/08eba0b27e820071cde6df949e0beb9ba4906955'. Error: Response status code does not indicate success: 504 (Gateway Timeout). C2D4:3B9E1:5A2F4B0:5C7D7F1:6919A3D8
 2026-11-17T15:46:44.2100000Z ##[warning]Back off 13.112 seconds before retry.
 2026-11-17T15:46:57.4000000Z ##[error]Response status code does not indicate success: 504 (Gateway Timeout).
+2026-11-17T15:46:57.4100000Z ##[error]Failed to download archive 'https://api.github.com/repos/actions/checkout/tarball/08eba0b27e820071cde6df949e0beb9ba4906955' after 3 attempts.
