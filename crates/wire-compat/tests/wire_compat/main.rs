@@ -49,11 +49,19 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[Accepted {
-    reader: Reader::Previous,
-    item: "attention-kind/action-archives",
-    adr: "0147",
-}];
+const ACCEPTED: &[Accepted] = &[
+    Accepted {
+        reader: Reader::Previous,
+        item: "attention-kind/action-archives",
+        adr: "0147",
+    },
+    // An older client draws the item by its title, as for any kind it does not know.
+    Accepted {
+        reader: Reader::Previous,
+        item: "attention-kind/rerun-refused",
+        adr: "0153",
+    },
+];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;

@@ -855,15 +855,14 @@ async fn with_job_actions_off_a_job_says_why_and_offers_neither() {
 }
 
 #[tokio::test]
-async fn a_job_an_actions_download_failed_says_so_as_core_words_it() {
+async fn a_jobs_failure_and_automatic_rerun_show_as_core_words_them() {
     let (dashboard, cookie, _, facts) = dashboard().await;
-    let html = dashboard
-        .page(
-            &cookie,
-            &format!("/jobs/{}", runnerd_fixtures::ACTION_ARCHIVE),
-        )
-        .await
-        .body;
-    let line = sentence(facts.failure_line);
-    assert!(text(&html).contains(&line), "{line}");
+    for (job, line) in [
+        (runnerd_fixtures::ACTION_ARCHIVE, facts.failure_line),
+        (runnerd_fixtures::RUNNER_FAULT, facts.rerun_line.as_str()),
+    ] {
+        let html = dashboard.page(&cookie, &format!("/jobs/{job}")).await.body;
+        let line = sentence(line);
+        assert!(text(&html).contains(&line), "{line}");
+    }
 }

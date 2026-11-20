@@ -204,6 +204,13 @@ fn repository_status() -> RepositoryStatus {
         }],
         paused: false,
         queued_jobs: 1,
+        rerun_refused: Some(runnerd_core::api::RerunRefused {
+            run: 4182,
+            since: 1_761_399_000,
+            refusal: ActionRefusal::Forbidden,
+            status: Some(403),
+            message: "GitHub refused to re-run the failed jobs of run 4182 (403).".to_owned(),
+        }),
         listing: Some(ListingFailure {
             since: 1_761_399_000,
             problem: ListingProblem::Refused { status: 404 },
@@ -576,6 +583,7 @@ pub(crate) fn attention_kind() -> Vec<AttentionKind> {
         AttentionKind::GithubAuth,
         AttentionKind::RateLimited,
         AttentionKind::ActionArchives,
+        AttentionKind::RerunRefused,
     ];
     for kind in &every {
         match kind {
@@ -588,6 +596,7 @@ pub(crate) fn attention_kind() -> Vec<AttentionKind> {
             | AttentionKind::GithubAuth
             | AttentionKind::RateLimited
             | AttentionKind::ActionArchives
+            | AttentionKind::RerunRefused
             // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
             | AttentionKind::Unknown => {}
         }
@@ -805,6 +814,7 @@ pub(crate) fn job_summary() -> JobSummary {
         },
         runner_fault: true,
         failure_cause: Some(FailureCause::ActionArchive),
+        rerun_at: Some(1_763_000_000),
         record_mark: Some(RecordMark::Kept),
     }
 }

@@ -576,6 +576,11 @@ pub struct Repository {
     /// the repository. Default `"default-branch"`.
     #[serde(default)]
     pub build_cache_writers: BuildCacheWriters,
+    /// Whether runnerd asks GitHub to re-run a run's failed jobs, once per attempt, when its runner failed one of them
+    /// and none failed otherwise (ADR 0153), the same in every pool of the repository. Needs `[github] job_actions`.
+    /// Default false: a runner fault is read from the job's own output, which its code could print.
+    #[serde(default)]
+    pub rerun_runner_faults: bool,
 }
 
 /// `build_cache_writers` of a `[[repositories]]`: whose jobs' uploads the shared build cache keeps (ADR 0053).
@@ -1174,6 +1179,26 @@ pub enum ConfigError {
         /// The repository's `owner/name`.
         repository: String,
     },
+    /// Two `[[repositories]]` entries name one repository in two spellings, which GitHub reads as one.
+    #[error(
+        "repositories {first} and {second} are one repository on GitHub, which ignores case; spell it the same in \
+         each entry"
+    )]
+    RepositorySpelledTwice {
+        /// The first spelling.
+        first: String,
+        /// The other.
+        second: String,
+    },
+    /// Two `[[repositories]]` entries of one repository say differently whether its runner faults are re-run.
+    #[error(
+        "repository {repository}'s entries set rerun_runner_faults differently; whether runnerd re-runs a run its \
+         runner failed is the repository's, so set the same in each"
+    )]
+    PoolRerunsDiffer {
+        /// The repository's `owner/name`.
+        repository: String,
+    },
     /// `unsafe-dind` without `allow_unsafe = true`.
     #[error(
         "isolation \"unsafe-dind\" runs runner containers privileged, so a job can take over the host; \
@@ -1475,9 +1500,18 @@ impl Config {
     }
 
     /// Checks that each repository's pools tell its jobs apart: each in its own profile, with labels no other of its
-    /// pools has, so at most one pool matches a job; and that they agree on whose runs write to the build cache.
+    /// pools has, so at most one pool matches a job; that they agree on whose runs write to the build cache and on
+    /// re-running runner faults; and that a repository is spelled one way, as GitHub ignores case.
     fn check_pools(&self) -> Result<(), ConfigError> {
         for (at, first) in self.repositories.iter().enumerate() {
+            if let Some(other) = self.repositories[at + 1..].iter().find(|other| {
+                other.name != first.name && other.name.eq_ignore_ascii_case(&first.name)
+            }) {
+                return Err(ConfigError::RepositorySpelledTwice {
+                    first: first.name.clone(),
+                    second: other.name.clone(),
+                });
+            }
             for second in self.repositories[at + 1..]
                 .iter()
                 .filter(|second| second.name == first.name)
@@ -1503,6 +1537,11 @@ impl Config {
                 }
                 if second.build_cache_writers != first.build_cache_writers {
                     return Err(ConfigError::PoolWritersDiffer {
+                        repository: first.name.clone(),
+                    });
+                }
+                if second.rerun_runner_faults != first.rerun_runner_faults {
+                    return Err(ConfigError::PoolRerunsDiffer {
                         repository: first.name.clone(),
                     });
                 }

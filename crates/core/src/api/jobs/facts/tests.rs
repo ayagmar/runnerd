@@ -23,6 +23,7 @@ fn job(state: JobState, conclusion: Option<&str>) -> JobSummary {
         log: LogSummary::default(),
         runner_fault: false,
         failure_cause: None,
+        rerun_at: None,
         record_mark: None,
     }
 }

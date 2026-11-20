@@ -306,6 +306,7 @@ async fn a_restart_starts_a_new_revision_and_forgets_why_listings_failed() {
             pools: Vec::new(),
             paused: false,
             queued_jobs: 0,
+            rerun_refused: None,
             listing: Some(ListingFailure {
                 since: 1_800_000_000,
                 problem: ListingProblem::Refused { status: 404 },

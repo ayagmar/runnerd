@@ -34,6 +34,26 @@ pub(super) struct Issued {
     pub(super) target: ActionTarget,
     /// The policy revision of the preview.
     pub(super) revision: u64,
+    /// Who asked for it.
+    pub(super) origin: Origin,
+}
+
+/// Who asked for an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Origin {
+    /// The owner, through a confirmed preview.
+    Owner,
+    /// runnerd itself, for a run its runner failed (ADR 0153).
+    Automatic,
+}
+
+/// Why an automatic action's permit said no, besides another attempt (ADR 0153).
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Withheld {
+    /// The run is not completed as `failure`: cancelled as a whole, say.
+    NotFailed,
+    /// The run could not be read: GitHub's failure, as a class and a status.
+    Unread(crate::github::ActionFailure),
 }
 
 /// How a flight ended.
@@ -48,6 +68,8 @@ pub(super) enum Landed {
         /// Why the confirmation was not sent.
         why: Superseded,
     },
+    /// Nothing was sent: an automatic action's permit said no (ADR 0153).
+    Withheld(Withheld),
 }
 
 /// One confirmation and what became of it.
@@ -76,6 +98,7 @@ struct Asked {
 struct Flight {
     id: u64,
     asked: Asked,
+    origin: Origin,
     answer: watch::Sender<Option<Landed>>,
 }
 
@@ -190,6 +213,32 @@ impl Flights {
         }
     }
 
+    /// Boards `issued` without a confirmation, for an action runnerd sends itself (ADR 0153): it leads a new flight,
+    /// follows the same automatic action from the same job in flight, or is busy behind another one or an owner's.
+    pub(super) fn board(self: &Arc<Flights>, issued: &Issued) -> Boarding {
+        let target = &issued.target;
+        let key = RunKey {
+            repository: target.repository.clone(),
+            run: target.run,
+        };
+        let asked = Asked {
+            action: target.action,
+            job: target.job,
+        };
+        match lock(&self.book).board(key.clone(), asked) {
+            Joined::Follow(answer) => Boarding::Follow(answer),
+            Joined::Busy(other) => Boarding::Busy(other),
+            Joined::Lead { id, answer } => Boarding::Lead {
+                landing: Landing {
+                    flights: self.clone(),
+                    key,
+                    id,
+                },
+                answer,
+            },
+        }
+    }
+
     /// How many runs have an action in flight.
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
@@ -226,7 +275,46 @@ enum Taken {
     },
 }
 
+/// What [`Book::board`] did.
+enum Joined {
+    Follow(watch::Receiver<Option<Landed>>),
+    Busy(JobAction),
+    Lead {
+        id: u64,
+        answer: watch::Receiver<Option<Landed>>,
+    },
+}
+
 impl Book {
+    /// Joins the automatic flight of `key` for `asked`, or starts one; an owner's flight, whatever it asks, is busy, so
+    /// its outcome is never taken for runnerd's own.
+    fn board(&mut self, key: RunKey, asked: Asked) -> Joined {
+        match self.runs.get(&key) {
+            Some(flight) if flight.asked == asked && flight.origin == Origin::Automatic => {
+                Joined::Follow(flight.answer.subscribe())
+            }
+            Some(flight) => Joined::Busy(flight.asked.action),
+            None => {
+                let id = self.next_flight;
+                self.next_flight += 1;
+                let (answer, receiver) = watch::channel(None);
+                self.runs.insert(
+                    key,
+                    Flight {
+                        id,
+                        asked,
+                        origin: Origin::Automatic,
+                        answer,
+                    },
+                );
+                Joined::Lead {
+                    id,
+                    answer: receiver,
+                }
+            }
+        }
+    }
+
     fn issue(&mut self, token: String, issued: Issued, now: Instant, lasts: Duration) {
         self.forget(now, lasts);
         while self.issued.len() >= ISSUED_MAX {
@@ -296,7 +384,15 @@ impl Book {
                 let id = self.next_flight;
                 self.next_flight += 1;
                 let (answer, receiver) = watch::channel(None);
-                self.runs.insert(key.clone(), Flight { id, asked, answer });
+                self.runs.insert(
+                    key.clone(),
+                    Flight {
+                        id,
+                        asked,
+                        origin: Origin::Owner,
+                        answer,
+                    },
+                );
                 if let Some(confirmation) = self.issued.get_mut(token) {
                     confirmation.used = Use::Boarded(id);
                 }

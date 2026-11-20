@@ -333,6 +333,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
         },
         runner_fault: false,
         failure_cause: None,
+        rerun_at: None,
         record_mark: None,
     };
     (
@@ -670,6 +671,7 @@ impl Fixtures {
                     }],
                     paused: false,
                     queued_jobs: 0,
+                    rerun_refused: None,
                     listing: None,
                     queue: runnerd_core::api::QueueShown::Listed,
                 },
@@ -687,6 +689,7 @@ impl Fixtures {
                     }],
                     paused: false,
                     queued_jobs: 1,
+                    rerun_refused: None,
                     listing: None,
                     queue: runnerd_core::api::QueueShown::Listed,
                 },

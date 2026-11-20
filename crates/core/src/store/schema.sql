@@ -75,7 +75,11 @@ CREATE TABLE jobs (
     wait_causes TEXT,
     -- Of `unseen`, what passed before runnerd first listed it: the downtime its first listing found, which later
     -- restarts add to `unseen` and not to this (ADR 0154). 0 in rows from before schema 26.
-    unseen_unlisted INTEGER NOT NULL DEFAULT 0
+    unseen_unlisted INTEGER NOT NULL DEFAULT 0,
+    -- When runnerd asked GitHub to re-run the failed jobs of this job's run because its runner failed it (ADR 0153),
+    -- in milliseconds; set on each job of that attempt the runner failed, once GitHub accepted. NULL for every other job,
+    -- and in rows from before schema 27.
+    rerun_at INTEGER
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
@@ -250,6 +254,16 @@ CREATE TABLE cache_sizes (
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
+) WITHOUT ROWID;
+
+-- The attempts runnerd claimed to re-run automatically, each before its request went out (ADR 0153): a restart
+-- never sends one again, whatever GitHub answered. A claim goes when nothing reached GitHub, or after a day.
+CREATE TABLE rerun_claims (
+    repository TEXT NOT NULL,
+    run_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    claimed_at INTEGER NOT NULL,
+    PRIMARY KEY (repository, run_id, attempt)
 ) WITHOUT ROWID;
 
 -- The repositories paused through the API, so a restart keeps them paused. A reload that removes a repository from

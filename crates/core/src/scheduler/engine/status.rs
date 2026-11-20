@@ -126,6 +126,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         api::QueueShown::Unlisted
                     },
                     paused: self.control.is_paused(&name),
+                    rerun_refused: self.actions.rerun_refused(&name),
                     queued_jobs: queued.iter().filter(|job| job.repository == name).count(),
                     name,
                 }

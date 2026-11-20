@@ -509,6 +509,7 @@ mod tests {
             log: LogSummary::default(),
             runner_fault: false,
             failure_cause: None,
+            rerun_at: None,
             record_mark: None,
         }
     }
@@ -693,6 +694,7 @@ mod tests {
             pools: vec![pool("jvm"), pool("light")],
             paused: false,
             queued_jobs: 1,
+            rerun_refused: None,
             listing: None,
             queue: runnerd_core::api::QueueShown::Listed,
         });

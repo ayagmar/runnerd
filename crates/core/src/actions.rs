@@ -6,11 +6,17 @@
 //! in hand, and before each send (a 401's second included), the snapshot is checked, the run read again for its
 //! attempt, and the snapshot checked once more, with nothing in between that and the send.
 //!
-//! It must not write the job history (GitHub's listings bring what the action did), kill a runner, keep a deadline,
-//! send an ambiguous request again, or put GitHub's text or the token anywhere: a refusal is its class and status.
+//! `rerun` sends one action itself: the re-run of a run whose runner failed one of its jobs (ADR 0153), through the
+//! same flights and the same check before the send, without a preview.
+//!
+//! It must not write the job history (GitHub's listings bring what the action did) beyond noting an automatic re-run
+//! GitHub accepted, kill a runner, keep a deadline, send an owner's ambiguous request again, or put GitHub's text or
+//! the token anywhere: a refusal is its class and status.
 
+mod faults;
 mod flights;
 pub mod policy;
+mod rerun;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,13 +25,14 @@ use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 use tracing::info;
 
-use self::flights::{Boarding, Flights, Issued, Landed, Redeemed};
+use self::faults::Faults;
+use self::flights::{Boarding, Flights, Issued, Landed, Origin, Redeemed, Withheld};
 use self::policy::{Denied, Policy};
 use crate::api::{
     self, ActionAnswer, ActionPreview, ActionRefusal, ActionResult, ActionTarget, JobAction,
     JobSummary, PreviewFacts, RunSeen, SIBLINGS_MAX, Superseded, UnknownCause,
 };
-use crate::github::{ActionFailure, GithubApi, JobActionRequest, Permit, RunNow};
+use crate::github::{ActionFailure, AttemptJob, GithubApi, JobActionRequest, Permit, RunNow};
 use crate::scheduler::engine::{Control, Shutdown};
 use crate::store::{Store, StoreError};
 use crate::time;
@@ -60,6 +67,14 @@ pub trait ActionsGithub: Send + Sync + 'static {
         run: u64,
     ) -> BoxFuture<'call, Result<RunNow, ActionFailure>>;
 
+    /// Reads the jobs of attempt `attempt` of the run, every runner's, with their conclusions.
+    fn attempt_jobs<'call>(
+        &'call self,
+        repository: &'call str,
+        run: u64,
+        attempt: u32,
+    ) -> BoxFuture<'call, Result<Vec<AttemptJob>, ActionFailure>>;
+
     /// Sends `request` once, asking `permit` once the token is in hand and before each send; GitHub's success
     /// status, or why not.
     fn send<'call>(
@@ -77,6 +92,15 @@ impl<G: GithubApi + 'static> ActionsGithub for G {
         run: u64,
     ) -> BoxFuture<'call, Result<RunNow, ActionFailure>> {
         Box::pin(GithubApi::action_run(self, repository, run))
+    }
+
+    fn attempt_jobs<'call>(
+        &'call self,
+        repository: &'call str,
+        run: u64,
+        attempt: u32,
+    ) -> BoxFuture<'call, Result<Vec<AttemptJob>, ActionFailure>> {
+        Box::pin(GithubApi::attempt_jobs(self, repository, run, attempt))
     }
 
     fn send<'call>(
@@ -128,6 +152,7 @@ pub struct JobActions {
     store: Store,
     control: Arc<Control>,
     flights: Arc<Flights>,
+    faults: Arc<Faults>,
     deadline: Duration,
 }
 
@@ -151,6 +176,7 @@ impl JobActions {
             store,
             control,
             flights: Arc::new(Flights::new(limits.confirmation)),
+            faults: Arc::new(Faults::default()),
             deadline: limits.deadline,
         }
     }
@@ -237,6 +263,7 @@ impl JobActions {
                 let issued = Issued {
                     target: target.clone(),
                     revision: policy.revision(),
+                    origin: Origin::Owner,
                 };
                 Some(
                     self.flights
@@ -294,6 +321,15 @@ impl JobActions {
                 self.preview(summary, issued.target.action, run, Some(why), &policy)
                     .await
             }
+            // The owner joined runnerd's own re-run, whose permit said no: nothing was sent.
+            Landed::Withheld(_) => {
+                let policy = self.control.action_policy();
+                allowed(&policy, &summary.repository)?;
+                let run = RunSeen::Unread { status: None };
+                let why = Some(Superseded::Unverified);
+                self.preview(summary, issued.target.action, run, why, &policy)
+                    .await
+            }
         }
     }
 
@@ -346,17 +382,41 @@ impl JobActions {
         };
         // Why the permit said no, when it did.
         let withheld: std::sync::Mutex<Option<Landed>> = std::sync::Mutex::new(None);
+        // Whether the permit let a send go: from then on the request may be on its way.
+        let opened = std::sync::atomic::AtomicBool::new(false);
         let permit = || -> BoxFuture<'_, bool> {
             Box::pin(async {
                 let why = self.verify(issued).await;
                 let go = why.is_none();
+                if go {
+                    opened.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 *crate::sync::lock(&withheld) = why;
                 go
             })
         };
         let (slug, run, job) = (target.action.slug(), target.run, target.job);
         info!("{repository}: sending the {slug} of run {run} (job {job}) to GitHub");
-        let answer = match self.github.send(repository, request, &permit).await {
+        let sent = async {
+            match issued.origin {
+                Origin::Owner => self.github.send(repository, request, &permit).await,
+                // A reload stops the request where it is. Before the permit let it go, nothing was sent: it is
+                // withdrawn. After, it may have reached GitHub, which may act on it yet: its outcome is unknown, as
+                // for a broken connection, and it is never sent again (ADR 0153).
+                Origin::Automatic => tokio::select! {
+                    biased;
+                    () = self.control.policy_moved(issued.revision) => {
+                        if opened.load(std::sync::atomic::Ordering::SeqCst) {
+                            Err(ActionFailure::Broken)
+                        } else {
+                            Err(ActionFailure::Withdrawn)
+                        }
+                    }
+                    sent = self.github.send(repository, request, &permit) => sent,
+                },
+            }
+        };
+        let answer = match sent.await {
             Err(ActionFailure::Withdrawn) => match crate::sync::lock(&withheld).take() {
                 Some(landed) => return landed,
                 None => classify(Err(ActionFailure::Withdrawn)),
@@ -395,12 +455,23 @@ impl JobActions {
             ))
         };
         match self.github.run(&target.repository, target.run).await {
+            // runnerd's own re-run goes only to a run completed as `failure`, whatever its jobs said before.
+            Ok(now)
+                if Some(now.attempt) == target.attempt
+                    && issued.origin == Origin::Automatic
+                    && !(now.completed && now.failed) =>
+            {
+                return Some(Landed::Withheld(Withheld::NotFailed));
+            }
             Ok(now) if Some(now.attempt) == target.attempt => {}
             Ok(now) => {
                 return Some(Landed::Repreview {
                     run: seen(now),
                     why: Superseded::AttemptChanged,
                 });
+            }
+            Err(failure) if issued.origin == Origin::Automatic => {
+                return Some(Landed::Withheld(Withheld::Unread(failure)));
             }
             Err(failure) => {
                 return Some(Landed::Repreview {
@@ -412,6 +483,18 @@ impl JobActions {
             }
         }
         (self.control.action_policy().revision() != issued.revision).then(withdrawn)
+    }
+
+    /// Why `repository`'s runner faults are not re-run, if GitHub refused one under the config of this moment
+    /// (ADR 0153): what its status shows.
+    pub fn rerun_refused(&self, repository: &str) -> Option<api::RerunRefused> {
+        self.faults
+            .held(
+                repository,
+                self.control.action_policy().revision(),
+                tokio::time::Instant::now(),
+            )
+            .map(|held| held.refused)
     }
 
     /// How many runs have an action in flight.
@@ -432,7 +515,8 @@ fn allowed(policy: &Policy, repository: &str) -> Result<(), ActionError> {
     policy.allows(repository).map_err(|denied| {
         ActionError::Forbidden(match denied {
             Denied::Off => api::actions_off().to_owned(),
-            Denied::NotConfigured => api::actions_not_configured(repository),
+            // `allows` never says `RerunsOff`.
+            Denied::NotConfigured | Denied::RerunsOff => api::actions_not_configured(repository),
         })
     })
 }

@@ -648,6 +648,95 @@ impl ActionResult {
     }
 }
 
+/// Why runnerd holds a repository's automatic re-runs of its runner faults (ADR 0153): GitHub refused one in a way
+/// that asking again soon cannot change, such as a token without Actions: write. Held for an hour, or until the config
+/// changes, and forgotten at a restart; [`RepositoryStatus::rerun_refused`](super::RepositoryStatus::rerun_refused)
+/// carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RerunRefused {
+    /// The run whose re-run GitHub refused.
+    pub run: u64,
+    /// When, in seconds since the Unix epoch.
+    pub since: u64,
+    /// The refusal's class.
+    pub refusal: ActionRefusal,
+    /// GitHub's HTTP status, when it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// What GitHub refused and why, as the result of the request worded it.
+    pub message: String,
+}
+
+impl RerunRefused {
+    /// What it was refused for, from `result`, at `now`.
+    pub fn new(result: &ActionResult, now: u64) -> RerunRefused {
+        RerunRefused {
+            run: result.run,
+            since: now,
+            refusal: result.refusal.unwrap_or(ActionRefusal::Other),
+            status: result.status,
+            message: result.message.clone(),
+        }
+    }
+
+    /// What a refused read of run `run` of `repository` is held for, at `now`: GitHub would not show runnerd's token
+    /// the run or its jobs, which the re-run needs first. `answer` is the read's failure, as a refusal.
+    pub fn unread(repository: &str, run: u64, answer: ActionAnswer, now: u64) -> RerunRefused {
+        let (refusal, status) = match answer {
+            ActionAnswer::Refused {
+                refusal, status, ..
+            } => (refusal, status),
+            ActionAnswer::Accepted { status } | ActionAnswer::AlreadyFinished { status } => {
+                (ActionRefusal::Other, Some(status))
+            }
+            ActionAnswer::Unknown { status, .. } => (ActionRefusal::Other, status),
+        };
+        let code = status.map_or_else(String::new, |status| format!(" ({status})"));
+        let message = match refusal {
+            ActionRefusal::NoToken => format!(
+                "runnerd could read no GitHub token, so it could not read run {run} of {repository}. Nothing was \
+                 sent."
+            ),
+            ActionRefusal::Unauthorized => format!(
+                "GitHub refused runnerd's token{code} when it read run {run} of {repository}. Nothing was sent."
+            ),
+            _ => format!(
+                "GitHub would not show run {run} of {repository} to runnerd{code}: the token may lack Actions: read \
+                 on it, or the run is gone. Nothing was sent."
+            ),
+        };
+        RerunRefused {
+            run,
+            since: now,
+            refusal,
+            status,
+            message,
+        }
+    }
+
+    /// The attention list's line: `runnerd holds the re-runs of o/app's runner faults for an hour: GitHub refused to
+    /// re-run the failed jobs of run 4182 (403): …`.
+    pub fn title(&self, repository: &str) -> String {
+        format!(
+            "runnerd holds the re-runs of {repository}'s runner faults for an hour: {}",
+            self.message
+        )
+    }
+
+    /// What clears it, in words.
+    pub fn fix(&self) -> &'static str {
+        match self.refusal {
+            ActionRefusal::NoToken | ActionRefusal::Unauthorized => {
+                "Give runnerd a GitHub token it can use; it tries again when the hour is up"
+            }
+            _ => {
+                "Give runnerd's token Actions: write on the repository (the repo scope for a classic token); it tries \
+                 again when the hour is up. Or set rerun_runner_faults = false"
+            }
+        }
+    }
+}
+
 fn accepted(target: &ActionTarget) -> String {
     let (run, repository) = (target.run_words(), &target.repository);
     match target.action {

@@ -212,11 +212,14 @@ fn a_job_states_its_outcome_steps_caps_and_build_cache_as_core_does() {
 }
 
 #[test]
-fn a_job_an_actions_download_failed_says_so_as_core_words_it() {
+fn a_jobs_failure_and_automatic_rerun_show_as_core_words_them() {
     let (daemon, facts) = fixtures();
     let shown = daemon.job(runnerd_fixtures::ACTION_ARCHIVE).unwrap();
     let text = job(shown, NOW, PLAIN);
     assert!(text.contains(facts.failure_line), "{text}");
+    let shown = daemon.job(runnerd_fixtures::RUNNER_FAULT).unwrap();
+    let text = job(shown, NOW, PLAIN);
+    assert!(text.contains(&facts.rerun_line), "{text}");
 }
 
 #[test]

@@ -118,6 +118,7 @@ impl Writer<'_> {
                     self.causes_waited(&waits)
                 });
             }
+            Write::Reran { jobs, at } => self.reran(&jobs, at),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -263,6 +264,10 @@ impl Writer<'_> {
             Write::RunnerNamed { secs, done } => {
                 let _ = done.send(self.runner_named(secs));
             }
+            Write::ClaimRerun { attempt, at, done } => {
+                let _ = done.send(self.claim_rerun(&attempt, at));
+            }
+            Write::ReleaseRerun(attempt) => self.release_rerun(&attempt),
             Write::Flush(done) => {
                 self.store_host_samples();
                 let _ = done.send(());
@@ -503,6 +508,18 @@ impl Writer<'_> {
             )?;
         }
         Ok(())
+    }
+
+    fn reran(&self, jobs: &[u64], at: u64) {
+        for job in jobs {
+            logged(
+                "record an automatic re-run",
+                self.db.execute(
+                    "UPDATE jobs SET rerun_at = ?2 WHERE id = ?1 AND rerun_at IS NULL",
+                    params![job, at],
+                ),
+            );
+        }
     }
 
     fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {
@@ -1274,6 +1291,42 @@ impl Writer<'_> {
             })
         })
         .unwrap_or(false)
+    }
+
+    /// Claims an automatic re-run's attempt, synced to disk, and drops claims older than a day.
+    fn claim_rerun(&self, attempt: &super::run::ClaimKey, at: u64) -> super::Claim {
+        let mut inserted = 0;
+        let committed = self
+            .durably(|| {
+                self.change("claim an automatic re-run", |_| {
+                    self.db.execute(
+                        "DELETE FROM rerun_claims WHERE claimed_at < ?1",
+                        [at.saturating_sub(super::run::CLAIM_KEPT_MS)],
+                    )?;
+                    inserted = self.db.execute(
+                        "INSERT OR IGNORE INTO rerun_claims (repository, run_id, attempt, claimed_at) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![attempt.repository, attempt.run, attempt.attempt, at],
+                    )?;
+                    Ok(())
+                })
+            })
+            .unwrap_or(false);
+        match (committed, inserted) {
+            (false, _) => super::Claim::Unstored,
+            (true, 0) => super::Claim::Taken,
+            (true, _) => super::Claim::Claimed,
+        }
+    }
+
+    fn release_rerun(&self, attempt: &super::run::ClaimKey) {
+        logged(
+            "release an automatic re-run's claim",
+            self.db.execute(
+                "DELETE FROM rerun_claims WHERE repository = ?1 AND run_id = ?2 AND attempt = ?3",
+                params![attempt.repository, attempt.run, attempt.attempt],
+            ),
+        );
     }
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without

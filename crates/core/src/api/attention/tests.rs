@@ -25,6 +25,7 @@ fn status() -> Status {
                 pools: Vec::new(),
                 paused: false,
                 queued_jobs: 0,
+                rerun_refused: None,
                 listing: None,
                 queue: crate::api::QueueShown::Listed,
             })
@@ -534,4 +535,39 @@ fn a_client_reads_items_of_kinds_subjects_fixes_and_tones_a_newer_daemon_names()
     // What this version writes, it reads back whole.
     let written = serde_json::to_string(&read).unwrap();
     assert_eq!(serde_json::from_str::<Attention>(&written).unwrap(), read);
+}
+
+/// A repository whose automatic re-runs GitHub refused is one warning, worded by core, with what clears it.
+#[test]
+fn a_refused_automatic_rerun_is_one_warning_for_its_repository() {
+    let mut status = status();
+    status.repositories[1].rerun_refused = Some(crate::api::RerunRefused {
+        run: 4182,
+        since: NOW - 30,
+        refusal: crate::api::ActionRefusal::Forbidden,
+        status: Some(403),
+        message: "GitHub refused to re-run the failed jobs of run 4182 (403): the token may lack Actions: write \
+                  (or the repo scope) on halyard/storefront, or the run has not finished. Nothing was done."
+            .to_owned(),
+    });
+    let items = attention_items(&status, &ready(Vec::new()), None, NOW);
+    let [item] = items.as_slice() else {
+        panic!("one item: {items:?}");
+    };
+    assert_eq!(item.key, "rerun-refused:halyard/storefront");
+    assert_eq!(item.tone, Tone::Warn);
+    assert!(
+        item.title.starts_with(
+            "runnerd holds the re-runs of halyard/storefront's runner faults for an hour: GitHub refused"
+        ),
+        "{}",
+        item.title
+    );
+    assert!(
+        item.fix
+            .as_ref()
+            .is_some_and(|fix| fix.line().contains("Actions: write")),
+        "{:?}",
+        item.fix
+    );
 }

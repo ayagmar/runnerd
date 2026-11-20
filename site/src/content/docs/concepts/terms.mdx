@@ -61,4 +61,4 @@ A job's wait runs from queued to started; the part that passed while runnerd was
 
 A job that leaves GitHub's queue without one of this machine's runners is recorded as `elsewhere` (the dashboard's "Not run here"), as `cancelled in queue` when its run was cancelled first, or as its conclusion, such as `skipped`. No wait, median or cost counts it. A finished job goes after `history.jobs`.
 
-A failed job reads `runner fault` when Sysbox, not its code, failed it; [Why did this job fail?](../../guides/logs/#everything-else-on-its-page) says how runnerd tells.
+A failed job reads `runner fault` when Sysbox, not its code, failed it; [Why did this job fail?](../../guides/logs/#everything-else-on-its-page) says how runnerd tells, and runnerd can [re-run its run](../../guides/cancel-rerun/#runner-faults).
