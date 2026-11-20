@@ -359,6 +359,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
                 @if let Some(workflow) = &summary.workflow { " · " (workflow) }
             }
             h1 { (summary.title().name) " " (badge(summary)) }
+            @if let Some(cause) = summary.failure_line() { p.job-cause { (format::sentence(cause)) "." } }
             // Waited, ran and the queued time are the timeline's.
             p.job-facts {
                 @if let Some(branch) = &summary.branch { code { (branch) } }

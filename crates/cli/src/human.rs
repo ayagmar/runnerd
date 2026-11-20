@@ -407,6 +407,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
         context.push(format!("attempt {}", summary.run_attempt));
     }
     let _ = writeln!(out, "{}", context.join(" · "));
+    if let Some(cause) = summary.failure_line() {
+        let _ = writeln!(out, "{}", paint.paint(tone, cause));
+    }
     if let Some(url) = &summary.url {
         let _ = writeln!(out, "{}", paint.paint(Tone::Dim, url));
     }

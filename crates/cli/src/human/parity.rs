@@ -212,6 +212,14 @@ fn a_job_states_its_outcome_steps_caps_and_build_cache_as_core_does() {
 }
 
 #[test]
+fn a_job_an_actions_download_failed_says_so_as_core_words_it() {
+    let (daemon, facts) = fixtures();
+    let shown = daemon.job(runnerd_fixtures::ACTION_ARCHIVE).unwrap();
+    let text = job(shown, NOW, PLAIN);
+    assert!(text.contains(facts.failure_line), "{text}");
+}
+
+#[test]
 fn records_and_caches_state_their_limits_as_core_does() {
     let (daemon, facts) = fixtures();
     let text = records(&daemon.records, NOW, PLAIN);

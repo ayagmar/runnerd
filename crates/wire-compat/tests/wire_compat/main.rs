@@ -314,6 +314,7 @@ documents! {
     "measure": Measure => variants(samples::measure()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
+    "failure-cause": FailureCause => variants(samples::failure_cause()),
 }
 
 /// The previous release's samples, one file per document.

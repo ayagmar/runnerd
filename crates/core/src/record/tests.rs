@@ -5,7 +5,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use super::{banner, expired, failed, listed, make_room, runner_fault, secrets_left};
+use super::{
+    banner, expired, failed, failure_cause, listed, make_room, runner_fault, secrets_left,
+};
 use crate::api::{self, RecordRemoval};
 use crate::config::{ByteSize, Records};
 use crate::testdir::TestDir;
@@ -627,4 +629,117 @@ fn only_the_step_that_failed_is_read() {
     let job = job_of(&[("cargo test", "success")]);
     let log = logged("cargo test", &[], &[signature]);
     assert!(!runner_fault(&job, &log), "no failed step");
+}
+
+/// The fixture logs of failures runnerd tells apart (`crates/fixtures/logs`), as the runner 2.338.1 writes them.
+mod causes {
+    use super::{failure_cause, step};
+    use crate::api::{self, FailureCause};
+
+    const ARCHIVE_DOWNLOAD: &str =
+        include_str!("../../../fixtures/logs/action-archive-download.log");
+    const ARCHIVE_INVALID: &str = include_str!("../../../fixtures/logs/action-archive-invalid.log");
+    const RESOLVE: &str = include_str!("../../../fixtures/logs/action-resolve.log");
+    const CHECKOUT: &str = include_str!("../../../fixtures/logs/checkout.log");
+    const RECOVERED: &str = include_str!("../../../fixtures/logs/recovered-then-tests.log");
+
+    fn lines(log: &str) -> Vec<String> {
+        log.lines().map(str::to_owned).collect()
+    }
+
+    /// A job that failed in `Set up job`, as GitHub lists its steps then.
+    fn failed_setting_up() -> api::Job {
+        let mut job = super::failed_job();
+        job.steps = vec![step(1, "Set up job", "failure")];
+        job
+    }
+
+    /// A job that set up, then ran steps named `name` that concluded as `conclusions` say.
+    fn failed_at(name: &str, conclusions: &[&str]) -> api::Job {
+        let mut job = super::failed_job();
+        job.steps = vec![step(1, "Set up job", "success")];
+        for (number, conclusion) in (2..).zip(conclusions) {
+            job.steps.push(step(number, name, conclusion));
+        }
+        job
+    }
+
+    #[test]
+    fn a_job_whose_set_up_could_not_download_or_unpack_an_action_reads_as_an_action_archive_failure()
+     {
+        for log in [ARCHIVE_DOWNLOAD, ARCHIVE_INVALID] {
+            assert_eq!(
+                failure_cause(&failed_setting_up(), &lines(log)),
+                Some(FailureCause::ActionArchive),
+                "{log}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_job_whose_set_up_could_not_resolve_an_action_reads_as_a_resolve_failure_not_an_archive_one()
+     {
+        assert_eq!(
+            failure_cause(&failed_setting_up(), &lines(RESOLVE)),
+            Some(FailureCause::ActionResolve)
+        );
+    }
+
+    #[test]
+    fn a_failed_checkout_reads_as_checkout_by_the_action_it_runs_whatever_its_name() {
+        let named = failed_at("checkout", &["failure"]);
+        assert_eq!(
+            failure_cause(&named, &lines(CHECKOUT)),
+            Some(FailureCause::Checkout)
+        );
+        let unnamed = failed_at(
+            "Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+            &["failure"],
+        );
+        assert_eq!(
+            failure_cause(&unnamed, &lines(CHECKOUT)),
+            Some(FailureCause::Checkout)
+        );
+    }
+
+    #[test]
+    fn a_download_that_recovered_on_a_retry_says_nothing_of_the_tests_that_failed_after_it() {
+        let mut job = failed_at(
+            "Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955",
+            &["success"],
+        );
+        job.steps.push(step(3, "Run ./gradlew test", "failure"));
+        assert_eq!(failure_cause(&job, &lines(RECOVERED)), None);
+        // Nor does it make a failed set-up an archive failure when the set-up failed for another reason after it.
+        let mut other = lines(RECOVERED);
+        other.truncate(
+            other
+                .iter()
+                .position(|line| line.contains("Complete job name"))
+                .unwrap(),
+        );
+        other.extend(
+            [
+                "##[group]Pull down action image 'ghcr.io/halyard/lint:1'",
+                "##[command]/usr/bin/docker pull ghcr.io/halyard/lint:1",
+                "Error response from daemon: unauthorized",
+                "##[endgroup]",
+                "##[error]Docker pull failed with exit code 1",
+            ]
+            .map(|text| format!("2026-11-17T15:46:46.0000000Z {text}")),
+        );
+        assert_eq!(failure_cause(&failed_setting_up(), &other), None);
+    }
+
+    #[test]
+    fn a_job_that_failed_with_no_cause_in_its_log_reads_as_none() {
+        // Setting up failed with nothing logged, or a test failed: no rule claims it.
+        assert_eq!(failure_cause(&failed_setting_up(), &[]), None);
+        let job = failed_at("Run ./gradlew test", &["failure"]);
+        let log = super::logged("./gradlew test", &[], &[super::ERROR]);
+        assert_eq!(failure_cause(&job, &log), None);
+        // No step failed.
+        let job = failed_at("Run actions/checkout@v7", &["success"]);
+        assert_eq!(failure_cause(&job, &lines(CHECKOUT)), None);
+    }
 }

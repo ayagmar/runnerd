@@ -508,6 +508,7 @@ mod tests {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            failure_cause: None,
             record_mark: None,
         }
     }

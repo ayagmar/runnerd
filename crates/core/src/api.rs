@@ -104,9 +104,9 @@ pub(crate) use jobs::TITLE_SOURCE_MAX;
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
-    ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource, Limits,
-    LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
+    ChartLines, FailureCause, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job,
+    JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource,
+    Limits, LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
     Swap, Timeline, Total, host_margin, job_title,
 };

@@ -64,7 +64,11 @@ CREATE TABLE jobs (
     disk_written INTEGER,
     disk_write_ios INTEGER,
     disk_dirty INTEGER,
-    disk_measure TEXT
+    disk_measure TEXT,
+    -- What its log says failed it (`record::failure_cause`): 'action-archive', 'action-resolve' or 'checkout', read
+    -- once the record is final for a job that concluded failed. NULL for every other job, and in rows from before
+    -- schema 25.
+    failure_cause TEXT
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

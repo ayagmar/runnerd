@@ -186,6 +186,7 @@ fn stub_summary(id: u64, repository: &str, name: &str) -> JobSummary {
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        failure_cause: None,
         record_mark: None,
     }
 }

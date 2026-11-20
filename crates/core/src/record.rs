@@ -357,6 +357,92 @@ pub fn runner_fault(job: &api::Job, log: &[String]) -> bool {
         .is_some_and(|section| section.output.iter().any(|line| sysbox_fault(line)))
 }
 
+/// What failed a failed job apart from its code, as its log shows it, read only where the runner reports it
+/// (actions/runner 2.338's `ActionManager`):
+///
+/// - [`api::FailureCause::ActionArchive`]: `Set up job` failed, and its last error says the runner could not
+///   download or unpack an action (`Failed to download archive`, `Can't use 'tar -xzf'`, `InvalidActionArchiveException`,
+///   a download that timed out), or comes right after the `Back off … seconds before retry.` warning of a download's
+///   last retry. A download that failed and then succeeded on a retry warns the same way but sets up the job: what
+///   fails after it is not this.
+/// - [`api::FailureCause::ActionResolve`]: `Set up job` failed, and its last error says an action could not be
+///   resolved, or comes after the runner's `Failed to resolve action download info` with no download begun since.
+/// - [`api::FailureCause::Checkout`]: the step that failed is `actions/checkout`, by the action its log's group runs,
+///   not by the step's name.
+///
+/// `None` for anything else: a job that did not fail, or whose log does not say. `log` is the stored lines.
+pub fn failure_cause(job: &api::Job, log: &[String]) -> Option<api::FailureCause> {
+    let failed = job
+        .steps
+        .iter()
+        .find(|step| step.conclusion.as_deref() == Some("failure"))?;
+    if failed.name == SET_UP {
+        return setup_failure(&setup_lines(log));
+    }
+    let sections = sections(log);
+    let section = section_of(job, &sections, failed)?;
+    let action = section.title.to_ascii_lowercase();
+    action
+        .strip_prefix("actions/checkout@")
+        .is_some_and(|reference| !reference.is_empty() && !reference.contains(' '))
+        .then_some(api::FailureCause::Checkout)
+}
+
+/// The name GitHub gives the step a job sets up in: the runner prepares its actions there.
+const SET_UP: &str = "Set up job";
+
+/// What the runner prints in `Set up job` before an action's download is retried.
+const BACK_OFF: &str = "##[warning]Back off ";
+
+/// What the runner prints in `Set up job` when GitHub did not resolve an action, before it retries.
+const RESOLVE_FAILED: &str = "Failed to resolve action download info";
+
+/// What the runner prints in `Set up job` as it begins an action's download.
+const DOWNLOADING: &str = "Download action repository '";
+
+/// The plain lines a log has before its first step's group: what `Set up job` printed.
+fn setup_lines(log: &[String]) -> Vec<String> {
+    log.iter()
+        .map(|line| plain(line))
+        .take_while(|text| !text.starts_with("##[group]Run ") && text != "Post job cleanup.")
+        .collect()
+}
+
+/// The cause of a failed `Set up job`, from what it printed (`failure_cause`).
+fn setup_failure(lines: &[String]) -> Option<api::FailureCause> {
+    let at = lines
+        .iter()
+        .rposition(|text| text.starts_with("##[error]"))?;
+    let error = &lines[at];
+    let archive = [
+        "Failed to download archive",
+        "Failed to download action",
+        "InvalidActionArchiveException",
+        "Can't use 'tar -xzf'",
+        "download has timed out",
+    ];
+    if archive.iter().any(|sign| error.contains(sign)) {
+        return Some(api::FailureCause::ActionArchive);
+    }
+    if error.contains("resolve action") {
+        return Some(api::FailureCause::ActionResolve);
+    }
+    let before = lines[..at]
+        .iter()
+        .rev()
+        .find(|text| !text.trim().is_empty());
+    if before.is_some_and(|text| text.starts_with(BACK_OFF)) {
+        return Some(api::FailureCause::ActionArchive);
+    }
+    let last_mark = lines[..at]
+        .iter()
+        .rev()
+        .find(|text| text.starts_with(RESOLVE_FAILED) || text.starts_with(DOWNLOADING));
+    last_mark
+        .is_some_and(|text| text.starts_with(RESOLVE_FAILED))
+        .then_some(api::FailureCause::ActionResolve)
+}
+
 /// What a call's name is in a line of Sysbox's trouble: the words of `mount`'s family and `openat2`.
 const FAULT_CALLS: [&str; 6] = [
     "mount", "umount", "umount2", "unmount", "mounting", "openat2",

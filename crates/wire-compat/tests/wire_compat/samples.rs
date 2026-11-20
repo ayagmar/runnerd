@@ -16,24 +16,24 @@ use runnerd_core::api::{
     Busy, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, Color, CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission,
     CpuBudget, Dashboard, Delivery, Digest, Doctor, DoctorQuery, DoctorState, ErrorResponse, Event,
-    EventEnvelope, EventQuery, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause, Holder,
-    HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples,
-    HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobAction, JobActions,
-    JobComparison, JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort,
-    JobState, JobSummary, Lane, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence,
-    LogGroup, LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary,
-    LongWait, MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest,
-    NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period,
-    PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob,
-    Record, RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records,
-    RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize,
-    RevertCause, Run, RunLink, RunnerFailure, RunnerSpan, RunnerStatus, RunningJob, Sample,
-    SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
-    ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused,
-    SizingRevert, Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started, Starts, Stats,
-    StatsQuery, StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch, Stopping,
-    StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View,
-    WaitSpread, Waiting, WeekWaits,
+    EventEnvelope, EventQuery, FailureCause, FailureSummary, FigureDelta, FigureKind, Fix,
+    HoldCause, Holder, HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery,
+    HostSamples, HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobAction,
+    JobActions, JobComparison, JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner,
+    JobSizing, JobSort, JobState, JobSummary, Lane, LineKind, LineRange, ListingFailure,
+    ListingProblem, LogEvidence, LogGroup, LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch,
+    LogSearchQuery, LogSummary, LongWait, MarkKind, MemoryBound, MemoryHold, Notification,
+    NotifyEvent, NotifyTest, NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused,
+    Peaks, Period, PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing,
+    ProfileStatus, QueuedJob, Record, RecordFilter, RecordLimits, RecordMark, RecordNote,
+    RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus,
+    RepositoryWaits, Resize, RevertCause, Run, RunLink, RunnerFailure, RunnerSpan, RunnerStatus,
+    RunningJob, Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory,
+    ShellQuery, ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery,
+    SizingRefused, SizingRevert, Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started,
+    Starts, Stats, StatsQuery, StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch,
+    Stopping, StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable,
+    Usd, View, WaitSpread, Waiting, WeekWaits,
 };
 use runnerd_core::api::{
     Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
@@ -789,6 +789,7 @@ pub(crate) fn job_summary() -> JobSummary {
             truncated: false,
         },
         runner_fault: true,
+        failure_cause: Some(FailureCause::ActionArchive),
         record_mark: Some(RecordMark::Kept),
     }
 }
@@ -2018,6 +2019,14 @@ pub(crate) fn job_list() -> JobList {
 
 pub(crate) fn record_mark() -> Vec<RecordMark> {
     vec![RecordMark::Kept, RecordMark::Removed, RecordMark::Skipped]
+}
+
+pub(crate) fn failure_cause() -> Vec<FailureCause> {
+    vec![
+        FailureCause::ActionArchive,
+        FailureCause::ActionResolve,
+        FailureCause::Checkout,
+    ]
 }
 
 pub(crate) fn record_filter() -> Vec<RecordFilter> {

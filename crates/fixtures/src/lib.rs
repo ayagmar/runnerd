@@ -1,7 +1,7 @@
 //! Daemon data every client's parity test draws, and the facts `runnerd-core` computes from it, which the dashboard,
 //! the TUI and `runnerctl` must each state as core words them (ADR 0062). The data is chosen where clients drifted
 //! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job, one cancelled before any
-//! runner took it, and one its runner failed (`runner fault`); an adopted job without a name;
+//! runner took it, one its runner failed (`runner fault`), and one an action's download failed; an adopted job without a name;
 //! a step without an end time and a cancelled one with times; a job no pool serves; a measured budget of which the
 //! host's memory leaves less free than `MemoryMax` does, and a job waiting for the host; warm and starting runners
 //! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
@@ -52,6 +52,9 @@ pub const NEVER_STARTED: u64 = 9207;
 pub const UNNAMED: u64 = 9206;
 /// A job that concluded `failure` because its runner's Sysbox lost the seccomp listener, not because of its code.
 pub const RUNNER_FAULT: u64 = 9208;
+/// A job whose `Set up job` failed because the runner could not download an action
+/// (`logs/action-archive-download.log`, the log core reads that cause in).
+pub const ACTION_ARCHIVE: u64 = 9199;
 /// A queued job asking for a label no pool of its repository has.
 pub const NO_POOL: u64 = 9301;
 /// A queued job waiting for the host's memory, which leaves less than `MemoryMax` does.
@@ -348,6 +351,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        failure_cause: None,
         record_mark: None,
     }
 }
@@ -443,6 +447,26 @@ fn written(bytes: u64, dirty: Option<u64>, measure: api::Measure) -> api::DiskWr
     }
 }
 
+/// [`ACTION_ARCHIVE`]: its `Set up job` failed, the oldest of the finished jobs.
+fn action_archive() -> Job {
+    let mut action_archive = ran(
+        summary(
+            ACTION_ARCHIVE,
+            STOREFRONT,
+            JobState::Completed,
+            Some("failure"),
+        ),
+        13_000,
+        Some(12_940),
+    );
+    "lint".clone_into(&mut action_archive.name);
+    action_archive.failure_cause = Some(api::FailureCause::ActionArchive);
+    Job {
+        steps: vec![step(1, "Set up job", Some("failure"), 13_000, Some(12_940))],
+        ..job(action_archive)
+    }
+}
+
 fn jobs() -> Vec<Job> {
     let [startup_failure, never_started, elsewhere] = not_run_here();
     let mut running = ran(summary(RUNNING, LEDGER, JobState::Running, None), 240, None);
@@ -516,11 +540,6 @@ fn jobs() -> Vec<Job> {
         refused: 3,
         writer: true,
     };
-    let lost = ran(
-        summary(LOST, LEDGER, JobState::Lost, None),
-        10_000,
-        Some(9600),
-    );
     let mut succeeded = ran(
         summary(9200, LEDGER, JobState::Completed, Some("success")),
         12_000,
@@ -550,8 +569,13 @@ fn jobs() -> Vec<Job> {
         job(startup_failure),
         job(never_started),
         job(elsewhere),
-        job(lost),
+        job(ran(
+            summary(LOST, LEDGER, JobState::Lost, None),
+            10_000,
+            Some(9600),
+        )),
         job(succeeded),
+        action_archive(),
     ]
 }
 
@@ -1279,6 +1303,8 @@ pub struct Facts {
     pub stopping: &'static str,
     /// Why no runner starts while GitHub's rate limit is used up.
     pub github: &'static str,
+    /// What failed [`ACTION_ARCHIVE`], as its page says under its outcome.
+    pub failure_line: &'static str,
 }
 
 fn row(job: &JobSummary) -> JobRow {
@@ -1412,6 +1438,10 @@ pub fn facts(daemon: &Daemon) -> Facts {
         savings_30_days: daemon.savings.last_30_days.headline(),
         stopping,
         github,
+        failure_line: daemon
+            .job(ACTION_ARCHIVE)
+            .and_then(|job| job.summary.failure_line())
+            .expect("an action archive's failure"),
     }
 }
 

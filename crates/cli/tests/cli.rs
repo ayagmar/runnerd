@@ -164,6 +164,7 @@ fn job(state: JobState) -> Job {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            failure_cause: None,
             record_mark: None,
         },
         steps: Vec::new(),

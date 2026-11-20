@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use super::{Job, JobState, JobSummary, Sample, SampleSeries, Step, Timeline};
+use super::{FailureCause, Job, JobState, JobSummary, Sample, SampleSeries, Step, Timeline};
 use crate::api::{QueuedJob, Record};
 
 /// What kind of outcome a job's or a step's is, for each client to colour as it colours that meaning.
@@ -58,6 +58,33 @@ impl Outcome {
     }
 }
 
+impl FailureCause {
+    /// Its word, as a client with little room writes it: `action download`, `action resolution` or `checkout`.
+    /// `None` for a cause this build does not know.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            FailureCause::ActionArchive => Some("action download"),
+            FailureCause::ActionResolve => Some("action resolution"),
+            FailureCause::Checkout => Some("checkout"),
+            FailureCause::Unknown => None,
+        }
+    }
+
+    /// What it means, in a line. `None` for a cause this build does not know.
+    pub fn line(self) -> Option<&'static str> {
+        match self {
+            FailureCause::ActionArchive => {
+                Some("the runner could not download or unpack an action while it set up the job")
+            }
+            FailureCause::ActionResolve => {
+                Some("the runner could not resolve an action with GitHub while it set up the job")
+            }
+            FailureCause::Checkout => Some("actions/checkout could not fetch the repository"),
+            FailureCause::Unknown => None,
+        }
+    }
+}
+
 /// The conclusions that count as a failure, as `GET /v1/stats` and the insights count them.
 fn failed_conclusion(conclusion: &str) -> bool {
     matches!(conclusion, "failure" | "timed_out")
@@ -85,6 +112,15 @@ impl JobSummary {
             self.timeline.started_at.is_some(),
             self.runner_fault,
         )
+    }
+
+    /// What its log says failed it, as every client writes it under its outcome: `the runner could not download or
+    /// unpack an action while it set up the job`. `None` for a job that did not fail, and for one whose log does not
+    /// say (`failure_cause`).
+    pub fn failure_line(&self) -> Option<&'static str> {
+        self.failure_cause
+            .filter(|_| self.is_failure())
+            .and_then(FailureCause::line)
     }
 
     /// Seconds it waited for a runner: until it started, or until `now` while it may still start. `None` for a job

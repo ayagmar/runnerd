@@ -1953,3 +1953,31 @@ async fn insights_read_the_host_s_readings_with_its_credit_from_the_budget_s_eve
         "the budget without a host reading is left out; the mirror alone, or with a seed and a shell, is no runner"
     );
 }
+
+#[tokio::test]
+async fn a_failed_job_keeps_what_its_log_says_failed_it_once_it_closes() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let log: Vec<&str> = include_str!("../../../fixtures/logs/action-archive-download.log")
+        .lines()
+        .collect();
+    finished_with_log(&store, 1, "failure", &[("Set up job", "failure")], &log).await;
+    // The same log of a job that was cancelled says nothing of why it failed: it did not.
+    finished_with_log(&store, 2, "cancelled", &[("Set up job", "cancelled")], &log).await;
+    store.flush().await;
+    let cause = |id| {
+        let store = store.clone();
+        async move {
+            let job = store.job(id).await.unwrap().unwrap().summary;
+            (job.failure_cause, job.failure_line())
+        }
+    };
+    assert_eq!(
+        cause(1).await,
+        (
+            Some(api::FailureCause::ActionArchive),
+            api::FailureCause::ActionArchive.line()
+        )
+    );
+    assert_eq!(cause(2).await, (None, None));
+}

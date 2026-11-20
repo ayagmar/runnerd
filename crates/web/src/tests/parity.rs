@@ -191,8 +191,8 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         );
         assert!(html.contains(&reason), "{reason}");
     }
-    // The latest eight jobs, the two running ones among them: all but the oldest three finished ones.
-    let latest = &facts.rows[..facts.rows.len() - 3];
+    // The latest eight jobs, the two running ones among them: all but the oldest four finished ones.
+    let latest = &facts.rows[..facts.rows.len() - 4];
     assert_rows(&html, latest, false);
 }
 
@@ -830,4 +830,18 @@ async fn with_job_actions_off_a_job_says_why_and_offers_neither() {
         !html.contains("/cancel')") && !html.contains("/rerun"),
         "{html}"
     );
+}
+
+#[tokio::test]
+async fn a_job_an_actions_download_failed_says_so_as_core_words_it() {
+    let (dashboard, cookie, _, facts) = dashboard().await;
+    let html = dashboard
+        .page(
+            &cookie,
+            &format!("/jobs/{}", runnerd_fixtures::ACTION_ARCHIVE),
+        )
+        .await
+        .body;
+    let line = sentence(facts.failure_line);
+    assert!(text(&html).contains(&line), "{line}");
 }

@@ -2153,3 +2153,20 @@ fn what_the_disk_figures_leave_out_reads_dim_under_them_as_core_words_it() {
         }
     }
 }
+
+#[test]
+fn a_job_an_actions_download_failed_says_so_as_core_words_it() {
+    let daemon = daemon();
+    let facts = facts(&daemon);
+    let mut app = app(&daemon);
+    open(
+        &mut app,
+        daemon.job(runnerd_fixtures::ACTION_ARCHIVE).unwrap(),
+    );
+    let (rows, _) = frame_of(&app, 200, 60);
+    assert!(
+        rows.iter().any(|row| row.contains(facts.failure_line)),
+        "{}",
+        rows.join("\n")
+    );
+}

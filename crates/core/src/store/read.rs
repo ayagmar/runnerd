@@ -65,7 +65,7 @@ const SUMMARY: &str = concat!(
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
      j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault, ",
     record_mark!(),
-    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure",
+    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause",
     " FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
 );
 
@@ -176,6 +176,25 @@ fn record_mark(name: &str) -> api::RecordMark {
     }
 }
 
+fn failure_cause(word: &str) -> api::FailureCause {
+    match word {
+        "action-archive" => api::FailureCause::ActionArchive,
+        "action-resolve" => api::FailureCause::ActionResolve,
+        "checkout" => api::FailureCause::Checkout,
+        _ => api::FailureCause::Unknown,
+    }
+}
+
+/// How the history stores a failure's cause: as the API names it.
+pub(super) fn cause_word(cause: api::FailureCause) -> Option<&'static str> {
+    match cause {
+        api::FailureCause::ActionArchive => Some("action-archive"),
+        api::FailureCause::ActionResolve => Some("action-resolve"),
+        api::FailureCause::Checkout => Some("checkout"),
+        api::FailureCause::Unknown => None,
+    }
+}
+
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
     let labels: String = row.get(8)?;
     let runner: Option<String> = row.get(11)?;
@@ -242,6 +261,10 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             truncated: row.get(29)?,
         },
         runner_fault: row.get(44)?,
+        failure_cause: row
+            .get::<_, Option<String>>(50)?
+            .as_deref()
+            .map(failure_cause),
         record_mark: row
             .get::<_, Option<String>>(45)?
             .as_deref()
@@ -387,7 +410,7 @@ fn listed_summary(db: &Connection, id: u64) -> rusqlite::Result<Option<(api::Job
     );
     let Some((summary, cut)) = db
         .query_row(&format!("SELECT {select} WHERE j.id = ?1"), [id], |row| {
-            Ok((summary_from(row)?, row.get::<_, bool>(50)?))
+            Ok((summary_from(row)?, row.get::<_, bool>(51)?))
         })
         .optional()?
     else {
