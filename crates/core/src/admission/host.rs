@@ -108,6 +108,15 @@ impl Remembered {
     pub fn was_stalled(self) -> bool {
         self.band.was_stalled()
     }
+
+    /// The same slice under the plain margin.
+    #[must_use]
+    pub fn plain(self) -> Self {
+        Self {
+            band: HostBand::Plain,
+            ..self
+        }
+    }
 }
 
 #[cfg(test)]

@@ -79,7 +79,8 @@ flowchart TB
   replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
-  aggregate count of what runs, which the engine and a replay by `admission::trace` both call
+  aggregate count of what runs, which the engine and a replay by `admission::trace` both call, each fitting a start by
+  the room the count leaves before it and counting a start as a runner with no job or sample yet
   ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md),
   [ADR 0130](docs/adr/0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md)); its growth
   count's brake is `admission::growth`, a leaf only its own methods write; `admission::recent` reads
@@ -234,7 +235,8 @@ queued → slot → container → removed
    start, counting the largest credit the pooled count could reach, and whose cap leaves the owner its room even if it
    never ends; or one of another profile that usually runs at most 2 minutes, ends before any older job could start, and
    finds the owner's room not there even with what passed given back, within the same caps, by run times read within
-   the minute. Both read the host by its plain margin. A job the barrier would let pass that does not fit says what it
+   the minute. Both read the host by its plain margin, counted again as that margin counts it (`Budget::plain`), as is
+   the band's read of its waiters. A job the barrier would let pass that does not fit says what it
    lacks, so the host's band reads it as a waiter, unless it lacks CPU too. `plan` names each pool's held job and the engine keeps its wait, from the
    plans of ticks and passes only; the high-water mark and a host stall suspend the barrier
    ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md),

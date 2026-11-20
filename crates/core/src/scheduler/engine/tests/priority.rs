@@ -155,11 +155,16 @@ impl Fixture {
     /// The host's memory read now: 32G, whose 2G margin grows to 3G while the host is short, with `room` of it for the
     /// slice and what is available.
     fn host(&self, room: u64) {
+        self.host_with(room, 0);
+    }
+
+    /// A host reading with `room` available while the slice's runners hold `slice`.
+    fn host_with(&self, room: u64, slice: u64) {
         self.handle.store.host_memory(api::HostMemory {
             at: crate::time::now_ms() / 1000,
             total: 32 * G,
             available: room,
-            slice: 0,
+            slice,
             some: Some(api::Pressure::default()),
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
@@ -1343,5 +1348,84 @@ async fn under_caps_a_history_changes_no_reservation() {
         fixture.engine.cpu_in_use(),
         1000,
         "the runner's whole 1 CPU"
+    );
+}
+
+/// Under the growth count the host's credit is bounded by the margin that stands, so the plain margin leaves more
+/// room than the larger one by more than the margins differ. Four settled small runners have 3G of headroom each, job
+/// 11 passed the 8G owner and takes 3.5G, and 13G is available: the larger margin's count leaves 2.5G, the plain
+/// margin's 4.5G. With job 11 given back the owner's 8G is there by the plain margin, so job 12 does not pass, and the
+/// band stays where it is. Read by the larger count plus the margins' difference, 7G would let job 12 pass as a host
+/// waiter, the band would drop for it, the plain margin's own count would then shut the pass, and the band would rise
+/// again, plan after plan, with nothing started (ADR 0151).
+#[tokio::test]
+async fn a_pass_moves_the_band_only_by_the_plain_margins_own_count() {
+    let config = big_and_small()
+        .replace("admission = \"caps\"", "admission = \"measured\"")
+        .replace("memory = \"1G\"", "memory = \"3584M\"")
+        .replace("slots = 4", "slots = 7");
+    let mut fixture = Fixture::with(&config, 64 * G).await;
+    fixture.ran("quick", 200, 3, 2).await;
+    let reading = |fixture: &Fixture, available: u64, slice: u64| {
+        admission::runners_use(&fixture.github, &fixture.handle.store, G / 2);
+        admission::slice_at(&fixture.handle.store, G);
+        fixture.host_with(available, slice);
+    };
+    reading(&fixture, 30 * G, 0);
+    for slot in 1..=4 {
+        let capture = format!("@@job {slot} {slot}\n");
+        fixture
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .slot_captures
+            .insert(slot, capture);
+    }
+    fixture.queue((1..=4).map(small).collect());
+    fixture.engine.tick(Shutdown::No).await;
+    for id in 1..=4 {
+        until_state(&fixture.handle, id, JobState::Running).await;
+    }
+    fixture.docker.0.lock().unwrap().slot_captures.clear();
+    fixture.all_busy();
+    fixture.queue(Vec::new());
+    admission::first_minute_passes(&mut fixture.engine);
+    fixture
+        .engine
+        .measured
+        .age_growth(api::GROWTH_WINDOW + Duration::from_secs(1));
+    reading(&fixture, 20 * G, 0);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.age();
+    reading(&fixture, 19 * G, 0);
+    fixture.queue(vec![big(10), named(11, "quick")]);
+    fixture.engine.forget_predictor();
+    fixture.engine.tick(Shutdown::No).await;
+    let (plan, _) = fixture.engine.plan();
+    assert_eq!(
+        plan.waiting.get(&11),
+        Some(&api::Waiting::RunnerStarting),
+        "job 11 passed the owner"
+    );
+    let mut bands = Vec::new();
+    for _ in 0..4 {
+        fixture.all_busy();
+        admission::first_minute_passes(&mut fixture.engine);
+        reading(&fixture, 13 * G, 8 * G);
+        fixture.queue(vec![big(10), named(11, "quick"), named(12, "quick")]);
+        fixture.engine.tick(Shutdown::No).await;
+        bands.push(fixture.engine.host_is_short());
+        let (plan, _) = fixture.engine.plan();
+        assert_eq!(
+            plan.waiting.get(&12),
+            Some(&api::Waiting::BehindMemory { job: 10 })
+        );
+    }
+    assert_eq!(
+        bands, [true; 4],
+        "the larger margin stands while nothing starts"
     );
 }

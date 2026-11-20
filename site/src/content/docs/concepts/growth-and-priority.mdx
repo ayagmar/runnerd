@@ -49,7 +49,7 @@ A younger job still starts behind that job if all of this holds:
 
 A job of another profile whose queued jobs all usually run 2 minutes or less starts behind it too, even when the running jobs' usual run times say nothing of when the room comes, as when one is past its usual end. It needs a free slot, fits the budgets left, and stays within the same caps. It must usually end before any older job that lacks room could start, and it doesn't start once the waiting job's room is there but for what started behind the barrier, or while the job history can't be read.
 
-A job that could start behind the barrier but doesn't fit says what it lacks, such as the host's memory, rather than `Behind <job>`. Both rules read the host's room by its plain margin, so a job goes ahead under the larger one only if it would under the plain one too.
+A job that could start behind the barrier but doesn't fit says what it lacks, such as the host's memory, rather than `Behind <job>`. Both rules read the host's room by its plain margin, counting what runs as that margin would, so a job goes ahead under the larger one only if it would under the plain one too, and the margin doesn't swing back and forth over it.
 
 So if every job takes exactly its usual run time, the waiting job starts when it would with nothing behind it, or at most 2 minutes later for a short job that went ahead. Usual run times err long, so a job that ends early can bring the room while a job behind the barrier still runs, and the waiting job then waits for that one too. It always fits once the runners from before that moment and any older jobs' have ended, even if a job behind it hangs.
 

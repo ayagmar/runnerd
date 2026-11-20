@@ -38,8 +38,8 @@ of these hold:
 2. Q is not O. The owner's own slots stay 0097's, which leaves it one.
 3. U(P), the largest usual run time of P's queued jobs, is known and at most `SHORT_RUN`, 2 minutes. If any of them has
    no estimate, P's jobs do not pass, as under 0097.
-4. U(P) ends before any job older than the owner that a drain serves could start, by the running runners' usual ends
-   as 0097 reads them. If such a job could start now, or no end brings its room, nothing passes as a short job. A short
+4. U(P) ends before any job older than the owner that a drain by the plain margin serves could start, by the running
+   runners' usual ends as 0097 reads them. If such a job could start now, or no end brings its room, nothing passes as a short job. A short
    job that outlasted an older job's wait would delay it, its end, and the next older job's start after it, and so on
    to the owner.
 5. The owner's room has not come even with what passed a barrier given back: those runners' takes added to the budgets
@@ -54,7 +54,13 @@ of these hold:
 
 Rules 4 and 5, and 0097's own times, read the host's room by the plain margin while the larger one stands. Under the
 larger margin the room comes later, so this lets less pass, and a job passes under one margin exactly when it passes
-under the other: its reason does not change with the band it moves.
+under the other: its reason does not change with the band it moves. The plain margin's room is its own count, not the
+larger one's plus the margins' difference: the growth count bounds the host's credit by what the host has past the
+margin in force, so under the larger margin the credit is smaller too, and the room differs by more than the margins
+do. The plan counts the runners as the plain margin would beside the count in force (`Budget::plain`), and counts both
+again after each start and stop it makes. The band reads whether a waiter fits the plain margin by the same count. An
+older job's start in rule 4 is read by the plain margin, so rule 4 counts every older job a drain by the plain margin
+serves; rule 6's allowance keeps room past the owner only for those the drain in force serves, as before.
 
 `priority::Backfill` stays the one rule; `plan` and `admission::simulate` both call it, and it keeps nothing between
 plans. A reload that changes a profile, its caps or a job's needs is read again by the next plan, and a restart leaves
@@ -115,9 +121,21 @@ out; a restart turns what passed into runners the next barrier waits out, which 
   lowers them, and one of a removed profile still counts.
 - `a_job_passes_by_the_plain_margin_whichever_stands` and `a_job_short_of_cpu_too_is_no_waiter_the_plain_margin_starts`:
   the two ways a job's reason followed the band it moved.
+- Through the engine, `a_pass_moves_the_band_only_by_the_plain_margins_own_count`: four settled runners under the growth
+  count, a 3.5G runner that passed an 8G owner, and 13G available. The larger margin's count leaves 2.5G, the plain
+  margin's 4.5G, as the host's credit is 1G larger by it. Read as the larger count plus the margins' difference, the
+  next short job passes as a host waiter, the band drops for it, the plain count then shuts the pass, and the band
+  rises again: four plans alternate with nothing started. By the plain count the larger margin stands through all four.
+- `a_short_job_waits_for_an_older_job_only_the_plain_margin_serves`: an older 17G job that only the plain margin's 18G
+  drain serves, not the larger margin's 16G, starts in a second by the plain margin; a short job waits for it.
 - `a_replay_reads_no_usual_end_of_a_runner_whose_job_has_no_name_yet`: the replay gives a running job a usual end only
   once the daemon could name it, and none to a runner started at that moment, as the daemon's plan does; before, it let
   a job pass by 0097, and so counted it as a host waiter, where the daemon held it behind the barrier.
+- `the_replay_starts_what_the_daemons_plan_starts_under_the_growth_count`: eight 3.5G jobs under the growth count, through
+  `plan` with its recount and through the replay. Both fit a start by the room the count leaves before it, and count a
+  runner that starts as one with no job or sample yet. In 13G both start three; the replay's old fit, by the count with
+  the start in it, started all eight. In 15G both start eight; reading a start's first sample at once, as the replay did,
+  started five.
 - Through the engine, `a_short_job_passes_only_by_run_times_read_within_the_minute`: with the history unreadable and the
   last read two minutes old, a job that passes as short when the read succeeds waits behind the barrier.
 - Through the engine: a short job behind a barrier that fits only the plain margin lets the larger margin go and starts at
@@ -139,32 +157,40 @@ The existing generated worlds run in 150 s to 600 s ticks, where no job is short
 
 ## Replay
 
-`runnerd simulate --causal --count growth` over a copy of the history from 2026-11-12 to 2026-11-20, with the slice at
-46G and 32 CPUs, before and after this change. The figure is job-hours waited; "shift" queues every job that much
-earlier, packing a busier day into the same host. The replay's own error against what was recorded is in brackets, and
-the mean waits are fretboard's.
+`runnerd simulate --causal --count growth` over a read-only copy of the history from 2026-11-12 to 2026-11-20, with the
+slice at 46G and 32 CPUs. "Shift" queues every job that much earlier, packing a busier day into the same host.
 
-| Window | Before | After | light | jvm | jvm-heavy |
-| --- | --- | --- | --- | --- | --- |
-| 12 h (-30%) | 32.0 | 31.6 | 26 s to 24 s | 5m39 to 5m35 | 3m42 to 3m47 |
-| 24 h (-33%) | 37.3 | 36.9 | 27 s to 26 s | 4m42 to 4m40 | 3m11 to 3m15 |
-| 48 h (-50%) | 49.9 | 49.5 | 23 s to 22 s | 3m28 to 3m26 | 3m10 to 3m12 |
-| 60 h (-52%) | 87.2 | 87.7 | 26 s to 28 s | 4m44 to 4m29 | 4m22 to 4m09 |
-| 72 h (-51%) | 96.9 | 97.4 | 25 s to 27 s | 4m00 to 3m48 | 3m39 to 3m29 |
-| 24 h, 30 min shift (+1%) | 54.8 | 55.2 | 29 s to 26 s | 6m11 to 7m26 | 4m20 to 4m11 |
-| 24 h, 1 h shift (+6%) | 59.1 | 58.0 | 40 s to 29 s | 7m03 to 8m19 | 4m15 to 4m42 |
-| 24 h, 4 h shift (+169%) | 147.3 | 146.4 | 1m52 to 1m18 | 11m43 to 13m35 | 9m20 to 10m56 |
-| 60 h, 30 min shift (-23%) | 126.8 | 141.0 | 38 s to 45 s | 5m40 to 6m26 | 5m46 to 5m39 |
-| 60 h, 1 h shift (-13%) | 158.0 | 160.4 | 1m00 to 58 s | 6m45 to 7m28 | 6m02 to 6m34 |
-| 60 h, 2 h shift (-43%) | 104.3 | 105.3 | 34 s to 37 s | 5m15 to 5m04 | 4m52 to 4m49 |
+This change also makes the replay fit a start as the daemon's plan does, by the room before it, and count a runner
+that starts as one with no job or sample yet. That alone moves its figures: the 60 h window waits 87.2 job-hours by the
+previous replay and 100.7 by this one with short passes off. So "off" and "on" below are this replay with the short pass
+and the band's new waiters switched off, and on. "Run" is the mean time a workflow run takes from its first job's
+arrival to its last job's end (`RUN MEAN`); "wait" is job-hours waited (`WAIT H`).
 
-Where the replay is close to the 12 to 48 hours that were recorded, every pool waits about the same or a little less.
-Packed tighter, light jobs gain most and jvm pays, up to two minutes a job in the 4 h shift, which is the bound met over
-and over. Over 60 hours the change is a wash in three windows and costs 14 job-hours in the 60 h, 30 min shift, where
-light jobs wait longer too; the replay does not say which passes cost that. Earlier variants, replayed on a copy that
-lacked the host's readings after 2026-11-19 11:00, did no better: letting short jobs pass without the reason change
-waited longer over 60 hours, as the band held them anyway, and counting the credit in rule 5 or a 60 s `SHORT_RUN` was
-mixed.
+| Window | Run off | Run on | Wait off | Wait on | Passes off | Passes on |
+| --- | --- | --- | --- | --- | --- | --- |
+| 12 h | 2m34 | 2m28 | 32.8 | 32.1 | 3 | 7 |
+| 24 h | 2m22 | 2m18 | 38.0 | 37.3 | 3 | 7 |
+| 48 h | 2m22 | 2m20 | 50.8 | 50.0 | 4 | 11 |
+| 60 h | 3m42 | 3m35 | 100.7 | 97.5 | 12 | 29 |
+| 72 h | 3m37 | 3m31 | 110.2 | 107.4 | 12 | 41 |
+| 24 h, 30 min shift | 2m58 | 2m47 | 58.3 | 54.7 | 8 | 109 |
+| 24 h, 1 h shift | 2m58 | 2m52 | 59.2 | 56.0 | 6 | 102 |
+| 24 h, 4 h shift | 7m11 | 5m35 | 178.5 | 150.2 | 23 | 217 |
+| 60 h, 30 min shift | 4m09 | 4m04 | 136.7 | 146.4 | 14 | 177 |
+| 60 h, 1 h shift | 4m15 | 4m07 | 139.4 | 138.1 | 34 | 241 |
+| 60 h, 2 h shift | 3m51 | 3m54 | 109.7 | 118.6 | 39 | 84 |
+
+The windows as recorded, 12 to 72 hours, all gain a little: runs end 2 to 7 s sooner on average and jobs wait 1.6 to
+3.2% less. In the shifted 24 h windows the gain grows with the packing, most in the 4 h shift. Two shifted 60 h windows
+wait more job-hours, and the 2 h shift's runs take 3 s longer on average.
+
+The 60 h, 30 min shift was isolated. With only the band's new waiters off it waits 144.9 job-hours; with only short
+passes off, 137.7. Short passes cause the difference, not the band. The first divergence is in the window's first
+minutes: three light jobs pass and the jvm-heavy owner starts 7 s later than it would. Across the whole window jobs start
+0.7 job-hours later in total, and every profile's runs end sooner. The extra wait comes from causal arrivals: a run's
+later jobs arrive as its earlier ones end, so a light job that ends sooner brings the next job's arrival forward, and
+that job then waits behind the same queue it would have met anyway. The 2 h shift is the same: jobs start 3.9
+job-hours sooner in total, yet wait 8.9 job-hours more.
 
 ## Consequences
 
@@ -173,5 +199,6 @@ to start, which under a short host is most of the time it stands. While the hist
 reads the runners of profiles a reload removed, and each runner's caps from its container, for every barrier, not only
 for short passes; a job that waits for the host but lacks CPU too no longer lets the larger margin go, behind a barrier
 or not. An owner can start up to a short run later than under a strict barrier, where 0097 promised
-none. A job behind a barrier that the barrier would let pass now says what it lacks, so `host_waited` and the host
+none. The replay fits a start by the room before it and counts a start as having no sample yet, as the daemon does, so
+its figures for every policy move. A job behind a barrier that the barrier would let pass now says what it lacks, so `host_waited` and the host
 insight count more, and less is said to wait behind a barrier.

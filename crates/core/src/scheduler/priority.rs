@@ -206,11 +206,9 @@ pub(crate) struct Older<'plan> {
 /// What a plan knows when a barrier goes up.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Around<'plan> {
-    /// The budgets left.
+    /// The budgets left by the plain host margin, counted by it (`Budget::plain`): which jobs pass then does not
+    /// depend on the band they move (ADR 0151). Under the larger margin the room comes later, so this lets less pass.
     pub(crate) left: Left,
-    /// How much less the larger host margin leaves than the plain one, 0 while the plain one stands (ADR 0102). A
-    /// backfill reads the room by the plain margin, so which jobs it lets pass does not move the band back.
-    pub(crate) host_larger_by: u64,
     /// How fresh the usual run times are.
     pub(crate) run_times: RunTimes,
     /// How much more memory the pooled count could leave with no runner ending (`Budget::credit_room`).
@@ -306,7 +304,6 @@ impl<'plan> Backfill<'plan> {
     ) -> Option<Backfill<'plan>> {
         let Around {
             mut left,
-            host_larger_by,
             run_times,
             credit_room,
             host_credit_room,
@@ -314,11 +311,6 @@ impl<'plan> Backfill<'plan> {
             runners,
             older,
         } = around;
-        // By the plain margin: under the larger one the room comes later, so this lets less pass, and a job that passes
-        // under one passes under the other.
-        left.host = left
-            .host
-            .map(|host| host.saturating_add(signed(host_larger_by)));
         // Room that is there now but for what passed: the owner takes it once that ends, so a short job must not take it
         // first. A credit that may come is not there yet; the next plan reads it. An older job's room needs no such
         // check: a short job ends before any of them could start.
@@ -360,9 +352,15 @@ impl<'plan> Backfill<'plan> {
         let served = older.iter().filter(|job| spare.fits(job.memory, job.cpu));
         // A short job that delays an older one delays what that one gives back, and the next older one's start after
         // it: so it ends before any of them could start, as 0097 asks. One whose start no end brings may start at any
-        // moment.
-        let short = served
-            .clone()
+        // moment. Its start is read by the plain margin, so any older job a drain by the plain margin serves counts,
+        // though only those the drain in force serves keep room past the owner.
+        let plain_drain = Left {
+            host: drained.host_plain.or(drained.host),
+            ..spare
+        };
+        let short = older
+            .iter()
+            .filter(|job| plain_drain.fits(job.memory, job.cpu))
             .map(|job| ending.start_of(job, left).unwrap_or(Duration::ZERO))
             .fold(SHORT_RUN, Duration::min);
         let short = (run_times == RunTimes::Fresh && !waiting_for_passes && !short.is_zero())

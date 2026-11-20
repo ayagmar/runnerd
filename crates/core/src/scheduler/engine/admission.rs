@@ -524,7 +524,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Decision::Start { .. } | Decision::Stop { .. } => None,
         });
         let needs = plan.host_needs().chain(starts);
-        let count = self.count(self.host_remembered());
+        // Whether a waiter fits the plain margin is read by the plain margin's count: under the larger one the growth
+        // count's credit is bounded by the larger margin too, and would read the room short (ADR 0151).
+        let count = self.count(self.host_remembered().plain());
         let band = admitting
             .host
             .as_ref()

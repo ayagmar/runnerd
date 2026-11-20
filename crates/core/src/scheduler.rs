@@ -326,8 +326,6 @@ pub struct Budget {
     /// The memory the host has to spare for new runners beside other programs (ADR 0055), negative by what the
     /// running ones reserve past the host's limit; `None` when not known.
     pub host: Option<i64>,
-    /// How much less `host` is than by the plain margin: 0 while the plain margin stands or none is known (ADR 0102).
-    pub host_larger_by: u64,
     /// Nothing starts, so no warm runner stops to make room: measured admission holds the slice at its high-water
     /// mark, or the host's tasks stall for memory. `memory` and `host` are then 0 whatever the room, so no job's wait
     /// starts and none puts up a barrier. Not a reservation for a starved job (ADR 0096).
@@ -346,6 +344,10 @@ pub struct Budget {
     pub recount: Option<Recount>,
     /// How fresh the repositories' usual run times are (ADR 0151).
     pub run_times: RunTimes,
+    /// These budgets as the plain host margin leaves them, counted again by it, while the larger one stands: what a
+    /// barrier's backfill reads, so that which jobs pass does not depend on the band they move (ADR 0151). `None`
+    /// while the plain margin stands, or with no reading of the host.
+    pub plain: Option<Box<Budget>>,
     /// The runners of profiles a reload removed, by profile name, which run until their jobs end: a barrier's backfill
     /// waits for them as for any runner, and counts those that passed it (ADR 0131).
     pub retired: Vec<Retired>,
@@ -546,7 +548,7 @@ pub fn plan(
                     memory,
                     cpu,
                 };
-                behind.left_waiting(job, decided.barrier, budgets.left, &budget, now);
+                behind.left_waiting(job, decided.barrier, budgets.plain_left(), &budget, now);
                 continue;
             }
         };
@@ -586,10 +588,12 @@ pub fn plan(
 struct Budgets {
     left: Left,
     recount: Option<Recount>,
+    /// The same by the plain host margin, while the larger one stands (`Budget::plain`), counted again alike.
+    plain: Option<Box<Budgets>>,
 }
 
 impl Budgets {
-    /// What `budget` leaves, taking its count to read again.
+    /// What `budget` leaves, taking its counts to read again.
     fn new(budget: &mut Budget) -> Self {
         Self {
             left: Left {
@@ -598,7 +602,16 @@ impl Budgets {
                 host: budget.host,
             },
             recount: budget.recount.take(),
+            plain: budget
+                .plain
+                .as_deref_mut()
+                .map(|plain| Box::new(Budgets::new(plain))),
         }
+    }
+
+    /// What is left by the plain host margin.
+    fn plain_left(&self) -> Left {
+        self.plain.as_ref().map_or(self.left, |plain| plain.left)
     }
 
     /// A runner of `memory` and `cpu` starts.
@@ -606,6 +619,9 @@ impl Budgets {
         self.left.take(memory, cpu);
         if let Some(recount) = &mut self.recount {
             recount.start(&mut self.left, memory);
+        }
+        if let Some(plain) = &mut self.plain {
+            plain.take(memory, cpu);
         }
     }
 
@@ -615,6 +631,9 @@ impl Budgets {
         self.left.give(room.memory, room.cpu);
         if let Some(recount) = &mut self.recount {
             recount.stop(&mut self.left, &room.stopped);
+        }
+        if let Some(plain) = &mut self.plain {
+            plain.give(room);
         }
     }
 }
@@ -673,7 +692,8 @@ impl<'plan> Behind<'plan> {
         }
     }
 
-    /// Notes `job`, which did not start: it put up `barrier`, or goes before any barrier to come.
+    /// Notes `job`, which did not start: it put up `barrier`, or goes before any barrier to come. `left` is what the
+    /// plain host margin leaves (`Budget::plain`).
     fn left_waiting(
         &mut self,
         job: Older<'plan>,
@@ -686,12 +706,12 @@ impl<'plan> Behind<'plan> {
             self.older.push(job);
             return;
         };
+        let plain = budget.plain.as_deref().unwrap_or(budget);
         let around = Around {
             left,
-            host_larger_by: budget.host_larger_by,
             run_times: budget.run_times,
-            credit_room: budget.credit_room,
-            host_credit_room: budget.host_credit_room,
+            credit_room: plain.credit_room,
+            host_credit_room: plain.host_credit_room,
             drained: budget.drained,
             runners: &self.runners,
             older: &self.older,

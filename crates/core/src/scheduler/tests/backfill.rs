@@ -439,6 +439,51 @@ fn a_short_job_ends_before_an_older_job_could_start() {
     );
 }
 
+/// An older job whose start the plain margin brings counts for a short job's timing, though only the plain margin's
+/// drain serves it: a pass would hold it too. 16G and 18G drained by the larger and the plain margin; 4G left by the
+/// larger, 6G by the plain one, and a 12G runner ends in a second. Older job A needs 17G: the drain in force never
+/// serves it, but by the plain margin it fits as that runner ends, and starts at the next plan as the band drops for
+/// it. A 3G two-minute job that passed would leave it 3G short until it ended.
+#[test]
+fn a_short_job_waits_for_an_older_job_only_the_plain_margin_serves() {
+    let mut profiles = slots(vec![running(12 * GIB, Duration::from_secs(1))]);
+    profiles.insert("a".to_owned(), profile(17 * GIB, 0, vec![Slot::Free]));
+    let repositories = [
+        Repository {
+            waits: starved(5),
+            ..pool("o/big", "big", 8 * GIB, None, &[5])
+        },
+        pool("o/a", "a", 17 * GIB, None, &[3]),
+        pool("o/small", "small", 3 * GIB, Some(SHORT_RUN), &[6]),
+    ];
+    let plan_with = |host_plain: i64| {
+        plan(
+            &repositories,
+            &profiles,
+            Budget {
+                host: Some(gib(4)),
+                plain: Some(Box::new(Budget {
+                    host: Some(gib(6)),
+                    ..Budget::default()
+                })),
+                drained: Drained {
+                    host: Some(gib(16)),
+                    host_plain: Some(host_plain),
+                    ..Drained::default()
+                },
+                ..Budget::default()
+            },
+            now(),
+        )
+    };
+    let plan = plan_with(gib(18));
+    assert_eq!(plan.barrier.map(|barrier| barrier.job), Some(5));
+    assert_eq!(started(&plan), [] as [&str; 0], "{plan:?}");
+    assert_eq!(plan.waiting[&6], Waiting::BehindMemory { job: 5 });
+    // Had the host no room for A by either margin, the short job would pass.
+    assert_eq!(started(&plan_with(gib(16))), ["o/small"]);
+}
+
 /// A reload lowers a profile's caps for the runners it starts next, not for those that run: a runner that passed
 /// counts at the caps it started with, as its container keeps them. One whose profile the reload removed still runs
 /// and counts too. 12G; the 8G owner waits for a 9G runner; a drain leaves 4G past the owner, which a passed runner of
@@ -506,12 +551,21 @@ fn a_runner_that_passed_counts_at_the_caps_it_started_with() {
 /// Under the larger host margin the room comes later than under the plain one, so a backfill read by the margin in force
 /// would let a job pass under the larger one and not under the plain one. Said to wait for the host under the larger
 /// margin, it would let the band go; said to wait behind the barrier under the plain one, it would bring the band back,
-/// plan after plan. Host room of 4G, or 6G by the plain margin; a 10G runner whose end is not known and a passed 2G one:
+/// plan after plan. Host room of 4G, or 6G by the plain margin's count (`Budget::plain`); a 10G runner whose end is not known and a passed 2G one:
 /// with the latter back, the 8G owner fits by the plain margin, so the 5G short job waits behind the barrier by either.
 #[test]
 fn a_job_passes_by_the_plain_margin_whichever_stands() {
     let since = now() - WAITED + PRIORITY_AFTER;
-    let plan_by = |host: i64, host_larger_by: u64, needs: u64, cpu: Option<i64>| {
+    let budget = |host| Budget {
+        host: Some(host),
+        drained: Drained {
+            host: Some(gib(16)),
+            host_plain: Some(gib(18)),
+            ..Drained::default()
+        },
+        ..Budget::default()
+    };
+    let plan_by = |budget: Budget| {
         let passed = Slot::Runner(RunnerSlot {
             repository: "o/small".to_owned(),
             busy: true,
@@ -533,31 +587,15 @@ fn a_job_passes_by_the_plain_margin_whichever_stands() {
             }
         })]);
         profiles.get_mut("small").unwrap().slots[0] = passed;
-        profiles.insert("mid".to_owned(), profile(needs, 1000, vec![Slot::Free]));
-        let mid = Repository {
-            runner_cpu: Some(1000),
-            ..pool("o/mid", "mid", needs, Some(minutes(1)), &[2])
-        };
-        plan(
-            &[owner(), mid],
-            &profiles,
-            Budget {
-                host: Some(host),
-                host_larger_by,
-                cpu,
-                drained: Drained {
-                    host: Some(gib(16)),
-                    host_plain: Some(gib(18)),
-                    cpu: Some(16_000),
-                    ..Drained::default()
-                },
-                ..Budget::default()
-            },
-            now(),
-        )
+        profiles.insert("mid".to_owned(), profile(5 * GIB, 0, vec![Slot::Free]));
+        let mid = pool("o/mid", "mid", 5 * GIB, Some(minutes(1)), &[2]);
+        plan(&[owner(), mid], &profiles, budget, now())
     };
-    let larger = plan_by(gib(4), 2 * GIB, 5 * GIB, None);
-    let plain = plan_by(gib(6), 0, 5 * GIB, None);
+    let larger = plan_by(Budget {
+        plain: Some(Box::new(budget(gib(6)))),
+        ..budget(gib(4))
+    });
+    let plain = plan_by(budget(gib(6)));
     for plan in [&larger, &plain] {
         assert_eq!(plan.barrier.map(|barrier| barrier.job), Some(1));
         assert_eq!(
@@ -584,7 +622,6 @@ fn a_job_short_of_cpu_too_is_no_waiter_the_plain_margin_starts() {
             &profiles,
             Budget {
                 host: Some(gib(2)),
-                host_larger_by: 2 * GIB,
                 cpu: Some(cpu),
                 ..Budget::default()
             },

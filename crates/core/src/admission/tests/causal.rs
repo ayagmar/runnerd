@@ -571,31 +571,26 @@ fn last_waited(replay: &Replay, repository: &str, profile: &str) -> u64 {
 
 #[test]
 fn the_growth_count_starts_what_only_it_fits() {
-    // Eight runners using 0.5G each count 0.5G + 4G + the three largest growths, 9G: 13.5G of 15G, where the plain
-    // count is 28.5G. A start is all growth, and the eighth's or page's is not among the three largest, so neither adds
-    // anything; counted in full, either would pass 15G.
+    // Eight runners using 0.5G each: the plain count fits four of the eight's 3.5G reservations in 15G, the rest waiting
+    // for the first to end. Under the growth count a start is all growth: kept among the three largest, the fourth and
+    // later add nothing, so the eight start at once. Once they use 0.5G each, the count is 0.5G + 4G + the three largest
+    // growths, 13.5G: page's 2.5G does not fit the 1.5G left before it starts, and it waits for the first to end. As in
+    // the daemon's plan, the room before a start must fit its whole take, and the count is read again after it.
     let jobs = eight_and_a_page(30);
     let trace = trace_of(&jobs);
     let plain = replay_counted(&jobs, &trace, 15 * G, None);
     let counted = replay_counted(&jobs, &trace, 15 * G, Some(TOP3));
-    assert!(
-        plain
+    let at_once = |replay: &Replay| {
+        replay
             .pools
             .values()
             .flat_map(|pool| &pool.waits)
-            .any(|waited| *waited >= 25 * 60),
-        "the plain count fits four of the eight, the rest wait for the first to end: {:?}",
-        plain.pools
-    );
-    assert!(
-        counted
-            .pools
-            .values()
-            .flat_map(|pool| &pool.waits)
-            .all(|waited| *waited <= 15),
-        "every job starts at the plan it arrives at: {:?}",
-        counted.pools
-    );
+            .filter(|waited| **waited <= 15)
+            .count()
+    };
+    assert_eq!(at_once(&plain), 4, "{:?}", plain.pools);
+    assert_eq!(at_once(&counted), 8, "{:?}", counted.pools);
+    assert_eq!(last_waited(&counted, "halyard/storefront", "node"), 18 * 60);
     assert_eq!(counted.hazard.braked, 0, "no brake to engage");
 }
 
@@ -806,4 +801,159 @@ fn a_replay_reads_no_usual_end_of_a_runner_whose_job_has_no_name_yet() {
         unnamed[0] > 0,
         "unnamed until minute 15, nothing is known of their end: {unnamed:?}"
     );
+}
+
+/// The replay and the daemon's plan start the same jobs under an active growth credit: both fit a runner by the room
+/// the count leaves before it starts, count again after it, and count a runner that starts as having no job nor sample
+/// yet. Eight 3.5G jobs queue beside the 512M mirror, on a host with room to spare; each start is all growth. In a 13G
+/// slice the count after three starts is 11G and leaves 2G, so both start three: fitting a start by the count with it
+/// already in, as the replay once did, would let all eight in, as a fourth adds nothing past the three largest. In
+/// 15G it leaves 4G after any number, so both start all eight: reading each start's first 0.5G sample at once, as the
+/// replay once did, would leave 3.5G after the fifth and start five.
+#[test]
+fn the_replay_starts_what_the_daemons_plan_starts_under_the_growth_count() {
+    for (memory_max, started) in [(13 * G, 3), (15 * G, 8)] {
+        let planned = planned_starts(memory_max);
+        assert_eq!(
+            replayed_starts(memory_max),
+            planned,
+            "in {}G",
+            memory_max / G
+        );
+        assert_eq!(planned.iter().sum::<usize>(), started);
+    }
+}
+
+/// How many jobs of `jvm` and of `node` the replay of `eight_and_a_page` starts at `NOW` in a slice of `memory_max`.
+fn replayed_starts(memory_max: u64) -> Vec<usize> {
+    let jobs = eight_and_a_page(30);
+    let trace = trace_of(&jobs);
+    let replay = replay_counted(&jobs, &trace, memory_max, Some(TOP3));
+    ["jvm", "node"]
+        .iter()
+        .map(|profile| {
+            replay
+                .pools
+                .iter()
+                .filter(|(pool, _)| pool.profile == *profile)
+                .flat_map(|(_, pool)| &pool.waits)
+                .filter(|waited| **waited == 0)
+                .count()
+        })
+        .collect()
+}
+
+/// How many jobs of `jvm` and of `node` the daemon's plan starts at once in a slice of `memory_max`, reading what the
+/// replay reads at `NOW`.
+fn planned_starts(memory_max: u64) -> Vec<usize> {
+    use crate::admission::host;
+    use crate::api;
+    use crate::scheduler::{self, Budget, Profile, Recount, Slot, SlotRef};
+
+    // The replay's reading at `NOW`: nothing runs, the host's other programs hold 8G of 64G.
+    let memory = api::HostMemory {
+        at: NOW / 1000,
+        total: 64 * G,
+        available: 56 * G,
+        slice: 0,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+        ceiling: None,
+        swap: None,
+    };
+    let remembered = host::Remembered::new(host::HostBand::Plain, host::Occupancy::Occupied);
+    let snapshot = pooled::Snapshot {
+        runners: &[],
+        committed: G / 2,
+        slice: Some(pooled::Slice {
+            memory: 0,
+            memory_max: Some(memory_max),
+        }),
+        host: Some(host::pooling(&memory, remembered)),
+        most: 0,
+        host_reserve: false,
+        growth: Some(TOP3.growth),
+    };
+    let tally = pooled::Tally::<SlotRef>::new(&snapshot, []);
+    let count = tally.count();
+    let limit = host::limit(&memory, false);
+    let budget = Budget {
+        memory: Some(i64::try_from(memory_max - count.pooled()).unwrap()),
+        host: Some(host::left(limit, count.hosted(), false)),
+        recount: Some(Recount {
+            tally,
+            memory_max: Some(memory_max),
+            host: Some(scheduler::HostLimit {
+                limit,
+                stalled: false,
+            }),
+        }),
+        ..Budget::default()
+    };
+    let config = config();
+    let profiles: BTreeMap<String, Profile> = ["jvm", "node"]
+        .iter()
+        .map(|name| {
+            let caps = &config.profiles[*name];
+            let profile = Profile {
+                memory: caps.memory.0,
+                cpus: 0,
+                preparing: None,
+                upkeep_due: false,
+                count: 6,
+                ran: Vec::new(),
+                slots: vec![Slot::Free; 6],
+            };
+            ((*name).to_owned(), profile)
+        })
+        .collect();
+    let repositories = [
+        parity_pool("halyard/ledger", "jvm", "jvm", 10),
+        parity_pool("halyard/storefront", "node", "node", 11),
+    ];
+    let plan = scheduler::plan(
+        &repositories,
+        &profiles,
+        budget,
+        std::time::UNIX_EPOCH + Duration::from_millis(NOW),
+    );
+    ["jvm", "node"]
+        .iter()
+        .map(|profile| {
+            plan.decisions
+                .iter()
+                .filter(|decision| {
+                    matches!(decision, Decision::Start { slot, .. } if slot.profile == *profile)
+                })
+                .count()
+        })
+        .collect()
+}
+
+/// The pool `name` of `profile` as the plan reads it: four 3.5G jobs of `label` queued at `NOW`, from `first` by twos.
+fn parity_pool(name: &str, profile: &str, label: &str, first: u64) -> Repository {
+    Repository {
+        name: name.to_owned(),
+        profile: profile.to_owned(),
+        labels: vec![label.to_owned()],
+        paused: false,
+        held: None,
+        // Queued at once, check and site by turns as `eight_and_a_page` lists them.
+        queued: (0..4)
+            .map(|turn| first + 2 * turn)
+            .map(|id| QueuedJob {
+                id,
+                run_id: id,
+                labels: vec![label.to_owned()],
+                created_at: NOW,
+                ..QueuedJob::default()
+            })
+            .collect(),
+        runner_memory: Some(3 * G + G / 2),
+        runner_cpu: Some(0),
+        waits: Waits::default(),
+        usual: None,
+        warm: 0,
+    }
 }

@@ -953,9 +953,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .host
                 .as_ref()
                 .map(|host| host::left(host.limit, count.hosted(), host.stalled)),
-            host_larger_by: admitting.host.as_ref().map_or(0, |host| {
-                host::limit(&host.memory, false).saturating_sub(host.limit)
-            }),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
             run_times: if self.measured.predictor_is_fresh() {
                 RunTimes::Fresh
@@ -963,6 +960,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 RunTimes::Stale
             },
             retired: self.retired_runners(),
+            plain: self.plain_budget(admitting),
             credit_room: count.credit_room,
             host_credit_room: count.host_credit_room,
             drained: Drained {
@@ -983,6 +981,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }),
             },
         }
+    }
+
+    /// The budgets `admitting` leaves as the plain host margin would, counted by it, while the larger one stands
+    /// (`Budget::plain`). `None` under the plain margin, with no host reading, or while the host stalls, when nothing
+    /// starts.
+    fn plain_budget(&self, admitting: &Admitting) -> Option<Box<Budget>> {
+        let host = admitting.host.as_ref()?;
+        if !admitting.remembered.short() || host.stalled {
+            return None;
+        }
+        let remembered = admitting.remembered.plain();
+        let plain = Admitting {
+            host: self.host_budget_by(remembered),
+            remembered,
+            ..admitting.clone()
+        };
+        Some(Box::new(self.plan_budget(&plain)))
     }
 
     /// Whether a runner of `memory` and `cpu` that `plan` started in `profile` still fits, by the plan's rule, the
