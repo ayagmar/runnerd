@@ -79,7 +79,8 @@ flowchart TB
   replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
   (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::pooled` is the one
-  aggregate count of what runs, which the engine and a replay by `admission::trace` both call
+  aggregate count of what runs, which the engine and a replay by `admission::trace` both call, each fitting a start by
+  the room the count leaves before it and counting a start as a runner with no job or sample yet
   ([ADR 0099](docs/adr/0099-the-budget-counts-jobs-that-do-not-peak-at-once.md),
   [ADR 0130](docs/adr/0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md)); its growth
   count's brake is `admission::growth`, a leaf only its own methods write; `admission::recent` reads
@@ -232,10 +233,15 @@ queued → slot → container → removed
    what runs would make room for puts up the plan's one barrier (`scheduler::priority`, reading the pool's `scheduler::waits::Waits`, which only its own methods write), and no younger job starts until a runner of its pool
    does, but one that usually ends before the running runners' usual ends let the owner or an older waiting job
    start, counting the largest credit the pooled count could reach, and whose cap leaves the owner its room even if it
-   never ends. `plan` names each pool's held job and the engine keeps its wait, from the
+   never ends; or one of another profile that usually runs at most 2 minutes, ends before any older job could start, and
+   finds the owner's room not there even with what passed given back, within the same caps, by run times read within
+   the minute. Both read the host by its plain margin, counted again as that margin counts it (`Budget::plain`), as is
+   the band's read of its waiters. A job the barrier would let pass that does not fit says what it
+   lacks, so the host's band reads it as a waiter, unless it lacks CPU too. `plan` names each pool's held job and the engine keeps its wait, from the
    plans of ticks and passes only; the high-water mark and a host stall suspend the barrier
    ([ADR 0096](docs/adr/0096-a-job-starved-of-memory-or-cpu-goes-first.md),
-   [ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md)). Once every job it can start has its
+   [ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md),
+   [ADR 0151](docs/adr/0151-a-short-job-of-another-profile-passes-a-barrier.md)). Once every job it can start has its
    runner and none waits for room, it starts the warm runners each active repository wants
    (`scheduler::warm`: `[[repositories]] warm` within 10 minutes of its last job listed, taken or finished, plus the
    jobs its workflow runs seen so far are expected to queue still), so a job finds a runner already registered
@@ -447,13 +453,16 @@ always returns, so the daemon closes and flushes the history.
   changes nothing
   ([ADR 0098](docs/adr/0098-a-pool-waits-longer-for-its-first-barrier.md)).
 - What starts behind a barrier keeps two bounds, and only those: if each run takes what the plan read, an owner that
-  keeps the barrier starts no later than with nothing behind it; whatever they take, it fits once the runners from
-  before the barrier matured and older jobs' have ended, as the caps of what passed since leave it its room and a slot.
-  Plans read p95s, so a run that ends early can cost the owner what still runs behind the barrier, and neither bound
-  carries to a later owner. `priority::Backfill` is the one rule, for `plan` and `simulate`; it keeps nothing between
-  plans. A runner's engagement keeps the barrier it passed from its start, and a restart drops it with the waits
+  keeps the barrier starts no later than with nothing behind it, or at most `SHORT_RUN` (2 minutes) later once a short
+  job of another profile passed it; whatever they take, it fits once the runners from before the barrier matured and
+  older jobs' have ended, as the caps of what passed since, the caps each started with, leave it its room and a slot.
+  No short job outlasts an older job's wait, nor passes once only what passed keeps the owner out. Plans read p95s, so a run that ends early can cost the owner what
+  still runs behind the barrier, and neither bound carries to a later owner. `priority::Backfill` is the one rule, for
+  `plan` and `simulate`; it keeps nothing between plans. A runner's engagement keeps the barrier it passed from its
+  start, and a restart drops it with the waits
   ([ADR 0097](docs/adr/0097-a-job-may-start-behind-a-barrier-it-cannot-cost.md),
-  [ADR 0131](docs/adr/0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md)).
+  [ADR 0131](docs/adr/0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md),
+  [ADR 0151](docs/adr/0151-a-short-job-of-another-profile-passes-a-barrier.md)).
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
 - A warm runner never holds back upkeep: a due reseed, or the shared caches' check an hour after the last, stops

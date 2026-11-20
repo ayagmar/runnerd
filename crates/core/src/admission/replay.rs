@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::api::{Basis, HostMemory};
 use crate::config::Config;
-use crate::scheduler::priority::{Around, Backfill, Candidate, Caps, Held, Older, Runner, Short};
+use crate::scheduler::priority::{
+    Around, Backfill, Candidate, Caps, Held, Older, RunTimes, Runner, Short,
+};
 use crate::scheduler::{Barrier, Drained, Left, Pool, Scarce, Waits};
 use crate::sizing::{Measure, Ran};
 use crate::time;
@@ -713,6 +715,11 @@ impl<'run> Replayer<'run> {
     /// The count with a runner `starting` that much added, as the next plan would read it: under the credits, the
     /// count with that much more; under the growth count, as much more as it makes the room kept for growth.
     fn count_with(&self, starting: Option<u64>) -> pooled::Count {
+        self.count_by(starting, self.host_band)
+    }
+
+    /// `count_with` as the host's `band` would count it.
+    fn count_by(&self, starting: Option<u64>, band: host::HostBand) -> pooled::Count {
         let mut runners = self.held();
         runners.extend(starting.map(|takes| pooled::Runner {
             key: None,
@@ -727,11 +734,16 @@ impl<'run> Replayer<'run> {
         } else {
             pooled::Hold::Free
         };
-        self.count_of(&runners, hold)
+        self.count_of(&runners, hold, band)
     }
 
-    /// The count of `runners`, the growth count's brake holding it as `hold` says.
-    fn count_of(&self, runners: &[pooled::Runner<'_>], hold: pooled::Hold) -> pooled::Count {
+    /// The count of `runners`, the growth count's brake holding it as `hold` says, under the host's `band`.
+    fn count_of(
+        &self,
+        runners: &[pooled::Runner<'_>],
+        hold: pooled::Hold,
+        band: host::HostBand,
+    ) -> pooled::Count {
         let host = self.host_memory();
         let measured = self.trace.is_some() && self.policy == Policy::Measured;
         pooled::count(&pooled::Snapshot {
@@ -744,7 +756,7 @@ impl<'run> Replayer<'run> {
             host: host.map(|memory| {
                 host::pooling(
                     &memory,
-                    host::Remembered::new(self.host_band, host::Occupancy::Occupied),
+                    host::Remembered::new(band, host::Occupancy::Occupied),
                 )
             }),
             most: if measured { self.most_credit } else { 0 },
@@ -761,6 +773,17 @@ impl<'run> Replayer<'run> {
         self.running
             .iter()
             .map(|running| {
+                // One this plan started has no job nor sample yet, as the daemon's count of a start
+                // (`pooled::Tally::start`) has it, whatever its trace says of its first moment.
+                if running.started == self.moment {
+                    return pooled::Runner {
+                        key: None,
+                        takes: self.charge(running),
+                        used: Reading::NotYet,
+                        ran: Some(Duration::ZERO),
+                        basis: None,
+                    };
+                }
                 let used = running
                     .reading(self.moment)
                     .filter(|_| running.run.measure == Measure::WithoutPageCache)
@@ -797,7 +820,12 @@ impl<'run> Replayer<'run> {
         let held = self.held();
         let room = pooled::growth_room(&held, growth);
         let guard = match guard {
-            GuardHold::On if self.count_of(&held, pooled::Hold::Free).kept.is_none() => {
+            GuardHold::On
+                if self
+                    .count_of(&held, pooled::Hold::Free, self.host_band)
+                    .kept
+                    .is_none() =>
+            {
                 growth::Guard::Crossed
             }
             GuardHold::On | GuardHold::Off => growth::Guard::Clear,
@@ -821,18 +849,17 @@ impl<'run> Replayer<'run> {
         self.brake.look(instant(self.moment), used, room, guard);
     }
 
-    /// What the host leaves beside what runs, the mirror's memory counted; `None` without a trace of it.
-    fn host_left(&self) -> Option<i64> {
-        self.host_left_with(self.count())
-    }
-
     /// What the host leaves beside `count`; `None` without a trace of it.
     fn host_left_with(&self, count: pooled::Count) -> Option<i64> {
+        self.host_left_by(count, self.host_band)
+    }
+
+    /// What the host leaves beside `count` under its `band`; `None` without a trace of it.
+    fn host_left_by(&self, count: pooled::Count, band: host::HostBand) -> Option<i64> {
         let memory = self.host_memory()?;
         let limit = host::limit(
             &memory,
-            self.host_band
-                .short(host::Occupancy::of(!self.running.is_empty())),
+            band.short(host::Occupancy::of(!self.running.is_empty())),
         );
         Some(host::left(limit, count.hosted(), false))
     }
@@ -881,8 +908,14 @@ impl<'run> Replayer<'run> {
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
                     // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
-                    if self.barrier.is_none() {
-                        self.host_needs.push(short.memory);
+                    // One the barrier would let pass does, as there (ADR 0151). One that lacks CPU too would not start
+                    // by the plain margin, as `Plan::host_needs` reads it.
+                    if self.barrier.is_none() || self.may_pass(queued, &listed).is_some() {
+                        let cpu_short = self
+                            .cpu_budget
+                            .is_some_and(|budget| self.cpu_taken() + short.cpu > budget);
+                        self.host_needs
+                            .push(if cpu_short { u64::MAX } else { short.memory });
                     }
                     let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
@@ -910,7 +943,8 @@ impl<'run> Replayer<'run> {
             Band::AnyWaiter if self.held_for_host > 0 => host::HostBand::Larger,
             Band::AnyWaiter => host::HostBand::Plain,
             Band::NoWaiterFits => self.host_memory().map_or(host::HostBand::Plain, |memory| {
-                let reserved = self.count().hosted();
+                // By the plain margin's count, as the daemon's `note_host` reads it.
+                let reserved = self.count_by(None, host::HostBand::Plain).hosted();
                 let needs = self.host_needs.iter().copied();
                 host::HostBand::after_plan(&memory, reserved, false, needs)
             }),
@@ -977,10 +1011,13 @@ impl<'run> Replayer<'run> {
             })
             .collect();
         let runners = self.runners();
+        // By the plain margin's count, as `Budget::plain`.
+        let plain = self.count_by(None, host::HostBand::Plain);
         let around = Around {
-            left: self.left(),
-            credit_room: self.credit_room(),
-            host_credit_room: self.host_credit_room(),
+            left: self.left_of(plain, host::HostBand::Plain),
+            run_times: RunTimes::Fresh,
+            credit_room: self.credit_room_of(plain),
+            host_credit_room: self.host_credit_room_of(plain),
             drained: self.drained(),
             runners: &runners,
             older: &older,
@@ -988,23 +1025,23 @@ impl<'run> Replayer<'run> {
         self.backfill = Backfill::behind(barrier, &run.profile, around, instant(now));
     }
 
-    /// How much more the credit could take off what runs, as `Budget::credit_room`.
-    fn credit_room(&self) -> u64 {
+    /// `credit_room` as `count` reads it.
+    fn credit_room_of(&self, count: pooled::Count) -> u64 {
         if self.trace.is_none()
             || self.policy != Policy::Measured
             || self.expects_credit == CreditRoom::LeftOut
         {
             return 0;
         }
-        self.count().credit_room
+        count.credit_room
     }
 
-    /// How much more the host's credit could take off what runs, as `Budget::host_credit_room`.
-    fn host_credit_room(&self) -> u64 {
+    /// `host_credit_room` as `count` reads it.
+    fn host_credit_room_of(&self, count: pooled::Count) -> u64 {
         if self.expects_credit == CreditRoom::LeftOut {
             return 0;
         }
-        self.count().host_credit_room
+        count.host_credit_room
     }
 
     /// What a drain leaves.
@@ -1034,9 +1071,9 @@ impl<'run> Replayer<'run> {
         (slots as usize).saturating_sub(in_profile)
     }
 
-    /// Whether `queued`, which fits, may start behind the barrier, `listed` being what the pass began with: the usual
+    /// Whether `queued` may start behind the barrier once it fits, `listed` being what the pass began with: the usual
     /// run time it passes by, if so.
-    fn passes(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
+    fn may_pass(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
         let run = queued.run;
         self.backfill.as_ref()?;
         let predictor = &self.predictor;
@@ -1048,24 +1085,44 @@ impl<'run> Replayer<'run> {
                 .map(|other| Key::of(other.run));
             predictor.longest_usual(keys, &run.profile)
         });
-        let candidate = Candidate {
+        let candidate = self.candidate(run, usual);
+        let backfill = self.backfill.as_ref()?;
+        backfill.passes(candidate).then_some(usual).flatten()
+    }
+
+    /// Whether `queued`, which fits, may start behind the barrier, counting it if so: the usual run time it passes by.
+    fn passes(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
+        let usual = self.may_pass(queued, listed)?;
+        let candidate = self.candidate(queued.run, Some(usual));
+        if let Some(backfill) = self.backfill.as_mut() {
+            backfill.admit(candidate);
+        }
+        Some(usual)
+    }
+
+    /// `run`'s runner as a candidate to start behind the barrier, its pool usually done in `usual`.
+    fn candidate<'profile>(
+        &self,
+        run: &'profile Ran,
+        usual: Option<Duration>,
+    ) -> Candidate<'profile> {
+        Candidate {
             profile: &run.profile,
             free_slots: self.free_slots(&run.profile),
             usual,
             caps: self.caps(&run.profile),
-        };
-        let backfill = self.backfill.as_mut()?;
-        backfill.admits(candidate).then_some(usual).flatten()
+        }
     }
 
-    /// The budgets left beside what runs.
-    fn left(&self) -> Left {
+    /// What the budgets leave beside `count`, under the host's `band`.
+    fn left_of(&self, count: pooled::Count, band: host::HostBand) -> Left {
         let cpu = self.cpu_taken();
         let left = |budget: u64, taken: u64| signed(budget).saturating_sub(signed(taken));
+        let taken = count.pooled().saturating_sub(self.mirror);
         Left {
-            memory: self.budget.map(|budget| left(budget, self.taken())),
+            memory: self.budget.map(|budget| left(budget, taken)),
             cpu: self.cpu_budget.map(|budget| left(budget, cpu)),
-            host: self.host_left(),
+            host: self.host_left_by(count, band),
         }
     }
 
@@ -1140,14 +1197,17 @@ impl<'run> Replayer<'run> {
         }
     }
 
-    /// What runs, as a backfill reads it: each job's usual run time as the runs finished so far say.
+    /// What runs, as a backfill reads it: each job's usual run time as the runs finished so far say, once the daemon
+    /// could name it. A runner started at this moment has none, as one the daemon's plan started or has in flight.
     fn runners(&self) -> Vec<Runner<'_>> {
         self.running
             .iter()
             .map(|running| Runner {
                 profile: running.profile,
                 started_at: instant(running.started),
-                usual: self.predictor.usual(&Key::of(running.run), running.profile),
+                usual: (running.started < self.moment && running.named(self.moment))
+                    .then(|| self.predictor.usual(&Key::of(running.run), running.profile))
+                    .flatten(),
                 memory: self.charge(running),
                 cpu: running.cpu_at(self.moment),
                 caps: self.caps(running.profile),
@@ -1303,16 +1363,19 @@ impl<'run> Replayer<'run> {
             memory: starting.memory,
             cpu: starting.cpu,
         };
-        let with = self.count_with(Some(starting.memory));
+        // As the daemon's plan: the room before the start fits the runner, and the count is read again after it.
+        let count = self.count();
+        let needs = signed(starting.memory);
         if let Some(budget) = self.budget {
-            if with.pooled().saturating_sub(self.mirror) > budget {
+            let taken = count.pooled().saturating_sub(self.mirror);
+            if signed(budget).saturating_sub(signed(taken)) < needs {
                 return Err(Refused::Budget(short(Scarce::Memory, Held::ByBudget)));
             }
             if self.at_high_water() {
                 return Err(Refused::HighWater(short(Scarce::Memory, Held::ByBudget)));
             }
         }
-        if self.host_left_with(with).is_some_and(|left| left < 0) {
+        if self.host_left_with(count).is_some_and(|left| left < needs) {
             return Err(Refused::Host(short(Scarce::Memory, Held::ByHost)));
         }
         if let Some(cpu_budget) = self.cpu_budget {

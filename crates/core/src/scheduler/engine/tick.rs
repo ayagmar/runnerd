@@ -30,8 +30,9 @@ use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Budget, Decision, Demand, Drained, HostLimit, Left, Plan, Pool, Preparing, Profile,
-    Recount, Repository, RunnerSlot, Slot, SlotRef, StartFor, StopReason, plan,
+    Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Plan, Pool, Preparing,
+    Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef, StartFor,
+    StopReason, plan,
 };
 use crate::store::Store;
 use crate::time;
@@ -953,6 +954,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .as_ref()
                 .map(|host| host::left(host.limit, count.hosted(), host.stalled)),
             held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
+            run_times: if self.measured.predictor_is_fresh() {
+                RunTimes::Fresh
+            } else {
+                RunTimes::Stale
+            },
+            retired: self.retired_runners(),
+            plain: self.plain_budget(admitting),
             credit_room: count.credit_room,
             host_credit_room: count.host_credit_room,
             drained: Drained {
@@ -973,6 +981,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }),
             },
         }
+    }
+
+    /// The budgets `admitting` leaves as the plain host margin would, counted by it, while the larger one stands
+    /// (`Budget::plain`). `None` under the plain margin, with no host reading, or while the host stalls, when nothing
+    /// starts.
+    fn plain_budget(&self, admitting: &Admitting) -> Option<Box<Budget>> {
+        let host = admitting.host.as_ref()?;
+        if !admitting.remembered.short() || host.stalled {
+            return None;
+        }
+        let remembered = admitting.remembered.plain();
+        let plain = Admitting {
+            host: self.host_budget_by(remembered),
+            remembered,
+            ..admitting.clone()
+        };
+        Some(Box::new(self.plan_budget(&plain)))
     }
 
     /// Whether a runner of `memory` and `cpu` that `plan` started in `profile` still fits, by the plan's rule, the
@@ -1005,6 +1030,60 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         !budget.held && left.fits(memory, cpu)
     }
 
+    /// The runner in `slot` of profile `name` as `plan` sees it; `None` for a free slot. A start in flight is a runner
+    /// its plan gave a job or a warm purpose already: none to start again.
+    fn plan_runner(&self, slot: &super::Slot, name: &str) -> Option<RunnerSlot> {
+        match slot.holder() {
+            Holder::Free => None,
+            Holder::Starting(starting) => {
+                let footprint = starting.footprint();
+                Some(RunnerSlot {
+                    repository: starting.repository().to_owned(),
+                    busy: true,
+                    started_at: starting.launched_at(),
+                    memory: self.held_by(&footprint).takes,
+                    cpu: self.reserves_cpu(&footprint),
+                    usual: None,
+                    caps: Caps {
+                        memory: footprint.memory,
+                        cpu: footprint.cpus,
+                    },
+                    behind: starting.behind(),
+                })
+            }
+            Holder::Runner(occupant) => Some(RunnerSlot {
+                repository: occupant.repository.clone(),
+                // Its capture named its job before a listing showed it busy: it waits for none of those queued.
+                busy: occupant.engaged(),
+                started_at: occupant.started_at,
+                memory: self.takes(occupant),
+                cpu: self.reserves_cpu(&occupant.footprint()),
+                usual: self.usual_run(occupant, name),
+                caps: Caps {
+                    memory: occupant.memory,
+                    cpu: occupant.cpus,
+                },
+                behind: occupant.engagement.behind(),
+            }),
+        }
+    }
+
+    /// The runners of profiles the config no longer has, which a reload left to end.
+    fn retired_runners(&self) -> Vec<Retired> {
+        self.slots
+            .iter()
+            .filter(|(name, _)| !self.config.profiles.contains_key(*name))
+            .flat_map(|(name, slots)| {
+                slots.iter().filter_map(|slot| {
+                    Some(Retired {
+                        profile: name.clone(),
+                        runner: self.plan_runner(slot, name)?,
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// A profile as `plan` sees it.
     fn plan_profile(&self, name: &str, profile: &crate::config::Profile) -> Profile {
         let slots = &self.slots[name];
@@ -1014,35 +1093,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let slots_len = slots.len();
         let slots = slots
             .iter()
-            .map(|slot| match slot.holder() {
-                Holder::Free if free > 0 => {
+            .map(|slot| match self.plan_runner(slot, name) {
+                Some(runner) => Slot::Runner(runner),
+                None if free > 0 => {
                     free -= 1;
                     Slot::Free
                 }
-                Holder::Free => Slot::Closed,
-                // A start in flight is a runner its plan gave a job or a warm purpose already: none to start again.
-                Holder::Starting(starting) => {
-                    let footprint = starting.footprint();
-                    Slot::Runner(RunnerSlot {
-                        repository: starting.repository().to_owned(),
-                        busy: true,
-                        started_at: starting.launched_at(),
-                        memory: self.held_by(&footprint).takes,
-                        cpu: self.reserves_cpu(&footprint),
-                        usual: None,
-                        behind: starting.behind(),
-                    })
-                }
-                Holder::Runner(occupant) => Slot::Runner(RunnerSlot {
-                    repository: occupant.repository.clone(),
-                    // Its capture named its job before a listing showed it busy: it waits for none of those queued.
-                    busy: occupant.engaged(),
-                    started_at: occupant.started_at,
-                    memory: self.takes(occupant),
-                    cpu: self.reserves_cpu(&occupant.footprint()),
-                    usual: self.usual_run(occupant, name),
-                    behind: occupant.engagement.behind(),
-                }),
+                None => Slot::Closed,
             })
             .collect();
         Profile {

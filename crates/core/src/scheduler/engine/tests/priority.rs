@@ -78,7 +78,7 @@ struct Fixture {
     docker: FakeDocker,
     engine: Engine<FakeGithub, FakeDocker>,
     handle: Handle,
-    _dir: TestDir,
+    dir: TestDir,
 }
 
 impl Fixture {
@@ -100,7 +100,7 @@ impl Fixture {
             docker,
             engine,
             handle,
-            _dir: dir,
+            dir,
         }
     }
 
@@ -155,11 +155,16 @@ impl Fixture {
     /// The host's memory read now: 32G, whose 2G margin grows to 3G while the host is short, with `room` of it for the
     /// slice and what is available.
     fn host(&self, room: u64) {
+        self.host_with(room, 0);
+    }
+
+    /// A host reading with `room` available while the slice's runners hold `slice`.
+    fn host_with(&self, room: u64, slice: u64) {
         self.handle.store.host_memory(api::HostMemory {
             at: crate::time::now_ms() / 1000,
             total: 32 * G,
             available: room,
-            slice: 0,
+            slice,
             some: Some(api::Pressure::default()),
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
@@ -649,7 +654,7 @@ async fn a_runner_that_fits_the_slice_but_not_beside_a_shell_erects_no_barrier()
         docker,
         engine,
         handle,
-        _dir: dir,
+        dir,
     };
     fixture.younger_job_after_a_starved_one().await;
     assert_eq!(fixture.runners_of("o/small"), 1, "younger jobs go on");
@@ -1081,6 +1086,114 @@ async fn a_runner_that_passed_counts_against_the_room_behind_the_barrier_until_i
     );
 }
 
+/// A short job that may pass the barrier but finds the host's larger margin in force waits for the host, which the band
+/// reads (ADRs 0102 and 0151): it fits the plain margin, so the band goes and the next plan starts it. Said to wait
+/// behind the barrier, it would keep the larger margin up for as long as the barrier stood. A 32G host keeps 2G, or 3G
+/// while short: 12.5G available leaves 10.5G or 9.5G, of which the 8G and 1G runners take 9G.
+#[tokio::test]
+async fn a_short_job_behind_a_barrier_lets_the_hosts_larger_margin_go_and_starts() {
+    let mut fixture = Fixture::new(24 * G).await;
+    fixture.host(25 * G / 2);
+    fixture.queue(vec![big(9), small(1)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/big"), 1);
+    assert_eq!(fixture.runners_of("o/small"), 1);
+    // Listed busy for the first time, the runners took jobs 9 and 1.
+    fixture.all_busy();
+    fixture.queue(Vec::new());
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert!(
+        matches!(fixture.reason(10), Some(api::Waiting::HostMemory { .. })),
+        "{:?}",
+        fixture.reason(10)
+    );
+    assert!(fixture.engine.host_is_short(), "job 10 fits no margin");
+    fixture.age();
+    fixture.ran("quick", 200, 3, 2).await;
+    fixture.engine.forget_predictor();
+    fixture.queue(vec![big(10), named(11, "quick")]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(
+        fixture.runners_of("o/small"),
+        1,
+        "this plan had the larger one"
+    );
+    assert!(
+        !fixture.engine.host_is_short(),
+        "job 11 fits the plain margin, so the larger one goes"
+    );
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(
+        fixture.runners_of("o/small"),
+        2,
+        "the next plan starts job 11"
+    );
+    assert_eq!(fixture.runners_of("o/big"), 1, "job 10 still waits");
+}
+
+/// A reload that lowers a profile's caps leaves its running containers as they were, so a runner that passed counts at
+/// the caps it started with (ADR 0131): job 11's 1G, not the 512M job 12 would start at, takes what a drain leaves past
+/// the owner.
+#[tokio::test]
+async fn a_runner_that_passed_counts_at_its_caps_through_a_reload() {
+    let mut fixture = Fixture::behind_the_barrier("quick").await;
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 11 passed");
+    // Busy, it is no waiting runner a reload stops for its limits. Job 11 is still listed, and it claims it.
+    fixture.all_busy();
+    let lowered = big_and_small().replace("memory = \"1G\"", "memory = \"512M\"");
+    fixture
+        .engine
+        .reload(Config::parse(&lowered).unwrap(), Some(9 * G), None);
+    fixture.queue(vec![big(10), named(11, "quick"), named(12, "quick")]);
+    fixture.engine.tick(Shutdown::No).await;
+    assert_eq!(fixture.runners_of("o/small"), 3, "job 12 waits");
+    assert_eq!(
+        fixture.reason(12),
+        Some(api::Waiting::BehindMemory { job: 10 })
+    );
+}
+
+/// A history read that fails leaves the last one standing, though a pool's runs may have grown longer since: a short
+/// job passes only by run times read within the minute (ADR 0151). No capture named the small runners, so no end is
+/// known before which the owner's room comes, and job 11 could pass as a short job alone.
+#[tokio::test]
+async fn a_short_job_passes_only_by_run_times_read_within_the_minute() {
+    for read in [Read::Succeeds, Read::Fails] {
+        let mut fixture = Fixture::starved().await;
+        fixture.ran("quick", 200, 3, 2).await;
+        fixture.engine.forget_predictor();
+        fixture.queue(vec![big(10)]);
+        fixture.engine.tick(Shutdown::No).await;
+        fixture.engine.age_predictor(Duration::from_secs(120));
+        if read == Read::Fails {
+            rusqlite::Connection::open(fixture.dir.0.join("history.db"))
+                .unwrap()
+                .execute("ALTER TABLE jobs RENAME TO jobs_gone", [])
+                .unwrap();
+        }
+        fixture.queue(vec![big(10), named(11, "quick")]);
+        fixture.engine.tick(Shutdown::No).await;
+        let reason = fixture.reason(11);
+        match read {
+            Read::Succeeds => assert_eq!(fixture.runners_of("o/small"), 3, "{reason:?}"),
+            Read::Fails => {
+                assert_eq!(fixture.runners_of("o/small"), 2, "job 11 stays queued");
+                assert_eq!(reason, Some(api::Waiting::BehindMemory { job: 10 }));
+            }
+        }
+    }
+}
+
+/// Whether the history can be read at the next plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    Succeeds,
+    Fails,
+}
+
 #[tokio::test]
 async fn a_job_that_would_outlast_the_room_or_has_too_few_runs_stays_behind_the_barrier() {
     for name in ["slow", "rare"] {
@@ -1235,5 +1348,84 @@ async fn under_caps_a_history_changes_no_reservation() {
         fixture.engine.cpu_in_use(),
         1000,
         "the runner's whole 1 CPU"
+    );
+}
+
+/// Under the growth count the host's credit is bounded by the margin that stands, so the plain margin leaves more
+/// room than the larger one by more than the margins differ. Four settled small runners have 3G of headroom each, job
+/// 11 passed the 8G owner and takes 3.5G, and 13G is available: the larger margin's count leaves 2.5G, the plain
+/// margin's 4.5G. With job 11 given back the owner's 8G is there by the plain margin, so job 12 does not pass, and the
+/// band stays where it is. Read by the larger count plus the margins' difference, 7G would let job 12 pass as a host
+/// waiter, the band would drop for it, the plain margin's own count would then shut the pass, and the band would rise
+/// again, plan after plan, with nothing started (ADR 0151).
+#[tokio::test]
+async fn a_pass_moves_the_band_only_by_the_plain_margins_own_count() {
+    let config = big_and_small()
+        .replace("admission = \"caps\"", "admission = \"measured\"")
+        .replace("memory = \"1G\"", "memory = \"3584M\"")
+        .replace("slots = 4", "slots = 7");
+    let mut fixture = Fixture::with(&config, 64 * G).await;
+    fixture.ran("quick", 200, 3, 2).await;
+    let reading = |fixture: &Fixture, available: u64, slice: u64| {
+        admission::runners_use(&fixture.github, &fixture.handle.store, G / 2);
+        admission::slice_at(&fixture.handle.store, G);
+        fixture.host_with(available, slice);
+    };
+    reading(&fixture, 30 * G, 0);
+    for slot in 1..=4 {
+        let capture = format!("@@job {slot} {slot}\n");
+        fixture
+            .docker
+            .0
+            .lock()
+            .unwrap()
+            .slot_captures
+            .insert(slot, capture);
+    }
+    fixture.queue((1..=4).map(small).collect());
+    fixture.engine.tick(Shutdown::No).await;
+    for id in 1..=4 {
+        until_state(&fixture.handle, id, JobState::Running).await;
+    }
+    fixture.docker.0.lock().unwrap().slot_captures.clear();
+    fixture.all_busy();
+    fixture.queue(Vec::new());
+    admission::first_minute_passes(&mut fixture.engine);
+    fixture
+        .engine
+        .measured
+        .age_growth(api::GROWTH_WINDOW + Duration::from_secs(1));
+    reading(&fixture, 20 * G, 0);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.queue(vec![big(10)]);
+    fixture.engine.tick(Shutdown::No).await;
+    fixture.age();
+    reading(&fixture, 19 * G, 0);
+    fixture.queue(vec![big(10), named(11, "quick")]);
+    fixture.engine.forget_predictor();
+    fixture.engine.tick(Shutdown::No).await;
+    let (plan, _) = fixture.engine.plan();
+    assert_eq!(
+        plan.waiting.get(&11),
+        Some(&api::Waiting::RunnerStarting),
+        "job 11 passed the owner"
+    );
+    let mut bands = Vec::new();
+    for _ in 0..4 {
+        fixture.all_busy();
+        admission::first_minute_passes(&mut fixture.engine);
+        reading(&fixture, 13 * G, 8 * G);
+        fixture.queue(vec![big(10), named(11, "quick"), named(12, "quick")]);
+        fixture.engine.tick(Shutdown::No).await;
+        bands.push(fixture.engine.host_is_short());
+        let (plan, _) = fixture.engine.plan();
+        assert_eq!(
+            plan.waiting.get(&12),
+            Some(&api::Waiting::BehindMemory { job: 10 })
+        );
+    }
+    assert_eq!(
+        bands, [true; 4],
+        "the larger margin stands while nothing starts"
     );
 }

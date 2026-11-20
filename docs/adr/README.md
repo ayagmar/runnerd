@@ -157,4 +157,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0148](0148-a-failed-jobs-log-says-whether-an-action-or-checkout-failed-it.md) | A failed job's log says whether an action or its checkout failed it | Accepted |
 | [0149](0149-pinned-mise-and-tools-are-baked-into-a-derived-image.md) | A repository's pinned mise and tools are baked into an image derived from runnerd's | Accepted |
 | [0150](0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md) | A script asks whether a job waits for the host's memory in an exit code | Accepted |
+| [0151](0151-a-short-job-of-another-profile-passes-a-barrier.md) | A short job of another profile passes a barrier | Accepted |
 | [0152](0152-a-snapshot-over-its-limit-starts-its-tools-over-first.md) | A snapshot over its limit starts its tools over first, and all of it only when that is not enough | Accepted |
