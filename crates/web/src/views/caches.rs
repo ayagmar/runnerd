@@ -1,10 +1,10 @@
 //! `/caches`: every cache volume as a lane, its size, filling it against its bound where it has one, each one's size
-//! over the last 30 days, its action, and the shared build cache's week as figures.
+//! over the last 30 days, its action, the shared build cache's week as figures, and what the action archives hold.
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    BUILD_CACHE_TOOLS, BuildCacheStats, CacheHistory, CacheKind, CacheVolume, Caches, Section,
-    Status,
+    ActionArchives, BUILD_CACHE_TOOLS, BuildCacheStats, CacheHistory, CacheKind, CacheVolume,
+    Caches, Section, Status,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -74,6 +74,9 @@ pub(crate) fn render(view: &CachesView) -> Markup {
     let main = html! {
         (heading(runnerd_core::api::View::Capacity.title(), Some(Page::Caches), Some(figure)))
         (volumes(view))
+        @if let Some(archives) = &view.caches.actions {
+            (action_archives(archives, view.now))
+        }
     };
     page(Section::Caches.title(), Some(Page::Caches), None, &main)
 }
@@ -160,6 +163,23 @@ fn build_cache(build: &BuildCacheStats) -> Markup {
         div.build-cache {
             (figure_list("build-figures", &build.figures()))
             p.muted { "For " (BUILD_CACHE_TOOLS) ". " (format::sentence(&build.actions_cache_line())) "." }
+        }
+    }
+}
+
+/// The action archives runners read: what they hold, and each failure in its tone.
+fn action_archives(archives: &ActionArchives, now: u64) -> Markup {
+    html! {
+        section.action-archives aria-label="Action archives" {
+            h2 { "Action archives" }
+            p.muted { (format::sentence(&archives.line(now))) "." }
+            @if !archives.failures.is_empty() {
+                ul.archive-failures class=(super::tone_class(archives.tone())) {
+                    @for failure in &archives.failures {
+                        li { (failure.line()) }
+                    }
+                }
+            }
         }
     }
 }

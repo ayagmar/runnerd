@@ -57,6 +57,7 @@ fn status() -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        action_archives: None,
         budget: Budget {
             admission: runnerd_core::api::AdmissionPolicy::Caps,
             held: false,

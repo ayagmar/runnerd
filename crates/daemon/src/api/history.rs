@@ -349,6 +349,7 @@ pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> R
                 measured_at: measured.at,
                 volumes,
                 build,
+                actions: state.handle.status.borrow().action_archives.clone(),
             })
             .into_response()
         }

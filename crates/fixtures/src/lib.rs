@@ -216,6 +216,7 @@ fn status() -> Status {
         shutting_down: true,
         stopping: Some(api::Stopping::WaitsForJobs),
         github_limited_until: Some(NOW + 750),
+        action_archives: None,
         budget: Budget {
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(24 * GIB),
@@ -627,6 +628,21 @@ fn caches() -> Caches {
             },
             actions_cache: true,
         }),
+        actions: Some(action_archives()),
+    }
+}
+
+/// The action archives: eight kept, and one download that failed its check.
+fn action_archives() -> api::ActionArchives {
+    api::ActionArchives {
+        entries: 8,
+        bytes: 12 * MIB,
+        refreshed_at: Some(NOW - 180),
+        failures: vec![api::ArchiveFailure {
+            subject: "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955".to_owned(),
+            kind: api::ArchiveFailureKind::Rejected,
+            since: NOW - 600,
+        }],
     }
 }
 
@@ -1295,6 +1311,10 @@ pub struct Facts {
     pub build_cache_week: String,
     /// Where jobs' GitHub Actions cache is.
     pub actions_cache: String,
+    /// What the action archives hold.
+    pub action_archives: String,
+    /// The action archive that failed, in a line.
+    pub action_archive_failure: String,
     /// The month's job minutes priced at GitHub's rates, with their basis.
     pub savings: String,
     /// The last 30 days', which reach the jobs of September.
@@ -1434,6 +1454,8 @@ pub fn facts(daemon: &Daemon) -> Facts {
         records_tone: daemon.records.summary_tone(),
         build_cache_week: build.week_line(),
         actions_cache: build.actions_cache_line(),
+        action_archives: action_archives().line(NOW),
+        action_archive_failure: action_archives().failures[0].line(),
         savings: daemon.savings.month.headline(),
         savings_30_days: daemon.savings.last_30_days.headline(),
         stopping,

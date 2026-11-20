@@ -49,7 +49,11 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[];
+const ACCEPTED: &[Accepted] = &[Accepted {
+    reader: Reader::Previous,
+    item: "attention-kind/action-archives",
+    adr: "0147",
+}];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -315,6 +319,7 @@ documents! {
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
     "failure-cause": FailureCause => variants(samples::failure_cause()),
+    "archive-failure-kind": ArchiveFailureKind => variants(samples::archive_failure_kind()),
 }
 
 /// The previous release's samples, one file per document.

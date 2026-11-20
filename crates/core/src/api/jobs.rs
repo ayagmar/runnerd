@@ -997,6 +997,10 @@ pub struct Caches {
     pub volumes: Vec<CacheVolume>,
     /// The shared build cache now, when it is on.
     pub build: Option<BuildCacheStats>,
+    /// The action archives runnerd keeps for its runners, when `[caches.actions]` is on (ADR 0147); absent from an
+    /// older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<super::ActionArchives>,
 }
 
 /// The shared build cache (ADR 0052): its size now, and what it served the jobs of the last 7 days.

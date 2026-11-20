@@ -85,6 +85,7 @@ fn app() -> App {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            action_archives: None,
             budget: Budget {
                 admission: AdmissionPolicy::Caps,
                 held: false,

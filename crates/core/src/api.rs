@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 
 mod actions;
 mod admission;
+mod archives;
 mod attention;
 mod budget;
 mod control;
@@ -74,6 +75,7 @@ pub use actions::{
     actions_not_configured, actions_off,
 };
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
+pub use archives::{ActionArchives, ArchiveFailure, ArchiveFailureKind};
 pub use attention::{
     ATTENTION_MAX, Attention, AttentionItem, AttentionKind, Fix, Subject, attention_items,
 };
@@ -192,6 +194,10 @@ pub struct Status {
     /// [`JobActions::Unsupported`].
     #[serde(default)]
     pub job_actions: JobActions,
+    /// The action archives runnerd keeps for its runners (ADR 0147); absent while `[caches.actions]` is off, before
+    /// the store opened, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_archives: Option<ActionArchives>,
 }
 
 /// The memory budget runners and the mirror share, in bytes.

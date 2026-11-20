@@ -3,7 +3,8 @@
 //! which workflow each run is of and what it is named (`workflows`, ADR 0140),
 //! the pages of a listing, conditional requests and the answers kept for them, rate-limit backoff, and the count of
 //! what it asks and the limit it last read. It must never put the token in a log line, a `Debug` output or an error,
-//! nor send it anywhere but its base URL, and it decides nothing about scheduling. A job action's request is read for
+//! nor send it anywhere but its base URL, and it decides nothing about scheduling. It also reads what the action
+//! archives need (`archives`, ADR 0147). A job action's request is read for
 //! its status and headers only: its body is never read, and what it returns is a class and a status, never text.
 
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,7 @@ use crate::docker::JitConfig;
 use crate::sync::lock;
 use crate::time;
 
+mod archives;
 mod requests;
 mod token;
 mod workflows;
@@ -152,6 +154,9 @@ pub enum Error {
     /// No token could be read.
     #[error("no GitHub token: {0}")]
     Token(String),
+    /// An action archive or a file could not be downloaded whole: what failed, never an address or the token.
+    #[error("{0}")]
+    Download(String),
 }
 
 impl Error {
@@ -427,7 +432,7 @@ impl ActionFailure {
             },
             Error::Http { source, .. } if source.is_connect() => ActionFailure::Unreachable,
             Error::Http { source, .. } if source.is_timeout() => ActionFailure::TimedOut,
-            Error::Http { .. } | Error::Decode { .. } => ActionFailure::Broken,
+            Error::Http { .. } | Error::Decode { .. } | Error::Download(_) => ActionFailure::Broken,
         }
     }
 }
@@ -436,7 +441,7 @@ impl ActionFailure {
 struct Withdrawn;
 
 /// The GitHub calls the scheduler makes. `Github` is the real client; the engine's tests use a fake.
-pub trait GithubApi: Send + Sync {
+pub trait GithubApi: crate::archives::Source + Send + Sync {
     /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
     fn queued_jobs(
         &self,
@@ -524,6 +529,8 @@ pub trait GithubApi: Send + Sync {
 /// answer costs no rate limit.
 pub struct Github {
     http: reqwest::Client,
+    /// The action archives' downloads (ADR 0147): no redirect followed on its own, a longer timeout.
+    downloads: reqwest::Client,
     base: String,
     /// The token, read on a thread of its own: `gh` may wait on a keyring for seconds.
     tokens: Tokens,
@@ -763,8 +770,19 @@ impl Github {
                 path: base.to_owned(),
                 source,
             })?;
+        let downloads = reqwest::Client::builder()
+            .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(archives::DOWNLOAD_TIMEOUT)
+            .build()
+            .map_err(|source| Error::Http {
+                method: Method::GET,
+                path: base.to_owned(),
+                source,
+            })?;
         Ok(Github {
             http,
+            downloads,
             base: base.trim_end_matches('/').to_owned(),
             tokens: Tokens::new(Arc::from(token_source)),
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),

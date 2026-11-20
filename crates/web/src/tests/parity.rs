@@ -278,6 +278,13 @@ async fn the_build_cache_states_its_week_and_tools_as_core_does() {
         shown.contains(runnerd_core::api::BUILD_CACHE_TOOLS),
         "the build cache names the tools it serves: {shown}"
     );
+    // What they hold, as core words it; the dashboard's clock is its own, so the age is left out.
+    let (held, _) = facts
+        .action_archives
+        .split_once(", refreshed")
+        .expect("refreshed once");
+    assert!(shown.contains(&sentence(held)), "{held}: {shown}");
+    assert!(shown.contains(&facts.action_archive_failure), "{shown}");
 }
 
 #[tokio::test]

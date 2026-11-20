@@ -16,11 +16,13 @@ default = ["host"]
 # `api` and `config` alone.
 host = [
   "dep:bollard",
+  "dep:flate2",
   "dep:futures-util",
   "dep:http-body-util",
   "dep:hyper",
   "dep:hyper-util",
   "dep:reqwest",
+  "dep:ring",
   "dep:rusqlite",
   "dep:rustix",
   "dep:rustls",
@@ -49,11 +51,13 @@ client = [
 
 [dependencies]
 bollard = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 reqwest = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true, features = ["fs", "process"] }
 rustls = { workspace = true, optional = true }

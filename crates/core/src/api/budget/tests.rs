@@ -29,6 +29,7 @@ fn status(admission: AdmissionPolicy, memory_max: Option<u64>) -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        action_archives: None,
         budget: Budget {
             slice: "ci.slice".to_owned(),
             memory_max,

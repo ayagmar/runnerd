@@ -661,8 +661,8 @@ fn sizing_short_of_room_drops_a_figure_whole_rather_than_cut_it() {
 }
 
 #[test]
-fn the_caches_view_states_the_build_cache_s_week_as_core_s_figures() {
-    let (daemon, _) = fixtures();
+fn the_caches_view_states_the_build_cache_s_week_and_the_action_archives_as_core_does() {
+    let (daemon, facts) = fixtures();
     let mut app = app(&daemon);
     app.update(super::tab(View::Capacity));
     app.update(super::tab(View::Capacity));
@@ -676,6 +676,10 @@ fn the_caches_view_states_the_build_cache_s_week_as_core_s_figures() {
             assert!(shows(&rows, &figure.value), "{}: {all}", figure.value);
         }
     }
+    let (rows, _) = frame_of(&app, 200, 40);
+    let all = rows.join("\n");
+    assert!(shows(&rows, &facts.action_archives), "{all}");
+    assert!(shows(&rows, &facts.action_archive_failure), "{all}");
 }
 
 #[test]

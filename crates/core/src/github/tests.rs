@@ -1926,3 +1926,68 @@ async fn a_renamed_workflow_takes_its_new_name_once_the_names_are_old() {
     *name.lock().unwrap() = "Build";
     assert_eq!(workflow(3).await.as_deref(), Some("Build"));
 }
+
+/// An action's archive is asked of the API with the token, and fetched from where GitHub redirects without it; a
+/// redirect anywhere else, or a body past the limit, fails without the token or the signed address in the error.
+#[tokio::test]
+async fn an_archive_download_sends_the_token_to_the_api_alone() {
+    use crate::archives::Source as _;
+    const SIGNED: &str = "/signed/o-r-abc.tar.gz?token=SIGNATURE";
+    let (url, seen) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/tarball/abc" => (StatusCode::FOUND, [("location", SIGNED)]).into_response(),
+        "/repos/o/r/tarball/far" => (
+            StatusCode::FOUND,
+            [(
+                "location",
+                "https://elsewhere.example/a.tar.gz?token=SIGNATURE",
+            )],
+        )
+            .into_response(),
+        SIGNED => b"archive bytes".to_vec().into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let github = client(&url);
+    let dir = crate::testdir::TestDir::new("tarball");
+
+    let to = dir.0.join("a");
+    let written = github.tarball("o/r", "abc", &to, 1024).await.unwrap();
+    assert_eq!(written, 13);
+    assert_eq!(std::fs::read(&to).unwrap(), b"archive bytes");
+    let requests = lock(&seen).clone();
+    let auth = |uri: &str| {
+        requests
+            .iter()
+            .find(|request| request.uri == uri)
+            .map(|request| request.headers.contains_key("authorization"))
+    };
+    assert_eq!(
+        auth("/repos/o/r/tarball/abc"),
+        Some(true),
+        "the API gets the token"
+    );
+    assert_eq!(auth(SIGNED), Some(false), "the signed address never does");
+
+    let capped = github
+        .tarball("o/r", "abc", &dir.0.join("b"), 4)
+        .await
+        .unwrap_err();
+    let far = github
+        .tarball("o/r", "far", &dir.0.join("c"), 1024)
+        .await
+        .unwrap_err();
+    assert!(
+        !lock(&seen)
+            .iter()
+            .any(|request| request.uri.contains("elsewhere")),
+        "a redirect off GitHub is not followed"
+    );
+    for error in [capped, far] {
+        let shown = format!("{error} {error:?}");
+        assert!(!shown.contains(TOKEN), "the token stays hidden: {shown}");
+        assert!(
+            !shown.contains("SIGNATURE"),
+            "the signed address stays hidden: {shown}"
+        );
+    }
+}

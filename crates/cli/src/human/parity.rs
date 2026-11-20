@@ -236,6 +236,8 @@ fn records_and_caches_state_their_limits_as_core_does() {
     assert!(text.contains(&facts.build_cache_week), "{text}");
     assert!(text.contains(&facts.actions_cache), "{text}");
     assert!(text.contains(api::BUILD_CACHE_TOOLS), "{text}");
+    assert!(text.contains(&facts.action_archives), "{text}");
+    assert!(text.contains(&facts.action_archive_failure), "{text}");
 }
 
 #[test]
