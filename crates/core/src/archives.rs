@@ -1210,7 +1210,7 @@ enum Fetch {
 #[derive(Debug)]
 struct Meter {
     limits: Limits,
-    bytes: Mutex<Bytes>,
+    bytes: Arc<Mutex<Bytes>>,
 }
 
 /// The bytes a refresh has left to receive, and those downloads in flight may still add to the store.
@@ -1228,13 +1228,18 @@ enum Refused {
     Full,
 }
 
-/// A download's place in the store's cap, given back when it ends: by then what it kept is in the store's size.
-struct InFlight<'meter>(&'meter Meter);
+/// A download's place in the store's cap, given back when it ends. Once its archive is published, it is given back
+/// with the store still locked, so a download reserving with the store locked counts the archive once: in the store's
+/// size or in flight.
+struct InFlight {
+    bytes: Arc<Mutex<Bytes>>,
+    archive: u64,
+}
 
-impl Drop for InFlight<'_> {
+impl Drop for InFlight {
     fn drop(&mut self) {
-        let mut bytes = lock(&self.0.bytes);
-        bytes.in_flight = bytes.in_flight.saturating_sub(self.0.limits.archive);
+        let mut bytes = lock(&self.bytes);
+        bytes.in_flight = bytes.in_flight.saturating_sub(self.archive);
     }
 }
 
@@ -1242,10 +1247,10 @@ impl Meter {
     fn new(limits: Limits) -> Meter {
         Meter {
             limits,
-            bytes: Mutex::new(Bytes {
+            bytes: Arc::new(Mutex::new(Bytes {
                 left: limits.bytes,
                 in_flight: 0,
-            }),
+            })),
         }
     }
 
@@ -1263,9 +1268,10 @@ impl Meter {
         Ok(())
     }
 
-    /// Reserves a download's bytes, if the refresh has them left and the store, holding `held` bytes, has room for
-    /// them beside the downloads in flight. The place in the cap is held until what it returns is dropped.
-    fn reserve(&self, held: u64) -> Result<InFlight<'_>, Refused> {
+    /// Reserves a download's bytes, if the refresh has them left and `store` has room for them beside the downloads in
+    /// flight. The place in the cap is held until what it returns is dropped.
+    fn reserve(&self, store: &ArchiveStore) -> Result<InFlight, Refused> {
+        let held = store.size().1;
         let mut bytes = lock(&self.bytes);
         if held + bytes.in_flight + self.limits.archive > self.limits.store {
             return Err(Refused::Full);
@@ -1275,7 +1281,10 @@ impl Meter {
         }
         bytes.left -= self.limits.archive;
         bytes.in_flight += self.limits.archive;
-        Ok(InFlight(self))
+        Ok(InFlight {
+            bytes: self.bytes.clone(),
+            archive: self.limits.archive,
+        })
     }
 
     /// Gives back what a download reserved and did not receive.
@@ -1300,8 +1309,9 @@ async fn fetch<S: Source>(
     for wait in ATTEMPTS {
         tokio::time::sleep(wait).await;
         drop(place.take());
-        let held = lock(store).size().1;
-        place = Some(match meter.reserve(held) {
+        // With the store locked: an archive another download publishes is in the store's size or in flight, not both.
+        let reserved = meter.reserve(&lock(store));
+        place = Some(match reserved {
             Ok(place) => place,
             Err(Refused::Full) => return Err(Fetch::Full),
             Err(Refused::Spent) => return Err(Fetch::Deferred),
@@ -1368,9 +1378,11 @@ async fn fetch<S: Source>(
                 unread,
                 actions,
             };
-            lock(&store)
-                .publish(key, staged, now)
-                .map_err(Fetch::Store)?;
+            let mut store = lock(&store);
+            store.publish(key, staged, now).map_err(Fetch::Store)?;
+            // Its bytes are in the store's size now: given back before another download can read that size.
+            drop(place);
+            drop(store);
             Ok(size)
         })
         .await
