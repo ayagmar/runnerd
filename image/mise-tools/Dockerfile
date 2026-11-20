@@ -9,7 +9,8 @@ FROM ${BASE} AS base
 
 # The repository's config, refused before anything is downloaded when it is outside the shapes the recipe has tested
 # (inputs.py check). The SHA-256s build.sh passes are the image's labels; checking them here keeps the labels true to
-# the files. SHA256SUMS lets a job check that its own mise.toml and mise.lock are the ones the image was built from.
+# the files. SHA256SUMS, to which the next stage adds the mise binary, lets a job check that its own mise.toml,
+# mise.lock and mise pin are the ones the image was built from.
 FROM base AS inputs
 USER root
 ARG LOCK_SHA256
@@ -38,14 +39,16 @@ RUN [ "${TARGETARCH:-$(dpkg --print-architecture)}" = amd64 ] || { echo "linux-x
     && tar --zstd -xf /tmp/mise.tar.zst -C /tmp mise/bin/mise \
     && echo "${MISE_SHA256}  /tmp/mise/bin/mise" | sha256sum --check --strict \
     && install -D -o root -g root -m 755 /tmp/mise/bin/mise /opt/mise/bin/mise \
+    && echo "${MISE_SHA256}  /opt/mise/bin/mise" >> /opt/mise/share/SHA256SUMS \
     && rm -rf /tmp/mise /tmp/mise.tar.zst \
     && /opt/mise/bin/mise --version
 
 # The tools, as root into mise's system installs directory, /usr/local/share/mise/installs, at the paths jobs run them
 # from, which must not exist yet. --locked takes each version and URL from mise.lock; each shape inputs.py lets through
 # compares the download with the lock's digest before installing it (test.sh's wrong-digest builds). mise runs with a
-# cleared environment: its data, cache, state and config are fresh scratch, gone with the stage; no hooks; no Python or
-# Node compiled from source.
+# cleared environment: its data, cache, state and config are fresh scratch, gone with the stage; no hooks; no Python
+# compiled from source. Node builds from source only for a lock entry's `install = "source"`, which inputs.py refuses;
+# MISE_NODE_COMPILE=0 would change the entry's identity so that none matched.
 FROM mise AS tools
 WORKDIR /opt/mise/share/build
 RUN [ ! -e /usr/local/share/mise ] \
@@ -54,7 +57,7 @@ RUN [ ! -e /usr/local/share/mise ] \
         MISE_DATA_DIR=/tmp/mise/data MISE_CACHE_DIR=/tmp/mise/cache MISE_STATE_DIR=/tmp/mise/state \
         MISE_CONFIG_DIR=/tmp/mise/config MISE_SYSTEM_CONFIG_DIR=/tmp/mise/etc \
         MISE_TRUSTED_CONFIG_PATHS=/opt/mise/share/build MISE_YES=1 MISE_NO_HOOKS=1 MISE_LOCKED=1 \
-        MISE_PYTHON_COMPILE=0 MISE_NODE_COMPILE=0 MISE_NODE_VERIFY=1 \
+        MISE_PYTHON_COMPILE=0 MISE_NODE_VERIFY=1 \
         /opt/mise/bin/mise install --system --locked \
     && rm -rf /tmp/mise \
     && chown -R root:root /usr/local/share/mise \

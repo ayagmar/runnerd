@@ -74,6 +74,8 @@ label() { docker image inspect --format "{{index .Config.Labels \"$1\"}}" "$tag"
 docker run --rm --network none --entrypoint bash -v "$recipe/tests/fixture:/project:ro" "$tag" -c \
   '[ ! -e /usr/local/share/mise/hook-ran ] && cd /project && sha256sum --check --strict /opt/mise/share/SHA256SUMS' \
   >/dev/null || fail "the hook ran at build time, or SHA256SUMS does not match the fixture"
+docker run --rm --entrypoint grep "$tag" -qx "$mise_sha256  /opt/mise/bin/mise" /opt/mise/share/SHA256SUMS \
+  || fail "SHA256SUMS does not name the mise binary"
 
 echo "another lock makes another tag; a tag on another image stays" >&2
 changed=$(project changed)
