@@ -161,3 +161,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0152](0152-a-snapshot-over-its-limit-starts-its-tools-over-first.md) | A snapshot over its limit starts its tools over first, and all of it only when that is not enough | Accepted |
 | [0153](0153-a-run-its-runner-failed-is-rerun-once-per-attempt.md) | A run its runner failed is re-run once per attempt, where the config asks | Accepted |
 | [0154](0154-a-job-keeps-how-long-each-cause-held-it.md) | A job keeps how long each cause held it in the queue | Accepted |
+| [0155](0155-a-runner-is-probed-after-it-exits-and-the-verdict-is-recorded.md) | A runner is probed after it exits, and the verdict is recorded | Accepted |

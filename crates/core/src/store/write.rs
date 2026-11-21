@@ -109,6 +109,7 @@ impl Writer<'_> {
             Write::RunnerStarted(runner) => self.runner_started(&runner),
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
+            Write::RunnerProbe { runner, probe } => self.runner_probe(&runner, probe),
             Write::RunnerStoppedFor { runner, reason } => self.runner_stopped_for(&runner, reason),
             Write::RunnerCancelBy { runner, at } => self.runner_cancel_by(&runner, at),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
@@ -429,6 +430,19 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
                 [runner],
+            ),
+        );
+    }
+
+    fn runner_probe(&self, runner: &str, probe: api::RunnerProbe) {
+        let Some(word) = read::probe_word(probe) else {
+            return;
+        };
+        logged(
+            "record a runner's probe",
+            self.db.execute(
+                "UPDATE runners SET probe = ?2 WHERE name = ?1",
+                [runner, word],
             ),
         );
     }

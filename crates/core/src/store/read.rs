@@ -55,7 +55,7 @@ macro_rules! record_mark {
 }
 
 /// How many columns `SUMMARY` has: a query that adds one after them reads it at this index.
-const SUMMARY_COLUMNS: usize = 52;
+const SUMMARY_COLUMNS: usize = 53;
 
 /// The columns `summary_from` reads, in its order.
 const SUMMARY: &str = concat!(
@@ -68,7 +68,7 @@ const SUMMARY: &str = concat!(
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
      j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault, ",
     record_mark!(),
-    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at",
+    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at, r.probe",
     " FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
 );
 
@@ -188,6 +188,32 @@ fn failure_cause(word: &str) -> api::FailureCause {
     }
 }
 
+/// A runner's probe as the history stores it (`probe_word`); a word this build does not know reads as unknown.
+fn probe(word: &str) -> api::RunnerProbe {
+    match word {
+        "clean" => api::RunnerProbe::Clean,
+        "mount" => api::RunnerProbe::Mount,
+        "procfs" => api::RunnerProbe::Procfs,
+        "mount-and-procfs" => api::RunnerProbe::MountAndProcfs,
+        "timed-out" => api::RunnerProbe::TimedOut,
+        "broken" => api::RunnerProbe::Broken,
+        _ => api::RunnerProbe::Unknown,
+    }
+}
+
+/// How the history stores a runner's probe: as the API names it.
+pub(super) fn probe_word(probe: api::RunnerProbe) -> Option<&'static str> {
+    match probe {
+        api::RunnerProbe::Clean => Some("clean"),
+        api::RunnerProbe::Mount => Some("mount"),
+        api::RunnerProbe::Procfs => Some("procfs"),
+        api::RunnerProbe::MountAndProcfs => Some("mount-and-procfs"),
+        api::RunnerProbe::TimedOut => Some("timed-out"),
+        api::RunnerProbe::Broken => Some("broken"),
+        api::RunnerProbe::Unknown => None,
+    }
+}
+
 /// How the history stores a failure's cause: as the API names it.
 pub(super) fn cause_word(cause: api::FailureCause) -> Option<&'static str> {
     match cause {
@@ -269,6 +295,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             .as_deref()
             .map(failure_cause),
         rerun_at: row.get::<_, Option<u64>>(51)?.map(secs),
+        probe: row.get::<_, Option<String>>(52)?.as_deref().map(probe),
         record_mark: row
             .get::<_, Option<String>>(45)?
             .as_deref()

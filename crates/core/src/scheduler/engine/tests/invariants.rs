@@ -4114,7 +4114,7 @@ fn steps_of(seed: u64) -> Vec<Step> {
 /// `run`, with a panic reported as the broken invariant `no_panic`, so it keeps its seed and shrinks like any other;
 /// its step is not known, and says 0.
 async fn attempt(steps: &[Step]) -> Result<Seen, Violation> {
-    match AssertUnwindSafe(run(steps)).catch_unwind().await {
+    match AssertUnwindSafe(Box::pin(run(steps))).catch_unwind().await {
         Ok(outcome) => outcome,
         Err(panic) => Err(Violation {
             invariant: "no_panic",
@@ -4534,7 +4534,7 @@ async fn the_trace_of_each_seed() {
 
 /// Runs `steps` as the generated test does, and returns what broke.
 async fn broken(steps: &[Step]) -> Option<(&'static str, String)> {
-    run(steps)
+    Box::pin(run(steps))
         .await
         .err()
         .map(|found| (found.invariant, found.detail))

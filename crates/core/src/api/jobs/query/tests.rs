@@ -24,6 +24,7 @@ fn job(id: u64, queued_at: u64) -> JobSummary {
         runner_fault: false,
         failure_cause: None,
         rerun_at: None,
+        probe: None,
         record_mark: None,
     }
 }

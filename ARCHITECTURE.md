@@ -283,7 +283,9 @@ queued → slot → container → removed
    ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md),
    [ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
-   dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). Docker's `die` event wakes
+   dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`), and, when its Sysbox profile opts in, probes
+   a sample of the calls Sysbox serves (`image/probe.py`). The inspect below records the verdict and nothing decides
+   on ([ADR 0155](docs/adr/0155-a-runner-is-probed-after-it-exits-and-the-verdict-is-recorded.md)). Docker's `die` event wakes
    the engine (`engine/exits`), between ticks or while a tick waits for GitHub, for a pass (`Engine::turnover`): an
    event is a hint, and Docker's inspect decides. A stopped runner is released: once Docker removed its container its
    slot is free. GitHub drops a runner's registration with its job, so one whose log shows its job's end is not

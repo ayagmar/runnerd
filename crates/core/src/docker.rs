@@ -78,6 +78,35 @@ pub const SKIP_SYNCS_LABEL: &str = "runnerd.skip-syncs";
 /// later version of the label still says the image has them.
 pub const VOLATILE_LAYERS_LABEL: &str = "runnerd.volatile-layers";
 
+/// The label of a runner image whose entrypoint probes its container after the runner exits and exits with the
+/// verdict (`image/probe.py`, ADR 0155), with the version of the exit codes it uses. Docker gives a container its
+/// image's labels, and a job cannot change a container's labels: a container without it, or with another version,
+/// was not probed, whatever its exit code.
+pub const PROBE_LABEL: &str = "runnerd.runner-probe";
+
+/// What a stopped runner container's exit code says its probe found, when its labels say its image probes
+/// (`PROBE_LABEL` at version 1): 200 every call worked, 201 a mount failed, 202 `/proc` did not open, 203 both, 204
+/// the probe timed out, 205 it could not run. Any other code, such as 137 for a container killed before or while the
+/// probe ran, or a runner still running, is `None`.
+pub fn probe<S: std::hash::BuildHasher>(
+    labels: &HashMap<String, String, S>,
+    exit_code: Option<i64>,
+) -> Option<crate::api::RunnerProbe> {
+    use crate::api::RunnerProbe;
+    if labels.get(PROBE_LABEL).map(String::as_str) != Some("1") {
+        return None;
+    }
+    match exit_code? {
+        200 => Some(RunnerProbe::Clean),
+        201 => Some(RunnerProbe::Mount),
+        202 => Some(RunnerProbe::Procfs),
+        203 => Some(RunnerProbe::MountAndProcfs),
+        204 => Some(RunnerProbe::TimedOut),
+        205 => Some(RunnerProbe::Broken),
+        _ => None,
+    }
+}
+
 /// Whether an image's labels say it answers `SKIP_SYNCS`.
 pub fn skips_syncs<S: std::hash::BuildHasher>(labels: &HashMap<String, String, S>) -> bool {
     labels
@@ -119,6 +148,9 @@ pub struct RunnerState {
     pub exit_code: Option<i64>,
     /// Whether the kernel killed a process in it for memory, as Docker saw.
     pub oom_killed: bool,
+    /// What its probe found after its runner exited, from its labels and exit code (`probe`); `None` while it runs
+    /// and where no probe reported.
+    pub probe: Option<crate::api::RunnerProbe>,
     /// True under `unsafe-dind`: a job in the container can take over the host.
     pub privileged: bool,
     /// The runtime Docker runs it with, such as `sysbox-runc`.
@@ -630,6 +662,11 @@ impl DockerApi for Docker {
         let response = self.api.inspect_container(container, None).await?;
         let state = response.state.unwrap_or_default();
         let host_config = response.host_config.unwrap_or_default();
+        let running = state.running.unwrap_or(false);
+        let labels = response
+            .config
+            .and_then(|config| config.labels)
+            .unwrap_or_default();
         let address = response
             .network_settings
             .and_then(|settings| settings.networks)
@@ -639,9 +676,14 @@ impl DockerApi for Docker {
                     .find_map(|network| network.ip_address.filter(|address| !address.is_empty()))
             });
         Ok(RunnerState {
-            running: state.running.unwrap_or(false),
+            running,
             exit_code: state.exit_code,
             oom_killed: state.oom_killed.unwrap_or(false),
+            probe: if running {
+                None
+            } else {
+                probe(&labels, state.exit_code)
+            },
             privileged: host_config.privileged.unwrap_or(false),
             runtime: host_config.runtime,
             pid: state

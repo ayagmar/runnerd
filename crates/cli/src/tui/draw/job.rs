@@ -48,7 +48,8 @@ pub(super) fn job(
         Reading::Read(outline) => outline.failure.as_ref(),
         Reading::Unread(_) => None,
     };
-    // What failed it and whether runnerd re-ran it, as core words them, come before what the log shows of it.
+    // What failed it, whether runnerd re-ran it and what the probe after it found, as core words them, come before
+    // what the log shows of it.
     let mut failure_lines = cause_lines(summary, width, theme);
     failure_lines.extend(failure.map_or_else(Vec::new, |failure| {
         failure_lines_of(failure, job, width, theme)
@@ -168,7 +169,8 @@ fn head_lines(frame: &mut Frame<'_>, head: Rect, app: &App, job: &Job, now: u64,
 
 /// A failed job's failure as its log says it: core's headline in the failure's colour, the step's last lines, and
 /// the command that opens a shell in its record while it is kept.
-/// What failed `summary`'s job, as core read it from its log, and that runnerd re-ran its run.
+/// What failed `summary`'s job, as core read it from its log, that runnerd re-ran its run, and what the probe after
+/// its runner found.
 fn cause_lines(summary: &JobSummary, width: usize, theme: Theme) -> Vec<Line<'static>> {
     let cause = summary.failure_line().map(|cause| {
         Line::styled(
@@ -182,7 +184,13 @@ fn cause_lines(summary: &JobSummary, width: usize, theme: Theme) -> Vec<Line<'st
             theme.tone(Tone::Plain),
         )
     });
-    cause.into_iter().chain(rerun).collect()
+    let probe = summary.probe_line().map(|probe| {
+        Line::styled(
+            fit(&probe.text, width).trim_end().to_owned(),
+            theme.tone(probe.tone.into()),
+        )
+    });
+    cause.into_iter().chain(rerun).chain(probe).collect()
 }
 
 fn failure_lines_of(

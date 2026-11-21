@@ -135,7 +135,11 @@ CREATE TABLE runners (
     cancel_by INTEGER,
     -- When the sampler first found its container's cgroup gone (ADR 0143); a later sample means the container ran
     -- again. NULL while it was not seen to go, and in rows from before schema 24.
-    cgroup_gone_at INTEGER
+    cgroup_gone_at INTEGER,
+    -- What the probe its image's entrypoint ran after the runner exited found (ADR 0155), as `api::RunnerProbe`
+    -- names it: 'clean', 'mount', 'procfs', 'mount-and-procfs', 'timed-out' or 'broken'. NULL where no probe
+    -- reported, and in rows from before schema 28.
+    probe TEXT
 );
 
 CREATE TABLE steps (

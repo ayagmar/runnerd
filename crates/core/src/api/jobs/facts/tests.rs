@@ -24,6 +24,7 @@ fn job(state: JobState, conclusion: Option<&str>) -> JobSummary {
         runner_fault: false,
         failure_cause: None,
         rerun_at: None,
+        probe: None,
         record_mark: None,
     }
 }
@@ -522,4 +523,26 @@ fn a_job_offers_cancel_while_it_goes_and_a_re_run_once_final_and_of_failed_jobs_
         JobAction::for_job(&job(JobState::Completed, Some("failure"))),
         &[JobAction::Rerun, JobAction::RerunFailed]
     );
+}
+
+// Catches: a probe line on every passing job, and a failed job without a verdict (an older image, a container
+// killed first) read as clean.
+#[test]
+fn a_probe_shows_for_a_failed_job_or_a_fault_and_a_missing_verdict_is_never_clean() {
+    let line = |conclusion: &str, probe: Option<RunnerProbe>| {
+        let mut summary = job(JobState::Completed, Some(conclusion));
+        summary.probe = probe;
+        summary.probe_line().map(|line| (line.text, line.tone))
+    };
+    assert_eq!(line("success", None), None);
+    assert_eq!(line("success", Some(RunnerProbe::Clean)), None);
+    let (text, tone) = line("success", Some(RunnerProbe::Mount)).expect("a fault shows on any job");
+    assert_eq!(tone, Tone::Warn, "{text}");
+    let (text, tone) = line("failure", None).expect("a failed job says the verdict is missing");
+    assert_eq!(text, "no probe verdict recorded");
+    assert_eq!(tone, Tone::Quiet);
+    let (text, _) =
+        line("failure", Some(RunnerProbe::Clean)).expect("a failed job shows a clean probe");
+    assert!(text.ends_with("calls succeeded"), "{text}");
+    assert_eq!(line("failure", Some(RunnerProbe::Unknown)), None);
 }

@@ -2381,7 +2381,8 @@ dl.health-figures {
   color: var(--failure-ink);
 }
 
-.job-rerun {
+.job-rerun,
+.job-probe {
   margin: 0;
 }
 

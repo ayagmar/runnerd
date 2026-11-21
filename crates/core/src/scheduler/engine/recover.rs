@@ -14,7 +14,7 @@ use super::unsynced::Recovered;
 use super::{Engagement, Engine, Occupant, Slot};
 use crate::api;
 use crate::cache;
-use crate::docker::{self, DockerApi, is_being_removed, is_not_found};
+use crate::docker::{self, DockerApi, RunnerState, is_being_removed, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
 use crate::scheduler::warm::Attempt;
@@ -29,6 +29,8 @@ struct Caps {
     cpus: u64,
     /// When Docker started it; `None` when Docker cannot tell.
     started_at: Option<SystemTime>,
+    /// The same inspect also carries a stopped runner's probe, without a second Docker call.
+    inspected: Option<Box<RunnerState>>,
 }
 
 /// The second a runner's name carries: the engine names the next runner later, even within that second or after the
@@ -94,8 +96,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .or_else(|| configured.map(|settings| u64::from(settings.cpus) * 1000))
                 .unwrap_or(0),
             started_at: state
+                .as_ref()
                 .and_then(|state| state.started_at)
                 .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+            inspected: state.filter(|state| state.probe.is_some()).map(Box::new),
         }
     }
 
@@ -130,6 +134,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         started_at: state
                             .started_at
                             .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+                        inspected: None,
                     },
                 );
             }
@@ -149,7 +154,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// What a runner container left running by an earlier daemon runs as, from its labels, `caps` and its record.
-    async fn adopted(&self, container: &docker::Container, caps: Caps) -> Occupant {
+    async fn adopted(&self, container: &docker::Container, caps: &Caps) -> Occupant {
         let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
         Occupant {
             repository: label("runnerd.repository"),
@@ -191,14 +196,28 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     async fn remove_left(
         &mut self,
         container: docker::Container,
-        slot: SlotRef,
+        profile: String,
+        index: Option<usize>,
         occupant: Occupant,
+        inspected: Option<&RunnerState>,
     ) {
         if container.running {
             self.remove_unkept(container.id, container.name).await;
-        } else {
-            self.decide_left(Unread::new(slot, occupant)).await;
+            return;
         }
+        let slot = SlotRef {
+            profile,
+            index: index.unwrap_or(0),
+        };
+        if let Some(state) = inspected
+            && let Some(probe) = state.probe
+        {
+            if index.is_some() && !slot.profile.is_empty() && !occupant.repository.is_empty() {
+                self.record_runner(&slot, &occupant, state);
+            }
+            self.note_probe(&occupant.runner_name, probe);
+        }
+        self.decide_left(Unread::new(slot, occupant)).await;
     }
 
     /// Keeps a stopped runner container an earlier run left as its failed job's record, or removes it. One Docker could
@@ -275,6 +294,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.repositories.found_running(&occupant.repository);
     }
 
+    /// Reads the mirror's actual cap after a reload may have lowered the configured one.
+    async fn recover_mirror(&mut self) {
+        match self.docker.inspect(&self.names.mirror()).await {
+            Ok(state) if state.running => self.mirror.found_running(state.memory),
+            Ok(_) => self.mirror.found_not_running(),
+            Err(error) if is_not_found(&error) => self.mirror.found_not_running(),
+            // Unknown: the configured cap.
+            Err(_) => {}
+        }
+    }
+
     /// Adopts the runner and seed containers a previous daemon left running, also those the config no longer has
     /// room for, which drain as after a reload, and removes the runners that stopped, or that run under this
     /// machine's names without a slot to adopt them in. Their registrations, and any of this host's runners without a
@@ -293,19 +323,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .partition(|container| container.labels.contains_key(record::SHELL_LABEL));
         self.remove_shells(shells).await;
         self.list_records().await;
-        // A reload may have lowered the configured cap since the mirror started.
-        match self.docker.inspect(&self.names.mirror()).await {
-            Ok(state) if state.running => {
-                self.mirror.found_running(state.memory);
-            }
-            Ok(_) => self.mirror.found_not_running(),
-            Err(error) if is_not_found(&error) => self.mirror.found_not_running(),
-            // Unknown: the configured cap.
-            Err(_) => {}
-        }
+        self.recover_mirror().await;
         // Runner containers still running once recovery is done.
         let mut running = BTreeSet::new();
-        for container in containers {
+        for mut container in containers {
             // Runner containers on this Engine are this machine's whatever their name, which older builds or
             // another machine ID may have chosen: a running one is adopted when its labels name a free slot.
             let ours = container.name.starts_with(&self.runner_prefix);
@@ -324,7 +345,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(caps) => caps,
                 None => self.running_caps(&container, &profile).await,
             };
-            let occupant = self.adopted(&container, caps).await;
+            // A runner may have finished between the list and the inspect that found its verdict.
+            if caps.inspected.is_some() {
+                container.running = false;
+            }
+            let occupant = self.adopted(&container, &caps).await;
             // A runner the config no longer has room for drains as it would have without the restart: in a slot
             // past a lowered count, of a removed profile or for a removed repository. One of a removed profile
             // whose caps Docker does not tell is removed, as it would count at zero.
@@ -376,11 +401,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                 }
                 _ => {
-                    let slot = SlotRef {
+                    self.remove_left(
+                        container,
                         profile,
-                        index: index.unwrap_or(0),
-                    };
-                    self.remove_left(container, slot, occupant).await;
+                        index,
+                        occupant,
+                        caps.inspected.as_deref(),
+                    )
+                    .await;
                 }
             }
         }

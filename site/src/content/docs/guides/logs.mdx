@@ -35,4 +35,6 @@ The page also shows its wait, split at when runnerd first saw the job queued (*S
 
 A job that failed reads `runner fault`, not `failure`, when its failed step's log shows Sysbox losing the runner's seccomp listener: `function not implemented` on a mount, umount or openat2, or `unsafe procfs detected … invalid argument`. Its code did not fail, and a re-run on a new runner is the answer, which runnerd [can ask GitHub for itself](../cancel-rerun/#runner-faults). It still counts as a failure in the stats and notifications.
 
+The Sysbox probe is off by default. To collect verdicts on one profile, set `sysbox_probe_profile` under `[host]` to that profile's name. After a normal runner exit, its image tries a few mounts and an `openat2` under `/proc`. A failed job's page shows the verdict under its outcome, as does any job whose probe found a call failing. A failed job without a stored verdict reads `no probe verdict recorded`. For a successful canary job, check `runnerctl job <id> --json` for `probe: "clean"`. This means the sampled calls succeeded, not that every call worked during the job. The verdict does not change outcomes or trigger reruns.
+
 Frames set in JetBrains Mono ([OFL](../../fonts/JetBrainsMono-OFL.txt)).

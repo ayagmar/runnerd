@@ -112,6 +112,7 @@ COPY job-started.sh /usr/local/bin/runnerd-job-started.sh
 COPY job-completed.sh /usr/local/bin/runnerd-job-completed.sh
 COPY seed.sh /usr/local/sbin/runnerd-seed
 COPY scrub.sh /usr/local/sbin/runnerd-scrub
+COPY --chmod=755 probe.py /usr/local/sbin/runnerd-probe
 COPY entrypoint.sh /usr/local/bin/runnerd-runner
 # Answers the runner's sync calls without syncing when runnerd sets RUNNERD_SKIP_SYNCS=1 (docs/adr/0141); before the
 # entrypoint, so its Docker Engine and everything after it inherit the filter. dind's own setup keeps its syncs.
@@ -119,8 +120,9 @@ COPY --chmod=755 skip-syncs.py /usr/local/bin/runnerd-skip-syncs
 # runnerd asks a runner to skip its syncs, and guards its caches against a crash, only when its image says it can
 # (docker::SKIP_SYNCS_LABEL): the version of RUNNERD_SKIP_SYNCS it answers. Asked, the entrypoint also mounts the
 # slot's layers `volatile`, so unmounting them syncs nothing (layers.sh, docs/adr/0142); the second label says so
-# (docker::VOLATILE_LAYERS_LABEL), for doctor.
-LABEL runnerd.skip-syncs="1" runnerd.volatile-layers="1"
+# (docker::VOLATILE_LAYERS_LABEL), for doctor. The third says the entrypoint exits with its probe's verdict, in the
+# codes of its version (docker::PROBE_LABEL, docs/adr/0155): runnerd reads no verdict from an image without it.
+LABEL runnerd.skip-syncs="1" runnerd.volatile-layers="1" runnerd.runner-probe="1"
 # The runner accepts hook scripts only by their extension.
 ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/runnerd-job-started.sh \
     ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/bin/runnerd-job-completed.sh

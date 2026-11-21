@@ -361,6 +361,9 @@ pub(crate) fn head(view: &JobView) -> Markup {
             h1 { (summary.title().name) " " (badge(summary)) }
             @if let Some(cause) = summary.failure_line() { p.job-cause { (format::sentence(cause)) "." } }
             @if let Some(rerun) = summary.rerun_line() { p.job-rerun { (format::sentence(&rerun)) "." } }
+            @if let Some(probe) = summary.probe_line() {
+                p class={ "job-probe " (tone_class(probe.tone)) } { (format::sentence(&probe.text)) "." }
+            }
             // Waited, ran and the queued time are the timeline's.
             p.job-facts {
                 @if let Some(branch) = &summary.branch { code { (branch) } }

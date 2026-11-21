@@ -874,6 +874,10 @@ struct DockerState {
     cpus: HashMap<String, u64>,
     /// How many `inspect`s of a container fail next, by ID, as when the Engine is busy.
     fail_inspects: HashMap<String, u32>,
+    /// The exit code of each stopped container that has one, by ID: its image's probe's verdict (ADR 0155).
+    exit_codes: HashMap<String, i64>,
+    /// Runners that stop on their next inspect, after Docker may have listed them as running.
+    stop_on_inspect: BTreeSet<String>,
     /// How many of the next runner containers started fail their first `inspect`.
     fail_started_inspects: u32,
     /// How many `remove`s fail next, as when the Engine is busy.
@@ -1461,15 +1465,29 @@ impl DockerApi for FakeDocker {
                 message: "the Engine is busy".to_owned(),
             });
         }
+        if state.stop_on_inspect.remove(container)
+            && let Some(found) = state
+                .containers
+                .iter_mut()
+                .find(|found| found.id == container)
+        {
+            found.running = false;
+        }
         let found = state
             .containers
             .iter()
             .find(|candidate| candidate.id == container || candidate.name == container)
             .ok_or_else(not_found)?;
+        let exit_code = state
+            .exit_codes
+            .get(&found.id)
+            .copied()
+            .filter(|_| !found.running);
         Ok(RunnerState {
             running: found.running,
-            exit_code: None,
+            exit_code,
             oom_killed: false,
+            probe: exit_code.and_then(|code| docker::probe(&found.labels, Some(code))),
             privileged: false,
             runtime: None,
             pid: Some(4242),
@@ -8266,4 +8284,152 @@ async fn a_runs_workflow_named_late_corrects_its_jobs_in_the_history() {
     engine.tick(Shutdown::No).await;
     handle.store.flush().await;
     assert_eq!(workflow().await.as_deref(), Some("CI"));
+}
+
+#[tokio::test]
+async fn only_the_selected_sysbox_profile_collects_probe_verdicts() {
+    for (profile, isolation, expected) in [
+        ("", "sysbox", false),
+        ("app", "sysbox", true),
+        ("other", "sysbox", false),
+        ("app", "unsafe-dind", false),
+    ] {
+        let config = CONFIG.replace(
+            "isolation = \"sysbox\"",
+            &format!("isolation = \"{isolation}\"\nallow_unsafe = true"),
+        );
+        let config = if profile.is_empty() {
+            config
+        } else {
+            config.replace(
+                "[host]",
+                &format!("[host]\nsysbox_probe_profile = \"{profile}\""),
+            )
+        };
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("probe-profile");
+        let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+        engine.recover().await.unwrap();
+        github.0.lock().unwrap().queued = vec![job(1)];
+        engine.tick(Shutdown::No).await;
+        let state = docker.0.lock().unwrap();
+        let envs: Vec<_> = state.envs.values().collect();
+        assert_eq!(
+            envs.len(),
+            1,
+            "one runner started for {profile}/{isolation}"
+        );
+        assert_eq!(
+            envs[0].iter().any(|var| var == "RUNNERD_SYSBOX_PROBE=1"),
+            expected,
+            "probe setting for {profile}/{isolation}"
+        );
+    }
+}
+
+/// A runner container whose image probes after its runner exits (ADR 0155), in `slot`, that stops with `code`.
+fn probed(docker: &FakeDocker, slot: usize, code: i64) {
+    let mut state = docker.0.lock().unwrap();
+    let id = format!("container-{slot}");
+    state.exit_codes.insert(id.clone(), code);
+    if let Some(container) = state.containers.iter_mut().find(|found| found.id == id) {
+        container
+            .labels
+            .insert(docker::PROBE_LABEL.to_owned(), "1".to_owned());
+    }
+}
+
+/// The probe a job's history shows, once the writes are in.
+async fn probe_of(handle: &Handle, job: u64) -> Option<api::RunnerProbe> {
+    handle.store.flush().await;
+    let job = handle.store.job(job).await.unwrap().unwrap();
+    job.summary.probe
+}
+
+// Catches: a verdict read only from a runner this daemon started, lost for one a restart adopted; and an image
+// older than the probe, whose runner may exit 200 too, read as clean.
+#[tokio::test]
+async fn an_adopted_runners_probe_is_kept_with_its_job_and_an_older_image_reads_as_not_probed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    running_job(&github, &docker, "o/r", 2, 2);
+    probed(&docker, 1, 201);
+    // An image without the label, whose entrypoint exits with the runner's code, 200 here.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .exit_codes
+        .insert("container-2".to_owned(), 200);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    for container in &mut docker.0.lock().unwrap().containers {
+        container.running = false;
+    }
+    engine.tick(Shutdown::No).await;
+    assert_eq!(probe_of(&handle, 1).await, Some(api::RunnerProbe::Mount));
+    assert_eq!(probe_of(&handle, 2).await, None);
+}
+
+// Catches: a container that stopped while no daemon ran removed at the next start without its verdict read.
+#[tokio::test]
+async fn a_runner_that_stopped_while_runnerd_was_down_keeps_its_probe() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("probe");
+    {
+        let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+        engine.recover().await.unwrap();
+        until_state(&handle, 1, JobState::Running).await;
+        engine.tick(Shutdown::No).await;
+        handle.store.flush().await;
+    }
+    docker.0.lock().unwrap().trace.clear();
+    // The daemon is down when its runner exits and its probe finds both calls failing.
+    probed(&docker, 1, 203);
+    docker.0.lock().unwrap().containers[0].running = false;
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    assert_eq!(
+        probe_of(&handle, 1).await,
+        Some(api::RunnerProbe::MountAndProcfs)
+    );
+    assert_eq!(
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .trace
+            .iter()
+            .filter(|call| *call == "inspect container-1")
+            .count(),
+        1,
+        "recover the stopped runner from its one inspect"
+    );
+}
+
+#[tokio::test]
+async fn recovery_records_a_probe_when_the_runner_never_reached_history() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    probed(&docker, 1, 200);
+    let dir = TestDir::new("probe-no-history");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    let runner = {
+        let mut state = docker.0.lock().unwrap();
+        // Docker lists the runner as still running, then the inspect finds that it has stopped.
+        let container = state.containers[0].clone();
+        state.stop_on_inspect.insert(container.id);
+        container.name
+    };
+    // Already queued, but the previous daemon went away before creating the runner's history row.
+    handle.store.queued("o/r", &job(1), crate::time::now_ms());
+    handle.store.claimed(1, 1, &runner, crate::time::now_ms());
+    handle.store.flush().await;
+    assert_eq!(probe_of(&handle, 1).await, None);
+    engine.recover().await.unwrap();
+    assert_eq!(probe_of(&handle, 1).await, Some(api::RunnerProbe::Clean));
 }
