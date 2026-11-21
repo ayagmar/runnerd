@@ -17,6 +17,7 @@ before the first call, is the entrypoint's 205: the probe could not run. A probe
 """
 
 import ctypes
+import errno
 import os
 import sys
 
@@ -61,12 +62,21 @@ def mount(source, target, fstype, flags=0):
     return False
 
 
+def setup_failed(call):
+    """Treat a lost syscall as evidence, not an unrelated sandbox denial of probe setup."""
+    error = ctypes.get_errno()
+    failed(call)
+    if error != errno.ENOSYS:
+        sys.exit(BROKEN)
+    return True
+
+
 def mounts(scratch):
     """The mounts runc makes for a container, on a tmpfs over `scratch`; True when one failed."""
     if libc.mount(None, b"/", None, MS_REC | MS_PRIVATE, None) != 0:
-        return failed("make / private")
+        return setup_failed("make / private")
     if libc.mount(b"tmpfs", scratch.encode(), b"tmpfs", MS_NOSUID | MS_NODEV, b"size=64k") != 0:
-        return failed(f"mount tmpfs on {scratch}")
+        return setup_failed(f"mount tmpfs on {scratch}")
     names = ("proc", "sys", "source", "bound")
     for name in names:
         os.mkdir(os.path.join(scratch, name))

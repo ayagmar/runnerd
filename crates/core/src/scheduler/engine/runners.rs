@@ -13,7 +13,7 @@ use super::runner_exit::{Exit, Logged, TOOK_JOB};
 use super::{Engine, Occupant, STOP_DEADLINE, Shutdown, Slot};
 use crate::api::{self, Event, HoldCause, RunnerFailure};
 use crate::cache;
-use crate::docker::{self, DockerApi, RunnerState, is_being_removed, is_log_gone, is_not_found};
+use crate::docker::{self, DockerApi, is_being_removed, is_log_gone, is_not_found};
 use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{SlotRef, StopReason};
@@ -152,7 +152,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Releases a slot's runner if Docker says its container stopped or is gone; returns whether the slot is free
     /// now. Docker's say, not an event's: an event only says when to ask (ADR 0095).
     pub(super) async fn reap(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
-        if !self.ended(occupant).await {
+        if !self.ended(slot, occupant).await {
             return false;
         }
         self.release(slot, occupant).await;
@@ -160,7 +160,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Whether Docker says a runner's container stopped or is gone; notes a kill for memory and logs the end.
-    pub(super) async fn ended(&mut self, occupant: &Occupant) -> bool {
+    pub(super) async fn ended(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
         let state = match self.docker.inspect(&occupant.container).await {
             Ok(state) => Some(state),
             Err(error) if is_not_found(&error) => None,
@@ -178,8 +178,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if state.as_ref().is_some_and(|state| state.running) {
             return false;
         }
-        if let Some(state) = &state {
-            self.note_probe(&occupant.runner_name, state);
+        if let Some(state) = &state
+            && let Some(probe) = state.probe
+        {
+            self.record_runner(slot, occupant, state);
+            self.note_probe(&occupant.runner_name, probe);
         }
         // How long it took to notice: the pacing of slots between jobs (ADR 0095).
         let noticed = state
@@ -201,10 +204,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Records what the probe after a stopped runner exited found, as its container says (ADR 0155). Recorded only:
     /// no decision reads it.
-    pub(super) fn note_probe(&self, runner: &str, state: &RunnerState) {
-        let Some(probe) = state.probe else {
-            return;
-        };
+    pub(super) fn note_probe(&self, runner: &str, probe: api::RunnerProbe) {
         if probe != api::RunnerProbe::Clean {
             info!("{runner}: its probe after the runner exited found {probe:?}");
         }
@@ -469,9 +469,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// A runner container's environment: whether its image skips the runner's sync calls, as `skips` says, its
     /// slot's share of what the slots' Docker Engines may keep, which its image's job cleanup holds it to, once the
-    /// caches' check has measured Docker's disk, and where the action archives are while runners mount them.
+    /// caches' check has measured Docker's disk, where the action archives are while runners mount them, and
+    /// whether to collect the Sysbox probe verdict for this profile.
     pub(super) fn runner_env(
         &self,
+        profile: &str,
         skips: bool,
         archives: Option<&crate::archives::RunnerArchives>,
     ) -> Vec<String> {
@@ -489,10 +491,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             )
         });
         let archives = archives.map(|archives| archives.env.clone());
+        let probe = (self.config.host.isolation == crate::config::Isolation::Sysbox
+            && self.config.host.sysbox_probe_profile.as_deref() == Some(profile))
+        .then(|| "RUNNERD_SYSBOX_PROBE=1".to_owned());
         skip_syncs
             .into_iter()
             .chain(budget)
             .chain(archives)
+            .chain(probe)
             .collect()
     }
 

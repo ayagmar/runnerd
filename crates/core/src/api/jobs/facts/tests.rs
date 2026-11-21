@@ -538,11 +538,11 @@ fn a_probe_shows_for_a_failed_job_or_a_fault_and_a_missing_verdict_is_never_clea
     assert_eq!(line("success", Some(RunnerProbe::Clean)), None);
     let (text, tone) = line("success", Some(RunnerProbe::Mount)).expect("a fault shows on any job");
     assert_eq!(tone, Tone::Warn, "{text}");
-    let (text, tone) = line("failure", None).expect("a failed job says it was not probed");
-    assert!(text.starts_with("no probe"), "{text}");
+    let (text, tone) = line("failure", None).expect("a failed job says the verdict is missing");
+    assert_eq!(text, "no probe verdict recorded");
     assert_eq!(tone, Tone::Quiet);
     let (text, _) =
         line("failure", Some(RunnerProbe::Clean)).expect("a failed job shows a clean probe");
-    assert!(text.ends_with("working"), "{text}");
+    assert!(text.ends_with("calls succeeded"), "{text}");
     assert_eq!(line("failure", Some(RunnerProbe::Unknown)), None);
 }

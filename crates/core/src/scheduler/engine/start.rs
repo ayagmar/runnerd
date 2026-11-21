@@ -725,7 +725,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
             memory: profile.memory,
-            env: self.runner_env(skips, archives.as_ref()),
+            env: self.runner_env(&slot.profile, skips, archives.as_ref()),
             mounts: self.runner_mounts(&slot.profile, number, &name, repository, archives.as_ref()),
             network: Some(self.names.network()),
             labels: std::collections::BTreeMap::new(),

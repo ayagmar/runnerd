@@ -6,6 +6,11 @@
 # the container, or keeps it as the record of a failed job.
 set -euo pipefail
 
+# The image also puts the slot's writable tool cache on PATH. Only jobs get that path.
+runner_path=$PATH
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+cd /
+
 # runnerd puts the runner's just-in-time config here before it starts the container: never in its environment, which
 # Docker stores and clients may log.
 jitconfig_file=/run/runnerd/jitconfig
@@ -35,12 +40,14 @@ cd "$HOME"
 touch /run/runnerd-since
 # Not as `--jitconfig`: any user of the host reads a process's arguments. The listener reads the config from its
 # environment, which only root and the runner user read, and drops it from what its job's processes inherit.
-ACTIONS_RUNNER_INPUT_JITCONFIG=$jitconfig setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh &
+ACTIONS_RUNNER_INPUT_JITCONFIG=$jitconfig /usr/bin/setpriv --reuid=runner --regid=runner --init-groups -- \
+    /usr/bin/env "PATH=$runner_path" ./run.sh &
 runner=$!
 unset jitconfig
 # docker stop's signal goes to the runner's listener, which cancels its job; run.sh passes on no signal. Before the
-# listener runs, run.sh takes it.
-trap 'pkill -TERM -x Runner.Listener || kill -TERM "$runner" 2> /dev/null' TERM INT
+# listener runs, run.sh takes it. Do not probe on a requested stop.
+stopping=0
+trap 'stopping=1; pkill -TERM -x Runner.Listener || kill -TERM "$runner" 2> /dev/null || true' TERM INT
 status=0
 wait "$runner" || status=$?
 # A trapped signal ends the wait before the runner exits.
@@ -48,6 +55,8 @@ while kill -0 "$runner" 2> /dev/null; do
     status=0
     wait "$runner" || status=$?
 done
+trap 'stopping=1' TERM INT
+cd /
 # Nothing of the runner's may write after the scrub: what it left running (a Gradle daemon) gets TERM, then 2 s to
 # end, then KILL, within docker stop's 10 s.
 if pkill -TERM -u runner 2> /dev/null; then
@@ -57,16 +66,24 @@ if pkill -TERM -u runner 2> /dev/null; then
     done
     pkill -KILL -u runner 2> /dev/null || true
 fi
-runnerd-scrub
-# Whether the calls Sysbox serves still work in this container (docs/adr/0155), as root once nothing of the runner's
-# runs: the container exits with the verdict, which runnerd records beside the job and acts on nowhere yet. Within 3 s,
-# so docker stop's 10 s still cover the kills and the scrub above; 124 is a probe that did not end, and any code but
-# its own is one that could not run. The runner's own code goes to the log, as runnerd never read it.
+/usr/local/sbin/runnerd-scrub
+if [[ $stopping == 1 || ${RUNNERD_SYSBOX_PROBE:-} != 1 ]]; then
+    # Leave the verdict codes reserved even if the runner itself returned one of them.
+    if (( status >= 200 && status <= 205 )); then exit 1; fi
+    exit "$status"
+fi
+# Wait asynchronously so a stop after the probe starts can interrupt this wait and discard the verdict.
+/usr/bin/timeout --kill-after=1 3 /usr/local/sbin/runnerd-probe &
+probe_pid=$!
 probe=0
-timeout --kill-after=1 3 runnerd-probe || probe=$?
+if [[ $stopping == 0 ]]; then wait "$probe_pid" || probe=$?; fi
+if [[ $stopping == 1 ]]; then
+    kill -TERM "$probe_pid" 2> /dev/null || true
+    exit 143
+fi
 case $probe in
     200 | 201 | 202 | 203) ;;
-    124) probe=204 ;;
+    124 | 137) probe=204 ;;
     *) probe=205 ;;
 esac
 echo "runnerd: the runner exited with $status; the probe after it with $probe"

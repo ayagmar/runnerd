@@ -122,8 +122,8 @@ pub struct JobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerun_at: Option<u64>,
     /// What the runner image's probe found after the runner exited (ADR 0155): whether the calls Sysbox serves still
-    /// worked in its container. `None` where no probe ran: an image older than the probe, a container stopped or
-    /// killed before it, a job still running, and from a daemon older than it. Recorded only; it decides nothing.
+    /// worked in its container when sampled. `None` where no verdict was recorded, including when collection is
+    /// disabled, a container stops early or the daemon is older. Recorded only; it decides nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<RunnerProbe>,
     /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).

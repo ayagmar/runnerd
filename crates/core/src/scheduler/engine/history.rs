@@ -139,18 +139,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let started_at = state
             .started_at
             .unwrap_or_else(|| time::ms(occupant.started_at));
-        self.store.runner_started(RunnerRecord {
-            name: occupant.runner_name.clone(),
-            repository: occupant.repository.clone(),
-            profile: slot.profile.clone(),
-            slot: slot.index + 1,
-            container: occupant.container.clone(),
-            started_at,
-            memory_cap: state.memory,
-            cpu_cap: state.cpus,
-            admission: occupant.admission,
-            purpose: occupant.purpose().map(super::Purpose::as_str),
-        });
+        self.record_runner(slot, occupant, &state);
         if let Some(pid) = state.pid {
             self.tracked.send_modify(|tracked| {
                 tracked.push(Tracked {
@@ -237,6 +226,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
             .and_then(|(_, candidate)| candidate.named_job())
             .or(occupant.named_job())
+    }
+
+    /// Ensures a runner has a history row, without replacing one the history already has.
+    pub(super) fn record_runner(&self, slot: &SlotRef, occupant: &Occupant, state: &RunnerState) {
+        self.store.runner_started(RunnerRecord {
+            name: occupant.runner_name.clone(),
+            repository: occupant.repository.clone(),
+            profile: slot.profile.clone(),
+            slot: slot.index + 1,
+            container: occupant.container.clone(),
+            started_at: state
+                .started_at
+                .unwrap_or_else(|| time::ms(occupant.started_at)),
+            memory_cap: state.memory,
+            cpu_cap: state.cpus,
+            admission: occupant.admission,
+            purpose: occupant.purpose().map(super::Purpose::as_str),
+        });
     }
 
     /// Claims the job a stopped runner's worker log names, if no capture read one: nothing else may link the two, and a

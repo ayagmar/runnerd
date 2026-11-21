@@ -138,7 +138,7 @@ impl JobSummary {
 
     /// What the probe after its runner exited found (`probe`, ADR 0155), as every client writes it under its outcome,
     /// with its tone: `a probe after the job found the runner's mounts failing`. For a job that failed, and for any
-    /// job whose probe found a call failing; a failed job without a verdict reads `no probe ran after the job`, never
+    /// job whose probe found a call failing; a failed job without a verdict reads `no probe verdict recorded`, never
     /// as clean. `None` for every other job, and for a verdict this build does not know.
     pub fn probe_line(&self) -> Option<Toned> {
         let found = |text: &str, tone| {
@@ -148,11 +148,11 @@ impl JobSummary {
             })
         };
         match self.probe {
-            None if self.is_failure() => found("no probe ran after the job", Tone::Quiet),
+            None if self.is_failure() => found("no probe verdict recorded", Tone::Quiet),
             None | Some(RunnerProbe::Unknown) => None,
             Some(RunnerProbe::Clean | RunnerProbe::Broken) if !self.is_failure() => None,
             Some(RunnerProbe::Clean) => found(
-                "a probe after the job found the runner's mounts and /proc working",
+                "the probe's sampled mount and /proc calls succeeded",
                 Tone::Quiet,
             ),
             Some(RunnerProbe::Broken) => found("a probe after the job could not run", Tone::Quiet),

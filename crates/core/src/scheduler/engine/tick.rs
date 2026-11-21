@@ -533,7 +533,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|(slot, occupant)| (slot, occupant.clone()))
             .collect();
         for (slot, occupant) in noted {
-            if self.ended(&occupant).await {
+            if self.ended(&slot, &occupant).await {
                 let drained = self.drain(&occupant);
                 let index = releases.ended.len();
                 releases.ended.push(Some(Ending {

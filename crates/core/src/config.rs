@@ -88,6 +88,9 @@ pub struct Host {
     /// applies it from the next runner on.
     #[serde(default = "default_on")]
     pub skip_syncs: bool,
+    /// One Sysbox profile to probe after its runners exit (ADR 0155). Absent by default; ignored under unsafe-dind.
+    #[serde(default)]
+    pub sysbox_probe_profile: Option<String>,
 }
 
 /// Whether a profile's image answers its runner's sync calls without syncing, as doctor reads it.
