@@ -1248,7 +1248,7 @@ const REFERENCE_BASE: &[(&str, &[(&str, &str)])] = &[
     (
         "profiles.jvm",
         &[
-            ("image", r#""ghcr.io/ayagmar/runnerd-runner:jvm-0.1.4""#),
+            ("image", r#""ghcr.io/ayagmar/runnerd-runner:jvm-0.1.5""#),
             ("cpus", "8"),
             ("memory", r#""9G""#),
             ("slots", "2"),

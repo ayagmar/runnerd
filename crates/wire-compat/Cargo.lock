@@ -57,6 +57,7 @@ dependencies = [
 [[package]]
 name = "runnerd-core"
 version = "0.1.4"
+source = "git+https://github.com/ayagmar/runnerd?rev=a3f19797cc638ff966228e1a4760a09b75829326#a3f19797cc638ff966228e1a4760a09b75829326"
 dependencies = [
  "serde",
  "thiserror",
@@ -66,8 +67,7 @@ dependencies = [
 
 [[package]]
 name = "runnerd-core"
-version = "0.1.4"
-source = "git+https://github.com/ayagmar/runnerd?rev=a3f19797cc638ff966228e1a4760a09b75829326#a3f19797cc638ff966228e1a4760a09b75829326"
+version = "0.1.5"
 dependencies = [
  "serde",
  "thiserror",
@@ -80,7 +80,7 @@ name = "runnerd-wire-compat"
 version = "0.0.0"
 dependencies = [
  "runnerd-core 0.1.4",
- "runnerd-core 0.1.4 (git+https://github.com/ayagmar/runnerd?rev=a3f19797cc638ff966228e1a4760a09b75829326)",
+ "runnerd-core 0.1.5",
  "serde",
  "serde_json",
 ]
