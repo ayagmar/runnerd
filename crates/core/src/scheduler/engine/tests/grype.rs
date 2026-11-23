@@ -19,9 +19,11 @@ async fn first_runner(
         TestDir::new("grype"),
     );
     let (mut engine, _handle) = engine_with(&github, &docker, &dir, config);
-    engine
-        .grype
-        .serve(&dir.0.join("grype/dbs").join(GENERATION), GENERATION);
+    engine.grype.serve(
+        &dir.0.join("grype/dbs").join(GENERATION),
+        GENERATION,
+        crate::time::now_ms() / 1000,
+    );
     engine.recover().await.unwrap();
     {
         let mut state = github.0.lock().unwrap();

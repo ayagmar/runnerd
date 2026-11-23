@@ -45,6 +45,9 @@ pub const IMAGE: &str = "anchore/grype:v0.122.1@sha256:661583704a253c0448ed63998
 const REFRESH: Duration = Duration::from_hours(6);
 /// How soon after a failure the store tries again.
 const RETRY: Duration = Duration::from_mins(30);
+/// How long before Grype's age limit a database is no longer given to a starting runner: a job's length, so its
+/// scan does not find it past the limit.
+const MOUNT_MARGIN: Duration = Duration::from_hours(1);
 /// The largest archive downloaded: Anchore's was 207 MB on 2026-11-23.
 const ARCHIVE_LIMIT: u64 = 1 << 30;
 
@@ -88,6 +91,10 @@ pub trait Grype: Send + Sync {
         work: &Path,
         archive: &str,
     ) -> impl Future<Output = Result<Imported, String>> + Send;
+    /// Makes sure Grype can run: its image is there, pulled if not, and Docker answers.
+    fn ready(&self) -> impl Future<Output = Result<(), String>> + Send;
+    /// Removes the containers an import or its check left, as a daemon stopped midway leaves them.
+    fn clean(&self) -> impl Future<Output = Result<(), String>> + Send;
     /// The generations containers' [`LABEL`]s name, running or not.
     fn mounted(&self) -> impl Future<Output = Result<BTreeSet<String>, String>> + Send;
 }
@@ -101,11 +108,25 @@ pub struct RunnerGrype {
     pub env: Vec<String>,
     /// The generation, for its container's [`LABEL`].
     pub generation: String,
+    /// When Anchore built it, in seconds since the epoch: a start does not get it within an hour of Grype's
+    /// age limit.
+    pub built_at: u64,
+}
+
+/// When a database built at `built_at` stops being given to starting runners: [`MOUNT_MARGIN`] before Grype's age
+/// limit.
+fn stale_at(built_at: u64) -> u64 {
+    (built_at + api::GRYPE_MAX_AGE_SECS).saturating_sub(MOUNT_MARGIN.as_secs())
+}
+
+/// Whether a database built at `built_at` is given to a runner that starts at `now`.
+fn mountable(built_at: u64, now: u64) -> bool {
+    now < stale_at(built_at)
 }
 
 impl RunnerGrype {
     /// What a runner gets of the generation `generation` at `dir`.
-    fn of(dir: &Path, generation: &str) -> RunnerGrype {
+    fn of(dir: &Path, generation: &str, built_at: u64) -> RunnerGrype {
         RunnerGrype {
             mount: Mount {
                 target: Some(MOUNT.to_owned()),
@@ -120,6 +141,7 @@ impl RunnerGrype {
                 "GRYPE_DB_VALIDATE_AGE=true".to_owned(),
             ],
             generation: generation.to_owned(),
+            built_at,
         }
     }
 }
@@ -155,6 +177,12 @@ impl Link {
         grype: Arc<G>,
     ) -> Option<Running> {
         let directory = self.directory.clone()?;
+        let cleaner = grype.clone();
+        let clean = Box::pin(async move {
+            if let Err(error) = cleaner.clean().await {
+                tracing::warn!("cannot remove what the Grype import left: {error}");
+            }
+        });
         let task = tokio::spawn(run(
             source,
             grype,
@@ -163,7 +191,10 @@ impl Link {
             self.status.clone(),
             self.ready.clone(),
         ));
-        Some(Running(Some(task)))
+        Some(Running {
+            task: Some(task),
+            clean: Some(clean),
+        })
     }
 
     /// Hands the task `config`'s setting, after a reload. Turned off, runners get no database from then on.
@@ -187,40 +218,59 @@ impl Link {
         self.status.borrow().clone()
     }
 
-    /// What a runner container mounts and its environment gets, read once as it starts.
+    /// What a runner container mounts and its environment gets, read once as it starts: the clock is read here, as
+    /// the task's timers do not count a time the host slept.
     pub fn runner(&self) -> Option<RunnerGrype> {
         if !*self.enabled.borrow() {
             return None;
         }
-        self.ready.borrow().clone()
+        self.ready
+            .borrow()
+            .clone()
+            .filter(|runner| mountable(runner.built_at, unix_now()))
     }
 
     /// Publishes `generation` at `dir` to runners, as the task would after checking it.
     #[cfg(test)]
-    pub(crate) fn serve(&self, dir: &Path, generation: &str) {
+    pub(crate) fn serve(&self, dir: &Path, generation: &str, built_at: u64) {
         self.ready
-            .send_replace(Some(RunnerGrype::of(dir, generation)));
+            .send_replace(Some(RunnerGrype::of(dir, generation, built_at)));
     }
 }
 
 /// The running task; dropping it stops the task. A download or import stopped midway leaves a work directory in
-/// `staging/`, which the next start removes, and an import container, which the next import removes first.
-#[derive(Debug)]
-pub struct Running(Option<tokio::task::JoinHandle<()>>);
+/// `staging/`, which the next start removes. `stop` also removes the import's containers; a task only dropped leaves
+/// them to the next start, which removes them before it opens the store.
+pub struct Running {
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// Removes the import's containers.
+    clean: Option<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+impl std::fmt::Debug for Running {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Running")
+            .field("task", &self.task)
+            .finish_non_exhaustive()
+    }
+}
 
 impl Running {
-    /// Stops the task and waits until it has.
+    /// Stops the task, waits until it has, and removes what an import it cut short left in Docker.
     pub async fn stop(mut self) {
-        if let Some(task) = self.0.take() {
+        if let Some(task) = self.task.take() {
             task.abort();
             let _ = task.await;
+        }
+        if let Some(clean) = self.clean.take() {
+            clean.await;
         }
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        if let Some(task) = &self.0 {
+        if let Some(task) = &self.task {
             task.abort();
         }
     }
@@ -247,7 +297,7 @@ async fn run<S: Source + 'static, G: Grype + 'static>(
     loop {
         let on = *enabled.borrow_and_update();
         let wait = if on {
-            keeper.prepare(unix_now()).await;
+            keeper.prepare(&*grype, unix_now()).await;
             ready.send_replace(keeper.runner(unix_now()));
             status.send_replace(Some(keeper.status(unix_now())));
             let wait = keeper.update(&*source, &*grype, unix_now()).await;

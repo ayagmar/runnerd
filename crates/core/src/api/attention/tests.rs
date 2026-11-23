@@ -602,7 +602,8 @@ fn a_grype_database_that_failed_or_went_stale_is_one_warning_and_a_current_one_n
     assert_eq!(item.tone, Tone::Warn);
     assert_eq!(item.since, Some(NOW - 86_400));
     assert!(
-        item.title.contains("older than the 5 days Grype accepts"),
+        item.title
+            .contains("within an hour of the 5 days Grype accepts"),
         "{}",
         item.title
     );

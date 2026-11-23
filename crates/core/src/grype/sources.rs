@@ -192,16 +192,6 @@ impl<D: DockerApi> Importer<D> {
             _ => Ok(()),
         };
         remove().await?;
-        if !docker
-            .image_present(IMAGE)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            docker
-                .pull(IMAGE)
-                .await
-                .map_err(|error| format!("cannot pull Grype's image: {error}"))?;
-        }
         let ran = tokio::time::timeout(deadline, async {
             docker
                 .run(name, import_body(work, args, &self.user, read_only))
@@ -272,6 +262,33 @@ impl<D: DockerApi + 'static> Grype for Importer<D> {
             built_at,
             schema: status.schema_version,
         })
+    }
+
+    async fn ready(&self) -> Result<(), String> {
+        let docker = &*self.docker;
+        if !docker
+            .image_present(IMAGE)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            docker
+                .pull(IMAGE)
+                .await
+                .map_err(|error| format!("cannot pull Grype's image: {error}"))?;
+        }
+        Ok(())
+    }
+
+    async fn clean(&self) -> Result<(), String> {
+        for name in [IMPORT_NAME, STATUS_NAME] {
+            match self.docker.remove(name).await {
+                Err(error) if !is_not_found(&error) => {
+                    return Err(format!("cannot remove {name}: {error}"));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     async fn mounted(&self) -> Result<BTreeSet<String>, String> {

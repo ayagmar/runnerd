@@ -1,6 +1,7 @@
 //! What the Grype database task knows besides its store (ADR 0160), and the steps of a refresh: open and check the
-//! store, read the listing, download, check the SHA-256, import, publish and prune. Only `Keeper`'s methods write its
-//! fields, which are independent: whether the store is open, what last failed, and when the listing was last read.
+//! store, prune, read the listing, download, check the SHA-256, import and publish. Only `Keeper`'s methods write its
+//! fields, which are independent: whether the store is open, what last failed, when the listing was last read, and
+//! which archive is held back after its fetch failed.
 //!
 //! Nothing here survives a restart but the store's own files: the next task opens and checks the store again and
 //! reads the listing at once. A reload that turns the database off leaves it as it is.
@@ -13,8 +14,8 @@ use tracing::{info, warn};
 
 use super::listing::{self, Listing};
 use super::store::{Checked, GrypeStore, Held, Publishing};
-use super::{ARCHIVE_LIMIT, Grype, REFRESH, RETRY, RunnerGrype, Source};
-use crate::api::{self, GRYPE_MAX_AGE_SECS, GrypeFailure, GrypeFailureKind};
+use super::{ARCHIVE_LIMIT, Grype, REFRESH, RETRY, RunnerGrype, Source, mountable, stale_at};
+use crate::api::{self, GrypeFailure, GrypeFailureKind};
 use crate::sync::lock;
 
 /// The task's state.
@@ -27,7 +28,22 @@ pub(super) struct Keeper {
     failure: Option<GrypeFailure>,
     /// When the listing was last read.
     checked_at: Option<u64>,
+    /// The archive whose fetch failed after it was downloaded, not fetched again until a day passes or the listing
+    /// names another.
+    held_back: Option<HeldBack>,
 }
+
+/// An archive whose fetch failed after it cost a download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeldBack {
+    /// The archive's SHA-256, as the listing named it.
+    sha256: String,
+    /// When it may be fetched again.
+    until: u64,
+}
+
+/// How long an archive whose fetch failed after its download is held back: a day, four refreshes.
+const HOLD_BACK: Duration = Duration::from_hours(24);
 
 /// Why an update stopped, and in what words.
 struct Failed {
@@ -52,14 +68,19 @@ impl Keeper {
             store: None,
             failure: None,
             checked_at: None,
+            held_back: None,
         }
     }
 
     /// Opens the store if it is not open, and then checks the database it holds, once: a store that cannot open is
-    /// a `Store` failure until a later refresh opens it.
-    pub(super) async fn prepare(&mut self, now: u64) {
+    /// a `Store` failure until a later refresh opens it. Before it opens, the containers an import of an earlier
+    /// daemon left are removed, so none writes into `staging/` as it is emptied.
+    pub(super) async fn prepare<G: Grype>(&mut self, grype: &G, now: u64) {
         if self.store.is_some() {
             return;
+        }
+        if let Err(error) = grype.clean().await {
+            warn!("cannot remove what an earlier Grype import left: {error}");
         }
         let directory = self.directory.clone();
         let opened = tokio::task::spawn_blocking(move || {
@@ -94,9 +115,11 @@ impl Keeper {
         }
     }
 
-    /// Reads the listing and, when it names a database built after the held one, downloads, checks, imports and
-    /// publishes it; then removes the generations no container mounts. Returns how long until the next refresh.
-    /// Whatever fails keeps the held database.
+    /// Removes the generations neither held nor named by a container, then reads the listing and, when it names a
+    /// database built after the held one, downloads, checks, imports and publishes it. A generation is so removed a
+    /// refresh after it was replaced, once every start that read it has its container. Returns how long until the
+    /// next refresh. Whatever fails keeps the held database; an archive that failed after its download is held back
+    /// a day, unless the listing names another.
     pub(super) async fn update<S: Source, G: Grype>(
         &mut self,
         source: &S,
@@ -106,6 +129,9 @@ impl Keeper {
         let Some(store) = self.store.clone() else {
             return RETRY;
         };
+        if let Err(error) = prune(&store, grype).await {
+            warn!("old Grype databases stay: {error}");
+        }
         let listing = match source.listing().await {
             Ok(bytes) => listing::parse(&bytes)
                 .map_err(|error| Failed::new(GrypeFailureKind::Listing, error)),
@@ -124,6 +150,18 @@ impl Keeper {
             .as_ref()
             .is_none_or(|held| listing.built_at > held.built_at)
         {
+            if self
+                .held_back
+                .as_ref()
+                .is_some_and(|back| back.sha256 == listing.sha256 && now < back.until)
+            {
+                return REFRESH;
+            }
+            // Nothing is downloaded that Grype could not import.
+            if let Err(error) = grype.ready().await {
+                self.fail(Failed::new(GrypeFailureKind::Import, error), now);
+                return RETRY;
+            }
             match fetch(&store, source, grype, &listing).await {
                 Ok(held) => info!(
                     "Grype database {} built at {} is the one runners mount",
@@ -134,15 +172,19 @@ impl Keeper {
                         "the Grype database built at {} is not kept: {}",
                         listing.built_at, failed.detail
                     );
+                    if failed.kind != GrypeFailureKind::Download {
+                        self.held_back = Some(HeldBack {
+                            sha256: listing.sha256.clone(),
+                            until: now + HOLD_BACK.as_secs(),
+                        });
+                    }
                     self.fail(failed, now);
                     return RETRY;
                 }
             }
         }
         self.failure = None;
-        if let Err(error) = prune(&store, grype).await {
-            warn!("old Grype databases stay: {error}");
-        }
+        self.held_back = None;
         REFRESH
     }
 
@@ -151,14 +193,19 @@ impl Keeper {
         let store = self.store.as_ref()?;
         let store = lock(store);
         let held = store.held()?;
-        fresh(held, now)
-            .then(|| RunnerGrype::of(&store.generation_dir(&held.generation), &held.generation))
+        fresh(held, now).then(|| {
+            RunnerGrype::of(
+                &store.generation_dir(&held.generation),
+                &held.generation,
+                held.built_at,
+            )
+        })
     }
 
     /// How long until the held database grows older than Grype accepts; `None` when none is held or it already has.
     pub(super) fn until_stale(&self, now: u64) -> Option<Duration> {
         let store = lock(self.store.as_ref()?);
-        let stale_at = store.held()?.built_at + GRYPE_MAX_AGE_SECS;
+        let stale_at = stale_at(store.held()?.built_at);
         (stale_at > now).then(|| Duration::from_secs(stale_at - now))
     }
 
@@ -174,7 +221,7 @@ impl Keeper {
             .map(|held| GrypeFailure {
                 kind: GrypeFailureKind::Stale,
                 detail: String::new(),
-                since: held.built_at + GRYPE_MAX_AGE_SECS,
+                since: stale_at(held.built_at),
             });
         api::GrypeDatabase {
             mounted: held.as_ref().is_some_and(|held| fresh(held, now)),
@@ -203,9 +250,9 @@ impl Keeper {
     }
 }
 
-/// Whether `held` is younger than Grype accepts.
+/// Whether `held` is given to a starting runner at `now`.
 fn fresh(held: &Held, now: u64) -> bool {
-    now < held.built_at + GRYPE_MAX_AGE_SECS
+    mountable(held.built_at, now)
 }
 
 /// Downloads the archive `listing` names into a new work directory, checks its SHA-256, has Grype import and check

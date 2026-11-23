@@ -148,8 +148,8 @@ impl GrypeStore {
         let Some(problem) = problem else {
             return Ok(Checked::Good);
         };
+        self.save(None)?;
         self.held = None;
-        self.save()?;
         remove_dir(&self.generation_dir(&held.generation))?;
         Ok(Checked::Dropped(problem))
     }
@@ -219,7 +219,6 @@ impl GrypeStore {
         // What a stop between a rename and the state's write left: no runner was given it.
         remove_dir(&target)?;
         fs::rename(&db, &target)?;
-        sync_dir(&self.root.join(DBS))?;
         let held = Held {
             generation,
             built_at: imported.built_at,
@@ -227,8 +226,12 @@ impl GrypeStore {
             bytes,
             sha256,
         };
+        // Held only once `state.json` names it: a restart then finds what was served.
+        if let Err(error) = sync_dir(&self.root.join(DBS)).and_then(|()| self.save(Some(&held))) {
+            let _ = remove_dir(&target);
+            return Err(error);
+        }
         self.held = Some(held.clone());
-        self.save()?;
         self.discard(work)?;
         Ok(held)
     }
@@ -251,10 +254,10 @@ impl GrypeStore {
         Ok(removed)
     }
 
-    /// Writes `state.json`: to a temporary file, synced, renamed over the last, the directory synced.
-    fn save(&self) -> io::Result<()> {
+    /// Writes `state.json` naming `held`: to a temporary file, synced, renamed over the last, the directory synced.
+    fn save(&self, held: Option<&Held>) -> io::Result<()> {
         let state = Saved {
-            held: self.held.clone(),
+            held: held.cloned(),
         };
         let bytes = serde_json::to_vec_pretty(&state).map_err(io::Error::other)?;
         let temporary = self.root.join(format!("{STATE}.tmp"));

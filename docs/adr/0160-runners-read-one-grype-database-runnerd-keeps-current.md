@@ -43,7 +43,7 @@ runnerd can reproduce.
   mount, written to a temporary file and renamed. The store holds an exclusive `flock` on `lock` while its task runs;
   a second runnerd on the same directory is a `store` failure and mounts nothing.
 - **runnerd checks what Grype checks, then has Grype import it.** A task of its own reads the listing at start, every
-  6 hours, and 30 minutes after a failure. It takes only a listing whose schema is `v6.<n>.<n>`, whose path is one
+  6 hours, and 30 minutes after a failed listing or download. It takes only a listing whose schema is `v6.<n>.<n>`, whose path is one
   file name ending `.tar.zst`, `.tar.xz` or `.tar.gz`, and whose checksum is a SHA-256; `eol` is refused. When the
   listing's database was built after the one held, it downloads the archive anonymously (15-minute timeout, at most
   1 GiB) into a new work directory, hashing it as it arrives, and refuses one whose SHA-256 differs from the
@@ -51,23 +51,31 @@ runnerd can reproduce.
   second `grype db status -o json`, which checks the schema, the age and the digest as a scan does. Both run as the
   daemon's user, without a network, capabilities or new privileges, on a read-only root, with 3 GiB of memory and
   the work directory as their only mount (the import needs under 1.5 GiB); each is removed after it ends or after its deadline (20 and 5 minutes),
-  and one an earlier daemon left is removed first. The status must be valid and name the listing's build time and
-  schema.
+  and one an earlier daemon left is removed before the store opens and again when the task stops. The status must be
+  valid and name the listing's build time and schema.
+- **A failure that cost a download is not repeated for a day.** The image is pulled before the archive is
+  downloaded, so a missing image or a stopped Docker costs nothing and is tried again in 30 minutes. An archive whose
+  checksum, import, check or publish failed is held back by its SHA-256 for 24 hours, while the listing still names
+  it: a failure that repeats writes at most one archive and one import a day, not 48.
 - **A database is published once and never written again.** Its directories are made 0755 and its files 0644, so a
   runner's user reads them, links or anything but files and directories refuse it, the archive is removed, every file
   is synced, and the directory is renamed to `dbs/<built>-<first 12 hex of the archive's SHA-256>` before
-  `state.json` names it with the SHA-256 of its `vulnerability.db`. Any failure before that leaves the database held
+  `state.json` names it with the SHA-256 of its `vulnerability.db`; the store holds it only once that write succeeded,
+  and removes the directory if it failed. Any failure before that leaves the database held
   as it was and removes the work directory.
 - **A runner mounts the current generation, read-only, once it is checked.** At start, the task hashes the held
   database against `state.json` before any runner mounts it; one that differs or is missing is removed and downloaded
   again. A runner's start reads the ready view once: it mounts that generation at `/opt/runnerd/grype` read-only and
   sets `GRYPE_DB_CACHE_DIR=/opt/runnerd/grype`, `GRYPE_DB_AUTO_UPDATE=false` and `GRYPE_DB_VALIDATE_AGE=true`, or none
   of them. `db.max-allowed-built-age` is left to the workflow's own Grype config. The view is withdrawn while the
-  database is off, and once the held database is older than 5 days (Grype's default limit), so a scan downloads its
-  own instead of failing on runnerd's; the task wakes when that happens.
+  database is off, and from an hour before the held database passes 5 days (Grype's default limit), so a job that
+  starts with it does not find it past the limit when it scans; a scan without it downloads its own. A start checks
+  that against the clock itself, as the task's timers do not count a time the host slept.
 - **A generation stays while a container names it.** A runner's container carries `runnerd.grype-db=<generation>`.
-  After each refresh that read the listing, the task removes every generation but the held one that no container
-  (running or stopped) names; while Docker cannot list containers, none is removed.
+  At the start of each refresh, before the listing is read, the task removes every generation but the held one that
+  no container (running or stopped) names; while Docker cannot list containers, none is removed. A replaced
+  generation so stays until the refresh after the one that replaced it, by when every start that read it has made its
+  container.
 - **The owner sees it.** `Status` and `/v1/caches` carry `GrypeDatabase` (the database held, its schema, build time
   and size, whether runners mount it, when the listing was last read, and what failed); core words the line and the
   failure, and `runnerctl caches`, the TUI and the dashboard's Caches page show them. A failure, a stale database
@@ -77,7 +85,10 @@ runnerd can reproduce.
 ## What it does not guarantee
 
 - That a scan uses it. A step that sets its own `GRYPE_DB_CACHE_DIR` or `GRYPE_DB_AUTO_UPDATE`, or a Grype that runs
-  in a container of its own, reads its own database as before. The environment overrides a Grype config file's
+  in a container of its own, reads its own database as before.
+- That every Grype step still passes. `grype db update` fails on the read-only directory, and a Grype older than 0.88
+  looks for a schema v5 database (`5/`) that is not there. Such a step sets its own `GRYPE_DB_CACHE_DIR`, or the host
+  sets `grype.enabled = false`. The environment overrides a Grype config file's
   `db.cache-dir`, `db.auto-update` and `db.validate-age`.
 - That the database is newer than 6 hours behind Anchore's. A job that needs the latest one sets its own cache
   directory and updates.

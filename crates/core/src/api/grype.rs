@@ -64,7 +64,7 @@ pub enum GrypeFailureKind {
     Import,
     /// The store's directory could not be opened, checked or written.
     Store,
-    /// The database held is older than Grype accepts, so runners do not mount it.
+    /// The database held is within an hour of Grype's age limit or past it, so new runners do not mount it.
     Stale,
     /// A kind from a newer daemon.
     #[serde(other)]
@@ -85,7 +85,8 @@ impl GrypeFailure {
             }
             GrypeFailureKind::Store => "its directory cannot be opened, checked or written",
             GrypeFailureKind::Stale => {
-                "the database held is older than the 5 days Grype accepts, so runners do not mount it"
+                "the database held is within an hour of the 5 days Grype accepts, or past them, so new runners do \
+                 not mount it"
             }
             GrypeFailureKind::Unknown => "it failed",
         };

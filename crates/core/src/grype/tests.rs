@@ -35,6 +35,8 @@ struct World {
     listings: u32,
     downloads: u32,
     imports: u32,
+    /// How many times the import's containers were cleared away.
+    cleans: u32,
 }
 
 /// What goes wrong after the listing, if anything.
@@ -42,6 +44,8 @@ struct World {
 enum Fault {
     #[default]
     None,
+    /// Grype's image cannot be pulled, or Docker does not answer.
+    Image,
     /// The download fails.
     Download,
     /// Anchore sends other bytes than the listing's checksum.
@@ -162,6 +166,18 @@ impl Grype for Fake {
         })
     }
 
+    async fn ready(&self) -> Result<(), String> {
+        if self.get(|world| world.fault) == Fault::Image {
+            return Err("cannot pull Grype's image".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn clean(&self) -> Result<(), String> {
+        self.set(|world| world.cleans += 1);
+        Ok(())
+    }
+
     async fn mounted(&self) -> Result<BTreeSet<String>, String> {
         self.get(|world| world.mounted.clone())
             .ok_or_else(|| "Docker is not answering".to_owned())
@@ -170,7 +186,7 @@ impl Grype for Fake {
 
 /// A refresh as the task makes one: prepare, then update.
 async fn refresh(keeper: &mut Keeper, fake: &Fake, now: u64) {
-    keeper.prepare(now).await;
+    keeper.prepare(fake, now).await;
     keeper.update(fake, fake, now).await;
 }
 
@@ -303,7 +319,7 @@ async fn a_failed_step_keeps_the_database_held_and_says_what_failed() {
             break_it(world);
         });
         let now = START + 86_400 + 60;
-        keeper.prepare(now).await;
+        keeper.prepare(&fake, now).await;
         let wait = keeper.update(&fake, &fake, now).await;
         assert_eq!(wait, RETRY, "{step}: tried again soon");
         assert_eq!(
@@ -326,7 +342,8 @@ async fn a_failed_step_keeps_the_database_held_and_says_what_failed() {
                 ..World::default()
             };
         });
-        let later = now + 1800;
+        // A day later: an archive that failed after its download is held back that long.
+        let later = now + 24 * 3600;
         refresh(&mut keeper, &fake, later).await;
         assert_eq!(
             mounted_database(&keeper.runner(later).unwrap()),
@@ -336,8 +353,8 @@ async fn a_failed_step_keeps_the_database_held_and_says_what_failed() {
         assert_eq!(keeper.status(later).failure, None, "{step}");
         assert_eq!(
             generations(&dir.0).len(),
-            1,
-            "{step}: the old one went, as no container mounts it"
+            2,
+            "{step}: the old one stays until the next refresh, for a start that read it"
         );
     }
 }
@@ -357,7 +374,7 @@ async fn a_restart_mounts_the_database_held_once_checked_even_while_anchore_is_d
 
     fake.set(|world| world.listed = None);
     let mut keeper = Keeper::new(dir.0.clone());
-    keeper.prepare(START + 120).await;
+    keeper.prepare(&fake, START + 120).await;
     assert_eq!(
         keeper.runner(START + 120),
         Some(held),
@@ -391,7 +408,7 @@ async fn a_restart_drops_a_database_that_changed_on_disk_and_downloads_it_again(
 
     fake.set(|world| world.listed = None);
     let mut keeper = Keeper::new(dir.0.clone());
-    keeper.prepare(START + 120).await;
+    keeper.prepare(&fake, START + 120).await;
     assert_eq!(keeper.runner(START + 120), None, "no runner mounts it");
     assert_eq!(
         keeper
@@ -458,7 +475,9 @@ async fn a_database_older_than_grype_accepts_is_not_mounted() {
     refresh(&mut keeper, &fake, START + 60).await;
     assert_eq!(
         keeper.until_stale(START + 60),
-        Some(Duration::from_secs(GRYPE_MAX_AGE_SECS - 60)),
+        Some(Duration::from_secs(
+            GRYPE_MAX_AGE_SECS - MOUNT_MARGIN.as_secs() - 60
+        )),
         "the task wakes when it goes stale"
     );
 
@@ -611,7 +630,7 @@ async fn generated_sequences_never_give_a_runner_an_unchecked_stale_or_vanished_
             if dropped {
                 newest_served = 0;
             }
-            keeper.prepare(now).await;
+            keeper.prepare(&fake, now).await;
             keeper.update(&fake, &fake, now).await;
             let context = format!("seed {seed}: {trace:?}");
             newest_served = holds(
@@ -678,7 +697,7 @@ fn holds(
         assert!(
             status
                 .held
-                .is_none_or(|held| now >= held.built_at + GRYPE_MAX_AGE_SECS),
+                .is_none_or(|held| !mountable(held.built_at, now)),
             "{context}: a fresh database held but not served"
         );
         return newest_served;
@@ -691,7 +710,7 @@ fn holds(
         .parse()
         .unwrap();
     assert_eq!(mounted_database(&runner), database(built), "{context}");
-    assert!(now < built + GRYPE_MAX_AGE_SECS, "{context}: stale");
+    assert!(mountable(built, now), "{context}: stale");
     assert!(
         built >= newest_served,
         "{context}: went back to an older one"
@@ -708,6 +727,7 @@ fn turned_off_by_a_reload_runners_get_no_database_and_clients_see_none() {
     link.serve(
         &dir.0.join("dbs/1795415312-3d24f57cd358"),
         "1795415312-3d24f57cd358",
+        unix_now(),
     );
     assert!(link.runner().is_some(), "served while on");
     let off = Config::parse(&CONFIG.replace(
@@ -829,4 +849,218 @@ fn grype_s_status_is_read_from_its_output_whatever_it_logs_around_it() {
     let value: serde_json::Value = serde_json::from_str(json).unwrap();
     assert_eq!(value["built"], "2026-11-23T06:28:32Z");
     assert_eq!(sources::json_object("no json here"), None);
+}
+
+/// H1. The bug it catches: an import that fails the same way every time downloading the archive (and writing a
+/// hydrated database into `staging/`) every 30 minutes, all day, on every host.
+#[tokio::test]
+async fn an_archive_whose_import_failed_is_not_fetched_again_until_a_day_passes_or_the_listing_changes()
+ {
+    for kind in [Fault::Import, Fault::Corrupt, Fault::OtherDatabase] {
+        let dir = TestDir::new("grype-backoff");
+        let fake = Fake::default();
+        fake.set(|world| {
+            world.listed = Some(START);
+            world.mounted = Some(BTreeSet::new());
+            world.fault = kind;
+        });
+        let mut keeper = Keeper::new(dir.0.clone());
+        let mut now = START + 60;
+        refresh(&mut keeper, &fake, now).await;
+        for _ in 0..10 {
+            now += RETRY.as_secs();
+            refresh(&mut keeper, &fake, now).await;
+        }
+        assert_eq!(
+            fake.get(|world| world.downloads),
+            1,
+            "{kind:?}: one download for one listing"
+        );
+        assert!(
+            keeper.status(now).failure.is_some(),
+            "{kind:?}: the failure still shows"
+        );
+
+        fake.set(|world| world.listed = Some(START + 86_400));
+        now += RETRY.as_secs();
+        refresh(&mut keeper, &fake, now).await;
+        assert_eq!(
+            fake.get(|world| world.downloads),
+            2,
+            "{kind:?}: a new listing is tried"
+        );
+
+        now += 24 * 3600;
+        refresh(&mut keeper, &fake, now).await;
+        assert_eq!(
+            fake.get(|world| world.downloads),
+            3,
+            "{kind:?}: tried again after a day"
+        );
+
+        fake.set(|world| world.fault = Fault::None);
+        now += 24 * 3600;
+        refresh(&mut keeper, &fake, now).await;
+        assert!(keeper.runner(now).is_some(), "{kind:?}: kept once it works");
+        assert_eq!(keeper.status(now).failure, None, "{kind:?}");
+    }
+}
+
+/// H1. The bug it catches: a missing image or a stopped Docker costing a 200 MB download each time.
+#[tokio::test]
+async fn nothing_is_downloaded_while_grype_cannot_run() {
+    let dir = TestDir::new("grype-image");
+    let fake = Fake::default();
+    fake.set(|world| {
+        world.listed = Some(START);
+        world.mounted = Some(BTreeSet::new());
+        world.fault = Fault::Image;
+    });
+    let mut keeper = Keeper::new(dir.0.clone());
+    refresh(&mut keeper, &fake, START + 60).await;
+    assert_eq!(fake.get(|world| world.downloads), 0);
+    assert_eq!(
+        keeper
+            .status(START + 60)
+            .failure
+            .map(|failure| failure.kind),
+        Some(GrypeFailureKind::Import)
+    );
+    fake.set(|world| world.fault = Fault::None);
+    refresh(&mut keeper, &fake, START + 60 + RETRY.as_secs()).await;
+    assert!(
+        keeper.runner(START + 60 + RETRY.as_secs()).is_some(),
+        "tried again soon, as nothing was spent"
+    );
+}
+
+/// M1. The bug it catches: a start that read the old generation, whose container does not exist yet, failing on a
+/// bind source the same refresh removed.
+#[tokio::test]
+async fn the_database_a_starting_runner_was_just_given_stays_through_the_refresh_that_replaced_it()
+{
+    let dir = TestDir::new("grype-replaced");
+    let fake = Fake::default();
+    fake.set(|world| {
+        world.listed = Some(START);
+        world.mounted = Some(BTreeSet::new());
+    });
+    let mut keeper = Keeper::new(dir.0.clone());
+    refresh(&mut keeper, &fake, START + 60).await;
+    let given = keeper.runner(START + 60).unwrap();
+
+    fake.set(|world| world.listed = Some(START + 86_400));
+    refresh(&mut keeper, &fake, START + 86_400 + 60).await;
+    let source = PathBuf::from(given.mount.source.as_deref().unwrap());
+    assert!(
+        source.join(MODEL_DIR).join(DB_FILE).exists(),
+        "still there for the start that read it"
+    );
+
+    refresh(&mut keeper, &fake, START + 86_400 + 60 + REFRESH.as_secs()).await;
+    assert!(
+        !source.exists(),
+        "gone a refresh later, no container naming it"
+    );
+}
+
+/// M2. The bug it catches: a runner given a database that goes past Grype's age limit while its job runs, or one the
+/// task has not looked at since the host slept, so its scan fails rather than downloading its own.
+#[tokio::test]
+async fn a_database_near_or_past_grype_s_age_limit_is_not_given_to_a_starting_runner() {
+    let dir = TestDir::new("grype-margin");
+    let fake = Fake::default();
+    fake.set(|world| {
+        world.listed = Some(START);
+        world.mounted = Some(BTreeSet::new());
+    });
+    let mut keeper = Keeper::new(dir.0.clone());
+    refresh(&mut keeper, &fake, START + 60).await;
+    let near = START + GRYPE_MAX_AGE_SECS - MOUNT_MARGIN.as_secs() / 2;
+    assert_eq!(
+        keeper.runner(near),
+        None,
+        "within a job's length of the limit"
+    );
+    assert!(!keeper.status(near).mounted);
+
+    // The link checks the clock itself, whenever the task last woke.
+    let config = Config::parse(CONFIG).unwrap();
+    let link = Link::new(Some(dir.0.clone()), &config);
+    let old = unix_now() - GRYPE_MAX_AGE_SECS + MOUNT_MARGIN.as_secs() / 2;
+    link.serve(&dir.0.join("dbs/x"), "1-000000000000", old);
+    assert_eq!(link.runner(), None, "after a sleep the task did not see");
+    link.serve(&dir.0.join("dbs/x"), "1-000000000000", unix_now() - 3600);
+    assert!(link.runner().is_some(), "a young one is given");
+}
+
+/// L1. The bug it catches: a store that serves a database its `state.json` does not name, which a restart then finds
+/// missing and fetches again.
+#[test]
+fn a_publish_whose_state_cannot_be_written_keeps_the_database_held() {
+    use super::store::{GrypeStore, Publishing};
+    let dir = TestDir::new("grype-save");
+    let mut store = GrypeStore::open(&dir.0).unwrap();
+    let publish = |store: &mut GrypeStore, built: u64| {
+        let work = store.work().unwrap();
+        let model = work.join(WORK_DB).join(MODEL_DIR);
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join(DB_FILE), database(built)).unwrap();
+        std::fs::write(model.join(IMPORT_FILE), "{}").unwrap();
+        std::fs::write(work.join(path(built)), archive(built)).unwrap();
+        store.publish(
+            &work,
+            &Publishing {
+                built_at: built,
+                schema: "v6.1.10".to_owned(),
+                archive: path(built),
+                archive_sha256: sha256(&archive(built)),
+            },
+        )
+    };
+    let first = publish(&mut store, START).unwrap();
+    // The state's temporary file cannot be made.
+    std::fs::create_dir_all(dir.0.join("state.json.tmp/x")).unwrap();
+    assert!(publish(&mut store, START + 86_400).is_err());
+    assert_eq!(store.held(), Some(&first), "the one state.json names");
+    assert_eq!(
+        generations(&dir.0),
+        BTreeSet::from([first.generation]),
+        "the new one is gone"
+    );
+}
+
+/// L2. The bug it catches: an import a stopped daemon left running, writing into `staging/` as the next daemon
+/// empties it, or left behind for good.
+#[tokio::test]
+async fn the_import_s_containers_are_cleared_before_the_store_opens_and_when_the_task_stops() {
+    let dir = TestDir::new("grype-clean");
+    let fake = Fake::default();
+    fake.set(|world| world.mounted = Some(BTreeSet::new()));
+    let mut keeper = Keeper::new(dir.0.clone());
+    keeper.prepare(&fake, START).await;
+    assert_eq!(fake.get(|world| world.cleans), 1, "before the store opened");
+    keeper.prepare(&fake, START + 60).await;
+    assert_eq!(fake.get(|world| world.cleans), 1, "once");
+
+    let config = Config::parse(CONFIG).unwrap();
+    let other = TestDir::new("grype-clean-task");
+    let link = Link::new(Some(other.0.clone()), &config);
+    let fake = Fake::default();
+    let running = link
+        .start(Arc::new(fake.clone()), Arc::new(fake.clone()))
+        .unwrap();
+    for _ in 0..200 {
+        if fake.get(|world| world.cleans) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let before = fake.get(|world| world.cleans);
+    running.stop().await;
+    assert_eq!(
+        fake.get(|world| world.cleans),
+        before + 1,
+        "a stop clears what it left"
+    );
 }
