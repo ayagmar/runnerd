@@ -50,9 +50,19 @@ pub(crate) fn parse_ns(text: &str) -> Option<u64> {
     seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
+/// `ms` since the epoch as GitHub writes a time, to the second: a test's fixture dated by the clock, so no window
+/// that reads back from now ages it out.
+#[cfg(test)]
+pub(crate) fn rfc3339(ms: u64) -> String {
+    let (seconds, of_day) = (ms / 1000, ms / 1000 % 86_400);
+    let (year, month, day) = crate::api::civil_from_days(seconds / 86_400);
+    let (hour, minute, second) = (of_day / 3600, of_day / 60 % 60, of_day % 60);
+    format!("{year}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_ms;
+    use super::{parse_ms, rfc3339};
 
     #[test]
     fn github_and_docker_timestamps_parse_to_epoch_milliseconds() {
@@ -72,5 +82,13 @@ mod tests {
         ] {
             assert_eq!(parse_ms(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn a_time_written_as_github_does_parses_back_to_its_second() {
+        for at in [0, 1_709_208_000_500, 1_792_697_245_233, 4_102_444_799_000] {
+            assert_eq!(parse_ms(&rfc3339(at)), Some(at / 1000 * 1000), "{at}");
+        }
+        assert_eq!(rfc3339(1_792_697_245_233), "2026-10-22T19:27:25Z");
     }
 }
