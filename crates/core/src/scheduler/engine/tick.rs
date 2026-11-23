@@ -385,6 +385,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.follow_visibility();
             self.pull_images().await;
             self.refresh_predictor().await;
+            self.refresh_shares().await;
             self.rereserve().await;
             // Once a tick, from the readings its plan counts by: never from a pass, a status read or a check.
             self.look_at_growth();

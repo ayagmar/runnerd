@@ -343,6 +343,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         logs: Option<&str>,
         removed: Result<Removal, docker::Error>,
     ) {
+        // What its job's cleanup found the slot's Docker store holding, which the profile's share follows.
+        if let Some(report) = logs.and_then(cache::shares::store_report) {
+            self.store
+                .runner_docker_store(&occupant.runner_name, report);
+        }
         match removed {
             Ok(Removal::Done) => {}
             Ok(Removal::UnderWay) => {
@@ -468,7 +473,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// A runner container's environment: whether its image skips the runner's sync calls, as `skips` says, its
-    /// slot's share of what the slots' Docker Engines may keep, which its image's job cleanup holds it to, once the
+    /// slot's share of what the slots' Docker Engines may keep, by what its profile's stores held after their jobs
+    /// (ADR 0156), which its image's job cleanup holds it to, once the
     /// caches' check has measured Docker's disk, where the action archives are while runners mount them, and
     /// whether to collect the Sysbox probe verdict for this profile.
     pub(super) fn runner_env(
@@ -479,15 +485,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     ) -> Vec<String> {
         let skip_syncs = skips.then(|| docker::SKIP_SYNCS.to_owned());
         let budget = self.docker_disk.borrow().map(|disk| {
-            let slots = self
-                .config
-                .profiles
-                .values()
-                .map(|p| u64::from(p.slots))
-                .sum();
             format!(
                 "RUNNERD_DOCKER_BUDGET_GB={}",
-                cache::docker_budget_gib(disk, slots)
+                self.shares.gib(disk, &self.config, profile)
             )
         });
         let archives = archives.map(|archives| archives.env.clone());

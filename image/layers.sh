@@ -45,6 +45,33 @@ DOCKER_BUDGET_GB=$(cat "$DOCKER_BUDGET_FILE" 2> /dev/null || echo 20)
 # Where the slot's Docker Engine keeps its images, layers and build cache: the slot's volume.
 DOCKER_DATA_ROOT=/state/docker
 
+# Touched as the runner starts (entrypoint.sh), so present only once a job may have run: job-cleanup.sh measures and
+# reports the store only then (docs/adr/0156).
+JOB_SINCE_FILE=/run/runnerd-since
+# When the slot's last job began, its runner's start in seconds since the epoch, on the slot's volume: a layer used
+# since then is one the next job most likely needs, which the routine prune and BuildKit's GC keep (recent_use).
+LAST_JOB_FILE=/state/.runnerd-last-job
+# What job-cleanup.sh measured of the store after the job, root's, which the entrypoint prints once the runner exits:
+# `held=<bytes> share=<GiB>`.
+STORE_REPORT_FILE=/run/runnerd-docker-store
+
+# Size of a directory in bytes; 0 when it does not exist.
+size_bytes() {
+    local size
+    size=$(du -sxb "$1" 2> /dev/null | cut -f1) || true
+    echo "${size:-0}"
+}
+
+# Seconds back from now that a layer last used counts as recent: since the slot's last job began, and an hour more,
+# which keeps what this job uses while it runs. A slot no job ran on yet gets the hour.
+recent_use() {
+    local last now
+    now=$(date +%s)
+    last=$(cat "$LAST_JOB_FILE" 2> /dev/null) || true
+    [[ $last =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=$now
+    echo $((now - last + 3600))
+}
+
 # Size of a directory in GB, rounded up; 0 when it does not exist.
 size_gb() {
     local size
@@ -112,18 +139,20 @@ keep_docker_budget() {
 # Writes BuildKit's GC policy into the engine's daemon.json, sized from DOCKER_BUDGET_GB (docs/adr/0089), over the
 # image's own, which is the same policy for the default 20 GB. Build context snapshots and git checkouts go first,
 # all of them once the build cache holds over 512 MB, then layers while the unshared build cache holds over half the
-# budget, and cache mounts (`RUN --mount=type=cache`) only while it holds over three quarters, so a package store of
-# up to about three quarters of the budget stays. Each rule compares the whole build cache with its limit and removes
+# budget, never one used since the slot's last job began (recent_use, docs/adr/0156), and cache mounts
+# (`RUN --mount=type=cache`) only while it holds over three quarters, so a package store of up to about three quarters
+# of the budget stays. Each rule compares the whole build cache with its limit and removes
 # only its type, least recently used first. A policy with only a reserved space keeps no more than that space:
 # `defaultReservedSpace` alone kept 512 MB and dropped every larger cache mount within a minute of its build. A
 # daemon.json GC rule takes only `type=` filters: Moby drops a `type!=` one, and the rule then matches everything.
 docker_gc_policy() {
     local config=/etc/docker/daemon.json
     jq --arg half "$((DOCKER_BUDGET_GB * 512))MB" --arg most "$((DOCKER_BUDGET_GB * 768))MB" \
+        --arg recent "until=$(recent_use)s" \
         '.builder.gc = {enabled: true, policy: [
             {filter: ["type=source.local"], maxUsedSpace: "512MB"},
             {filter: ["type=source.git.checkout"], maxUsedSpace: "512MB"},
-            {filter: ["type=regular"], maxUsedSpace: $half},
+            {filter: ["type=regular", $recent], maxUsedSpace: $half},
             {all: true, maxUsedSpace: $most}]}' "$config" > "$config.new" && mv "$config.new" "$config"
 }
 
