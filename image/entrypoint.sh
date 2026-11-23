@@ -77,10 +77,11 @@ if pkill -TERM -u runner 2> /dev/null; then
 fi
 /usr/local/sbin/runnerd-scrub
 # The job's workspace on the slot's volume goes with the job, as one on the container's disk goes with the container,
-# but for the slot's pnpm store (docs/adr/0167). Not on a requested stop, which has seconds: the slot's next runner
-# empties it before its job.
+# but for the slot's pnpm store and `_tool`, the tool cache's layer's mount point, which the kernel will not remove
+# while mounted (docs/adr/0167). Not on a requested stop, which has seconds: the slot's next runner empties it before
+# its job.
 if [[ $stopping == 0 ]] && mountpoint -q "$WORK"; then
-    empty_slot_work "$SLOT_WORK"
+    empty_slot_work "$SLOT_WORK" _tool
 fi
 # What the job-completed hook's cleanup measured of the slot's Docker store, for runnerd, which takes the last such
 # line of the container's log (docs/adr/0156). Printed after every process of the runner's ended, and printed even

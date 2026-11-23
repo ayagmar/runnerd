@@ -62,10 +62,13 @@ WORK=/home/runner/_work
 SLOT_WORK=/state/work
 SLOT_PNPM_STORE=.pnpm-store
 
-# Empties the slot's workspace $1 of what a job left in it, but for the pnpm store: when the job ends
-# (entrypoint.sh), and again before the next one, for a container killed before its end.
+# Empties the slot's workspace $1 of what a job left in it, but for the pnpm store and the entry named $2, if any:
+# when the job ends (entrypoint.sh), keeping `_tool`, where the tool cache's layer is still mounted, and again before
+# the next one, for a container killed before its end.
 empty_slot_work() {
-    find "$1" -mindepth 1 -maxdepth 1 ! -name "$SLOT_PNPM_STORE" -exec rm -rf --one-file-system {} +
+    local keep=(! -name "$SLOT_PNPM_STORE")
+    [ -z "${2:-}" ] || keep+=(! -name "$2")
+    find "$1" -mindepth 1 -maxdepth 1 "${keep[@]}" -exec rm -rf --one-file-system {} +
 }
 
 # Empties the slot's workspace $1 of what its last job left (empty_slot_work), and removes its pnpm store whole when

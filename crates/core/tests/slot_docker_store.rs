@@ -498,14 +498,16 @@ async fn slot_pnpm_store_scenario(docker: &Docker, names: &Names) -> Result<(), 
         .map_err(|e| e.to_string())?;
     let file = "v11/files/ab/cdef";
     // A job of the slot's own store: pnpm finds it beside the workspace and links a package file into
-    // node_modules, as pnpm 12 does first on Linux; the tool cache's layer is mounted inside the workspace.
+    // node_modules, as pnpm 12 does first on Linux; the tool cache's layer is mounted inside the workspace. Then the
+    // entrypoint's clear when the job ends, with that layer still mounted: it keeps the store and `_tool`.
     let (code, output) = job(
         docker,
         names,
         &[SLOT_STORE],
         &format!(
             "test \"$pnpm_config_store_dir\" = /home/runner/_work/.pnpm-store && mountpoint -q /home/runner/_work \
-             && mountpoint -q /home/runner/_work/_tool && ! mountpoint -q /shared/pnpm && {}",
+             && mountpoint -q /home/runner/_work/_tool && ! mountpoint -q /shared/pnpm && {} \
+             && empty_slot_work \"$SLOT_WORK\" _tool && echo cleared=$(LC_ALL=C ls -A \"$SLOT_WORK\" | tr '\\n' ' ')",
             as_runner(&format!(
                 "cd ~/_work && mkdir -p .pnpm-store/{dir} app/node_modules && echo pkg > .pnpm-store/{file} \
                  && ln .pnpm-store/{file} app/node_modules/index.js && echo links=$(stat -c %h .pnpm-store/{file})",
@@ -518,6 +520,11 @@ async fn slot_pnpm_store_scenario(docker: &Docker, names: &Names) -> Result<(), 
     if code != 0 || !output.contains("links=2") {
         return Err(format!(
             "a job of the slot's own store could not link from it (exit {code}):\n{output}"
+        ));
+    }
+    if !output.contains("cleared=.pnpm-store _tool\n") {
+        return Err(format!(
+            "the clear when the job ends did not leave only the store and the mounted tool cache:\n{output}"
         ));
     }
     // The slot's next job finds the store, and nothing else of the last job's workspace.
