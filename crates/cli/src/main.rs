@@ -19,6 +19,7 @@ use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
 
 mod human;
+mod machines;
 mod output;
 #[cfg(test)]
 mod testing;
@@ -36,6 +37,9 @@ struct Cli {
     /// The daemon's API socket [default: `$XDG_RUNTIME_DIR/runnerd.sock`].
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
+    /// Ask the daemon of this machine, as `runnerctl machine add` named it, over SSH instead.
+    #[arg(long, global = true, value_name = "NAME", conflicts_with = "socket")]
+    machine: Option<String>,
     /// Print the API's JSON instead of text: the response type unchanged, one event per line for `watch`.
     #[arg(long, global = true)]
     json: bool,
@@ -220,7 +224,14 @@ enum Command {
     /// Check that the host can run runners. Runs `runnerd doctor` here when the daemon is not running.
     Doctor,
     /// Open the web dashboard with a one-time login link, and print one for each of `[web] origins`.
+    ///
+    /// With --machine, only --qr and --sign-out-all: the login link is a file on that machine.
     Web(WebArgs),
+    /// Add, list or forget the other machines runnerctl reaches over SSH with --machine.
+    Machine {
+        #[command(subcommand)]
+        command: machines::MachineCommand,
+    },
 }
 
 /// `runnerctl web`'s flags.
@@ -353,9 +364,6 @@ fn main() -> ExitCode {
             code
         }
     };
-    let Some(socket) = cli.socket.clone().or_else(default_socket) else {
-        return fail(&"XDG_RUNTIME_DIR is not set; pass --socket");
-    };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -363,10 +371,121 @@ fn main() -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => return fail(&error),
     };
-    match runtime.block_on(run(&Client::new(socket), cli.json, cli.command)) {
+    match runtime.block_on(start(cli)) {
         Ok(code) => code,
         Err(error) => fail(&error),
     }
+}
+
+/// Opens the client `--machine` or `--socket` names and runs the command with it; `machine` needs none.
+async fn start(cli: Cli) -> Result<ExitCode, Error> {
+    let Cli {
+        socket,
+        machine,
+        json,
+        command,
+    } = cli;
+    let socket = socket.or_else(default_socket);
+    if let Command::Machine { command } = command {
+        if machine.is_some() {
+            return Err(Error::Local(
+                "--machine names the machine other commands ask; `runnerctl machine` edits the list on this one"
+                    .to_owned(),
+            ));
+        }
+        let local = socket.map(Client::new);
+        return machines::run(
+            command,
+            json,
+            &machines::file()?,
+            local.as_ref(),
+            std::sync::Arc::new(runnerd_core::client::OpenSsh),
+            &machines::private_base(),
+        )
+        .await;
+    }
+    let Some(name) = machine else {
+        let client =
+            Client::new(socket.ok_or_else(|| {
+                Error::Local("XDG_RUNTIME_DIR is not set; pass --socket".to_owned())
+            })?);
+        return run(&client, json, command).await;
+    };
+    // Refused before ssh runs, so a machine that is down cannot hide why.
+    match &command {
+        Command::Web(args) if !args.qr && !args.sign_out_all => {
+            return Err(web_needs_the_file(&name));
+        }
+        #[cfg(feature = "tui")]
+        Command::Tui { .. } if json || !output::is_terminal() => return Err(tui_needs_a_terminal()),
+        _ => {}
+    }
+    let client = machines::client(&machines::file()?, &name).await?;
+    // The TUI ends on these signals itself, giving the terminal back; `shell`'s raw mode turns Ctrl-C into a key.
+    #[cfg(feature = "tui")]
+    let own = matches!(command, Command::Tui { .. });
+    #[cfg(not(feature = "tui"))]
+    let own = false;
+    let interrupt = !own && !matches!(command, Command::Shell { .. });
+    let ended = ended(!own, interrupt);
+    // Ended by a signal, the command is dropped and then the client, which stops ssh and removes its directory.
+    tokio::select! {
+        code = run(&client, json, command) => code,
+        code = ended => code,
+    }
+}
+
+/// Completes with the exit code of the signal that ends runnerctl: SIGTERM when `terminate`, SIGINT when
+/// `interrupt`; never otherwise.
+async fn ended(terminate: bool, interrupt: bool) -> Result<ExitCode, Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let listen = |kind: SignalKind, on: bool| {
+        if on {
+            signal(kind)
+                .map(Some)
+                .map_err(|error| Error::Local(error.to_string()))
+        } else {
+            Ok(None)
+        }
+    };
+    let mut terminated = listen(SignalKind::terminate(), terminate)?;
+    let mut interrupted = listen(SignalKind::interrupt(), interrupt)?;
+    let wait = |stream: Option<tokio::signal::unix::Signal>| async move {
+        match stream {
+            Some(mut stream) => {
+                stream.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        () = wait(terminated.take()) => Ok(ExitCode::from(128 + 15)),
+        () = wait(interrupted.take()) => Ok(ExitCode::from(128 + 2)),
+    }
+}
+
+/// `runnerctl`, with `--machine` when `client` reaches another machine: how a command printed to run next starts,
+/// so it asks the same daemon.
+fn ctl(client: &Client) -> String {
+    match client.machine() {
+        Some(machine) => format!("runnerctl --machine {}", machine.name),
+        None => "runnerctl".to_owned(),
+    }
+}
+
+/// Why plain `web` cannot open machine `name`'s dashboard from here.
+fn web_needs_the_file(name: &str) -> Error {
+    Error::Local(format!(
+        "the login link is a file on {name}, which runnerctl does not read over SSH; `runnerctl --machine {name} web \
+         --qr` prints a fresh link to scan, or run `runnerctl web` on {name}"
+    ))
+}
+
+#[cfg(feature = "tui")]
+fn tui_needs_a_terminal() -> Error {
+    Error::Local(
+        "runnerctl tui needs a terminal; `runnerctl watch` prints events as lines".to_owned(),
+    )
 }
 
 /// `$XDG_RUNTIME_DIR/runnerd.sock`, where `runnerd serve` listens by default.
@@ -536,10 +655,7 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         #[cfg(feature = "tui")]
         Command::Tui { no_mouse } => {
             if json || !output::is_terminal() {
-                return Err(Error::Local(
-                    "runnerctl tui needs a terminal; `runnerctl watch` prints events as lines"
-                        .to_owned(),
-                ));
+                return Err(tui_needs_a_terminal());
             }
             let mouse = !no_mouse
                 && std::env::var_os("RUNNERCTL_NO_MOUSE").is_none_or(|value| value.is_empty());
@@ -580,6 +696,8 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
         Command::Web(args) => return web(client, &args).await,
+        // `start` runs it without a client.
+        Command::Machine { .. } => {}
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -694,7 +812,8 @@ async fn pause(
             jobs,
         }) if status == StatusCode::CONFLICT => {
             return Err(Error::Local(format!(
-                "{message}\n`runnerctl pause --force {}` {}",
+                "{message}\n`{} pause --force {}` {}",
+                ctl(client),
                 target.arguments,
                 runnerd_core::api::force_pause_consequence(jobs.len())
             )));
@@ -776,7 +895,7 @@ async fn job_action(
             };
             match (send, preview.confirm.clone()) {
                 (Send::Unseen, Some(token)) => token,
-                _ => return Err(shown(&preview, paint, job, action)),
+                _ => return Err(shown(client, &preview, paint, job, action)),
             }
         }
     };
@@ -788,12 +907,13 @@ async fn job_action(
     match client.job_action(job, action, &confirmed).await? {
         JobActionAnswer::Done(result) => action_done(json, paint, &result),
         // The confirmation no longer holds: nothing was sent; show the new preview and its own command.
-        JobActionAnswer::Confirm(preview) => Err(shown(&preview, paint, job, action)),
+        JobActionAnswer::Confirm(preview) => Err(shown(client, &preview, paint, job, action)),
     }
 }
 
 /// A preview, and the command that sends what it shows, or why nothing can be.
 fn shown(
+    client: &Client,
     preview: &runnerd_core::api::ActionPreview,
     paint: human::Paint,
     job: u64,
@@ -805,11 +925,12 @@ fn shown(
             "{shown}nothing can be sent until runnerd can read the run"
         ));
     };
+    let ctl = ctl(client);
     let command = match action {
-        JobAction::RerunFailed => format!("runnerctl rerun {job} --failed --confirm {token}"),
-        JobAction::Rerun => format!("runnerctl rerun {job} --confirm {token}"),
+        JobAction::RerunFailed => format!("{ctl} rerun {job} --failed --confirm {token}"),
+        JobAction::Rerun => format!("{ctl} rerun {job} --confirm {token}"),
         JobAction::Cancel | JobAction::Unsupported => {
-            format!("runnerctl cancel {job} --confirm {token}")
+            format!("{ctl} cancel {job} --confirm {token}")
         }
     };
     let minutes = runnerd_core::api::CONFIRM_SECS / 60;
@@ -1121,7 +1242,7 @@ async fn config(client: &Client, json: bool, command: ConfigCommand) -> Result<E
 async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
     let doctor: Doctor = match client.get("/v1/doctor").await {
         Ok(doctor) => doctor,
-        Err(ClientError::NotRunning(_)) if !json => {
+        Err(ClientError::NotRunning(_)) if !json && client.machine().is_none() => {
             output::line("runnerd is not running; running `runnerd doctor` here");
             let status = std::process::Command::new("runnerd")
                 .arg("doctor")
@@ -1244,9 +1365,13 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
     let base = args.base.as_ref();
     if args.sign_out_all {
         client.post("/v1/dashboard/sign-out", &()).await?;
-        output::line(
-            "signed every browser out of the dashboard; `runnerctl web` signs this one in again",
-        );
+        let again = match client.machine() {
+            Some(_) => format!("`{} web --qr` signs a device in again", ctl(client)),
+            None => "`runnerctl web` signs this one in again".to_owned(),
+        };
+        output::line(format_args!(
+            "signed every browser out of the dashboard; {again}"
+        ));
         return Ok(ExitCode::SUCCESS);
     }
     if args.qr {
@@ -1264,6 +1389,9 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
             ));
         }
         return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(machine) = client.machine() {
+        return Err(web_needs_the_file(&machine.name));
     }
     let file = client.socket().with_extension("web");
     let text = match std::fs::read_to_string(&file) {
@@ -1402,7 +1530,10 @@ async fn logs(
 fn is_outage(error: &ClientError) -> bool {
     matches!(
         error,
-        ClientError::NotRunning(_) | ClientError::Transport(_) | ClientError::Timeout(_)
+        ClientError::NotRunning(_)
+            | ClientError::Unreachable { .. }
+            | ClientError::Transport(_)
+            | ClientError::Timeout(_)
     )
 }
 

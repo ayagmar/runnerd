@@ -27,7 +27,7 @@ flowchart TB
     host --> bollard[("bollard: Docker")]
     host --> reqwest[("reqwest: GitHub")]
     daemon --> notify[("reqwest: [notify] targets")]
-    cli -.->|Unix socket| daemon
+    cli -.->|"Unix socket, or ssh -L to another machine's"| daemon
     web -.->|Unix socket| daemon
 ```
 
@@ -35,7 +35,7 @@ flowchart TB
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, the shared build cache's server, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper's client behind `client` and its server behind `host` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
-| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
+| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `machines` (`machine add|list|rm`, `--machine`, the `machines.toml` file), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 | `runnerd-fixtures` | `crates/fixtures` | tests only: the daemon data every client's parity test draws, and the facts core computes from it ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)); not published | `runnerd-core` without `host`; clients take it as a dev-dependency only |
 | `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
@@ -62,7 +62,10 @@ flowchart TB
   the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
-  client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
+  client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)). `ssh`, behind the same feature, reaches another machine's daemon
+  through one `ssh -N -L` per client, from a socket in a private directory, behind `SshProgram`, the boundary tests
+  replace; `config::machines` checks and edits `machines.toml`, the list of those machines, which only a client reads
+  ([ADR 0164](docs/adr/0164-runnerctl-reaches-another-machine-over-an-ssh-forward.md)).
 - `actions`, `admission`, `archives`, `boots`, `buildcache`, `command`, `docker`, `github`, `grype`, `cache`,
   `insights`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
