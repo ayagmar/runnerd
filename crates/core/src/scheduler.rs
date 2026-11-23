@@ -238,6 +238,8 @@ pub enum StopReason {
     OverBudget,
     /// A cache clean needs the volumes it mounts.
     Clean,
+    /// It was up before the host slept, and GitHub ended its session meanwhile (ADR 0159).
+    Slept,
     /// runnerd stops.
     Shutdown,
 }
@@ -254,6 +256,7 @@ impl StopReason {
             StopReason::Changed => "changed",
             StopReason::OverBudget => "over_budget",
             StopReason::Clean => "clean",
+            StopReason::Slept => "slept",
             StopReason::Shutdown => "shutdown",
         }
     }
@@ -269,6 +272,7 @@ impl StopReason {
             StopReason::Changed => "the config or runnerd changed its runners",
             StopReason::OverBudget => "raised for a heavier job, it does not fit the budget",
             StopReason::Clean => "a cache clean needs its volumes",
+            StopReason::Slept => "the host slept, which ended its session with GitHub",
             StopReason::Shutdown => "runnerd stops",
         }
     }

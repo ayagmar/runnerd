@@ -22,6 +22,7 @@ fn job(state: JobState, conclusion: Option<&str>) -> JobSummary {
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        slept: false,
         failure_cause: None,
         rerun_at: None,
         probe: None,
@@ -143,6 +144,39 @@ fn a_failed_job_its_runner_failed_reads_runner_fault_and_no_other_does() {
         job.runner_fault = fault;
         assert_eq!(job.outcome(), expected, "{conclusion:?} {fault}");
     }
+}
+
+// Catches a job the host's sleep failed read as a failure of its code, and one that passed across a sleep read as
+// failed (ADR 0159).
+#[test]
+fn a_job_that_failed_across_a_sleep_of_the_host_reads_host_slept_and_says_why() {
+    let mut failed = job(JobState::Completed, Some("failure"));
+    failed.slept = true;
+    assert_eq!(
+        failed.outcome(),
+        Outcome::new("host slept", OutcomeKind::Failed)
+    );
+    assert_eq!(
+        failed.failure_line(),
+        Some("the host slept while it ran, which ended its runner's session with GitHub")
+    );
+    let mut lost = job(JobState::Lost, None);
+    lost.slept = true;
+    assert_eq!(lost.outcome().label, "host slept");
+    let mut passed = job(JobState::Completed, Some("success"));
+    passed.slept = true;
+    assert_eq!(
+        passed.outcome(),
+        Outcome::new("success", OutcomeKind::Succeeded)
+    );
+    assert_eq!(
+        passed.failure_line(),
+        None,
+        "a job that passed has no failure"
+    );
+    // Its log says the runner failed it: that is what the page says.
+    failed.runner_fault = true;
+    assert_eq!(failed.outcome().kind, OutcomeKind::RunnerFault);
 }
 
 #[test]

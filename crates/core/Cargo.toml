@@ -60,7 +60,7 @@ hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 reqwest = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
-rustix = { workspace = true, optional = true, features = ["fs", "process"] }
+rustix = { workspace = true, optional = true, features = ["fs", "process", "time"] }
 rustls = { workspace = true, optional = true }
 saphyr = { workspace = true, optional = true }
 serde.workspace = true

@@ -54,8 +54,20 @@ macro_rules! record_mark {
     };
 }
 
+/// Whether the job `j` failed for a sleep of the host (ADR 0159), in SQL: it ran across a sleep and ended during it or
+/// within `write::SLEPT_GRACE_MS` after the wake, when GitHub fails a job whose runner went silent. A job that ran on past
+/// that survived the sleep, and how it ended is its own. A macro, so that `SUMMARY` and `SLEPT` read one expression.
+macro_rules! slept {
+    () => {
+        "coalesce(j.finished_at BETWEEN j.slept_from AND j.slept_ended_by, 0)"
+    };
+}
+
+/// [`slept!`] for a query built at run time.
+pub(super) const SLEPT: &str = slept!();
+
 /// How many columns `SUMMARY` has: a query that adds one after them reads it at this index.
-const SUMMARY_COLUMNS: usize = 53;
+const SUMMARY_COLUMNS: usize = 54;
 
 /// The columns `summary_from` reads, in its order.
 const SUMMARY: &str = concat!(
@@ -68,7 +80,8 @@ const SUMMARY: &str = concat!(
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
      j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault, ",
     record_mark!(),
-    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at, r.probe",
+    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at, r.probe, ",
+    slept!(),
     " FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
 );
 
@@ -296,6 +309,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             .map(failure_cause),
         rerun_at: row.get::<_, Option<u64>>(51)?.map(secs),
         probe: row.get::<_, Option<String>>(52)?.as_deref().map(probe),
+        slept: row.get(53)?,
         record_mark: row
             .get::<_, Option<String>>(45)?
             .as_deref()
@@ -1409,16 +1423,16 @@ pub(super) fn pricing(db: &Connection, since: u64) -> rusqlite::Result<api::Pric
 /// The jobs completed or lost that were queued at or after `since` (ms), with their runners, as insights read them,
 /// and from when the history holds every job.
 pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::insights::History> {
-    let runs = db.prepare_cached(
+    let runs = db.prepare_cached(&format!(
         "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
          r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
          j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.seen_at, \
-         j.wait_causes, j.unseen_unlisted, r.docker_held, r.docker_share FROM jobs j \
+         j.wait_causes, j.unseen_unlisted, r.docker_held, r.docker_share, {SLEPT} FROM jobs j \
          LEFT JOIN runners r ON r.name = j.runner \
-         WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
-    )?
+         WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id"
+    ))?
     .query_map([since], |row| {
         Ok(crate::insights::Run {
             id: row.get(0)?,
@@ -1456,6 +1470,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             disk: stored_disk(row, 27)?,
             seen_at: row.get(31)?,
             unseen_unlisted: row.get(33)?,
+            slept: row.get(36)?,
             causes: row
                 .get::<_, Option<String>>(32)?
                 .map(|text| stored_causes(&text)),
@@ -1665,6 +1680,12 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
         })
     })?
     .collect()
+}
+
+pub(super) fn last_sleep_began(db: &Connection) -> rusqlite::Result<Option<u64>> {
+    db.prepare_cached("SELECT value FROM meta WHERE key = 'slept_from'")?
+        .query_row([], |row| row.get(0))
+        .optional()
 }
 
 pub(super) fn last_runner_second(db: &Connection, prefix: &str) -> rusqlite::Result<Option<u64>> {

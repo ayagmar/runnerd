@@ -73,6 +73,11 @@ impl ListingPace {
         lists
     }
 
+    /// The host slept (ADR 0159): it is due now, with its runners, as after a restart.
+    pub(super) fn slept(&mut self) {
+        *self = ListingPace::default();
+    }
+
     /// One of its runners started or went, or its runners listing failed: its next probe lists them.
     pub(super) fn runners_owed(&mut self) {
         self.runners = RunnersDue::Owed;

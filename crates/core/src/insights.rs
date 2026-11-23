@@ -117,6 +117,8 @@ pub struct Run {
     pub seen_at: Option<u64>,
     /// Of `unseen`, what passed before runnerd first listed it: the downtime its first listing found.
     pub unseen_unlisted: u64,
+    /// Whether the host slept while it ran (ADR 0159): its time holds the sleep, and a failure is the sleep's.
+    pub slept: bool,
     /// How long it waited for each cause, in ms (ADR 0154); `None` for a row from before runnerd counted them.
     pub causes: Option<BTreeMap<api::WaitCause, u64>>,
     /// What its job's cleanup found its slot's Docker store holding (ADR 0156); `None` where its image reported
@@ -135,13 +137,18 @@ impl Run {
 
     /// Failed as `GET /v1/stats` counts failures: failed, timed out or lost.
     fn failed(&self) -> bool {
-        self.state == JobState::Lost || self.failed_itself()
+        self.state == JobState::Lost || self.concluded_failed()
     }
 
-    /// Failed or timed out: what the job did, not what became of its runner.
-    fn failed_itself(&self) -> bool {
+    /// Concluded failed or timed out.
+    fn concluded_failed(&self) -> bool {
         self.state == JobState::Completed
             && matches!(self.conclusion.as_deref(), Some("failure" | "timed_out"))
+    }
+
+    /// Failed or timed out: what the job did, not what became of its runner, nor what a sleep of the host did to it.
+    fn failed_itself(&self) -> bool {
+        self.concluded_failed() && !self.slept
     }
 
     /// Seconds from start to finish.
@@ -451,7 +458,7 @@ fn median(values: &[u64]) -> u64 {
 fn slower(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
     let timed_on = |branch: &str| -> Vec<(&Run, u64)> {
         runs.iter()
-            .filter(|run| run.succeeded() && run.branch.as_deref() == Some(branch))
+            .filter(|run| run.succeeded() && !run.slept && run.branch.as_deref() == Some(branch))
             .filter_map(|run| Some((*run, run.took()?)))
             .collect()
     };

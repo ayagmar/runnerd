@@ -458,7 +458,10 @@ impl Open {
 }
 
 /// Adds up the readings of the drive into windows of `WINDOW`, each starting where the last ended. A reload leaves
-/// it be; a restart starts a new window at its first reading, so the time no daemon ran is in none.
+/// it be; a restart starts a new window at its first reading, so the time no daemon ran is in none, and so does a
+/// reading more than `WINDOW` after the last: the host slept or the sampler stalled between them (ADR 0159), and what
+/// the counters rose by then is in no window. The sampler ends the window itself when it sees the host slept; this
+/// keeps out a gap it missed.
 #[derive(Debug, Default)]
 pub struct Windows {
     open: Option<Open>,
@@ -471,13 +474,16 @@ impl Windows {
             self.open = Some(Open::new(reading));
             return None;
         };
-        if reading.device != open.last.device || reading.store != open.last.store {
+        let span = u64::try_from(WINDOW.as_millis()).unwrap_or(u64::MAX);
+        if reading.device != open.last.device
+            || reading.store != open.last.store
+            || reading.at.saturating_sub(open.last.at) > span
+        {
             let closed = open.close();
             self.open = Some(Open::new(reading));
             return Some(closed).filter(|window| window.end > window.start);
         }
         open.add(reading);
-        let span = u64::try_from(WINDOW.as_millis()).unwrap_or(u64::MAX);
         if open.last.at.saturating_sub(open.first) < span {
             return None;
         }

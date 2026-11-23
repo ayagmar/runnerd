@@ -71,6 +71,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         disk: None,
         seen_at: Some(finished - seconds * 1000 - 15_000),
         unseen_unlisted: 0,
+        slept: false,
         docker_store: None,
         causes: Some(BTreeMap::new()),
     }
@@ -291,6 +292,40 @@ fn a_lost_job_that_passed_on_a_re_run_is_not_flaky() {
             .insights
             .is_empty(),
         "a vanished runner is the host's fault"
+    );
+}
+
+// Catches a failure the host's sleep caused read as the code's: GitHub ended the runner's session, and the re-run
+// passed (ADR 0159).
+#[test]
+fn a_job_that_failed_because_the_host_slept_and_passed_on_a_re_run_is_not_flaky() {
+    let mut slept = attempt(2, 1, "failure");
+    slept.slept = true;
+    let runs = vec![slept, attempt(2, 2, "success")];
+
+    assert!(
+        insights(&whole(&runs), &config(), 14, NOW)
+            .insights
+            .is_empty(),
+        "a sleep of the host is not the job's fault"
+    );
+}
+
+// Catches the hours a host slept counted in its jobs' run times, so the runs across a sleep read as a regression.
+#[test]
+fn runs_that_spanned_a_sleep_of_the_host_are_not_slower() {
+    let mut durations = vec![240; 8];
+    durations.extend([3_840; 6]);
+    let mut runs = history(&durations);
+    for run in &mut runs[8..] {
+        run.slept = true;
+    }
+
+    assert!(
+        insights(&whole(&runs), &config(), 14, NOW)
+            .insights
+            .is_empty(),
+        "the sleep is not the job's run time"
     );
 }
 

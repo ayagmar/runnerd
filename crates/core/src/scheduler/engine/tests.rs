@@ -7924,6 +7924,7 @@ mod priority;
 mod records;
 mod registrations;
 mod shares;
+mod sleep;
 mod start;
 mod stop;
 mod unsynced;

@@ -800,7 +800,13 @@ fn message(target: &Target) -> Notification {
             } else {
                 "failed"
             };
-            format!("{} {how}{}", job_line(job), on_branch(job))
+            // A sleep of the host failed it, not its code: the line says so.
+            let why = job
+                .failure_line()
+                .filter(|_| job.slept)
+                .map(|line| format!(": {line}"))
+                .unwrap_or_default();
+            format!("{} {how}{}{why}", job_line(job), on_branch(job))
         }),
         failed.count,
     ));

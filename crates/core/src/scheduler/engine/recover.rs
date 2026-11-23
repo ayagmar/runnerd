@@ -413,6 +413,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.caches_adopted(&running);
+        self.recover_sleep().await;
         self.drop_closed_slots();
         self.recover_history(&running).await;
         self.measure_docker_disk();

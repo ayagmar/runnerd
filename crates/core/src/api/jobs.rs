@@ -126,6 +126,11 @@ pub struct JobSummary {
     /// disabled, a container stops early or the daemon is older. Recorded only; it decides nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<RunnerProbe>,
+    /// Whether the host slept while it ran (ADR 0159): runnerd saw the host wake with the job running. GitHub ends a
+    /// runner's session while its host sleeps, so a job that failed then failed for that, not for its code, and its
+    /// run time holds the sleep. False from a daemon older than it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slept: bool,
     /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).
     /// `None` for a job without a record note, and from a daemon older than the mark. Not `record`, which a `Job`
     /// that flattens this summary holds in full.

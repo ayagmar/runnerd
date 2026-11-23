@@ -120,6 +120,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "ALTER TABLE runners ADD COLUMN docker_held INTEGER;\n\
          ALTER TABLE runners ADD COLUMN docker_share INTEGER;",
     ),
+    (
+        30,
+        "ALTER TABLE jobs ADD COLUMN slept_from INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN slept_ended_by INTEGER;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -358,6 +363,11 @@ enum Write {
     RunnerCancelBy {
         runner: String,
         at: u64,
+    },
+    /// The host slept from `from` to `until` (ms), with this daemon running (ADR 0159).
+    Downtime {
+        from: u64,
+        until: u64,
     },
     HostWaited {
         jobs: Vec<u64>,
@@ -602,7 +612,7 @@ impl Store {
                 write::run(
                     write::Started {
                         db,
-                        downtime,
+                        downtimes: Downtimes(downtime.into_iter().collect()),
                         session,
                     },
                     receiver,
@@ -874,6 +884,15 @@ impl Store {
     /// with the reading; it is not stored. A plan that finds none replaces the last one's.
     pub fn host_waiting(&self, jobs: BTreeSet<u64>, at: u64) {
         *lock(&self.host_waiting) = (jobs, at);
+    }
+
+    /// Records that the host slept from `from` to `until` (ms) while this daemon ran (ADR 0159): it is downtime, as
+    /// the time before a start is (ADR 0081). The jobs queued then leave what they waited through it out of their
+    /// waits, as do those recorded later that were queued before it; the jobs running then are marked as having run
+    /// across it; and the daemon's session ends where the sleep began, a new one starting where it ended, so the
+    /// timeline reads the sleep as unknown.
+    pub fn downtime(&self, from: u64, until: u64) {
+        self.send(Write::Downtime { from, until });
     }
 
     /// Adds `ms` to how long each of `jobs` waited because the host's memory could not take its runner, which
@@ -1354,6 +1373,11 @@ impl Store {
         self.read(read::slot_jobs).await
     }
 
+    /// When the host's last sleep began (ms), if a daemon saw one (ADR 0159).
+    pub async fn last_sleep_began(&self) -> Result<Option<u64>, StoreError> {
+        self.read(read::last_sleep_began).await
+    }
+
     /// The latest second a runner was named for (`runner_named`), or any runner name starting with `prefix` carries,
     /// of a runner or of a job's runner: the engine names runners later after a restart, so no name it used before
     /// is used twice.
@@ -1615,16 +1639,7 @@ impl Downtime {
             .filter(|last| *last < now)
             .map(|from| Downtime { from, until: now });
         if let Some(downtime) = downtime {
-            let queued: Vec<(u64, u64)> = transaction
-                .prepare("SELECT id, queued_at FROM jobs WHERE state = 'queued'")?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            for (job, queued_at) in queued {
-                transaction.execute(
-                    "UPDATE jobs SET unseen = unseen + ?2 WHERE id = ?1",
-                    rusqlite::params![job, downtime.of(queued_at)],
-                )?;
-            }
+            downtime.credit_queued(&transaction)?;
         }
         transaction.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('opened_at', ?1)",
@@ -1632,6 +1647,21 @@ impl Downtime {
         )?;
         transaction.commit()?;
         Ok(downtime)
+    }
+
+    /// Leaves it out of the waits of the jobs `db` has queued.
+    fn credit_queued(self, db: &Connection) -> rusqlite::Result<()> {
+        let queued: Vec<(u64, u64)> = db
+            .prepare("SELECT id, queued_at FROM jobs WHERE state = 'queued'")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (job, queued_at) in queued {
+            db.execute(
+                "UPDATE jobs SET unseen = unseen + ?2 WHERE id = ?1",
+                rusqlite::params![job, self.of(queued_at)],
+            )?;
+        }
+        Ok(())
     }
 
     /// How much of it a job queued at `queued_at` (ms) waited through.
@@ -1649,6 +1679,54 @@ impl Downtime {
     fn after(self, queued_at: u64, started_at: u64) -> u64 {
         self.of(queued_at)
             .saturating_sub(started_at.saturating_sub(queued_at.max(self.from)))
+    }
+}
+
+/// How long a sleep's downtime is kept for jobs recorded later: past it, a job queued before it no longer queues on
+/// GitHub, which cancels a job queued for a day, and one that ran across it has ended, as a job runs 5 days at most.
+const DOWNTIME_KEPT: u64 = 6 * 24 * 60 * 60 * 1000;
+
+/// The downtimes of this daemon's life, oldest first: the one before its start, if any, and each time the host slept
+/// since (ADR 0081, 0159). They do not overlap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Downtimes(Vec<Downtime>);
+
+impl Downtimes {
+    /// Adds one that ended last, and forgets those that ended `DOWNTIME_KEPT` before it.
+    fn push(&mut self, downtime: Downtime) {
+        let kept_from = downtime.until.saturating_sub(DOWNTIME_KEPT);
+        self.0.retain(|kept| kept.until >= kept_from);
+        self.0.push(downtime);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How much of them a job queued at `queued_at` (ms) waited through, if it waited still at the last.
+    fn of(&self, queued_at: u64) -> u64 {
+        self.0.iter().map(|downtime| downtime.of(queued_at)).sum()
+    }
+
+    /// How much of them passed from `from` to `until` (ms).
+    fn during(&self, from: u64, until: u64) -> u64 {
+        self.0
+            .iter()
+            .map(|downtime| downtime.during(from, until))
+            .sum()
+    }
+
+    /// What those a job queued at `queued_at` was recorded queued through gave it after it started at `started_at`
+    /// (ms), once GitHub says when it started: `known` is the start the history had, which a capture or claim after a
+    /// downtime dates after it. One the history knew it started before had given it nothing.
+    fn after(&self, queued_at: u64, started_at: u64, known: Option<u64>) -> u64 {
+        self.0
+            .iter()
+            .filter(|downtime| {
+                started_at < downtime.until && known.is_none_or(|known| known >= downtime.until)
+            })
+            .map(|downtime| downtime.after(queued_at, started_at))
+            .sum()
     }
 }
 

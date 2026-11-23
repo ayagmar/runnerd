@@ -164,3 +164,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0155](0155-a-runner-is-probed-after-it-exits-and-the-verdict-is-recorded.md) | A runner is probed after it exits, and the verdict is recorded | Accepted |
 | [0156](0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md) | Each profile's slots get a Docker share by what their stores hold | Accepted |
 | [0158](0158-a-host-has-a-name-that-its-status-and-messages-carry.md) | A host has a name that its status and messages carry | Accepted |
+| [0159](0159-time-the-host-slept-is-downtime-not-waiting.md) | Time the host slept is downtime, not waiting | Accepted |

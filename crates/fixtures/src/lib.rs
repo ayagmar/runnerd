@@ -52,6 +52,8 @@ pub const NEVER_STARTED: u64 = 9207;
 pub const UNNAMED: u64 = 9206;
 /// A job that concluded `failure` because its runner's Sysbox lost the seccomp listener, not because of its code.
 pub const RUNNER_FAULT: u64 = 9208;
+/// A job that failed because the host slept while it ran (ADR 0159), not because of its code.
+pub const SLEPT: u64 = 9198;
 /// A job whose `Set up job` failed because the runner could not download an action
 /// (`logs/action-archive-download.log`, the log core reads that cause in).
 pub const ACTION_ARCHIVE: u64 = 9199;
@@ -358,6 +360,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
         runner_fault: false,
+        slept: false,
         failure_cause: None,
         rerun_at: None,
         probe: None,
@@ -496,6 +499,18 @@ fn runner_fault() -> JobSummary {
     runner_fault
 }
 
+/// [`SLEPT`]: running when the host went to sleep, so GitHub ended its runner's session and failed it.
+fn slept() -> JobSummary {
+    let mut slept = ran(
+        summary(SLEPT, LEDGER, JobState::Completed, Some("failure")),
+        3000,
+        Some(2950),
+    );
+    "lint".clone_into(&mut slept.name);
+    slept.slept = true;
+    slept
+}
+
 fn jobs() -> Vec<Job> {
     let [startup_failure, never_started, elsewhere] = not_run_here();
     let mut running = ran(summary(RUNNING, LEDGER, JobState::Running, None), 240, None);
@@ -594,6 +609,7 @@ fn jobs() -> Vec<Job> {
         )),
         job(succeeded),
         action_archive(),
+        job(slept()),
     ]
 }
 
@@ -1414,6 +1430,8 @@ pub struct Facts {
     pub github: &'static str,
     /// What failed [`ACTION_ARCHIVE`], as its page says under its outcome.
     pub failure_line: &'static str,
+    /// That the host slept while [`SLEPT`] ran, as its page says under its outcome.
+    pub slept_line: &'static str,
     /// That runnerd re-ran [`RUNNER_FAULT`]'s run, as its page says under its outcome.
     pub rerun_line: String,
     /// What the probe after [`RUNNER_FAULT`]'s runner found, as its page says under its outcome.
@@ -1553,11 +1571,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             finished: compared.finished,
         },
         records_usage: daemon.records.usage(),
-        records_pressure: daemon
-            .records
-            .pressure()
-            .expect("the records are near max_total")
-            .to_owned(),
+        records_pressure: records_pressure(daemon),
         records_tone: daemon.records.summary_tone(),
         build_cache_week: build.week_line(),
         actions_cache: build.actions_cache_line(),
@@ -1568,10 +1582,24 @@ pub fn facts(daemon: &Daemon) -> Facts {
         stopping,
         github,
         failure_line: job_line(daemon, ACTION_ARCHIVE, JobSummary::failure_line),
+        slept_line: job_line(daemon, SLEPT, JobSummary::failure_line),
         rerun_line: job_line(daemon, RUNNER_FAULT, JobSummary::rerun_line),
         probe_line: job_line(daemon, RUNNER_FAULT, JobSummary::probe_line).text,
         unprobed_line: job_line(daemon, ACTION_ARCHIVE, JobSummary::probe_line).text,
     }
+}
+
+/// What the records' pressure says, as near `max_total` as the fixtures put them.
+#[expect(
+    clippy::expect_used,
+    reason = "test support: fixtures without their own records fail the test"
+)]
+fn records_pressure(daemon: &Daemon) -> String {
+    daemon
+        .records
+        .pressure()
+        .expect("the records are near max_total")
+        .to_owned()
 }
 
 /// Each slot with a runner, as `Facts::slots` lists them.

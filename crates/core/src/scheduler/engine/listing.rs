@@ -42,6 +42,11 @@ impl Listing {
         self.0 = Shown::Unknown;
     }
 
+    /// The host slept (ADR 0159): what was queued before is no longer known, and nothing says the listing fails.
+    pub(super) fn slept(&mut self) {
+        self.0 = Shown::Unknown;
+    }
+
     /// A listing failed at `at` with `error`: what was queued is no longer known. A failure after a failure keeps when
     /// the streak began. The rate limit is no failure of the listing: `fail`.
     pub(super) fn fail_with(&mut self, error: &github::Error, at: SystemTime) {
