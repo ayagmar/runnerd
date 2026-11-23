@@ -67,6 +67,13 @@ fn a_runner_names_host_is_the_text_up_to_the_next_dash() {
         ("laptopdhcp42", "my-app-2-7")
     );
     assert_eq!(host.machine().name, "laptopdhcp42");
+    // A job this machine ran reads, on another machine's history, as run on this one's name (ADR 0163).
+    assert_eq!(api::Machine::of_runner(&name), Some("laptopdhcp42"));
+    let longest = identity("My.Very_Long-Hostname.example.org", ID_A);
+    assert_eq!(
+        api::Machine::of_runner(&longest.runner_name("rust-big", 12, 1_792_692_722)),
+        Some(longest.machine().name.as_str())
+    );
 }
 
 #[test]
@@ -5433,12 +5440,12 @@ async fn a_queued_job_of_a_repository_a_reload_removed_closes_once_github_says_i
         let mut state = github.0.lock().unwrap();
         state.queued = Vec::new();
         let mut elsewhere = details(5, "completed", Some("success"));
-        elsewhere.runner_name = Some("another-machine".to_owned());
+        elsewhere.runner_name = Some("runnerd-7c3e5a19-skiff-jvm-2-1763000000".to_owned());
         state.jobs.insert(5, elsewhere);
     }
     engine.tick(Shutdown::No).await;
     let job = until_state(&handle, 5, JobState::Elsewhere).await.summary;
-    assert_eq!(job.outcome().label, "elsewhere");
+    assert_eq!(job.outcome().label, "ran on skiff");
 }
 
 /// A job recorded queued that left the queue while no runner here could take it, and that the history keeps open.
