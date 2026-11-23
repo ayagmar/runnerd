@@ -23,13 +23,13 @@ rustix = { workspace = true, features = ["event", "process", "termios"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 unicode-width = { workspace = true, optional = true }
 
 [features]
 default = ["tui"]
 # `runnerctl tui`, the full-screen terminal dashboard.
-tui = ["dep:ratatui", "dep:unicode-width", "tokio/signal"]
+tui = ["dep:ratatui", "dep:unicode-width"]
 
 [dev-dependencies]
 axum.workspace = true

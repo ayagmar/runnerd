@@ -29,6 +29,6 @@ runnerctl --machine skiff logs 9001 --follow
 
 ## When it fails
 
-`ssh` runs with `BatchMode=yes`, so it cannot ask for a password, a key's passphrase, a new host key or Tailscale SSH's browser check. When one of those is needed, the error says so: run `ssh me@skiff.tail0b5e.ts.net` once yourself, then try again. Your `ControlMaster` settings are not used.
+`ssh` runs with `BatchMode=yes`, so it cannot ask for a password, a key's passphrase, a new host key or Tailscale SSH's browser check. When one of those is needed, the error says so: run `ssh me@skiff.tail0b5e.ts.net` once yourself, then try again. Your `~/.ssh/config` still says how to reach the host (aliases, user, keys, port, jump host), but not how runnerctl's `ssh` behaves: its `ControlMaster`, `ForkAfterAuthentication`, `RemoteCommand`, `LocalCommand` and `LogLevel` are not used. runnerctl needs OpenSSH 8.7 or later.
 
 `runnerctl --machine skiff web` cannot open the dashboard: its login link is a file on `skiff`. `runnerctl --machine skiff web --qr` prints a fresh link to scan, and `--sign-out-all` works too. `runnerctl --machine skiff doctor` reports a daemon that is down instead of running `runnerd doctor` on this machine.
