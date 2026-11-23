@@ -23,7 +23,7 @@ runnerctl --machine skiff logs 9001 --follow
 
 `runnerctl machine list` shows the machines, `runnerctl machine rm skiff` forgets one.
 
-In `runnerctl tui`, `m` lists this machine and every added one, each with its state. Enter on one reads that machine in the same TUI; its header says which machine it shows.
+In `runnerctl tui`, `m` lists this machine and every added one, and fills in each one's state as it is read. Enter on one reads that machine in the same TUI, without waiting for the others; its header says which machine it shows.
 
 ## Every machine at once
 

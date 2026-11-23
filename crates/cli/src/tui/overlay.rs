@@ -117,6 +117,12 @@ impl Picker {
     pub(crate) fn chosen(&self) -> Option<&Choice> {
         self.choices.get(self.at)
     }
+
+    /// Replaces the options with `choices`, the keys staying on the same line when there still is one.
+    pub(crate) fn fill(&mut self, choices: Vec<Choice>) {
+        self.choices = choices;
+        self.at = self.at.min(self.choices.len().saturating_sub(1));
+    }
 }
 
 /// Where typed text goes.

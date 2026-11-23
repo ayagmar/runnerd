@@ -206,10 +206,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) -> 
 }
 
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut Hits) {
-    // Which machine it reads (ADR 0158, 0166): ` runnerd on tern `.
+    // Which machine it reads (ADR 0158, 0166): ` runnerd on tern `, by the name it was chosen by when its daemon names
+    // none.
     let title = format!(
         " runnerd{} ",
-        api::Machine::notification_suffix(app.live.status.machine.as_ref())
+        api::Machine::shown_suffix(app.live.status.machine.as_ref(), app.chosen.as_deref())
     );
     let title_width = title.width();
     let mut spans = vec![Span::styled(title, bold())];

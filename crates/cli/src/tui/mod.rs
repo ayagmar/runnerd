@@ -38,6 +38,9 @@ mod mouse;
 mod overlay;
 mod prompts;
 mod reading;
+mod switching;
+
+use switching::{Switching, Ticket};
 #[cfg(test)]
 mod tests;
 
@@ -165,47 +168,53 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
         .map_err(|error| local(&error))
 }
 
-/// Which machine the TUI reads, and how it reads another (ADR 0166). Nothing of it survives leaving the TUI.
+/// How the TUI reads another machine (ADR 0166): which one it reads and the switch under way are [`Switching`]'s.
+/// Nothing of it survives leaving the TUI.
 struct Switcher {
     /// This machine's daemon's socket, for the list of machines: the one read at start, unless that was another
     /// machine's; `None` without one to ask.
     this_machine: Option<std::path::PathBuf>,
-    /// The machine read now: its name in `machines.toml`, or `None` for this machine's daemon.
-    current: Option<String>,
+    switching: Switching,
     /// Where a switch's read answers.
-    switched: UnboundedSender<Result<Switched, String>>,
+    switched: UnboundedSender<Answer>,
+}
+
+/// A switch's read, and which switch it was.
+struct Answer {
+    ticket: Ticket,
+    read: Result<Switched, String>,
 }
 
 impl Switcher {
     /// The switcher of the TUI reading `client`, and where the answers of its switches arrive.
-    fn new(client: &Client) -> (Switcher, mpsc::UnboundedReceiver<Result<Switched, String>>) {
+    fn new(client: &Client) -> (Switcher, mpsc::UnboundedReceiver<Answer>) {
         let (answers, receive) = mpsc::unbounded_channel();
         let made = Switcher {
             this_machine: match client.machine() {
                 None => Some(client.socket().to_owned()),
                 Some(_) => crate::default_socket(),
             },
-            current: client.machine().map(|machine| machine.name.clone()),
+            switching: Switching::new(client.machine().map(|machine| machine.name.clone())),
             switched: answers,
         };
         (made, receive)
     }
 
-    /// Starts reading another machine for `Effect::Switch`, unless it is the one read now, or every machine's state
+    /// Starts reading another machine for `Effect::Switch`, giving up the switch under way, or lists every machine
     /// for `Effect::Machines`, answering on `daemon`.
-    fn start(&self, effect: Effect, daemon: &UnboundedSender<Msg>) {
+    fn start(&mut self, effect: Effect, daemon: &UnboundedSender<Msg>) {
         match effect {
-            Effect::Switch(target) if target != self.current => {
-                tokio::spawn(switch(
-                    target,
-                    self.this_machine.clone(),
-                    self.switched.clone(),
-                ));
+            Effect::Switch(target) => {
+                let local = self.this_machine.clone();
+                let send = self.switched.clone();
+                self.switching.choose(target.clone(), move |ticket| {
+                    tokio::spawn(switch(ticket, target, local, send))
+                });
             }
             Effect::Machines => {
                 tokio::spawn(machines(
                     self.this_machine.clone(),
-                    self.current.clone(),
+                    self.switching.current().map(str::to_owned),
                     daemon.clone(),
                 ));
             }
@@ -213,17 +222,21 @@ impl Switcher {
         }
     }
 
-    /// Takes a switch's answer: the new machine's client, feed and state in place of the old, with a new channel for
-    /// what its daemon sends, so nothing still on its way from the old one arrives; or why not, flashed.
+    /// Takes a switch's answer, unless a later choice gave that switch up: the new machine's client, feed and state
+    /// in place of the old, with a new channel for what its daemon sends, so nothing still on its way from the old
+    /// one arrives; or why not, flashed.
     fn take(
         &mut self,
-        answer: Result<Switched, String>,
+        answer: Answer,
         app: &mut App,
         requests: &mut Requests,
         feeding: &mut JoinHandle<()>,
         daemon: &mut mpsc::UnboundedReceiver<Msg>,
     ) {
-        let to = match answer {
+        if !self.switching.answered(answer.ticket, answer.read.is_ok()) {
+            return;
+        }
+        let to = match answer.read {
             Ok(to) => to,
             Err(why) => {
                 let _ = app.update(Msg::Failed(why));
@@ -237,14 +250,11 @@ impl Switcher {
         *daemon = receive;
         *feeding = tokio::spawn(feed(to.client, to.events, requests.send.clone(), RETRY));
         *app = to.app;
-        self.current = to.target;
     }
 }
 
 /// Another machine's daemon, read and ready to show (ADR 0166).
 struct Switched {
-    /// The machine of `machines.toml`, or `None` for this machine's daemon.
-    target: Option<String>,
     client: Client,
     events: Events,
     app: App,
@@ -252,9 +262,10 @@ struct Switched {
 
 /// Opens a client of `target`, or of this machine's daemon at `local`, and reads its snapshot; why not, worded.
 async fn switch(
+    ticket: Ticket,
     target: Option<String>,
     local: Option<std::path::PathBuf>,
-    send: UnboundedSender<Result<Switched, String>>,
+    send: UnboundedSender<Answer>,
 ) {
     let opened = match &target {
         Some(name) => match crate::machines::file() {
@@ -267,17 +278,20 @@ async fn switch(
     };
     let read = match opened {
         Ok(client) => snapshot(&client).await.map(|(events, app)| Switched {
-            target: target.clone(),
             client,
             events,
             app,
         }),
         Err(error) => Err(error),
     };
-    let _ = send.send(read.map_err(|error| error.to_string()));
+    let _ = send.send(Answer {
+        ticket,
+        read: read.map_err(|error| error.to_string()),
+    });
 }
 
-/// Reads every machine's state for the list of machines: this machine's daemon first, then `machines.toml`'s.
+/// Lists every machine for the list of machines at once, this machine's daemon first, then `machines.toml`'s, and
+/// sends the list again once each was read.
 async fn machines(
     local: Option<std::path::PathBuf>,
     current: Option<String>,
@@ -290,6 +304,23 @@ async fn machines(
             return;
         }
     };
+    let targets: Vec<Option<String>> = std::iter::once(None)
+        .chain(added.all().iter().map(|machine| Some(machine.name.clone())))
+        .collect();
+    let listed = targets
+        .iter()
+        .map(|target| app::MachineChoice {
+            target: target.clone(),
+            name: target
+                .clone()
+                .unwrap_or_else(|| api::THIS_MACHINE.to_owned()),
+            machine: None,
+        })
+        .collect();
+    let _ = send.send(Msg::Machines {
+        choices: listed,
+        current: current.clone(),
+    });
     let query = JobQuery {
         limit: Some(1),
         ..JobQuery::default()
@@ -302,12 +333,15 @@ async fn machines(
         &crate::machines::private_base(),
     )
     .await;
-    let targets =
-        std::iter::once(None).chain(added.all().iter().map(|machine| Some(machine.name.clone())));
     let fleet = api::Fleet::merge(readings, 0);
     let choices = targets
+        .into_iter()
         .zip(fleet.machines)
-        .map(|(target, machine)| app::MachineChoice { target, machine })
+        .map(|(target, machine)| app::MachineChoice {
+            target,
+            name: machine.name.clone(),
+            machine: Some(machine),
+        })
         .collect();
     let _ = send.send(Msg::Machines { choices, current });
 }
@@ -350,6 +384,7 @@ async fn snapshot(client: &Client) -> Result<(Events, App), Error> {
     // An activity read that fails leaves the health figures out rather than the whole screen.
     let activity = activity(client).await.ok();
     let mut app = App::new(live, activity, host.samples, series);
+    app.chosen = client.machine().map(|machine| machine.name.clone());
     app.update(Msg::Attention(attention(client).await));
     Ok((events, app))
 }

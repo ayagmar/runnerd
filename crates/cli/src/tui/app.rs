@@ -141,7 +141,7 @@ pub(crate) enum Msg {
     Failed(String),
     /// A pause was refused because the repository, or one of them in a pause of all, runs a job.
     Busy(Refused),
-    /// Every machine's state, for the list of machines; `current` is the one read now.
+    /// The list of machines, as listed (none read yet) or read; `current` is the one read now.
     Machines {
         choices: Vec<MachineChoice>,
         current: Option<String>,
@@ -304,13 +304,15 @@ pub(crate) enum Effect {
     Quit,
 }
 
-/// A machine the list of machines offers, and what its daemon said.
+/// A machine the list of machines offers, and what its daemon said once read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MachineChoice {
     /// What choosing it reads: its name in `machines.toml`, or `None` for this machine's daemon.
     pub(crate) target: Option<String>,
-    /// Its name and state, as core words them.
-    pub(crate) machine: api::FleetMachine,
+    /// Its name before it is read.
+    pub(crate) name: String,
+    /// Its name and state, as core words them; `None` while it is being read.
+    pub(crate) machine: Option<api::FleetMachine>,
 }
 
 /// A profile's advised memory and slots, as the sizing view showed them when `a` asked.
@@ -739,6 +741,9 @@ pub(crate) struct App {
     pub(crate) flash: Option<Flash>,
     /// The questions the footer asks.
     pub(crate) prompts: Prompts,
+    /// The name in `machines.toml` of the machine read, for the header when its daemon names none; `None` for this
+    /// machine's daemon.
+    pub(crate) chosen: Option<String>,
     /// What is open over the view.
     pub(crate) overlay: Overlay,
     /// The records of failed jobs, once read.
@@ -815,6 +820,7 @@ impl App {
             job: None,
             flash: None,
             prompts: Prompts::default(),
+            chosen: None,
             overlay: Overlay::None,
             records: None,
             record: 0,
@@ -1199,21 +1205,38 @@ impl App {
     }
 
     /// Opens the list of machines, each with its state as core words and tones it, on the one read now.
+    ///
+    /// The machines as listed open it at once, unless something else is open or asked; their readings then fill it
+    /// in place, the cursor kept, and only while it is open: a late answer never takes the keys from another list, a
+    /// search or a question.
     fn list_machines(&mut self, choices: Vec<MachineChoice>, current: Option<String>) {
-        self.flash = None;
-        let choices = choices
+        let read = choices.iter().any(|choice| choice.machine.is_some());
+        let choices: Vec<Choice> = choices
             .into_iter()
-            .map(|choice| Choice {
-                note: choice.machine.summary(),
-                tone: choice.machine.tone(),
-                ..Choice::of(choice.machine.name, Value::Machine(choice.target))
+            .map(|choice| match choice.machine {
+                Some(machine) => Choice {
+                    note: machine.summary(),
+                    tone: machine.tone(),
+                    ..Choice::of(machine.name, Value::Machine(choice.target))
+                },
+                None => Choice {
+                    note: api::BEING_READ.to_owned(),
+                    ..Choice::of(choice.name, Value::Machine(choice.target))
+                },
             })
             .collect();
-        self.overlay = Overlay::Pick(Picker::new(
-            Pick::Machine,
-            choices,
-            &Value::Machine(current),
-        ));
+        match &mut self.overlay {
+            Overlay::Pick(picker) if picker.pick == Pick::Machine => picker.fill(choices),
+            Overlay::None if !read && self.prompts.top().is_none() => {
+                self.flash = None;
+                self.overlay = Overlay::Pick(Picker::new(
+                    Pick::Machine,
+                    choices,
+                    &Value::Machine(current),
+                ));
+            }
+            _ => {}
+        }
     }
 
     fn flash(&mut self, text: String, tone: api::Tone) {
@@ -1925,7 +1948,11 @@ impl App {
             (Value::Record(record), _) => history.record = *record,
             (Value::Range(range), _) => history.range = *range,
             (Value::Order(order), _) => history.order = *order,
-            (Value::Machine(target), _) => return vec![Effect::Switch(target.clone())],
+            (Value::Machine(target), _) => {
+                let name = target.as_deref().unwrap_or(api::THIS_MACHINE);
+                self.flash(format!("reading {name}…"), api::Tone::Quiet);
+                return vec![Effect::Switch(target.clone())];
+            }
             (
                 Value::Text(_),
                 Pick::Filters | Pick::Record | Pick::Range | Pick::Order | Pick::Machine,

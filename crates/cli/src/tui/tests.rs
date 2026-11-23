@@ -40,7 +40,7 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{App, Connection, Effect, Msg, Pane, Refused, Removal, Resizing, View};
 use super::draw::{Theme, draw};
 use super::feed;
-use super::overlay::Overlay;
+use super::overlay::{Overlay, Pick};
 use crate::testing::Fake;
 use crate::watch;
 
@@ -3562,9 +3562,90 @@ fn machine_choices() -> Vec<super::app::MachineChoice> {
         .enumerate()
         .map(|(at, machine)| super::app::MachineChoice {
             target: (at > 0).then(|| machine.name.clone()),
-            machine,
+            name: machine.name.clone(),
+            machine: Some(machine),
         })
         .collect()
+}
+
+/// The machines of `machine_choices` as listed before any is read.
+fn machines_listed() -> Vec<super::app::MachineChoice> {
+    machine_choices()
+        .into_iter()
+        .map(|choice| super::app::MachineChoice {
+            machine: None,
+            ..choice
+        })
+        .collect()
+}
+
+/// Catches: `m` showing nothing until the slowest machine answers (10 to 30 s with one down), and the readings
+/// moving the cursor the person already put on a machine.
+#[test]
+fn the_list_of_machines_opens_at_once_and_fills_in_place() {
+    let mut app = app();
+    assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    assert!(
+        matches!(&app.overlay, Overlay::Pick(picker) if picker.pick == Pick::Machine),
+        "the list is open before any machine answered"
+    );
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        shown.contains(runnerd_core::api::BEING_READ),
+        "each machine is being read: {shown}"
+    );
+    app.update(key(KeyCode::Down));
+    app.update(Msg::Machines {
+        choices: machine_choices(),
+        current: None,
+    });
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        shown.contains("cannot be read"),
+        "the readings fill it: {shown}"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Switch(Some("skiff".to_owned()))],
+        "the cursor stayed on skiff"
+    );
+}
+
+/// Catches: the list of machines, arriving late, replacing a search being typed or reopening a list closed meanwhile,
+/// so the next keys act on machines.
+#[test]
+fn a_late_list_of_machines_takes_the_place_of_nothing_else() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('m')));
+    app.update(key(KeyCode::Char('h')));
+    app.update(key(KeyCode::Char('/')));
+    for choices in [machines_listed(), machine_choices()] {
+        app.update(Msg::Machines {
+            choices,
+            current: None,
+        });
+        assert!(
+            matches!(app.overlay, Overlay::Input(_)),
+            "the search stays open: {:?}",
+            app.overlay
+        );
+    }
+    app.update(key(KeyCode::Esc));
+    app.update(key(KeyCode::Char('m')));
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    app.update(key(KeyCode::Esc));
+    app.update(Msg::Machines {
+        choices: machine_choices(),
+        current: None,
+    });
+    assert_eq!(app.overlay, Overlay::None, "a list closed stays closed");
 }
 
 /// Catches: the list of machines wording a machine's state itself, a machine that is down shown in a quiet colour,
@@ -3573,6 +3654,10 @@ fn machine_choices() -> Vec<super::app::MachineChoice> {
 fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_chosen() {
     let mut app = app();
     assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
     app.update(Msg::Machines {
         choices: machine_choices(),
         current: None,
@@ -3639,6 +3724,20 @@ fn the_header_names_the_machine_it_reads() {
             .next()
             .unwrap()
             .starts_with(" runnerd on skiff "),
+        "{first}"
+    );
+    // A 0.1.5 daemon names no machine: the name it was chosen by says which it is.
+    let mut status = app.live.status.clone();
+    status.machine = None;
+    app.update(Msg::Status(status));
+    app.chosen = Some("dory".to_owned());
+    let first = screen(&app, 120, 30, false);
+    assert!(
+        first
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with(" runnerd on dory "),
         "{first}"
     );
 }
