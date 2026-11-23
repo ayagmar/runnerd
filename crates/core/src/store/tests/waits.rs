@@ -122,18 +122,6 @@ fn a_history_brought_up_from_15_has_the_schema_a_new_one_gets() {
     assert_eq!(described(&Connection::open(&old).unwrap()), described(&new));
 }
 
-/// `at` (ms) as GitHub writes a time.
-fn rfc3339(at: u64) -> String {
-    Connection::open_in_memory()
-        .unwrap()
-        .query_row(
-            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?1, 'unixepoch')",
-            [at / SECOND],
-            |row| row.get(0),
-        )
-        .unwrap()
-}
-
 const CONFIG: &str = r#"
 [host]
 slice = "runnerd.slice"
@@ -208,7 +196,7 @@ async fn waits_leave_out_the_time_no_runnerd_ran_wherever_they_are_counted() {
         created_at: None,
         status: "in_progress".to_owned(),
         conclusion: None,
-        started_at: Some(rfc3339(start + 2 * HOUR)),
+        started_at: Some(crate::time::rfc3339(start + 2 * HOUR)),
         completed_at: None,
         runner_name: Some("r".to_owned()),
         steps: Vec::new(),
@@ -452,10 +440,10 @@ async fn a_job_a_capture_recorded_first_leaves_out_the_downtime_its_wait_went_th
             head_branch: None,
             html_url: None,
             labels: Vec::new(),
-            created_at: Some(rfc3339(start + 60 * SECOND)),
+            created_at: Some(crate::time::rfc3339(start + 60 * SECOND)),
             status: "in_progress".to_owned(),
             conclusion: None,
-            started_at: Some(rfc3339(start + 180 * SECOND)),
+            started_at: Some(crate::time::rfc3339(start + 180 * SECOND)),
             completed_at: None,
             runner_name: Some("r".to_owned()),
             steps: Vec::new(),
