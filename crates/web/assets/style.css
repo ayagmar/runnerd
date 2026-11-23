@@ -2057,6 +2057,20 @@ dialog.palette {
   background: var(--surface-2);
   color: var(--ink);
   vertical-align: middle;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* A label wider than its column, such as "ran on" a long runner name, ends in an ellipsis on each line it fills. */
+.badge-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A table sizes a column to its widest cell: a badge there takes at most what the longest host name needs. */
+.job-table .badge {
+  max-width: 10rem;
 }
 
 .badge.success { background: var(--success-bg); color: var(--success-ink); }

@@ -285,6 +285,7 @@ mod tests {
             probe: None,
             slept: false,
             record_mark: None,
+            elsewhere_runner: None,
         };
         job.state = state;
         job.runner = runner.then(|| JobRunner {
