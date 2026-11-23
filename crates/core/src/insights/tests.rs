@@ -1548,6 +1548,7 @@ fn the_drive_s_endurance_counts_from_its_smart_count_at_the_rates_runnerd_read()
         drive_read: Some(super::DriveRead {
             bytes: 23 * TB / 4,
             watched: 23 * HOUR,
+            until: NOW,
         }),
         ..whole(&[])
     };
@@ -1994,6 +1995,7 @@ fn a_drive_that_crossed_its_rating_today_is_new_in_the_digest() {
         drive_read: Some(super::DriveRead {
             bytes: 2 * TB,
             watched: 2 * HOUR,
+            until: NOW,
         }),
         ..whole(&[])
     };
@@ -2014,4 +2016,33 @@ fn a_drive_that_crossed_its_rating_today_is_new_in_the_digest() {
         ..whole(&[])
     };
     assert!(wear(&history, &config), "given today: new");
+}
+
+/// The daemon asks at whole seconds while a window closes at a millisecond: a window that closed in this second is in
+/// the history but not in what the store read since the count, and taking it off that read again undercounted it.
+#[test]
+fn a_window_closed_in_this_second_is_not_taken_off_a_read_that_never_had_it() {
+    let mut closing = drive_window("nvme0n1", 1, TB, None);
+    closing.end += 350;
+    let history = History {
+        disk: vec![
+            drive_window("nvme0n1", 3, TB, None),
+            drive_window("nvme0n1", 2, TB, None),
+            closing,
+        ],
+        drive_read: Some(super::DriveRead {
+            bytes: 2 * TB,
+            watched: 2 * HOUR,
+            until: NOW,
+        }),
+        ..whole(&[])
+    };
+    let written = insights(&history, &drive_config(Some("100TB")), 14, NOW)
+        .disk
+        .unwrap()
+        .endurance
+        .unwrap()
+        .written
+        .unwrap();
+    assert_eq!((written.read, written.watched), (2 * TB, 2 * 3600));
 }

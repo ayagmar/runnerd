@@ -30,7 +30,8 @@ TB a day its rating lasts months. Nothing in runnerd said so.
 - **Each cgroup's rise alone.** A reading keeps the raw counters, and a window adds each cgroup's rise before it
   subtracts. A restarted service's cgroup starts again at 0 while its parent keeps what it wrote; differences of
   lifetime counters moved that lifetime into "other system services" in one tick. A cgroup made anew rises from 0, a
-  gone one rises by nothing, its bytes already in the root's.
+  gone one rises by nothing, its bytes already in the root's. A named writer that one reading missed, as when its
+  `io.stat` failed once, takes at most its top-level cgroup's rise on the next, not its life since boot.
 - **The physical drive's lines, also on a loop.** The owner's Docker root is an ext4 in a file on btrfs, on
   `loop0`. Runner jobs' figures stay the loop's lines, what they wrote to that file system, but the split reads the
   drive's: runnerd, the services and btrfs write the drive, not the file system in the file, and the 16K inference

@@ -290,13 +290,16 @@ impl Counts {
     /// cgroup wrote is in the root's count already, and its rise now is nothing. The root's rise less its children's
     /// is no cgroup's; each named writer's rise comes off its top-level cgroup's, `user.slice` or another, and what is
     /// left is other user programs and other system services. The runner slice's is taken off and not kept: its
-    /// figure is the window's `slice`.
+    /// figure is the window's `slice`. A named writer that was not read last time takes at most its top-level
+    /// cgroup's rise.
     fn since(&self, before: &Counts) -> DriveOwners {
         let mut user = 0u64;
         let mut system = 0u64;
         let mut children = Written::default();
+        let mut rises = BTreeMap::new();
         for (name, now) in &self.tops {
             let rose = rise(before.tops.get(name).copied(), *now);
+            rises.insert(name.as_str(), rose.bytes);
             children.bytes = children.bytes.saturating_add(rose.bytes);
             children.ios = children.ios.saturating_add(rose.ios);
             let bucket = if name == USER_SLICE {
@@ -306,13 +309,28 @@ impl Counts {
             };
             *bucket = bucket.saturating_add(rose.bytes);
         }
+        let before_tops = &before.tops;
         let named = |now: &Option<Named>, before: &Option<Named>| {
             let now = now.as_ref()?;
             let before = before
                 .as_ref()
                 .filter(|before| before.relative == now.relative)
                 .map(|before| before.written);
-            Some((now.relative.clone(), rise(before, now.written).bytes))
+            let mut bytes = rise(before, now.written).bytes;
+            // Not read last time, as when its `io.stat` failed once: its whole count would be its life since boot,
+            // so it takes at most what its top-level cgroup rose, when that was read last time. A cgroup made anew
+            // keeps its whole count, which its parent rose by too.
+            let top = now
+                .relative
+                .components()
+                .next()
+                .and_then(|top| top.as_os_str().to_str());
+            if before.is_none()
+                && let Some(top) = top.filter(|top| before_tops.contains_key(*top))
+            {
+                bytes = bytes.min(rises.get(top).copied().unwrap_or(0));
+            }
+            Some((now.relative.clone(), bytes))
         };
         let writers = [
             named(&self.slice, &before.slice),

@@ -1506,6 +1506,7 @@ pub(super) fn drive_read_since(
             Ok(crate::insights::DriveRead {
                 bytes: row.get(0)?,
                 watched: row.get(1)?,
+                until,
             })
         },
     )

@@ -248,6 +248,8 @@ pub struct DriveRead {
     pub bytes: u64,
     /// The ms the windows span.
     pub watched: u64,
+    /// The end the windows were read to (ms): one that ended after it is not among them.
+    pub until: u64,
 }
 
 /// A job as insights tell jobs apart: repository, workflow and name.

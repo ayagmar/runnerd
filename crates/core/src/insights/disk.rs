@@ -210,8 +210,10 @@ pub(super) fn endurance(
                 let mut read = read.unwrap_or_default();
                 for window in windows.iter().filter(|window| {
                     window.device == drive.device
+                        && window.drive.is_some()
                         && window.start >= written.at.saturating_mul(1000)
                         && window.end > now
+                        && window.end <= read.until
                 }) {
                     read.bytes = read.bytes.saturating_sub(window.drive.unwrap_or(0));
                     read.watched = read

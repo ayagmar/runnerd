@@ -407,6 +407,7 @@ async fn a_window_keeps_its_split_by_cgroup_and_an_older_one_reads_as_not_split(
         crate::insights::DriveRead {
             bytes: 128 * MIB,
             watched: 1_200_000,
+            until: 3_400_000,
         },
         "the windows of nvme0n1 from the count on"
     );
@@ -421,7 +422,10 @@ async fn a_window_keeps_its_split_by_cgroup_and_an_older_one_reads_as_not_split(
     );
     assert_eq!(
         store.drive_read_since("sda", 0, 3_400_000).await.unwrap(),
-        crate::insights::DriveRead::default(),
+        crate::insights::DriveRead {
+            until: 3_400_000,
+            ..crate::insights::DriveRead::default()
+        },
         "a disk runnerd never read wrote nothing it counted"
     );
 }

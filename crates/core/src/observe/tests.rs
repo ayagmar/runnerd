@@ -1553,3 +1553,31 @@ fn on_a_root_in_a_file_the_split_reads_the_physical_drive() {
         "btrfs's writes on the drive"
     );
 }
+
+/// One tick that fails to read a running service's `io.stat` leaves the next tick nothing to take its rise from:
+/// counted from 0, it put the service's lifetime since boot into one window.
+#[test]
+fn a_service_read_once_without_its_count_takes_no_more_than_its_slice_rose() {
+    const K: u64 = 1024;
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    let slice = paths.slice("ci.slice");
+    // Ten steps since boot: Docker at 1200K.
+    cgroups(&paths, 10, 1600);
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    std::fs::remove_file(paths.cgroup.join("system.slice/docker.service/io.stat")).unwrap();
+    assert_eq!(windows.add(disks.read(&paths, &slice, 200_000)), None);
+    cgroups(&paths, 11, 1600);
+    let owners = windows
+        .add(disks.read(&paths, &slice, 600_000))
+        .unwrap()
+        .owners
+        .unwrap();
+    assert!(
+        owners.docker.is_some_and(|docker| docker <= 300 * K),
+        "Docker's rise at most system.slice's 300K, not its 1320K since boot: {owners:?}"
+    );
+}
