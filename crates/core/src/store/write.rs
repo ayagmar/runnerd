@@ -117,6 +117,9 @@ impl Writer<'_> {
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
             Write::RunnerProbe { runner, probe } => self.runner_probe(&runner, probe),
+            Write::RunnerDockerStore { runner, report } => {
+                self.runner_docker_store(&runner, report);
+            }
             Write::RunnerStoppedFor { runner, reason } => self.runner_stopped_for(&runner, reason),
             Write::RunnerCancelBy { runner, at } => self.runner_cancel_by(&runner, at),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
@@ -484,6 +487,16 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
                 [runner],
+            ),
+        );
+    }
+
+    fn runner_docker_store(&self, runner: &str, report: crate::cache::shares::StoreReport) {
+        logged(
+            "record what a slot's Docker store held",
+            self.db.execute(
+                "UPDATE runners SET docker_held = ?2, docker_share = ?3 WHERE name = ?1",
+                params![runner, report.held, report.share_gib],
             ),
         );
     }

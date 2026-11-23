@@ -102,7 +102,9 @@ flowchart TB
   the window's jobs and the drive's stored windows wrote (`insights::disk`,
   [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and splits each profile's queue
   time by the causes the engine's plans counted (`insights::queue`,
-  [ADR 0154](docs/adr/0154-a-job-keeps-how-long-each-cause-held-it.md)). All three are pure:
+  [ADR 0154](docs/adr/0154-a-job-keeps-how-long-each-cause-held-it.md)), and finds the profiles whose slots' Docker
+  stores keep outgrowing their share (`insights::stores`,
+  [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)). All three are pure:
   the engine and the daemon read the store and act on what they return. `archives` keeps the verified action archives
   runners read in place of downloading them, in a task of its own the engine starts: it reads the served
   repositories' pins from their parsed YAML (`archives::pins`), downloads anonymously from codeload into `staging/`,
@@ -632,12 +634,16 @@ always returns, so the daemon closes and flushes the history.
 - A slot's Docker Engine keeps its images and build cache on the slot's volume, given to dockerd as `--data-root`
   and never in `daemon.json`, where sysbox would mount a directory of its own over it. The slots' stores together
   stay within a quarter of Docker's disk not otherwise used: the engine gives each runner its share as
-  `RUNNERD_DOCKER_BUDGET_GB` (measured at start and with every check of the caches), BuildKit's GC policy, written
-  from it before the engine starts, and the image's job cleanup trim the build cache, cache mounts last, then a store
-  still over it loses its images and then everything, and the check removes the volumes of slots past their
-  profile's count. A store whose engine does not start is emptied
-  ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
-  [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md)).
+  `RUNNERD_DOCKER_BUDGET_GB` (measured at start and with every check of the caches). A profile's share follows what
+  its stores held after its recent jobs, which the image's entrypoint prints as `runnerd: docker store` once the
+  runner exits and the store keeps per runner; `cache::shares` splits the total, and the engine reads the needs from
+  the history hourly and at its first tick (`scheduler::engine::shares`). BuildKit's GC policy, written from the
+  share before the engine starts, and the image's job cleanup trim the build cache, never a layer the slot's last
+  job or the current one used, cache mounts last, then a store still over it loses its images and then everything,
+  and the check removes the volumes of slots past their profile's count. A store whose engine does not start is
+  emptied ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
+  [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md),
+  [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)).
 - Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner whose image
   carries the label `runnerd.skip-syncs=1` (`docker::SKIP_SYNCS_LABEL`) `RUNNERD_SKIP_SYNCS=1`
   (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before anything of the runner's

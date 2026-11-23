@@ -1,7 +1,8 @@
 //! Insights from the job history (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on a re-run,
 //! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, repositories whose
 //! downloads memory pressure throttled, jobs their CPU cap held back by the rule auto sizing reads (ADR 0087), jobs
-//! held for the host's memory by programs outside CI (ADR 0100), and how long each repository's jobs wait, this week against the last when the history holds all of last week; and the
+//! held for the host's memory by programs outside CI (ADR 0100), profiles whose slots' Docker stores keep outgrowing
+//! their share (ADR 0156), and how long each repository's jobs wait, this week against the last when the history holds all of last week; and the
 //! daily digest. What the host's memory came to while CI ran, and the warning when it ran low on a host credit
 //! (ADR 0108), are `host`'s. Pure: the daemon reads the history, the config and the clock and passes them in. It sends nothing
 //! and changes nothing.
@@ -19,6 +20,7 @@ use crate::sizing::{HELD, Throttling, spread};
 mod disk;
 mod host;
 mod queue;
+mod stores;
 
 const SECOND: u64 = 1000;
 const DAY: u64 = 24 * 3600 * SECOND;
@@ -119,6 +121,9 @@ pub struct Run {
     pub slept: bool,
     /// How long it waited for each cause, in ms (ADR 0154); `None` for a row from before runnerd counted them.
     pub causes: Option<BTreeMap<api::WaitCause, u64>>,
+    /// What its job's cleanup found its slot's Docker store holding (ADR 0156); `None` where its image reported
+    /// nothing.
+    pub docker_store: Option<crate::cache::shares::StoreReport>,
 }
 
 impl Run {
@@ -281,6 +286,7 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
             .as_ref()
             .and_then(|hold| host_held(hold, config, now)),
     );
+    found.extend(stores::overflowing(&window));
     let host_days = host::days(&history.readings, since, now);
     found.extend(host::low(&host_days));
     let waits = waits(history, now);

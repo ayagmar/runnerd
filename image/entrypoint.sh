@@ -37,7 +37,7 @@ rm -f "$jitconfig_file"
 export HOME=/home/runner USER=runner LOGNAME=runner
 cd "$HOME"
 # What the job changes from here on, runnerd-scrub deletes from the dot-files and temporary directories.
-touch /run/runnerd-since
+touch "$JOB_SINCE_FILE"
 # Not as `--jitconfig`: any user of the host reads a process's arguments. The listener reads the config from its
 # environment, which only root and the runner user read, and drops it from what its job's processes inherit.
 ACTIONS_RUNNER_INPUT_JITCONFIG=$jitconfig /usr/bin/setpriv --reuid=runner --regid=runner --init-groups -- \
@@ -67,6 +67,13 @@ if pkill -TERM -u runner 2> /dev/null; then
     pkill -KILL -u runner 2> /dev/null || true
 fi
 /usr/local/sbin/runnerd-scrub
+# What the job-completed hook's cleanup measured of the slot's Docker store, for runnerd, which takes the last such
+# line of the container's log (docs/adr/0156). Printed after every process of the runner's ended, and printed even
+# without a measure, so a line a job wrote to this log earlier is never the last. It starts on a line of its own:
+# what a killed process left unfinished on the last line must not swallow it.
+report=$(cat "$STORE_REPORT_FILE" 2> /dev/null) || true
+[[ $report =~ ^held=[0-9]+\ share=[0-9]+$ ]] || report=unmeasured
+printf '\nrunnerd: docker store %s\n' "$report"
 if [[ $stopping == 1 || ${RUNNERD_SYSBOX_PROBE:-} != 1 ]]; then
     # Leave the verdict codes reserved even if the runner itself returned one of them.
     if (( status >= 200 && status <= 205 )); then exit 1; fi

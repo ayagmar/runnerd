@@ -58,7 +58,7 @@ wall clock alone, and must change nothing.
   slept while it ran, which ended its runner's session with GitHub. A runner fault its log shows still reads as one.
   Insights leave such runs out of flaky and slower, and the notification line carries the failure line. The automatic
   re-run (ADR 0153) is unchanged: it follows `runner_fault` only.
-- `jobs.slept_from` and `jobs.slept_ended_by` are schema 29, nullable. `JobSummary` and `TimelineBar` carry `slept`, skipped when
+- `jobs.slept_from` and `jobs.slept_ended_by` are schema 30, nullable. `JobSummary` and `TimelineBar` carry `slept`, skipped when
   false and read as false when absent, so 0.1.5 and this version read each other's JSON.
 
 ## Consequences

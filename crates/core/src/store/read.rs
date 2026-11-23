@@ -1249,6 +1249,24 @@ pub(super) fn stats(
     })
 }
 
+/// What the slots' Docker stores held after the jobs of runners started at or after `since` (ms), newest first.
+pub(super) fn docker_stores(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<Vec<crate::cache::shares::StoreUse>> {
+    db.prepare_cached(
+        "SELECT profile, docker_held FROM runners WHERE docker_held IS NOT NULL AND started_at >= ?1 \
+         ORDER BY started_at DESC, name",
+    )?
+    .query_map([since], |row| {
+        Ok(crate::cache::shares::StoreUse {
+            profile: row.get(0)?,
+            held: row.get(1)?,
+        })
+    })?
+    .collect()
+}
+
 /// The finished jobs queued at or after `since` (ms) with their peaks, and the runners that held a slot after it.
 pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::History> {
     let ran = |row: &Row<'_>| {
@@ -1411,7 +1429,8 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
          r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
          j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.seen_at, \
-         j.wait_causes, j.unseen_unlisted, {SLEPT} FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         j.wait_causes, j.unseen_unlisted, r.docker_held, r.docker_share, {SLEPT} FROM jobs j \
+         LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id"
     ))?
     .query_map([since], |row| {
@@ -1451,10 +1470,16 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             disk: stored_disk(row, 27)?,
             seen_at: row.get(31)?,
             unseen_unlisted: row.get(33)?,
-            slept: row.get(34)?,
+            slept: row.get(36)?,
             causes: row
                 .get::<_, Option<String>>(32)?
                 .map(|text| stored_causes(&text)),
+            docker_store: match (row.get(34)?, row.get(35)?) {
+                (Some(held), Some(share_gib)) => {
+                    Some(crate::cache::shares::StoreReport { held, share_gib })
+                }
+                _ => None,
+            },
         })
     })?
     .collect::<rusqlite::Result<_>>()?;

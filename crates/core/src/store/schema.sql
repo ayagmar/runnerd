@@ -83,7 +83,7 @@ CREATE TABLE jobs (
     rerun_at INTEGER,
     -- The last sleep of the host it ran across (ADR 0159), in milliseconds: when the sleep began, and how long after the
     -- wake GitHub may still fail a job for it. A job that ended between the two failed for the sleep. Set on each job
-    -- running when the daemon saw the host wake; NULL for every other job, and in rows from before schema 29.
+    -- running when the daemon saw the host wake; NULL for every other job, and in rows from before schema 30.
     slept_from INTEGER,
     slept_ended_by INTEGER
 );
@@ -145,7 +145,12 @@ CREATE TABLE runners (
     -- What the probe its image's entrypoint ran after the runner exited found (ADR 0155), as `api::RunnerProbe`
     -- names it: 'clean', 'mount', 'procfs', 'mount-and-procfs', 'timed-out' or 'broken'. NULL where no probe
     -- reported, and in rows from before schema 28.
-    probe TEXT
+    probe TEXT,
+    -- What its job's cleanup found the slot's Docker store holding, in bytes, and the share it held the store to, in
+    -- GiB (ADR 0156), as the container's log said once the runner exited. NULL where no image reported, and in rows
+    -- from before schema 29.
+    docker_held INTEGER,
+    docker_share INTEGER
 );
 
 CREATE TABLE steps (

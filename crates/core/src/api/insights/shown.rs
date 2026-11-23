@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 impl InsightKind {
     /// Its name as a label: `Slower`, `Flaky`, `Near its cap`, `Cold cache`, `Memory pressure`, `CPU cap`,
-    /// `Host memory`, `Host low`, `Waits`, or `Insight` for a kind from a later release.
+    /// `Host memory`, `Host low`, `Waits`, `Docker store`, or `Insight` for a kind from a later release.
     pub fn label(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "Slower",
@@ -26,12 +26,13 @@ impl InsightKind {
             InsightKind::HostHeld { .. } => "Host memory",
             InsightKind::HostLow { .. } => "Host low",
             InsightKind::Waits { .. } => "Waits",
+            InsightKind::StoreOverflow { .. } => "Docker store",
             InsightKind::Unknown => "Insight",
         }
     }
 
     /// Its name as one word, the API's `kind`: `slower`, `flaky`, `near-cap`, `cold-cache`, `throttled`,
-    /// `cpu-held`, `host-held`, `host-low` or `waits`; `unknown` for a kind from a later release.
+    /// `cpu-held`, `host-held`, `host-low`, `waits` or `store-overflow`; `unknown` for a kind from a later release.
     pub fn word(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "slower",
@@ -43,6 +44,7 @@ impl InsightKind {
             InsightKind::HostHeld { .. } => "host-held",
             InsightKind::HostLow { .. } => "host-low",
             InsightKind::Waits { .. } => "waits",
+            InsightKind::StoreOverflow { .. } => "store-overflow",
             InsightKind::Unknown => "unknown",
         }
     }
@@ -70,6 +72,33 @@ impl Insight {
              that.",
             duration(waited),
             memory.outside_line()
+        )
+    }
+}
+
+impl Insight {
+    /// What a [`StoreOverflow`](InsightKind::StoreOverflow) insight says: `jvm: the slots' Docker stores held more
+    /// than their share after 9 of the last 10 jobs, 4.2G (p90) against 3G, so each such job's images and build
+    /// layers went and the next one pulled and built them again; more free space on Docker's disk raises every
+    /// share.` At the most a slot keeps, the cause is that limit instead.
+    pub fn store_overflow_sentence(
+        profile: &str,
+        overflowed: u32,
+        total: u32,
+        held: u64,
+        share: u64,
+    ) -> String {
+        let cause = if share >= crate::api::DOCKER_SLOT_MAX {
+            format!("{} is the most a slot keeps", ByteSize(share))
+        } else {
+            "more free space on Docker's disk raises every share".to_owned()
+        };
+        format!(
+            "{profile}: the slots' Docker stores held more than their share after {overflowed} of the last {total} \
+             jobs, {} (p90) against {}, so each such job's images and build layers went and the next one pulled \
+             and built them again; {cause}.",
+            ByteSize(held),
+            ByteSize(share),
         )
     }
 }
@@ -137,6 +166,15 @@ impl Insight {
             InsightKind::HostLow { lowest, .. } => figure(
                 ByteSize(*lowest).to_string(),
                 "least memory available".to_owned(),
+            ),
+            InsightKind::StoreOverflow {
+                profile,
+                overflowed,
+                total,
+                ..
+            } => figure(
+                of(*overflowed, *total),
+                format!("{profile} jobs outgrew their Docker share"),
             ),
             InsightKind::Unknown => None,
         }
