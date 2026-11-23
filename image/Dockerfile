@@ -63,7 +63,9 @@ RUN gpasswd -d runner sudo \
 # Package caches. Everything under ~/.cache is the slot's layer over the profile's snapshot (entrypoint.sh).
 # The pnpm store and the Maven repository are volumes all slots share, because both tools support concurrent
 # use of one store on one machine: pnpm when its processes share the lock directory under XDG_RUNTIME_DIR, Maven
-# with the resolver's file locks (file-lock needs the file-gav name mapper). Podman, Buildah and Skopeo keep registry
+# with the resolver's file locks (file-lock needs the file-gav name mapper). Asked, the entrypoint gives pnpm the
+# slot's own store instead, beside the job's workspace, where pnpm links packages rather than copies them
+# (layers.sh, docs/adr/0167). Podman, Buildah and Skopeo keep registry
 # logins under XDG_RUNTIME_DIR, which every slot of every profile shares: REGISTRY_AUTH_FILE keeps them on the
 # container's own disk, which goes with it.
 ENV GRADLE_USER_HOME=/home/runner/.cache/gradle \
@@ -121,8 +123,10 @@ COPY --chmod=755 skip-syncs.py /usr/local/bin/runnerd-skip-syncs
 # (docker::SKIP_SYNCS_LABEL): the version of RUNNERD_SKIP_SYNCS it answers. Asked, the entrypoint also mounts the
 # slot's layers `volatile`, so unmounting them syncs nothing (layers.sh, docs/adr/0142); the second label says so
 # (docker::VOLATILE_LAYERS_LABEL), for doctor. The third says the entrypoint exits with its probe's verdict, in the
-# codes of its version (docker::PROBE_LABEL, docs/adr/0155): runnerd reads no verdict from an image without it.
-LABEL runnerd.skip-syncs="1" runnerd.volatile-layers="1" runnerd.runner-probe="1"
+# codes of its version (docker::PROBE_LABEL, docs/adr/0155): runnerd reads no verdict from an image without it. The
+# fourth says the entrypoint keeps the slot's own pnpm store when asked (docker::SLOT_PNPM_STORE_LABEL,
+# docs/adr/0167): runnerd mounts the shared store for an image without it.
+LABEL runnerd.skip-syncs="1" runnerd.volatile-layers="1" runnerd.runner-probe="1" runnerd.slot-pnpm-store="1"
 # The runner accepts hook scripts only by their extension.
 ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/runnerd-job-started.sh \
     ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/bin/runnerd-job-completed.sh

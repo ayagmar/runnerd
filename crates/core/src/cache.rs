@@ -1,7 +1,8 @@
 //! The warm caches runner containers share and keep between jobs: each profile's read-only snapshot, each slot's
-//! volume (its layers' changes and its Docker Engine's data), the shared pnpm store and Maven repository, and the
-//! Docker Hub mirror on the runners' network. Owns their names, mounts and lifecycle; it never decides when a
-//! runner starts, and it never touches a volume a running container uses.
+//! volume (its layers' changes, its Docker Engine's data, and its jobs' workspace and pnpm store when it keeps its
+//! own), the shared pnpm store and Maven repository, and the Docker Hub mirror on the runners' network. Owns their
+//! names, mounts and lifecycle, and where a runner keeps pnpm's store; it never decides when a runner starts, and it
+//! never touches a volume a running container uses.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -139,14 +140,74 @@ fn volume(source: String, target: &str, read_only: bool) -> Mount {
     }
 }
 
-/// What a runner container in slot `slot` (1-based) of the profile mounts (paths from `image/Dockerfile`).
-pub fn runner_mounts(names: &Names, profile: &str, slot: usize) -> Vec<Mount> {
-    vec![
-        volume(names.base(profile), "/base", true),
-        volume(names.slot(profile, slot), "/state", false),
-        volume(names.pnpm(), "/shared/pnpm", false),
-        volume(names.maven(), "/shared/maven", false),
+/// Where a runner keeps pnpm's store (ADR 0167): one value, which both its mounts (`runner_mounts`) and its
+/// environment (`PnpmStore::env`) follow, so a runner never gets the variable without the mount or the other way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PnpmStore {
+    /// The slot's own, beside the job's workspace on the slot's volume, where pnpm links packages into
+    /// `node_modules`. The image empties it when it holds more than `max_size`. The runner mounts no shared store.
+    Slot {
+        /// What the store may hold when the slot's next runner starts.
+        max_size: ByteSize,
+    },
+    /// The volume every slot shares, which pnpm copies packages out of.
+    Shared,
+}
+
+impl PnpmStore {
+    /// Where a runner of `profile` keeps it, under `caches`, from an image that does what `image` says. The slot's
+    /// own when `pnpm.store` asks for it, the profile keeps no records, whose image needs the workspace in the
+    /// container (ADR 0031), and the image keeps such a store when asked; an image that cannot would look for the
+    /// store where the shared one is mounted.
+    pub fn of(
+        caches: &config::Caches,
+        profile: &config::Profile,
+        image: crate::docker::RunnerImage,
+    ) -> PnpmStore {
+        let wanted = caches.pnpm.store == config::PnpmStores::Slot;
+        if wanted && !profile.record_failures && image.slot_pnpm_store {
+            PnpmStore::Slot {
+                max_size: caches.pnpm.max_size,
+            }
+        } else {
+            PnpmStore::Shared
+        }
+    }
+
+    /// Whether Docker needs to be asked about the image of a runner of `profile` for `of` to decide.
+    pub fn depends_on_image(caches: &config::Caches, profile: &config::Profile) -> bool {
+        caches.pnpm.store == config::PnpmStores::Slot && !profile.record_failures
+    }
+
+    /// The variable that asks the runner's entrypoint for the slot's own store, if it gets one.
+    pub fn env(self) -> Option<String> {
+        match self {
+            PnpmStore::Slot { max_size } => Some(format!(
+                "{}={}",
+                crate::docker::SLOT_PNPM_STORE_ENV,
+                max_size.0
+            )),
+            PnpmStore::Shared => None,
+        }
+    }
+}
+
+/// What a runner container in slot `slot` (1-based) of the profile mounts (paths from `image/Dockerfile`), with its
+/// pnpm store where `pnpm` says.
+pub fn runner_mounts(names: &Names, profile: &str, slot: usize, pnpm: PnpmStore) -> Vec<Mount> {
+    let shared_pnpm = match pnpm {
+        PnpmStore::Shared => Some(volume(names.pnpm(), "/shared/pnpm", false)),
+        PnpmStore::Slot { .. } => None,
+    };
+    [
+        Some(volume(names.base(profile), "/base", true)),
+        Some(volume(names.slot(profile, slot), "/state", false)),
+        shared_pnpm,
+        Some(volume(names.maven(), "/shared/maven", false)),
     ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// The mirror container: Docker Hub through a proxy registry, which refuses pushes, so a job can only make it
@@ -935,6 +996,94 @@ mod tests {
         for path in kept {
             assert!(upper.join("files").join(path).exists(), "{path} stays");
         }
+    }
+
+    // Catches: the last job's checkout, step scripts or node_modules reaching the next job of the slot; the store
+    // emptied with them, so every job downloads again; a store past its limit kept; root following a store a job
+    // replaced with a link, measuring or deleting what it points at.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a test: a file it cannot write fails it"
+    )]
+    fn the_next_job_finds_the_slots_workspace_empty_but_for_its_pnpm_store_within_its_limit() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = TestDir::new("slot-work");
+        let work = dir.0.join("work");
+        let write = |path: &str, text: &str| {
+            let path = work.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let blob = ".pnpm-store/v11/files/ab/cdef";
+        write(blob, &"x".repeat(64 * 1024));
+        write("_temp/step.sh", "echo $SECRET");
+        write("_actions/actions/checkout/v6/action.yml", "name: checkout");
+        write("app/app/package.json", "{}");
+        let linked = work.join("app/app/node_modules/.pnpm/left-pad@1.3.0/index.js");
+        std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        std::fs::hard_link(work.join(blob), &linked).unwrap();
+
+        with_layers("clear_slot_work \"$1\" 1000000000", &[&work]);
+        let left: Vec<String> = std::fs::read_dir(&work)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [".pnpm-store"], "only the store outlives the job");
+        let kept = std::fs::metadata(work.join(blob)).unwrap();
+        assert_eq!(
+            (kept.len(), kept.nlink()),
+            (64 * 1024, 1),
+            "the store's file stays whole once its link in node_modules went"
+        );
+
+        with_layers("clear_slot_work \"$1\" 4096", &[&work]);
+        assert!(
+            !work.join(".pnpm-store").exists(),
+            "a store over its limit starts over"
+        );
+
+        let elsewhere = dir.0.join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("held")).unwrap();
+        std::fs::write(elsewhere.join("held/file"), "x".repeat(64 * 1024)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, work.join(".pnpm-store")).unwrap();
+        with_layers("clear_slot_work \"$1\" 4096", &[&work]);
+        assert!(
+            !work.join(".pnpm-store").exists() && elsewhere.join("held/file").exists(),
+            "a store that is a link goes, and what it pointed at stays"
+        );
+    }
+
+    // Catches: the slot's workspace bound over an image that holds something under `_work`, which the job would then
+    // not find, or pnpm pointed at a store the bind did not bring.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a test: a file it cannot write fails it"
+    )]
+    fn an_image_that_holds_something_in_the_workspace_keeps_it_and_the_shared_store_path() {
+        let dir = TestDir::new("image-work");
+        let (image, slot) = (dir.0.join("image"), dir.0.join("slot"));
+        std::fs::create_dir_all(image.join("_tool/node/24.0.0")).unwrap();
+        std::fs::create_dir_all(&slot).unwrap();
+        let said = with_layers(
+            "WORK=$1 SLOT_WORK=$2; unset pnpm_config_store_dir; \
+             if mount_slot_work 1000 2>&1; then echo bound; fi; echo \"store=${pnpm_config_store_dir:-}\"",
+            &[&image, &slot],
+        );
+        assert!(
+            said.contains("the image holds") && said.contains("_tool/node"),
+            "the image's tool cache is named: {said}"
+        );
+        assert!(!said.contains("bound"), "nothing is bound: {said}");
+        assert!(
+            said.ends_with("store=\n"),
+            "pnpm keeps the image's store path: {said}"
+        );
+        assert!(
+            std::fs::read_dir(&slot).unwrap().next().is_none(),
+            "the slot's workspace is left alone"
+        );
     }
 
     #[test]

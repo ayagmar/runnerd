@@ -2,7 +2,8 @@
 //! the Docker budget runnerd gives it, BuildKit's cache mounts the longest, and a store its engine does not start on
 //! is emptied. Told to, a runner answers its sync calls without syncing, down to its job's containers and builds,
 //! and the image's entrypoint is what tells it, as its label says; a runner image from before the filter says
-//! nothing. The volumes a crash may have torn are emptied past the stopped containers of runnerd's left on them, and a
+//! nothing. Asked for the slot's own pnpm store, a runner links packages from it into its workspace, and the slot's
+//! next job finds the store and none of the workspace. The volumes a crash may have torn are emptied past the stopped containers of runnerd's left on them, and a
 //! volume another container holds is refused at once, never waited on.
 //! Needs Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
 //!
@@ -21,7 +22,7 @@
 use std::collections::BTreeMap;
 
 use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType};
-use runnerd_core::cache::{self, Names, runner_mounts};
+use runnerd_core::cache::{self, Names, PnpmStore, runner_mounts};
 use runnerd_core::docker::{self, Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::{Isolation, Sysbox, UnsafeDind};
 
@@ -36,6 +37,20 @@ fn image() -> String {
 const BUILD: &str = "mkdir -p /root/app && cd /root/app && echo app > app.txt \
     && printf 'FROM scratch\\nCOPY app.txt /app.txt\\n' > Dockerfile \
     && docker build --progress=plain -t store-app . 2>&1";
+
+/// What the entrypoint does first when runnerd asks for the slot's own pnpm store (`image/entrypoint.sh`).
+const SLOT_WORK: &str = "if [[ ${RUNNERD_PNPM_SLOT_STORE:-} =~ ^[0-9]+$ ]]; then \
+    mount_slot_work \"$RUNNERD_PNPM_SLOT_STORE\" || true; fi;";
+
+/// Where a runner given `env` keeps its pnpm store, as runnerd mounts it: the slot's own when `env` asks for it.
+fn pnpm_store(env: &[&str]) -> PnpmStore {
+    env.iter()
+        .find_map(|var| var.strip_prefix(&format!("{}=", docker::SLOT_PNPM_STORE_ENV)))
+        .and_then(|max| max.parse().ok())
+        .map_or(PnpmStore::Shared, |max| PnpmStore::Slot {
+            max_size: runnerd_core::config::ByteSize(max),
+        })
+}
 
 /// Starts a runner container of slot 1 under `isolation` that runs `script` as root, under `runnerd-skip-syncs` as
 /// the image's entrypoint runs the runner, after its layers are mounted and its Docker Engine started as the runner's
@@ -57,7 +72,7 @@ async fn start_job(
         cpus: 1,
         memory: "1G".parse().map_err(|e: String| e)?,
         env: env.iter().map(|&var| var.to_owned()).collect(),
-        mounts: runner_mounts(names, PROFILE, 1),
+        mounts: runner_mounts(names, PROFILE, 1, pnpm_store(env)),
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
@@ -68,7 +83,7 @@ async fn start_job(
             "pipefail".to_owned(),
             "-c".to_owned(),
             format!(
-                "{before}\n. /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; {script}"
+                "{before}\n. /usr/local/lib/runnerd-layers.sh; {SLOT_WORK} mount_layers; start_docker; {script}"
             ),
         ]),
         jit_config: None,
@@ -426,9 +441,10 @@ async fn skip_syncs_scenario(docker: &Docker, names: &Names) -> Result<(), Strin
         ));
     }
     if !docker
-        .image_skips_syncs(&image())
+        .runner_image(&image())
         .await
         .map_err(|e| e.to_string())?
+        .skips_syncs
     {
         return Err(format!(
             "{} runs runnerd-skip-syncs, and its label does not say so: runnerd would never ask its runners",
@@ -464,6 +480,94 @@ async fn skip_syncs_scenario(docker: &Docker, names: &Names) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+/// Asks for the slot's own pnpm store, of up to 1 GB.
+const SLOT_STORE: &str = "RUNNERD_PNPM_SLOT_STORE=1000000000";
+
+/// Runs `script` as the runner user, with the container's environment.
+fn as_runner(script: &str) -> String {
+    format!(
+        "setpriv --reuid=runner --regid=runner --init-groups -- env HOME=/home/runner bash -euc '{script}'"
+    )
+}
+
+async fn slot_pnpm_store_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+    let file = "v11/files/ab/cdef";
+    // A job of the slot's own store: pnpm finds it beside the workspace and links a package file into
+    // node_modules, as pnpm 12 does first on Linux; the tool cache's layer is mounted inside the workspace.
+    let (code, output) = job(
+        docker,
+        names,
+        &[SLOT_STORE],
+        &format!(
+            "test \"$pnpm_config_store_dir\" = /home/runner/_work/.pnpm-store && mountpoint -q /home/runner/_work \
+             && mountpoint -q /home/runner/_work/_tool && ! mountpoint -q /shared/pnpm && {}",
+            as_runner(&format!(
+                "cd ~/_work && mkdir -p .pnpm-store/{dir} app/node_modules && echo pkg > .pnpm-store/{file} \
+                 && ln .pnpm-store/{file} app/node_modules/index.js && echo links=$(stat -c %h .pnpm-store/{file})",
+                dir = "v11/files/ab"
+            ))
+        ),
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || !output.contains("links=2") {
+        return Err(format!(
+            "a job of the slot's own store could not link from it (exit {code}):\n{output}"
+        ));
+    }
+    // The slot's next job finds the store, and nothing else of the last job's workspace.
+    let (code, output) = job(
+        docker,
+        names,
+        &[SLOT_STORE],
+        &as_runner(&format!(
+            "cd ~/_work && test ! -e app && test \"$(cat .pnpm-store/{file})\" = pkg \
+             && echo links=$(stat -c %h .pnpm-store/{file})"
+        )),
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || !output.contains("links=1") {
+        return Err(format!(
+            "the slot's next job lost the store, or found the last job's workspace (exit {code}):\n{output}"
+        ));
+    }
+    // Without it, the store is the shared volume, another mount than the workspace: pnpm cannot link, and copies.
+    let (code, output) = job(
+        docker,
+        names,
+        &[],
+        &as_runner(
+            "mkdir -p /shared/pnpm/store ~/_work/app && echo pkg > /shared/pnpm/store/blob \
+             && ! ln /shared/pnpm/store/blob ~/_work/app/blob 2>&1 && test -z \"${pnpm_config_store_dir#/shared/pnpm/store}\"",
+        ),
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || !output.contains("Invalid cross-device link") {
+        return Err(format!(
+            "a runner of the shared store linked across mounts, or used another store (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_slots_own_pnpm_store_links_into_the_workspace_and_outlives_its_jobs() {
+    let names = Names::new(&format!("runnerd-test-pnpm-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = slot_pnpm_store_scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -505,7 +609,7 @@ async fn a_runner_image_from_before_the_filter_is_never_asked_to_skip_syncs() {
         "Docker has {old}: docker pull {old}"
     );
     assert!(
-        !docker.image_skips_syncs(&old).await.unwrap(),
+        !docker.runner_image(&old).await.unwrap().skips_syncs,
         "{old} lacks runnerd-skip-syncs, so runnerd never asks its runners and arms nothing"
     );
 }

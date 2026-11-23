@@ -856,13 +856,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if self.config.profiles.contains_key(&record.profile) {
             // The snapshot and the shared caches as the job saw them, read-only: running jobs share them.
             mounts.extend(
-                crate::cache::runner_mounts(&self.names, &record.profile, 1)
-                    .into_iter()
-                    .filter(|mount| mount.target.as_deref() != Some("/state"))
-                    .map(|mount| Mount {
-                        read_only: Some(true),
-                        ..mount
-                    }),
+                crate::cache::runner_mounts(
+                    &self.names,
+                    &record.profile,
+                    1,
+                    crate::cache::PnpmStore::Shared,
+                )
+                .into_iter()
+                .filter(|mount| mount.target.as_deref() != Some("/state"))
+                .map(|mount| Mount {
+                    read_only: Some(true),
+                    ..mount
+                }),
             );
         }
         let mut host_config = HostConfig {

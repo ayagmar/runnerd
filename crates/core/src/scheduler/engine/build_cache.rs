@@ -76,18 +76,20 @@ struct Scoped {
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
-    /// What a runner container in `slot` (1-based) of `profile` mounts: the caches, its build cache socket's
+    /// What a runner container in `slot` (1-based) of `profile` mounts: the caches, with its pnpm store where `pnpm`
+    /// says, its build cache socket's
     /// directory when the build cache is on for its repository's pool in `profile`, and the action archives, read-only,
     /// when the runner gets them.
     pub(super) fn runner_mounts(
         &self,
         profile: &str,
         slot: usize,
+        pnpm: cache::PnpmStore,
         runner: &str,
         repository: &str,
         archives: Option<&crate::archives::RunnerArchives>,
     ) -> Vec<Mount> {
-        let mut mounts = cache::runner_mounts(&self.names, profile, slot);
+        let mut mounts = cache::runner_mounts(&self.names, profile, slot, pnpm);
         mounts.extend(self.attach_build_cache(runner, repository, profile));
         mounts.extend(archives.map(|archives| archives.mount.clone()));
         mounts

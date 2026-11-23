@@ -20,9 +20,18 @@ jitconfig_file=/run/runnerd/jitconfig
 # shellcheck source=SCRIPTDIR/build-cache.sh
 . /usr/local/lib/runnerd-build-cache.sh
 
+# The slot's own pnpm store beside the job's workspace, on the slot's volume, when runnerd asks for it
+# (docs/adr/0167); runnerd then mounts no shared store. First: the tool cache's layer mounts inside the workspace.
+if [[ ${RUNNERD_PNPM_SLOT_STORE:-} =~ ^[0-9]+$ ]]; then
+    mount_slot_work "$RUNNERD_PNPM_SLOT_STORE" || true
+else
+    # A slot that kept its own store before its runners took the shared one again gives it up, with its workspace.
+    rm -rf --one-file-system "$SLOT_WORK"
+fi
 mount_layers
 start_build_cache
-# pnpm processes sharing the store must share their lock directory (Dockerfile).
+# pnpm processes sharing the store must share their lock directory (Dockerfile). Beside the slot's own store, which
+# one container uses at a time, it is the container's own directory.
 install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 
 start_docker

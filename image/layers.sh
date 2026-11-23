@@ -55,6 +55,48 @@ LAST_JOB_FILE=/state/.runnerd-last-job
 # `held=<bytes> share=<GiB>`.
 STORE_REPORT_FILE=/run/runnerd-docker-store
 
+# The runner's workspace, and the slot's own on its volume, which the entrypoint binds over it when runnerd asks for
+# the slot's own pnpm store (RUNNERD_PNPM_SLOT_STORE, docs/adr/0167). The store is in the workspace, at the root of
+# the mount, where pnpm would put it itself: one mount, so pnpm links its packages into node_modules, not copies them.
+WORK=/home/runner/_work
+SLOT_WORK=/state/work
+SLOT_PNPM_STORE=.pnpm-store
+
+# Empties the slot's workspace $1 of what its last job left, but for its pnpm store, which goes whole when it takes
+# more than $2 bytes, or when it is not a directory.
+clear_slot_work() {
+    local store=$1/$SLOT_PNPM_STORE
+    mkdir -p "$1"
+    find "$1" -mindepth 1 -maxdepth 1 ! -name "$SLOT_PNPM_STORE" -exec rm -rf --one-file-system {} +
+    if [ -L "$store" ] || { [ -e "$store" ] && [ ! -d "$store" ]; }; then
+        rm -f "$store"
+    elif [ "$(size_bytes "$store")" -gt "$2" ]; then
+        echo "runnerd: the slot's pnpm store outgrew its limit of $2 bytes: it starts over" >&2
+        rm -rf "$store"
+    fi
+}
+
+# Binds the slot's workspace, emptied by clear_slot_work with the store's limit $1, over the runner's, and points
+# pnpm at the store in it. Call before mount_layers, which mounts the tool cache inside it, and before start_docker,
+# whose engine mounts it into a `container:` job. Leaves the container's own workspace, and says why, when the image
+# holds anything in it but an empty tool cache, which the bind would hide, or when the bind fails.
+mount_slot_work() {
+    local held
+    held=$(cd "$WORK" && find . -mindepth 1 ! -path ./_tool -print -quit)
+    if [ -n "$held" ]; then
+        echo "runnerd: the image holds $WORK/${held#./}: the job's workspace and pnpm store stay in the container" >&2
+        return 1
+    fi
+    clear_slot_work "$SLOT_WORK" "$1"
+    install -d -o runner -g runner "$SLOT_WORK" "$SLOT_WORK/_tool"
+    if ! mount --bind "$SLOT_WORK" "$WORK"; then
+        echo "runnerd: the slot's workspace could not be bound: the job's workspace and pnpm store stay in the" \
+            "container" >&2
+        return 1
+    fi
+    export pnpm_config_store_dir=$WORK/$SLOT_PNPM_STORE
+}
+
 # Disk a directory takes in bytes, as size_gb counts it, not its files' apparent size; 0 when it does not exist.
 size_bytes() {
     local size
