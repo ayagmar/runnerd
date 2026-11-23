@@ -38,6 +38,7 @@ async fn on_battery_idle_runners_stop_busy_ones_finish_and_nothing_starts_until_
     );
     assert_eq!(waiting(&handle), [Some(api::Waiting::OnBattery)]);
     let status = handle.status.borrow().clone();
+    assert!(status.on_battery, "the status says the host is on battery");
     assert_eq!(
         status.queued[0]
             .waiting
@@ -71,6 +72,31 @@ async fn on_battery_idle_runners_stop_busy_ones_finish_and_nothing_starts_until_
         "a runner starts for job 2 once the host is plugged in"
     );
     assert_ne!(waiting(&handle), [Some(api::Waiting::OnBattery)]);
+    assert!(
+        !handle.status.borrow().on_battery,
+        "plugged in, the status says no hold"
+    );
+}
+
+// Catches M2 of review 1 of #344: a laptop unplugged while idle whose warm runners go with nothing to say why.
+#[tokio::test]
+async fn an_idle_host_on_battery_says_so_in_its_status() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine-battery-idle"),
+    );
+    battery(&dir, "Discharging");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    assert!(status.queued.is_empty(), "nothing queued");
+    assert_eq!(
+        status.battery_line(),
+        Some("On battery: no runner starts until the host is plugged in")
+    );
 }
 
 // Catches `run` ignored, and a reload to `pause` that waits for the next restart.
@@ -95,6 +121,12 @@ async fn on_battery_run_starts_runners_and_a_reload_to_pause_holds_at_the_next_t
         1,
         "on_battery = \"run\" starts a runner on battery"
     );
+    let poll = engine.config.host.poll_interval;
+    let idle = engine.governor.listings_every(poll);
+    assert!(
+        engine.listing_every("o/r") < idle,
+        "a job queued lists o/r at the active pace"
+    );
 
     // GitHub has not handed the runner its job yet when the config says pause.
     engine.reload(Config::parse(CONFIG).unwrap(), None, None);
@@ -105,5 +137,34 @@ async fn on_battery_run_starts_runners_and_a_reload_to_pause_holds_at_the_next_t
         handle.status.borrow().profiles[0].slots[0].runner,
         None,
         "its idle runner stopped"
+    );
+    // Catches L1 of review 1 of #344: a job that cannot start listed three times as often, on battery.
+    assert_eq!(
+        engine.listing_every("o/r"),
+        idle,
+        "on battery, o/r is listed at the idle pace"
+    );
+}
+
+// Catches L2 of review 1 of #344: a pass between ticks that starts a runner on the reading from before the unplug.
+#[tokio::test]
+async fn a_pass_after_the_host_is_unplugged_starts_nothing() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine-battery-pass"),
+    );
+    battery(&dir, "Charging");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert!(!handle.status.borrow().on_battery, "plugged in, no hold");
+
+    battery(&dir, "Discharging");
+    engine.set_listed("o/r", vec![job(1)]);
+    assert_eq!(engine.refill().await, 0, "the pass starts nothing");
+    assert!(
+        registered(&github.calls()).is_empty(),
+        "no runner registers"
     );
 }

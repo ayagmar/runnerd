@@ -1,6 +1,6 @@
 //! Whether the host runs on its battery, as the engine last read it, and the hold `[host] on_battery = "pause"` puts
-//! on every start while it does (ADR 0161). The power supplies are read once a tick, before its plan
-//! (`observe::power`); a pass between ticks plans with the last reading. A hold of the host's, not the pause the store
+//! on every start while it does (ADR 0161). The power supplies are read before each plan that may start
+//! runners, a tick's and a pass's (`observe::power`). A hold of the host's, not the pause the store
 //! keeps per repository: it says nothing of a repository, and ends by itself once the host is on mains power again.
 
 use tracing::info;
@@ -32,10 +32,14 @@ impl Battery {
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
-    /// Reads what powers the host, for the tick's plan, and says so in the log when it changed.
+    /// Reads what powers the host, for the plan that follows, tells the job actions whether it holds starts, and says
+    /// so in the log when it changed.
     pub(super) fn look_at_power(&mut self) {
         let power = power::read(&self.paths.sys);
-        if !self.battery.read(power) {
+        let changed = self.battery.read(power);
+        // Every tick: a reload may have changed `on_battery`.
+        self.control.set_on_battery(self.on_battery());
+        if !changed {
             return;
         }
         match (power, self.config.host.on_battery) {

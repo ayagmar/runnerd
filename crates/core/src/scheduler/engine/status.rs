@@ -76,6 +76,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             shutting_down: mode != Shutdown::No,
             stopping: mode.stopping(),
             github_limited_until: self.github_limit().map(unix_secs),
+            on_battery: self.on_battery(),
             budget: self.budget(),
             profiles,
             repositories,

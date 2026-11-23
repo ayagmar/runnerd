@@ -49,6 +49,7 @@ pub(crate) fn status() -> Status {
         shutting_down: true,
         stopping: Some(Stopping::LeavesJobs),
         github_limited_until: Some(1_790_000_000),
+        on_battery: true,
         action_archives: Some(action_archives()),
         budget: budget(),
         profiles: vec![profile_status()],

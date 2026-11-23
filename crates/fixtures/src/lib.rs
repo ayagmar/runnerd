@@ -221,6 +221,7 @@ fn status() -> Status {
         shutting_down: true,
         stopping: Some(api::Stopping::WaitsForJobs),
         github_limited_until: Some(NOW + 750),
+        on_battery: false,
         action_archives: None,
         machine: Some(api::Machine {
             id: "4f2a91c0".to_owned(),
@@ -1809,10 +1810,11 @@ pub fn torn() -> Daemon {
     daemon
 }
 
-/// The fixtures on a host on battery under `[host] on_battery = "pause"`: every queued job a pool serves waits for
-/// mains power (ADR 0161).
+/// The fixtures on a host on battery under `[host] on_battery = "pause"`: the status says so, and every queued job a
+/// pool serves waits for mains power (ADR 0161).
 pub fn on_battery() -> Daemon {
     let mut daemon = daemon();
+    daemon.status.on_battery = true;
     for queued in &mut daemon.status.queued {
         if !queued.waiting.as_ref().is_some_and(Waiting::cannot_start) {
             queued.waiting = Some(Waiting::OnBattery);
@@ -1962,7 +1964,7 @@ pub fn job_actions(daemon: &Daemon) -> JobActionFixtures {
         attempt: 2,
         completed: false,
     };
-    let preview = |action, run, superseded, paused, siblings: Vec<JobSummary>, more| {
+    let preview = |action, run, superseded, paused: bool, siblings: Vec<JobSummary>, more| {
         let confirm = matches!(run, api::RunSeen::Now { .. })
             .then(|| format!("{:032x}", u128::from(job.id) * 0x9e37_79b9));
         api::ActionPreview::new(api::PreviewFacts {
@@ -1971,7 +1973,7 @@ pub fn job_actions(daemon: &Daemon) -> JobActionFixtures {
             run,
             superseded,
             confirm,
-            paused,
+            held: paused.then_some(api::Held::Paused),
             siblings,
             more,
         })

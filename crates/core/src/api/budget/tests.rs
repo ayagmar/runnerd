@@ -29,6 +29,7 @@ fn status(admission: AdmissionPolicy, memory_max: Option<u64>) -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        on_battery: false,
         action_archives: None,
         machine: None,
         budget: Budget {

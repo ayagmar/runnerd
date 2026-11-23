@@ -674,6 +674,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            on_battery: false,
             budget: api::Budget {
                 slice: config.host.slice.clone(),
                 memory_max,

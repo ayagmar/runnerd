@@ -541,6 +541,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             return 0;
         }
+        // The host may have been unplugged since the last tick's read.
+        self.look_at_power();
         // The jobs captures named since: their runners are busy, and their jobs no longer queued.
         self.take_found();
         // What waiting runners reserve for the jobs listed now, as a tick raises it before its plan: a pass may run
@@ -683,11 +685,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Whether `repository` is listed at the active pace: not paused, and active by ADR 0107's rule, which counts a job
-    /// its listings show queued while they show it, or a runner of it holds a job, as one past `ACTIVE_AFTER` does.
-    /// Only the listings' pace reads this; warm runners go by ADR 0107's rule alone.
+    /// Whether `repository` is listed at the active pace: not paused, the host not on battery under `pause`
+    /// (ADR 0161), and active by ADR 0107's rule, which counts a job its listings show queued while they show it, or a
+    /// runner of it holds a job, as one past `ACTIVE_AFTER` does. Only the listings' pace reads this; warm runners go by
+    /// ADR 0107's rule alone.
     fn listing_active(&self, repository: &str) -> bool {
         !self.control.is_paused(repository)
+            && !self.on_battery()
             && (self.warm.active(repository, time::now_ms())
                 || self
                     .occupied()

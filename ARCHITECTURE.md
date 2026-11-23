@@ -506,10 +506,11 @@ always returns, so the daemon closes and flushes the history.
   on the jobs running across it (`jobs.slept_from`, `jobs.slept_ended_by`) and splits the session. Until a listing answers and a fresh host sample is in, no runner starts;
   `engine/sleep.rs` owns that state and `engine/wake.rs` what a wake undoes
   ([ADR 0159](docs/adr/0159-time-the-host-slept-is-downtime-not-waiting.md)).
-- A host on battery holds every start under `[host] on_battery = "pause"`, the default: each tick reads the power
-  supplies under `/sys/class/power_supply` (`observe::power`) before its plan, which gives each repository
-  `Pause::Battery` unless the owner paused it. Idle and warm runners stop, busy ones finish, and queued jobs wait
-  `Waiting::OnBattery`. `engine/battery.rs` owns the last reading; nothing of it is stored
+- A host on battery holds every start under `[host] on_battery = "pause"`, the default: a tick and a pass read the
+  power supplies under `/sys/class/power_supply` (`observe::power`) before their plan, which gives each repository
+  `Pause::Battery` unless the owner paused it. Idle and warm runners stop, busy ones finish, queued jobs wait
+  `Waiting::OnBattery`, the status says `on_battery`, and listings go at the idle pace. Time held so is not a wait for
+  a runner (`sizing::Wait::held`). `engine/battery.rs` owns the last reading; nothing of it is stored
   ([ADR 0161](docs/adr/0161-a-host-on-battery-starts-no-runners.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction

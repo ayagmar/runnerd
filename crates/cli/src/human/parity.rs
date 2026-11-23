@@ -66,6 +66,11 @@ fn status_states_why_jobs_wait_on_battery_as_core_does() {
     let daemon = runnerd_fixtures::on_battery();
     let facts = facts(&daemon);
     let text = status(&daemon.status, NOW, PLAIN);
+    let hold = daemon.status.battery_line().expect("the hold");
+    assert!(
+        text.lines().next().is_some_and(|head| head.contains(hold)),
+        "{text}"
+    );
     for wait in &facts.waits {
         let row = line_of(&text, &[&wait.job.to_string()]);
         assert!(row.ends_with(&wait.reason), "{}: {row}", wait.reason);
