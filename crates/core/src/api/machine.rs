@@ -4,6 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How an outcome of a job that ran elsewhere starts.
+const RAN_ON: &str = "ran on ";
+
+/// The most characters an outcome's label holds (`Outcome::label`): `ran on ` and the longest host name. A client
+/// that lays outcomes out in a column needs no more room than this.
+pub const OUTCOME_MAX: usize = RAN_ON.len() + crate::config::HOST_NAME_MAX;
+
 /// A machine runnerd runs on, as its runner names carry it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Machine {
@@ -54,10 +61,31 @@ impl Machine {
         (digits(secs) && digits(slot) && host_ok && !profile.is_empty()).then_some(host)
     }
 
-    /// Where a job that ran elsewhere ran, as its outcome says it: `ran on skiff` for a runner another runnerd named
-    /// ([`Machine::of_runner`]), else `ran on` the runner's name as GitHub gave it.
+    /// Where a job that ran elsewhere ran, as its outcome says it, in at most [`OUTCOME_MAX`] characters: `ran on
+    /// skiff` for a runner another runnerd named ([`Machine::of_runner`]), else `ran on` the runner's name, its first
+    /// characters and `…` when it is longer than a host name may be.
     pub fn ran_on(runner: &str) -> String {
-        format!("ran on {}", Machine::of_runner(runner).unwrap_or(runner))
+        let room = OUTCOME_MAX - RAN_ON.len();
+        match Machine::of_runner(runner) {
+            Some(host) => format!("{RAN_ON}{host}"),
+            None if runner.chars().count() <= room => format!("{RAN_ON}{runner}"),
+            None => {
+                let kept: String = runner.chars().take(room - 1).collect();
+                format!("{RAN_ON}{}…", kept.trim_end())
+            }
+        }
+    }
+
+    /// A runner's name as GitHub gave it, as the history keeps it: plain text without escapes or control characters,
+    /// each run of white space one space, cut as a title is; `None` when nothing is left.
+    pub(crate) fn runner_text(name: &str) -> Option<String> {
+        let spaced: String = name
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect();
+        let plain = super::title(&spaced);
+        let words: Vec<&str> = plain.split_whitespace().collect();
+        (!words.is_empty()).then(|| words.join(" "))
     }
 
     /// A dashboard page's title, saying which machine it shows: `History · runnerd on tern`.
@@ -79,59 +107,74 @@ mod tests {
     fn a_job_that_ran_elsewhere_names_the_machine_its_runner_name_carries() {
         // Catches a parse that takes a dashed profile's first word for the host, or reads a name that only looks like
         // runnerd's, so a job reads as run on a machine that does not exist.
+        for (runner, host) in [
+            ("runnerd-4f2a91c0-skiff-default-1-1763000000", Some("skiff")),
+            (
+                "runnerd-4f2a91c0-skiff-rust-big-12-1763000000",
+                Some("skiff"),
+            ),
+            (
+                "runnerd-4f2a91c0-a1b2c3d4e5f6g7h8i9j0-app-1-1",
+                Some("a1b2c3d4e5f6g7h8i9j0"),
+            ),
+            // Not runnerd's.
+            ("GitHub Actions 12", None),
+            ("runnerd-4F2A91C0-skiff-default-1-1763000000", None),
+            ("runnerd-4f2a91c-skiff-default-1-1763000000", None),
+            ("runnerd-4f2a91c0-skiff-1-1763000000", None),
+            ("runnerd-4f2a91c0-skiff-default-x-1763000000", None),
+            ("runnerd-4f2a91c0-skiff-default-1-", None),
+            ("runnerd-4f2a91c0--default-1-1", None),
+            ("runnerd-4f2a91c0-Skiff-default-1-1", None),
+            ("runnerd-4f2a91c0-a1b2c3d4e5f6g7h8i9j0k-app-1-1", None),
+            ("runnerd-", None),
+        ] {
+            assert_eq!(Machine::of_runner(runner), host, "{runner:?}");
+        }
+    }
+
+    #[test]
+    fn a_job_that_ran_elsewhere_says_so_in_no_more_than_an_outcome_column_holds() {
+        // Catches a runner name of 64 characters, which GitHub allows, pushing every other column of a table out.
+        let longest_host = format!("runnerd-4f2a91c0-{}-app-1-1", "h".repeat(20));
         for (runner, said) in [
             (
                 "runnerd-4f2a91c0-skiff-default-1-1763000000",
                 "ran on skiff",
             ),
+            (longest_host.as_str(), "ran on hhhhhhhhhhhhhhhhhhhh"),
+            ("GitHub Actions 12", "ran on GitHub Actions 12"),
+            ("exactly-twenty-chars", "ran on exactly-twenty-chars"),
+            ("twenty-one-characters", "ran on twenty-one-characte…"),
+            ("GitHub Actions 1000001234", "ran on GitHub Actions 1000…"),
             (
-                "runnerd-4f2a91c0-skiff-rust-big-12-1763000000",
-                "ran on skiff",
+                "arc-prod-eu-west-1-linux-x64-runners-7b8c9d-k9x2p",
+                "ran on arc-prod-eu-west-1-…",
             ),
-            (
-                "runnerd-4f2a91c0-a1b2c3d4e5f6g7h8i9j0-app-1-1",
-                "ran on a1b2c3d4e5f6g7h8i9j0",
-            ),
-            // Not runnerd's: each reads as GitHub named it.
-            (
-                "GitHub Actions 1000001234",
-                "ran on GitHub Actions 1000001234",
-            ),
-            (
-                "runnerd-4F2A91C0-skiff-default-1-1763000000",
-                "ran on runnerd-4F2A91C0-skiff-default-1-1763000000",
-            ),
-            (
-                "runnerd-4f2a91c-skiff-default-1-1763000000",
-                "ran on runnerd-4f2a91c-skiff-default-1-1763000000",
-            ),
-            (
-                "runnerd-4f2a91c0-skiff-1-1763000000",
-                "ran on runnerd-4f2a91c0-skiff-1-1763000000",
-            ),
-            (
-                "runnerd-4f2a91c0-skiff-default-x-1763000000",
-                "ran on runnerd-4f2a91c0-skiff-default-x-1763000000",
-            ),
-            (
-                "runnerd-4f2a91c0-skiff-default-1-",
-                "ran on runnerd-4f2a91c0-skiff-default-1-",
-            ),
-            (
-                "runnerd-4f2a91c0--default-1-1",
-                "ran on runnerd-4f2a91c0--default-1-1",
-            ),
-            (
-                "runnerd-4f2a91c0-Skiff-default-1-1",
-                "ran on runnerd-4f2a91c0-Skiff-default-1-1",
-            ),
-            (
-                "runnerd-4f2a91c0-a1b2c3d4e5f6g7h8i9j0k-app-1-1",
-                "ran on runnerd-4f2a91c0-a1b2c3d4e5f6g7h8i9j0k-app-1-1",
-            ),
-            ("runnerd-", "ran on runnerd-"),
         ] {
             assert_eq!(Machine::ran_on(runner), said, "{runner:?}");
+            assert!(
+                said.chars().count() <= super::OUTCOME_MAX,
+                "{said:?} fits an outcome's column"
+            );
+        }
+    }
+
+    #[test]
+    fn a_runner_name_is_kept_as_one_line_of_plain_text_or_not_at_all() {
+        // Catches a tab or an escape that reaches a client's table, and a name of only white space or escapes that
+        // reads as run on nothing instead of as its conclusion.
+        for (name, kept) in [
+            ("skiff", Some("skiff")),
+            ("  ci\t1  ", Some("ci 1")),
+            ("peer\u{1b}[31m-red", Some("peer-red")),
+            ("a\nb", Some("a b")),
+            ("   ", None),
+            ("\t", None),
+            ("\u{1b}[31m", None),
+            ("", None),
+        ] {
+            assert_eq!(Machine::runner_text(name).as_deref(), kept, "{name:?}");
         }
     }
 

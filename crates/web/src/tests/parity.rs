@@ -75,9 +75,9 @@ fn assert_rows(html: &str, facts: &[JobRow], figures: bool) {
     for fact in facts {
         let row = row_of(html, fact.job);
         let badge = format!(
-            "<span class=\"badge {}\">{}</span>",
+            "<span class=\"badge {}\" title=\"{label}\"><span class=\"badge-label\">{label}</span></span>",
             outcome_kind_class(fact.kind),
-            fact.label
+            label = fact.label
         );
         assert!(row.contains(&badge), "{badge}: {row}");
         assert!(text(row).contains(&fact.name), "{}: {row}", fact.name);
@@ -216,9 +216,9 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
     let shown = text(&html);
     let job = &facts.job;
     let badge = format!(
-        "<span class=\"badge {}\">{}</span>",
+        "<span class=\"badge {}\" title=\"{label}\"><span class=\"badge-label\">{label}</span></span>",
         outcome_kind_class(job.row.kind),
-        job.row.label
+        label = job.row.label
     );
     assert!(html.contains(&badge), "{badge}");
     for label in &job.milestones {

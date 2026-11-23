@@ -426,10 +426,14 @@ pub(crate) fn outcome_class(job: &JobSummary) -> &'static str {
     outcome_kind_class(job.outcome().kind)
 }
 
-/// A job's outcome as a badge.
+/// A job's outcome as a badge: a column narrower than its label cuts it with an ellipsis, and its title says it whole.
 pub(crate) fn badge(job: &JobSummary) -> Markup {
     let outcome = job.outcome();
-    html! { span class=(format!("badge {}", outcome_kind_class(outcome.kind))) { (outcome.label) } }
+    html! {
+        span class=(format!("badge {}", outcome_kind_class(outcome.kind))) title=(outcome.label) {
+            span.badge-label { (outcome.label) }
+        }
+    }
 }
 
 /// A time as text with its exact value in a tooltip.

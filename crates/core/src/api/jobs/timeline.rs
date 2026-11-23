@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::facts::{Ended, outcome_of};
 use super::log::title;
 use super::{JobState, JobSummary, JobTitle, Outcome, job_title};
+use crate::api::Machine;
 
 /// The window a timeline shows unless `since` says otherwise: the last 24 hours, in seconds.
 pub const TIMELINE_DEFAULT: u64 = 24 * 3600;
@@ -376,6 +377,10 @@ impl SlotTimeline {
             let mut bar = job.bar;
             bar.name = title(&bar.name);
             bar.workflow = bar.workflow.as_deref().map(title);
+            bar.elsewhere_runner = bar
+                .elsewhere_runner
+                .as_deref()
+                .and_then(Machine::runner_text);
             match job.slot {
                 Some(key) => lane(&mut lanes, key).bars.push(bar),
                 None => unassigned.push(bar),

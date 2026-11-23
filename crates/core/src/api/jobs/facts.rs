@@ -348,7 +348,9 @@ pub(crate) fn outcome_of(
         elsewhere_runner,
     } = ended;
     if state == JobState::Elsewhere
-        && let Some(runner) = elsewhere_runner.filter(|runner| !runner.is_empty())
+        && let Some(runner) = elsewhere_runner
+            .map(str::trim)
+            .filter(|runner| !runner.is_empty())
     {
         return Outcome {
             label: Cow::Owned(Machine::ran_on(runner)),

@@ -28,7 +28,6 @@ pub use facts::{
 };
 #[cfg(feature = "host")]
 pub(crate) use log::TITLE_SOURCE_MAX;
-#[cfg(feature = "host")]
 pub(crate) use log::title;
 pub use log::{
     Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,

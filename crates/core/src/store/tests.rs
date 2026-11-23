@@ -2020,7 +2020,7 @@ async fn a_job_another_machine_ran_says_which_machine_after_a_restart_and_on_a_d
     drop(db);
     let store = Store::open(&path).unwrap();
     assert_eq!(user_version(&path), VERSION);
-    for id in 1..=4 {
+    for id in 1..=6 {
         store.queued("o/r", &queued(id), crate::time::now_ms());
     }
     store.elsewhere(ran_elsewhere(
@@ -2036,14 +2036,19 @@ async fn a_job_another_machine_ran_says_which_machine_after_a_restart_and_on_a_d
     store.elsewhere(ran_elsewhere(3, "success", Some("peer\u{1b}[31m-red")));
     // A job GitHub skipped names an empty runner; one a newer push cancelled, none.
     store.elsewhere(ran_elsewhere(4, "skipped", Some("")));
+    // A name of only white space and escapes is none: the job did not start, and reads as its run was cancelled.
+    store.elsewhere(ran_elsewhere(5, "cancelled", Some("\t \u{1b}[31m ")));
+    store.elsewhere(ran_elsewhere(6, "success", Some(" ci\t1 ")));
     store.flush().await;
     drop(store);
     let store = Store::open(&path).unwrap();
     let expected = [
         (1, "ran on skiff"),
-        (2, "ran on GitHub Actions 1000001234"),
+        (2, "ran on GitHub Actions 1000…"),
         (3, "ran on peer-red"),
         (4, "skipped"),
+        (5, "cancelled in queue"),
+        (6, "ran on ci 1"),
     ];
     let listed = store.jobs(JobQuery::default()).await.unwrap().page.jobs;
     for (id, said) in expected {
@@ -2053,6 +2058,11 @@ async fn a_job_another_machine_ran_says_which_machine_after_a_restart_and_on_a_d
         let row = listed.iter().find(|job| job.id == id).unwrap();
         assert_eq!(row.outcome().label, said, "job {id} as listed");
         assert!(!job.is_failure(), "job {id} is not this machine's failure");
+        assert_eq!(
+            job.timeline.started_at.is_some(),
+            job.elsewhere_runner.is_some(),
+            "job {id} started only where a runner took it"
+        );
     }
     let timeline = store
         .timeline(api::Span {
