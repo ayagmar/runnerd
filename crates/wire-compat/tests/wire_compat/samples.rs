@@ -1334,7 +1334,9 @@ fn insights_of_every_kind() -> Vec<Insight> {
         .filter(|kind| {
             !matches!(
                 kind,
-                InsightKind::HostHeld { .. } | InsightKind::HostLow { .. }
+                InsightKind::HostHeld { .. }
+                    | InsightKind::HostLow { .. }
+                    | InsightKind::StoreOverflow { .. }
             )
         })
         .map(|kind| Insight {
@@ -1398,6 +1400,13 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             seconds: 94,
             lowest: 3 << 30,
         },
+        InsightKind::StoreOverflow {
+            profile: "jvm".to_owned(),
+            overflowed: 18,
+            total: 20,
+            held: 4 << 30,
+            share: 3 << 30,
+        },
     ];
     for kind in &every {
         match kind {
@@ -1410,6 +1419,7 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::CpuHeld { .. }
             | InsightKind::HostHeld { .. }
             | InsightKind::HostLow { .. }
+            | InsightKind::StoreOverflow { .. }
             // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
             | InsightKind::Unknown => {}
         }

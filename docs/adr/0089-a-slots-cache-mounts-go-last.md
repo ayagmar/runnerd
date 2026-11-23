@@ -1,6 +1,6 @@
 # 0089. A slot's build cache follows its share, and cache mounts go last
 
-Status: **Accepted** (2026-10-31). Amends [0054](0054-slot-docker-stores-share-the-disk.md).
+Status: **Accepted** (2026-10-31), amended by [0156](0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md) (layers a recent job used stay). Amends [0054](0054-slot-docker-stores-share-the-disk.md).
 
 ## Context
 

@@ -1087,9 +1087,9 @@ mod auto {
         assert_eq!(slots_of(&raised.changes, "node"), Some(6));
         assert!(
             raised.changes[0].reason.contains("waited 300s for a slot")
-                && raised.changes[0]
-                    .reason
-                    .ends_with("at 6 slots each slot keeps 2G of Docker's disk, down from 3G"),
+                && raised.changes[0].reason.ends_with(
+                    "at 6 slots each slot keeps on average 2G of Docker's disk, down from 3G"
+                ),
             "the reason says what waited and how the share drops: {}",
             raised.changes[0].reason
         );
@@ -1099,7 +1099,7 @@ mod auto {
         assert_eq!(
             full.refused_slots[0].reason,
             "10 jobs waited 300s for a slot (p95) while memory and CPU had room, 10 at once at most; at 5 slots, \
-             beside the other profiles' 2, each slot would keep 1G of Docker's disk, down from 2G, under the 2G auto \
+             beside the other profiles' 2, each slot would keep on average 1G of Docker's disk, down from 2G, under the 2G auto \
              sizing leaves each slot"
         );
         let unmeasured = due_on(&config, &burst, None, &BTreeMap::new());
@@ -1148,9 +1148,9 @@ mod auto {
         let look = due_on(&config, &burst, Some(79_000_000_000), &BTreeMap::new());
         assert_eq!(slots_of(&look.changes, "jvm"), Some(6), "{look:?}");
         assert!(
-            look.changes[0]
-                .reason
-                .ends_with("at 6 slots each slot keeps 3G of Docker's disk, down from 4G"),
+            look.changes[0].reason.ends_with(
+                "at 6 slots each slot keeps on average 3G of Docker's disk, down from 4G"
+            ),
             "{}",
             look.changes[0].reason
         );
@@ -1349,7 +1349,7 @@ mod auto {
         assert!(
             line(&BTreeMap::new()).ends_with(
                 "auto sizing adds as many as waited at once, up to max_slots and while \
-                                              each slot keeps 2G of Docker's disk"
+                                              each slot keeps on average 2G of Docker's disk"
             ),
             "before any change the waits ask for slots: {}",
             line(&BTreeMap::new())

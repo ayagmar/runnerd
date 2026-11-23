@@ -61,6 +61,12 @@ const ACCEPTED: &[Accepted] = &[
         item: "attention-kind/rerun-refused",
         adr: "0153",
     },
+    // An older client reads a new insight kind as `Unknown` and shows its sentence.
+    Accepted {
+        reader: Reader::Previous,
+        item: "insight-kind/store-overflow",
+        adr: "0156",
+    },
 ];
 
 /// A document's items as JSON, by label.

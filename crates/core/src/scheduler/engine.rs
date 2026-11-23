@@ -38,6 +38,7 @@ mod repository_state;
 mod runner_exit;
 mod runners;
 mod running_reads;
+mod shares;
 mod slot;
 mod start;
 mod status;
@@ -501,6 +502,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// What the slots' Docker Engines may keep together, from the last check of the caches (`cache::docker_disk`);
     /// `None` until one measured Docker's disk, when each image keeps its own default.
     docker_disk: watch::Sender<Option<u64>>,
+    /// What each profile's slots need of that, from the history, which their share follows (ADR 0156).
+    shares: shares::Shares,
     /// The measure of Docker's disk recovery started, in the background: Docker measures every volume.
     disk: Option<JoinHandle<Result<caches::Disk, docker::Error>>>,
     /// Whether a job ended since the shared caches were last checked.
@@ -697,6 +700,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             prepare_failures: BTreeMap::new(),
             ran: BTreeMap::new(),
             docker_disk,
+            shares: shares::Shares::default(),
             disk: None,
             // So the caches are measured once at start.
             trim_due: true,
