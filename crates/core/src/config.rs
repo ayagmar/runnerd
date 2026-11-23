@@ -389,6 +389,29 @@ pub struct Caches {
     /// The verified action archives every runner reads.
     #[serde(default)]
     pub actions: ActionArchives,
+    /// The Grype vulnerability database every runner reads.
+    #[serde(default)]
+    pub grype: GrypeDatabase,
+}
+
+/// `[caches.grype]`: the Grype vulnerability database runnerd downloads, checks and keeps current for every runner
+/// to read, read-only, instead of each job downloading and unpacking its own (ADR 0160). Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GrypeDatabase {
+    /// Whether runnerd keeps it and runners mount it. Default true.
+    pub enabled: bool,
+    /// Where it is kept; default `$XDG_CACHE_HOME/runnerd/grype`.
+    pub directory: Option<PathBuf>,
+}
+
+impl Default for GrypeDatabase {
+    fn default() -> GrypeDatabase {
+        GrypeDatabase {
+            enabled: true,
+            directory: None,
+        }
+    }
 }
 
 /// `[caches.actions]`: the archives of the actions the served repositories pin, which runnerd downloads, verifies and

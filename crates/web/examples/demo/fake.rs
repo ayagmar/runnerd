@@ -580,6 +580,16 @@ impl Fixtures {
             failures: Vec::new(),
             unchecked: 0,
         };
+        let grype_database = runnerd_core::api::GrypeDatabase {
+            held: Some(runnerd_core::api::HeldGrypeDatabase {
+                built_at: now - 9 * 3600,
+                schema: "v6.1.10".to_owned(),
+                bytes: 1_240 * MIB,
+            }),
+            mounted: true,
+            checked_at: Some(now - 2 * 3600),
+            failure: None,
+        };
         let caches = Caches {
             measured_at: Some(now - 900),
             volumes: volumes
@@ -606,6 +616,7 @@ impl Fixtures {
                 actions_cache: true,
             }),
             actions: Some(action_archives.clone()),
+            grype: Some(grype_database.clone()),
         };
         let status = Status {
             job_actions: JobActions::On,
@@ -614,6 +625,7 @@ impl Fixtures {
             stopping: None,
             github_limited_until: None,
             action_archives: Some(action_archives),
+            grype_database: Some(grype_database),
             machine: Some(runnerd_core::api::Machine {
                 id: "4f2a91c0".to_owned(),
                 name: "tern".to_owned(),

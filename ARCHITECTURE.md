@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["actions, admission, archives, buildcache, command, docker, github, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
+        host["actions, admission, archives, buildcache, command, docker, github, grype, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -63,8 +63,8 @@ flowchart TB
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `actions`, `admission`, `archives`, `boots`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`,
-  `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
+- `actions`, `admission`, `archives`, `boots`, `buildcache`, `command`, `docker`, `github`, `grype`, `cache`,
+  `insights`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
   through the engine's own `Github`, off the engine's loop: a preview that reads the run and issues a confirmation,
   then, for a request that carries one, one POST within a deadline, once a permit `Github` asks with the token in hand
@@ -115,6 +115,14 @@ flowchart TB
   inventories only its methods write; `archives::state` keeps what failed. The task publishes a ready view only after
   a check found every file good; a runner's start reads it once, for both the mount and the environment, and the
   engine shows the task's status ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)).
+  `grype` keeps the Grype vulnerability database runners mount read-only, in a task of its own the engine starts:
+  it reads Anchore's listing (`grype::listing`), downloads the archive it names and checks its SHA-256, has Grype
+  itself import and check it in a container of the pinned Grype image without a network (`grype::sources`), and
+  publishes it as a generation under `dbs/` (`grype::store`, a leaf only its own methods write, holding an exclusive
+  lock on its directory); `grype::task`'s `Keeper` holds what failed and when the listing was last read. A runner's
+  start reads the ready view once, for the mount, Grype's settings and the label naming its generation, which keeps
+  that generation from removal while its container is there
+  ([ADR 0160](docs/adr/0160-runners-read-one-grype-database-runnerd-keeps-current.md)).
   `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.

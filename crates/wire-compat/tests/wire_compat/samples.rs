@@ -17,19 +17,20 @@ use runnerd_core::api::{
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Check, CheckStatus, Color,
     CompareQuery, ConfigCheck, ConfigFile, CountBrake, Counted, CpuAdmission, CpuBudget, Dashboard,
     Delivery, Digest, Doctor, DoctorQuery, DoctorState, ErrorResponse, Event, EventEnvelope,
-    EventQuery, FailureCause, FailureSummary, FigureDelta, FigureKind, Fix, HoldCause, Holder,
-    HostBudget, HostCredit, HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples,
-    HostSpan, Insight, InsightKind, Insights, InsightsQuery, Job, JobAction, JobActions,
-    JobComparison, JobList, JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort,
-    JobState, JobSummary, Lane, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence,
-    LogGroup, LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary,
-    LongWait, MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest,
-    NotifyTestQuery, Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period,
-    PoolStatus, Pooled, Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob,
-    Record, RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records,
-    RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize,
-    RevertCause, Run, RunLink, RunnerFailure, RunnerProbe, RunnerSpan, RunnerStatus, RunningJob,
-    Sample, SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
+    EventQuery, FailureCause, FailureSummary, FigureDelta, FigureKind, Fix, GrypeDatabase,
+    GrypeFailure, GrypeFailureKind, HeldGrypeDatabase, HoldCause, Holder, HostBudget, HostCredit,
+    HostHazard, HostMemory, HostSample, HostSampleQuery, HostSamples, HostSpan, Insight,
+    InsightKind, Insights, InsightsQuery, Job, JobAction, JobActions, JobComparison, JobList,
+    JobMetrics, JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobSort, JobState, JobSummary,
+    Lane, LineKind, LineRange, ListingFailure, ListingProblem, LogEvidence, LogGroup,
+    LogLinesQuery, LogMark, LogOutline, LogQuery, LogSearch, LogSearchQuery, LogSummary, LongWait,
+    MarkKind, MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery,
+    Pairing, PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pooled,
+    Pressure, PricedRunner, Priority, ProfileSizing, ProfileStatus, QueuedJob, Record,
+    RecordFilter, RecordLimits, RecordMark, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
+    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, Run,
+    RunLink, RunnerFailure, RunnerProbe, RunnerSpan, RunnerStatus, RunningJob, Sample,
+    SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
     ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused,
     SizingRevert, Sku, SlotStatus, SlotTimeline, SortOrder, Span, Spread, Started, Starts, Stats,
     StatsQuery, StatsRow, Status, Step, StepDelta, StepLines, StepLog, StepMatch, Stopping,
@@ -50,6 +51,7 @@ pub(crate) fn status() -> Status {
         stopping: Some(Stopping::LeavesJobs),
         github_limited_until: Some(1_790_000_000),
         action_archives: Some(action_archives()),
+        grype_database: Some(grype_database()),
         budget: budget(),
         profiles: vec![profile_status()],
         repositories: vec![repository_status()],
@@ -77,6 +79,7 @@ pub(crate) fn status_empty() -> Status {
         failures: Vec::new(),
         unchecked: 0,
     });
+    status.grype_database = Some(GrypeDatabase::default());
     if let Some(host) = &mut status.budget.host {
         host.memory.holders = Vec::new();
         host.memory.ceiling = None;
@@ -593,6 +596,7 @@ pub(crate) fn attention_kind() -> Vec<AttentionKind> {
         AttentionKind::GithubAuth,
         AttentionKind::RateLimited,
         AttentionKind::ActionArchives,
+        AttentionKind::GrypeDatabase,
         AttentionKind::RerunRefused,
     ];
     for kind in &every {
@@ -606,6 +610,7 @@ pub(crate) fn attention_kind() -> Vec<AttentionKind> {
             | AttentionKind::GithubAuth
             | AttentionKind::RateLimited
             | AttentionKind::ActionArchives
+            | AttentionKind::GrypeDatabase
             | AttentionKind::RerunRefused
             // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
             | AttentionKind::Unknown => {}
@@ -1006,7 +1011,49 @@ pub(crate) fn caches() -> Caches {
             actions_cache: true,
         }),
         actions: Some(action_archives()),
+        grype: Some(grype_database()),
     }
+}
+
+fn grype_database() -> GrypeDatabase {
+    GrypeDatabase {
+        held: Some(HeldGrypeDatabase {
+            built_at: 1_761_390_000,
+            schema: "v6.1.10".to_owned(),
+            bytes: 1_300 << 20,
+        }),
+        mounted: true,
+        checked_at: Some(1_761_400_000),
+        failure: Some(GrypeFailure {
+            kind: GrypeFailureKind::Listing,
+            detail: "Anchore answered 503".to_owned(),
+            since: 1_761_399_000,
+        }),
+    }
+}
+
+pub(crate) fn grype_failure_kind() -> Vec<GrypeFailureKind> {
+    let every = vec![
+        GrypeFailureKind::Listing,
+        GrypeFailureKind::Download,
+        GrypeFailureKind::Checksum,
+        GrypeFailureKind::Import,
+        GrypeFailureKind::Store,
+        GrypeFailureKind::Stale,
+    ];
+    for kind in &every {
+        match kind {
+            GrypeFailureKind::Listing
+            | GrypeFailureKind::Download
+            | GrypeFailureKind::Checksum
+            | GrypeFailureKind::Import
+            | GrypeFailureKind::Store
+            | GrypeFailureKind::Stale
+            // What a client reads a later daemon's kind as; no daemon sends it, so it has no sample.
+            | GrypeFailureKind::Unknown => {}
+        }
+    }
+    every
 }
 
 fn action_archives() -> ActionArchives {

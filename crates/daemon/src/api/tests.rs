@@ -189,6 +189,7 @@ pub(super) fn status() -> Status {
         stopping: None,
         github_limited_until: None,
         action_archives: None,
+        grype_database: None,
         machine: Some(runnerd_core::api::Machine {
             id: "4f2a91c0".to_owned(),
             name: "tern".to_owned(),

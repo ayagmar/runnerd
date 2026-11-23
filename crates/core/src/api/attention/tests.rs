@@ -17,6 +17,7 @@ fn status() -> Status {
         stopping: None,
         github_limited_until: None,
         action_archives: None,
+        grype_database: None,
         machine: None,
         budget: Budget::default(),
         profiles: Vec::new(),
@@ -570,5 +571,50 @@ fn a_refused_automatic_rerun_is_one_warning_for_its_repository() {
             .is_some_and(|fix| fix.line().contains("Actions: write")),
         "{:?}",
         item.fix
+    );
+}
+
+/// The bug it catches: scans quietly downloading their own database again, on the runners' disk, with nothing
+/// telling the owner why.
+#[test]
+fn a_grype_database_that_failed_or_went_stale_is_one_warning_and_a_current_one_none() {
+    let mut status = status();
+    let held = crate::api::HeldGrypeDatabase {
+        built_at: NOW - 6 * 86_400,
+        schema: "v6.1.10".to_owned(),
+        bytes: 3 << 30,
+    };
+    status.grype_database = Some(crate::api::GrypeDatabase {
+        held: Some(held.clone()),
+        mounted: false,
+        checked_at: Some(NOW - 60),
+        failure: Some(crate::api::GrypeFailure {
+            kind: crate::api::GrypeFailureKind::Stale,
+            detail: String::new(),
+            since: NOW - 86_400,
+        }),
+    });
+    let items = attention_items(&status, &ready(Vec::new()), None, NOW);
+    let [item] = items.as_slice() else {
+        panic!("one item: {items:?}");
+    };
+    assert_eq!(item.kind, AttentionKind::GrypeDatabase);
+    assert_eq!(item.tone, Tone::Warn);
+    assert_eq!(item.since, Some(NOW - 86_400));
+    assert!(
+        item.title.contains("older than the 5 days Grype accepts"),
+        "{}",
+        item.title
+    );
+
+    status.grype_database = Some(crate::api::GrypeDatabase {
+        held: Some(held),
+        mounted: true,
+        checked_at: Some(NOW - 60),
+        failure: None,
+    });
+    assert!(
+        attention_items(&status, &ready(Vec::new()), None, NOW).is_empty(),
+        "a current database needs no attention"
     );
 }

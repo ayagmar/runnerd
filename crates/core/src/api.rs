@@ -56,6 +56,7 @@ mod disk;
 mod endurance;
 mod events;
 mod figure;
+mod grype;
 mod insights;
 mod jobs;
 mod labels;
@@ -97,6 +98,9 @@ pub use disk::{
 pub use endurance::{Endurance, RateSpan, WriteRate, WrittenSince};
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use figure::LabelledFigure;
+pub use grype::{
+    GRYPE_MAX_AGE_SECS, GrypeDatabase, GrypeFailure, GrypeFailureKind, HeldGrypeDatabase,
+};
 pub use insights::{
     AutoNote, CauseWait, DOCKER_SLOT_MAX, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS,
     INSIGHT_DAYS_MAX, Insight, InsightFigure, InsightKind, Insights, InsightsHeading,
@@ -206,6 +210,10 @@ pub struct Status {
     /// the store opened, and from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_archives: Option<ActionArchives>,
+    /// The Grype database runnerd keeps for its runners (ADR 0160); absent while `[caches.grype]` is off, before
+    /// the store opened, and from a daemon before 0.1.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grype_database: Option<GrypeDatabase>,
     /// The machine the daemon runs on (ADR 0158); absent from a daemon before 0.1.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<Machine>,

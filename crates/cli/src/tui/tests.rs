@@ -88,6 +88,7 @@ fn app() -> App {
             stopping: None,
             github_limited_until: None,
             action_archives: None,
+            grype_database: None,
             machine: None,
             budget: Budget {
                 admission: AdmissionPolicy::Caps,
