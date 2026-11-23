@@ -629,6 +629,7 @@ impl Fixtures {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            on_battery: false,
             action_archives: Some(action_archives),
             machine: Some(runnerd_core::api::Machine {
                 id: "4f2a91c0".to_owned(),
@@ -1583,7 +1584,7 @@ fn job_action(fake: &Fake, id: u64, action: JobAction, query: &ActionQuery) -> R
             },
             superseded,
             confirm: Some(token),
-            paused,
+            held: paused.then_some(runnerd_core::api::Held::Paused),
             siblings,
             more,
         });

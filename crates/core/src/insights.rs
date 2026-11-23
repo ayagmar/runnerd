@@ -156,12 +156,22 @@ impl Run {
         Some(self.finished_at?.saturating_sub(self.started_at?) / SECOND)
     }
 
-    /// Its [wait](crate::sizing::Wait) in seconds, once it started.
+    /// How long the host on battery held it, in ms (`sizing::Wait::held`).
+    fn held(&self) -> u64 {
+        self.causes
+            .as_ref()
+            .and_then(|causes| causes.get(&api::WaitCause::Battery))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Its [wait](crate::sizing::Wait) in seconds, once it started, less what the host on battery held it.
     fn waited(&self, kept_since: u64) -> Option<u64> {
         let wait = crate::sizing::Wait {
             queued_at: self.queued_at,
             started_at: self.started_at?,
             unseen: self.unseen,
+            held: self.held(),
         };
         Some(wait.counted(kept_since) / SECOND)
     }

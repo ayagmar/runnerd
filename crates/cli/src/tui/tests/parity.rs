@@ -134,13 +134,17 @@ fn a_host_limit_past_memory_max_reads_as_core_says_it() {
 }
 
 #[test]
-fn why_jobs_wait_for_caches_a_crash_tore_reads_as_core_says_it() {
-    let daemon = runnerd_fixtures::torn();
-    let facts = facts(&daemon);
-    let (rows, _) = frame(&app(&daemon));
-    let all = rows.join("\n");
-    for wait in &facts.waits {
-        assert!(shows(&rows, &wait.reason), "{}: {all}", wait.reason);
+fn why_jobs_wait_for_caches_a_crash_tore_or_on_battery_reads_as_core_says_it() {
+    for daemon in [runnerd_fixtures::torn(), runnerd_fixtures::on_battery()] {
+        let facts = facts(&daemon);
+        let (rows, _) = frame(&app(&daemon));
+        let all = rows.join("\n");
+        if let Some(hold) = daemon.status.battery_line() {
+            assert!(shows(&rows, hold), "{hold}: {all}");
+        }
+        for wait in &facts.waits {
+            assert!(shows(&rows, &wait.reason), "{}: {all}", wait.reason);
+        }
     }
 }
 

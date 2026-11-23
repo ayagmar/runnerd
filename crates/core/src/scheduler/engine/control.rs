@@ -258,6 +258,9 @@ pub struct Control {
     /// What the config lets the job actions do, which the engine sets at start and at each reload before it answers,
     /// so the job actions check the config of the moment they are sent, as one snapshot (ADR 0134).
     actions: Policies,
+    /// Whether the host on battery holds every start (ADR 0161), as the engine's last tick found it: what the job
+    /// actions' previews say of a re-run. The engine's `battery` decides it; this only carries it off the loop.
+    on_battery: std::sync::atomic::AtomicBool,
     /// Where `paused` is recorded.
     store: Store,
     shutdown: watch::Sender<Stop>,
@@ -291,6 +294,7 @@ impl Control {
             }),
             repositories: Mutex::new(repositories),
             paused: Mutex::new(paused),
+            on_battery: std::sync::atomic::AtomicBool::new(false),
             store,
             shutdown: watch::Sender::new(Stop::none()),
             wake: Notify::new(),
@@ -398,6 +402,17 @@ impl Control {
     /// Whether the repository is paused.
     pub fn is_paused(&self, repository: &str) -> bool {
         lock(&self.paused).contains(repository)
+    }
+
+    /// Whether the host on battery holds every start, as the engine's last tick found it.
+    pub fn on_battery(&self) -> bool {
+        self.on_battery.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Says whether the host on battery holds every start: the engine does at each tick.
+    pub fn set_on_battery(&self, holds: bool) {
+        self.on_battery
+            .store(holds, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// What the config of this moment lets the owner do with jobs (ADR 0134): one snapshot.

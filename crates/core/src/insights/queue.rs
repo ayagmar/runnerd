@@ -38,6 +38,8 @@ pub(super) fn split(window: &[&Run], kept_since: u64) -> Vec<ProfileQueue> {
             queued_at: run.queued_at,
             started_at,
             unseen: run.unseen,
+            // The split shows the battery's hold as a cause of its own, so it stays in the wait split.
+            held: 0,
         }
         .counted(kept_since);
         let counted: u64 = causes.values().sum();

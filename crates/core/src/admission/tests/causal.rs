@@ -937,7 +937,7 @@ fn parity_pool(name: &str, profile: &str, label: &str, first: u64) -> Repository
         name: name.to_owned(),
         profile: profile.to_owned(),
         labels: vec![label.to_owned()],
-        paused: false,
+        paused: None,
         held: None,
         // Queued at once, check and site by turns as `eight_and_a_page` lists them.
         queued: (0..4)
