@@ -334,6 +334,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
         },
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,

@@ -107,6 +107,8 @@ pub use insights::{
 pub(crate) use jobs::SAMPLE_GAP_INTERVALS;
 #[cfg(feature = "host")]
 pub(crate) use jobs::TITLE_SOURCE_MAX;
+#[cfg(feature = "host")]
+pub(crate) use jobs::title;
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,

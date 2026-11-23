@@ -125,6 +125,9 @@ pub struct TimelineBar {
     /// Whether the host slept while it ran (`JobSummary::slept`); false from a daemon older than it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub slept: bool,
+    /// The runner that ran it elsewhere (`JobSummary::elsewhere_runner`); `None` from a daemon older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elsewhere_runner: Option<String>,
     /// When GitHub queued it: its wait starts here.
     pub queued_at: u64,
     /// When its runner started it, which ends its wait; `None` until then, or when the history does not have it.
@@ -152,6 +155,7 @@ impl TimelineBar {
             conclusion: job.conclusion.clone(),
             runner_fault: job.runner_fault,
             slept: job.slept,
+            elsewhere_runner: job.elsewhere_runner.clone(),
             queued_at: job.timeline.queued_at,
             started_at: job.timeline.started_at,
             end,
@@ -168,6 +172,7 @@ impl TimelineBar {
             Ended {
                 runner_fault: self.runner_fault,
                 slept: self.slept,
+                elsewhere_runner: self.elsewhere_runner.as_deref(),
             },
         )
     }

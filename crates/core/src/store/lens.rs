@@ -49,6 +49,7 @@ fn bar(row: &Row<'_>) -> rusqlite::Result<SlottedBar> {
             conclusion: row.get(5)?,
             runner_fault: row.get(6)?,
             slept: row.get(14)?,
+            elsewhere_runner: text(row, 15)?,
             queued_at: secs(row.get(7)?),
             started_at: row.get::<_, Option<u64>>(8)?.map(secs),
             end: BarEnd::of_job(
@@ -82,7 +83,7 @@ pub(super) fn timeline(
             .prepare_cached(&format!(
                 "SELECT j.id, j.repository, {}, {}, j.state, \
                  j.conclusion, j.runner_fault, j.queued_at, j.started_at, j.finished_at, j.runner, r.profile, \
-                 r.slot, r.removed_at, {SLEPT} FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+                 r.slot, r.removed_at, {SLEPT}, j.elsewhere_runner FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
                  WHERE j.queued_at < ?2 AND (min(j.finished_at, coalesce(r.removed_at, j.finished_at)) / 1000 > ?4 \
                  OR (j.finished_at IS NULL \
                  AND (j.state IN {OPEN} OR (r.name IS NOT NULL AND (r.removed_at IS NULL OR r.removed_at / 1000 > ?4)) \

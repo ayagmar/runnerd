@@ -149,6 +149,7 @@ fn summary(id: u64, state: JobState) -> JobSummary {
         log: LogSummary::default(),
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,
