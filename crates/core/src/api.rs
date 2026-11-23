@@ -98,7 +98,7 @@ pub use disk::{
 pub use endurance::{Endurance, RateSpan, WriteRate, WrittenSince};
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use figure::LabelledFigure;
-pub use fleet::{Fleet, FleetJob, FleetMachine, MachineReading, Reach};
+pub use fleet::{Fleet, FleetJob, FleetMachine, MachineReading, Reach, THIS_MACHINE};
 pub use insights::{
     AutoNote, CauseWait, DOCKER_SLOT_MAX, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS,
     INSIGHT_DAYS_MAX, Insight, InsightFigure, InsightKind, Insights, InsightsHeading,

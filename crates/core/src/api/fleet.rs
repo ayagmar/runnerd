@@ -87,14 +87,15 @@ pub struct FleetJob {
 }
 
 /// Which record of a job seen on several machines tells the most: the one that ran it, then one that knows how it
-/// ended, then one whose runner it lost, then one that still waits for it, and last one that saw it run elsewhere.
+/// ended, then one whose runner it lost, then one that saw it run elsewhere, and last one that still waits for it.
+/// A machine's record goes from queued to elsewhere, never back: one still queued has not polled since.
 fn rank(state: JobState) -> u8 {
     match state {
         JobState::Running => 4,
         JobState::Completed => 3,
         JobState::Lost => 2,
-        JobState::Queued => 1,
-        JobState::Elsewhere => 0,
+        JobState::Elsewhere => 1,
+        JobState::Queued => 0,
     }
 }
 
@@ -105,12 +106,17 @@ fn better(new: &JobSummary, kept: &JobSummary) -> bool {
 
 impl Fleet {
     /// Merges what was read from each machine into a page of at most `limit` jobs. Every machine was asked with the
-    /// same query and `before`; a job seen on several shows once, the record that knows most (running, then completed, lost, queued, elsewhere), the first machine read winning
-    /// a tie. The next page starts before the oldest job shown when the page was cut or a machine has more.
+    /// same query and `before`; a job seen on several shows once, the record that knows most (running, then
+    /// completed, lost, elsewhere, queued), the first machine read winning a tie. A machine's page can end before
+    /// `limit` (a daemon caps its bytes too), so no job below the highest `next` a machine gave is shown: below it,
+    /// that machine has not been heard. The next page starts before the oldest job shown when the page was cut or a
+    /// machine has more.
     pub fn merge(readings: Vec<MachineReading>, limit: usize) -> Fleet {
         let mut machines = Vec::with_capacity(readings.len());
         let mut jobs: BTreeMap<u64, FleetJob> = BTreeMap::new();
         let mut more = false;
+        // The highest id below which a machine has jobs it did not send.
+        let mut floor = 0;
         for reading in readings {
             let (page, jobs_unread) = match reading.jobs {
                 Ok(page) => (Some(page), None),
@@ -126,6 +132,7 @@ impl Fleet {
             });
             let Some(page) = page else { continue };
             more |= page.next.is_some();
+            floor = floor.max(page.next.unwrap_or(0));
             for job in page.jobs {
                 match jobs.get(&job.id) {
                     Some(kept) if !better(&job, &kept.job) => {}
@@ -141,6 +148,7 @@ impl Fleet {
                 }
             }
         }
+        jobs.retain(|id, _| *id >= floor);
         let cut = jobs.len() > limit;
         let jobs: Vec<FleetJob> = jobs.into_values().rev().take(limit).collect();
         let next = if cut || more {
@@ -152,6 +160,39 @@ impl Fleet {
             machines,
             jobs,
             next,
+        }
+    }
+}
+
+/// What this machine is called when its daemon does not say, or could not be read.
+pub const THIS_MACHINE: &str = "this machine";
+
+impl MachineReading {
+    /// What this machine's daemon answered, named as its status says, else [`THIS_MACHINE`].
+    pub fn this_machine(
+        status: Result<Status, String>,
+        jobs: Result<JobPage, String>,
+    ) -> MachineReading {
+        let machine = status
+            .as_ref()
+            .ok()
+            .and_then(|status| status.machine.as_ref())
+            .filter(|machine| !machine.name.is_empty())
+            .map_or_else(|| THIS_MACHINE.to_owned(), |machine| machine.name.clone());
+        MachineReading {
+            machine,
+            status,
+            jobs,
+        }
+    }
+
+    /// This machine when the client has no socket to ask its daemon on.
+    pub fn unasked() -> MachineReading {
+        let why = "no socket to ask: XDG_RUNTIME_DIR is not set".to_owned();
+        MachineReading {
+            machine: THIS_MACHINE.to_owned(),
+            status: Err(why.clone()),
+            jobs: Err(why),
         }
     }
 }
@@ -326,6 +367,7 @@ mod tests {
                         job(30, JobState::Elsewhere, false),
                         job(20, JobState::Queued, false),
                         job(10, JobState::Lost, true),
+                        job(5, JobState::Elsewhere, false),
                     ],
                     None,
                 ),
@@ -335,6 +377,7 @@ mod tests {
                         job(30, JobState::Running, true),
                         job(20, JobState::Completed, true),
                         job(10, JobState::Queued, false),
+                        job(5, JobState::Queued, false),
                     ],
                     None,
                 ),
@@ -347,6 +390,8 @@ mod tests {
                 (30, "skiff", JobState::Running),
                 (20, "skiff", JobState::Completed),
                 (10, "tern", JobState::Lost),
+                // skiff has not polled since: elsewhere is final, queued is not.
+                (5, "tern", JobState::Elsewhere),
             ]
         );
         assert_eq!(fleet.next, None, "no machine has more");
@@ -388,5 +433,30 @@ mod tests {
             10,
         );
         assert_eq!(last.next, None, "the last page has no next");
+    }
+
+    /// Catches: a machine whose page ended early (the daemon caps a page's bytes too) losing its older jobs, which
+    /// the next page, started before the oldest job of the others, would never ask for.
+    #[test]
+    fn a_page_cut_short_by_one_machine_ends_where_that_machine_stopped() {
+        let tern: Vec<_> = [100, 98, 96]
+            .into_iter()
+            .map(|id| job(id, JobState::Completed, true))
+            .collect();
+        let skiff: Vec<_> = (81..=99)
+            .rev()
+            .step_by(2)
+            .map(|id| job(id, JobState::Completed, true))
+            .collect();
+        let fleet = Fleet::merge(
+            vec![
+                reading("tern", tern, Some(96)),
+                reading("skiff", skiff, Some(81)),
+            ],
+            10,
+        );
+        let ids: Vec<u64> = fleet.jobs.iter().map(|job| job.job.id).collect();
+        assert_eq!(ids, [100, 99, 98, 97, 96], "nothing below what tern said");
+        assert_eq!(fleet.next, Some(96), "the next page asks tern below 96");
     }
 }

@@ -105,12 +105,11 @@ pub(crate) async fn readings(
     let local_query = query.clone();
     tasks.push(tokio::spawn(async move {
         match local {
-            Some(client) => ask(None, &client, &local_query).await,
-            None => MachineReading {
-                machine: THIS_MACHINE.to_owned(),
-                status: Err("XDG_RUNTIME_DIR is not set; pass --socket".to_owned()),
-                jobs: Err("XDG_RUNTIME_DIR is not set; pass --socket".to_owned()),
-            },
+            Some(client) => {
+                let (status, jobs) = ask(&client, &local_query).await;
+                MachineReading::this_machine(status, jobs)
+            }
+            None => MachineReading::unasked(),
         }
     }));
     for machine in machines.all() {
@@ -121,7 +120,14 @@ pub(crate) async fn readings(
         tasks.push(tokio::spawn(async move {
             let name = machine.name.clone();
             match Client::open(Endpoint::Ssh(machine), program, &private).await {
-                Ok(client) => ask(Some(name), &client, &query).await,
+                Ok(client) => {
+                    let (status, jobs) = ask(&client, &query).await;
+                    MachineReading {
+                        machine: name,
+                        status,
+                        jobs,
+                    }
+                }
                 Err(error) => unread(name, &error),
             }
         }));
@@ -135,25 +141,17 @@ pub(crate) async fn readings(
     readings
 }
 
-/// What this machine is called when its daemon does not say.
-const THIS_MACHINE: &str = "this machine";
-
-/// Reads one daemon's status and jobs. `name` is the machine's in `machines.toml`; for this machine, its daemon's.
-async fn ask(name: Option<String>, client: &Client, query: &JobQuery) -> MachineReading {
+/// One daemon's status and jobs, or why each could not be read.
+async fn ask(
+    client: &Client,
+    query: &JobQuery,
+) -> (Result<Status, String>, Result<JobPage, String>) {
     let status = client.get::<Status>("/v1/status").await;
     let jobs = client.get_query::<JobPage>("/v1/jobs", query).await;
-    let machine = name.unwrap_or_else(|| {
-        status
-            .as_ref()
-            .ok()
-            .and_then(|status| status.machine.as_ref())
-            .map_or_else(|| THIS_MACHINE.to_owned(), |machine| machine.name.clone())
-    });
-    MachineReading {
-        machine,
-        status: status.map_err(|error| reason(&error)),
-        jobs: jobs.map_err(|error| reason(&error)),
-    }
+    (
+        status.map_err(|error| reason(&error)),
+        jobs.map_err(|error| reason(&error)),
+    )
 }
 
 fn unread(machine: String, error: &ClientError) -> MachineReading {

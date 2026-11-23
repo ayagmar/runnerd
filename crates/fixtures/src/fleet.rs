@@ -124,7 +124,7 @@ pub fn fleet() -> Fleet {
 
 #[cfg(test)]
 mod tests {
-    use runnerd_core::api::{Reach, Tone};
+    use runnerd_core::api::{MachineReading, Reach, THIS_MACHINE, Tone};
 
     use super::{DORY_DOWN, FleetJobFact, SKIFF_ONLY, fleet, fleet_facts};
     use crate::ELSEWHERE;
@@ -162,5 +162,26 @@ mod tests {
         assert_eq!(facts.machines[2].tone, Tone::Bad);
         assert_eq!(fleet.next, None);
         assert!(!fleet.all_read(), "dory was not read");
+    }
+
+    /// Catches: this machine's line named by each client in its own words, or a daemon's own name ignored.
+    #[test]
+    fn this_machine_is_named_as_its_daemon_says_or_as_this_machine() {
+        let mut status = crate::daemon().status;
+        let named = MachineReading::this_machine(Ok(status.clone()), Err("x".to_owned()));
+        assert_eq!(named.machine, "tern");
+        status.machine = None;
+        let unnamed = MachineReading::this_machine(Ok(status), Err("x".to_owned()));
+        assert_eq!(unnamed.machine, THIS_MACHINE);
+        let down = MachineReading::this_machine(Err("down".to_owned()), Err("down".to_owned()));
+        assert_eq!(down.machine, THIS_MACHINE);
+        let unasked = MachineReading::unasked();
+        assert!(
+            unasked
+                .status
+                .as_ref()
+                .is_err_and(|why| why.contains("XDG_RUNTIME_DIR")),
+            "{unasked:?}"
+        );
     }
 }
