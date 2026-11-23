@@ -105,11 +105,28 @@ pub fn check_name(name: &str) -> Result<(), String> {
 pub fn check_socket(socket: &Path) -> Result<(), String> {
     let text = socket.to_string_lossy();
     if !socket.is_absolute() {
-        return Err(format!("{text}: a remote socket's path must be absolute"));
+        return Err(format!("{text}: a socket's path must be absolute"));
     }
     if text.contains(':') || text.chars().any(char::is_control) {
         return Err(format!(
-            "{text}: a remote socket's path cannot hold `:` or a control character, which ssh -L cannot forward"
+            "{text}: a socket's path cannot hold `:` or a control character, which ssh -L cannot forward"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `id` can be a machine id: not empty, no space or control character. An empty one would match no
+/// duplicate, so two entries for one machine could be kept.
+fn check_id(machine: &Machine) -> Result<(), String> {
+    if machine.id.is_empty()
+        || machine
+            .id
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(format!(
+            "{}: machine id {:?} is empty or holds a space; `runnerctl machine rm {}` and add it again",
+            machine.name, machine.id, machine.name
         ));
     }
     Ok(())
@@ -124,6 +141,7 @@ impl Machines {
         for machine in parsed.machines {
             check_name(&machine.name)?;
             check_socket(&machine.socket)?;
+            check_id(&machine)?;
             machines.refuse_clash(&machine)?;
             machines.machines.push(machine);
         }
@@ -152,6 +170,7 @@ impl Machines {
     pub fn add(&mut self, machine: Machine, local: Option<&str>) -> Result<(), String> {
         check_name(&machine.name)?;
         check_socket(&machine.socket)?;
+        check_id(&machine)?;
         if local == Some(machine.id.as_str()) {
             return Err(format!(
                 "{} has machine id {}, the same as this machine's: it is this machine, or a clone of it whose \
@@ -242,6 +261,22 @@ mod tests {
         assert!(
             Machines::parse(file).is_err(),
             "a hand-edited file with such a target is refused too"
+        );
+    }
+
+    /// Catches: an empty id, from a hand edit or a daemon that sent one, kept where no duplicate check can match it.
+    #[test]
+    fn an_empty_or_spaced_machine_id_is_refused() {
+        for id in ["", "1a2b 3c4d"] {
+            let error = Machines::default()
+                .add(machine("skiff", id), None)
+                .unwrap_err();
+            assert!(error.contains("machine id"), "{error}");
+        }
+        let file = "[[machine]]\nname = \"skiff\"\nssh = \"skiff\"\nsocket = \"/s\"\nid = \"\"\n";
+        assert!(
+            Machines::parse(file).is_err(),
+            "a hand-edited file with an empty id is refused"
         );
     }
 

@@ -26,10 +26,14 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often the forward's socket is looked for while `ssh` sets it up.
 const POLL: Duration = Duration::from_millis(25);
 
-/// Options every `ssh` here runs with: no terminal, no prompt (a password, a passphrase, a host key or a browser
-/// check fails instead of hanging), and none of the owner's connection sharing, so their config cannot change how
-/// this child behaves or outlives it.
-const OPTIONS: [&str; 9] = [
+/// Options every `ssh` here runs with. The owner's `~/.ssh/config` still says how to reach the host (its `Host`
+/// aliases, user, keys, port, jump host); these override what would change how this child behaves (ADR 0164): no
+/// terminal, no prompt (a password, a passphrase, a host key or a browser check fails instead of hanging), none of
+/// the owner's connection sharing, no fork into the background, no remote or local command of theirs, a log level
+/// that writes the lines [`failed`] and [`Tunnel::broken`] read and no debug lines after them, and keepalives so a
+/// stalled connection ends. A first value wins in ssh, so these beat the config's. `ForkAfterAuthentication` and
+/// `SessionType` need OpenSSH 8.7 or later.
+const OPTIONS: [&str; 19] = [
     "-T",
     "-o",
     "BatchMode=yes",
@@ -39,7 +43,20 @@ const OPTIONS: [&str; 9] = [
     "ControlMaster=no",
     "-o",
     "ConnectTimeout=10",
+    "-o",
+    "ForkAfterAuthentication=no",
+    "-o",
+    "RemoteCommand=none",
+    "-o",
+    "PermitLocalCommand=no",
+    "-o",
+    "LogLevel=INFO",
+    "-o",
+    "ServerAliveInterval=15",
 ];
+
+/// With [`OPTIONS`]' `ServerAliveInterval`: a connection that answered no keepalive for 45 s ends.
+const ALIVE_COUNT: &str = "ServerAliveCountMax=3";
 
 /// The remote command `machine add` runs to find the daemon's socket: its user's runtime directory, as `runnerd
 /// serve` takes it, or where systemd puts it.
@@ -93,17 +110,51 @@ impl SshProgram for OpenSsh {
     }
 
     fn run(&self, args: &[OsString]) -> io::Result<SshOutput> {
-        let output = Command::new("ssh")
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(not_found)?;
-        Ok(SshOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        output_within(Command::new("ssh").args(args), OPEN_TIMEOUT).map_err(not_found)
     }
+}
+
+/// Runs `command` with nothing on its standard input to its end and returns what it printed, or kills it once
+/// `limit` passed. What it printed is read on threads of their own, so a full pipe cannot stall it.
+fn output_within(command: &mut Command, limit: Duration) -> io::Result<SshOutput> {
+    use std::io::Read as _;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let read = |pipe: Option<Box<dyn io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut text);
+            }
+            String::from_utf8_lossy(&text).into_owned()
+        })
+    };
+    let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            // The readers end when the pipes close; a grandchild holding one would keep them, so they are left.
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("ssh did not finish within {}s", limit.as_secs()),
+            ));
+        }
+        std::thread::sleep(POLL);
+    };
+    Ok(SshOutput {
+        success: status.success(),
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 fn not_found(error: io::Error) -> io::Error {
@@ -117,8 +168,16 @@ fn not_found(error: io::Error) -> io::Error {
     }
 }
 
+/// A real `ssh`. Dropped, it is killed and reaped: `std::process::Child` would leave it running, still forwarding,
+/// when an open is given up on or fails on the way.
 #[derive(Debug)]
 struct SshChild(Child);
+
+impl Drop for SshChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 impl Forwarding for SshChild {
     fn exited(&mut self) -> io::Result<bool> {
@@ -141,8 +200,7 @@ pub(crate) fn forward_args(local: &Path, remote: &Path, target: &SshTarget) -> V
     for option in [
         "StreamLocalBindUnlink=yes",
         "ExitOnForwardFailure=yes",
-        "ServerAliveInterval=15",
-        "ServerAliveCountMax=3",
+        ALIVE_COUNT,
     ] {
         args.extend(["-o".into(), option.into()]);
     }
@@ -153,9 +211,12 @@ pub(crate) fn forward_args(local: &Path, remote: &Path, target: &SshTarget) -> V
     args
 }
 
-/// `ssh`'s arguments to run `command` on `target`.
+/// `ssh`'s arguments to run `command` on `target`, whatever session type the owner's config sets for it.
 fn command_args(target: &SshTarget, command: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = OPTIONS.iter().map(OsString::from).collect();
+    for option in [ALIVE_COUNT, "SessionType=default"] {
+        args.extend(["-o".into(), option.into()]);
+    }
     args.extend(["--".into(), target.as_str().into(), command.into()]);
     args
 }
@@ -205,7 +266,8 @@ enum Failure {
 }
 
 /// What `ssh` failing for `machine` means, from what it wrote to `stderr`. One that needed a person (a password, a
-/// passphrase, a host key or Tailscale's browser check) says so, since `BatchMode` stops it from asking.
+/// passphrase, a new host key or Tailscale's browser check) says so, since `BatchMode` stops it from asking; a
+/// host key that changed does not, since signing in by hand does not fix it, and ssh's own words stand.
 fn failed(machine: &str, target: &SshTarget, stderr: &str, how: Failure) -> ClientError {
     let said = stderr
         .lines()
@@ -216,14 +278,16 @@ fn failed(machine: &str, target: &SshTarget, stderr: &str, how: Failure) -> Clie
     let needs_you = [
         "permission denied",
         "host key verification failed",
-        "identification has changed",
         "passphrase",
         "password",
-        "tailscale",
-        "login.",
+        "tailscale ssh",
+        "login.tailscale.com",
+        "to authenticate, visit",
     ]
     .iter()
-    .any(|clue| lower.contains(clue));
+    .any(|clue| lower.contains(clue))
+        && !lower.contains("identification has changed");
+    let too_old = lower.contains("bad configuration option");
     let what = match how {
         Failure::Exited => format!("ssh {target} failed"),
         Failure::TimedOut => format!(
@@ -236,7 +300,9 @@ fn failed(machine: &str, target: &SshTarget, stderr: &str, how: Failure) -> Clie
     } else {
         format!(" (ssh said: {said})")
     };
-    let reason = if needs_you {
+    let reason = if too_old {
+        format!("{what}: runnerctl needs OpenSSH 8.7 or later{said}")
+    } else if needs_you {
         format!(
             "{what}: it needs you to sign in, and runnerctl runs it with BatchMode=yes, which cannot ask for a \
              password, a passphrase, a host key or a browser check; run `ssh {target}` once yourself, then try \
@@ -263,6 +329,40 @@ fn private_dir(base: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// A private directory removed when dropped, unless kept: an open given up on or failed leaves nothing behind.
+struct Made(Option<PathBuf>);
+
+impl Made {
+    fn keep(mut self) -> PathBuf {
+        self.0.take().unwrap_or_default()
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Where a connection through the forward began in `ssh`'s log, so only what `ssh` said since is read for it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Mark(u64);
+
+/// A connection through the forward, and where it began in `ssh`'s log.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    /// The connection.
+    pub(crate) stream: tokio::net::UnixStream,
+    /// Where it began in `ssh`'s log.
+    pub(crate) mark: Mark,
+}
+
+/// How long a connection refused by a forward whose `ssh` still runs is tried again: OpenSSH creates the socket a
+/// moment before it listens on it.
+const LISTEN_GRACE: Duration = Duration::from_millis(250);
+
 /// A forward to one machine's daemon, for one client and its clones. Dropping the last stops `ssh` and removes the
 /// directory. Nothing of it survives the client: a new one starts its own.
 #[derive(Debug)]
@@ -283,7 +383,7 @@ impl Tunnel {
         program: Arc<dyn SshProgram>,
         base: &Path,
     ) -> Result<Tunnel, ClientError> {
-        let dir = private_dir(base).map_err(|error| {
+        let made = Made(Some(private_dir(base).map_err(|error| {
             unreachable(
                 &machine.name,
                 format!(
@@ -291,20 +391,24 @@ impl Tunnel {
                     base.display()
                 ),
             )
+        })?));
+        let dir = made.0.clone().unwrap_or_default();
+        check_socket(&socket(&dir)).map_err(|why| {
+            unreachable(
+                &machine.name,
+                format!(
+                    "cannot forward from {}: {why}; set XDG_RUNTIME_DIR to a directory without one",
+                    socket(&dir).display()
+                ),
+            )
         })?;
-        let started = start(&machine, program.as_ref(), &dir).await;
-        match started {
-            Ok(forward) => Ok(Tunnel {
-                machine,
-                program,
-                dir,
-                forward: Mutex::new(forward),
-            }),
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&dir);
-                Err(error)
-            }
-        }
+        let forward = start(&machine, program.as_ref(), &dir).await?;
+        Ok(Tunnel {
+            machine,
+            program,
+            dir: made.keep(),
+            forward: Mutex::new(forward),
+        })
     }
 
     /// The machine it reaches.
@@ -330,12 +434,54 @@ impl Tunnel {
         Ok(())
     }
 
-    /// The error for a connection through the forward that broke before an answer: the daemon is not running
-    /// there when `ssh` last said it could not open the remote socket, else `error` as it was.
-    pub(crate) fn broken(&self, error: ClientError) -> ClientError {
-        let log = std::fs::read_to_string(log(&self.dir)).unwrap_or_default();
-        let last = log.lines().rfind(|line| !line.trim().is_empty());
-        if last.is_some_and(|line| line.contains("open failed") || line.contains("connect failed"))
+    /// Connects through the forward, starting `ssh` again first when it exited. A socket that refuses while
+    /// `ssh` runs is tried again for [`LISTEN_GRACE`].
+    pub(crate) async fn connect(&self) -> Result<Opened, ClientError> {
+        self.ensure().await?;
+        let mark = Mark(std::fs::metadata(log(&self.dir)).map_or(0, |meta| meta.len()));
+        let deadline = tokio::time::Instant::now() + LISTEN_GRACE;
+        loop {
+            match tokio::net::UnixStream::connect(self.socket()).await {
+                Ok(stream) => return Ok(Opened { stream, mark }),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    if tokio::time::Instant::now() >= deadline || self.exited().await {
+                        return Err(self.closed());
+                    }
+                    tokio::time::sleep(POLL).await;
+                }
+                Err(error) => {
+                    return Err(ClientError::Transport(format!(
+                        "{}: {error}",
+                        self.socket().display()
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Whether the `ssh` forwarding has exited; one that cannot be checked on counts as exited.
+    async fn exited(&self) -> bool {
+        self.forward.lock().await.exited().unwrap_or(true)
+    }
+
+    /// The error for a connection through the forward begun at `mark` that broke before an answer: the daemon is
+    /// not running there when `ssh` said since that it could not open the remote socket; `ssh` failed when it
+    /// exited; else `error` as it was.
+    pub(crate) async fn broken(&self, error: ClientError, mark: Mark) -> ClientError {
+        let log = std::fs::read(log(&self.dir)).unwrap_or_default();
+        let since = usize::try_from(mark.0)
+            .ok()
+            .and_then(|at| log.get(at..))
+            .unwrap_or_default();
+        let since = String::from_utf8_lossy(since);
+        if since
+            .lines()
+            .any(|line| line.contains("open failed") || line.contains("connect failed"))
         {
             return unreachable(
                 &self.machine.name,
@@ -346,6 +492,9 @@ impl Tunnel {
                     self.machine.name
                 ),
             );
+        }
+        if self.exited().await {
+            return self.closed();
         }
         error
     }
@@ -393,10 +542,11 @@ async fn start(
         .map_err(local_error)?;
     let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
     loop {
-        if local.exists() {
+        // Exited first: an ssh that bound the socket and then failed another forward is not set up.
+        let exited = forward.exited().map_err(local_error)?;
+        if !exited && local.exists() {
             return Ok(forward);
         }
-        let exited = forward.exited().map_err(local_error)?;
         let timed_out = tokio::time::Instant::now() >= deadline;
         if exited || timed_out {
             forward.stop();
@@ -421,31 +571,44 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use axum::Router;
-    use axum::routing::get;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    use super::{Failure, Forwarding, SshOutput, SshProgram, failed, forward_args};
+    use super::{
+        Failure, Forwarding, SshChild, SshOutput, SshProgram, command_args, failed, forward_args,
+        output_within,
+    };
     use crate::client::{Client, ClientError, Endpoint};
     use crate::config::machines::Machine;
     use crate::testdir::TestDir;
 
-    /// What the fake `ssh` does once started.
+    /// What the fake `ssh` does: once started, and with each connection through its forward.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Remote {
         /// Sets the forward up to a daemon that answers.
         Serves,
         /// Exits at once, as when the key is refused.
         RefusesKey,
-        /// Sets the forward up, but nothing listens on the remote socket.
+        /// Sets the forward up, but nothing listens on the remote socket: ssh logs that the channel failed.
         DaemonDown,
+        /// The daemon there closes the connection before answering; ssh logs nothing.
+        HangsUp,
+        /// ssh itself exits on the next connection, as when keepalives found the network gone.
+        ExitsMidRequest,
+        /// The socket's path appears before ssh listens on it, as between OpenSSH's `bind` and `listen`.
+        ListensLate,
+        /// ssh binds the socket, then exits because another forward failed.
+        BindsThenExits,
+        /// ssh never sets the forward up and never exits.
+        NeverListens,
     }
 
-    /// A fake `ssh`: binds the forward's local socket itself and serves a fake daemon on it, so no test runs the
-    /// real one or opens a network connection.
+    /// A fake `ssh`: binds the forward's local socket itself and answers on it as `remote` says, so no test runs
+    /// the real one or opens a network connection.
     #[derive(Debug)]
     struct FakeSsh {
-        remote: Remote,
+        remote: Arc<Mutex<Remote>>,
         starts: AtomicU32,
         /// `ssh`s stopped while still running.
         kills: Arc<AtomicU32>,
@@ -457,12 +620,17 @@ mod tests {
     impl FakeSsh {
         fn new(remote: Remote) -> Arc<FakeSsh> {
             Arc::new(FakeSsh {
-                remote,
+                remote: Arc::new(Mutex::new(remote)),
                 starts: AtomicU32::new(0),
                 kills: Arc::new(AtomicU32::new(0)),
                 last: Mutex::new(None),
                 args: Mutex::new(Vec::new()),
             })
+        }
+
+        /// From now on, ssh and the daemon behind it do as `remote` says.
+        fn set(&self, remote: Remote) {
+            *self.remote.lock().unwrap() = remote;
         }
 
         /// The last `ssh` exits, and its socket is left behind as a killed one leaves it.
@@ -499,6 +667,60 @@ mod tests {
         }
     }
 
+    /// As [`SshChild`]: dropping one stops it.
+    impl Drop for FakeForward {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// Answers each connection through the forward on `listener` as `remote` says at that moment.
+    async fn answer(
+        listener: tokio::net::UnixListener,
+        remote: Arc<Mutex<Remote>>,
+        exited: Arc<AtomicBool>,
+        mut log: File,
+    ) {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let now = *remote.lock().unwrap();
+            match now {
+                Remote::DaemonDown => {
+                    let _ = writeln!(
+                        log,
+                        "channel 2: open failed: connect failed: No such file or directory"
+                    );
+                }
+                Remote::ExitsMidRequest => {
+                    let _ = writeln!(log, "client_loop: send disconnect: Broken pipe");
+                    exited.store(true, Ordering::SeqCst);
+                    return;
+                }
+                Remote::HangsUp => {}
+                _ => {
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 1024];
+                    while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 4\r\n\r\n\"hi\"",
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    fn bind(local: &Path) -> io::Result<tokio::net::UnixListener> {
+        let listener = std::os::unix::net::UnixListener::bind(local)?;
+        listener.set_nonblocking(true)?;
+        tokio::net::UnixListener::from_std(listener)
+    }
+
     impl SshProgram for FakeSsh {
         fn start(&self, args: &[OsString], mut log: File) -> io::Result<Box<dyn Forwarding>> {
             self.starts.fetch_add(1, Ordering::SeqCst);
@@ -510,34 +732,44 @@ mod tests {
                 kills: self.kills.clone(),
                 server,
             };
-            if self.remote == Remote::RefusesKey {
-                writeln!(log, "me@skiff: Permission denied (publickey).")?;
-                exited.store(true, Ordering::SeqCst);
-                return Ok(Box::new(forward(None)));
-            }
             let at = args.iter().position(|arg| arg == "-L").unwrap() + 1;
             let local = args[at].to_string_lossy();
             let local = PathBuf::from(local.split_once(':').unwrap().0);
-            let listener = std::os::unix::net::UnixListener::bind(&local)?;
-            listener.set_nonblocking(true)?;
-            let listener = tokio::net::UnixListener::from_std(listener)?;
-            let server = if self.remote == Remote::Serves {
-                let router = Router::new().route("/v1/hello", get(|| async { "\"hi\"" }));
-                tokio::spawn(async move {
-                    let _ = axum::serve(listener, router).await;
-                })
-            } else {
-                tokio::spawn(async move {
-                    while let Ok((stream, _)) = listener.accept().await {
-                        let _ = writeln!(
-                            log,
-                            "channel 2: open failed: connect failed: No such file or directory"
-                        );
-                        drop(stream);
-                    }
-                })
-            };
-            Ok(Box::new(forward(Some(server))))
+            let remote = *self.remote.lock().unwrap();
+            match remote {
+                Remote::RefusesKey => {
+                    writeln!(log, "me@skiff: Permission denied (publickey).")?;
+                    exited.store(true, Ordering::SeqCst);
+                    Ok(Box::new(forward(None)))
+                }
+                Remote::NeverListens => Ok(Box::new(forward(None))),
+                Remote::BindsThenExits => {
+                    drop(std::os::unix::net::UnixListener::bind(&local)?);
+                    writeln!(log, "Error: forwarding failed")?;
+                    exited.store(true, Ordering::SeqCst);
+                    Ok(Box::new(forward(None)))
+                }
+                Remote::ListensLate => {
+                    // A path that refuses connections until ssh listens.
+                    File::create(&local)?;
+                    let shared = self.remote.clone();
+                    let up = exited.clone();
+                    let server = tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = std::fs::remove_file(&local);
+                        if let Ok(listener) = bind(&local) {
+                            answer(listener, shared, up, log).await;
+                        }
+                    });
+                    Ok(Box::new(forward(Some(server))))
+                }
+                _ => {
+                    let listener = bind(&local)?;
+                    let server =
+                        tokio::spawn(answer(listener, self.remote.clone(), exited.clone(), log));
+                    Ok(Box::new(forward(Some(server))))
+                }
+            }
         }
 
         fn run(&self, _: &[OsString]) -> io::Result<SshOutput> {
@@ -560,6 +792,12 @@ mod tests {
 
     fn entries(dir: &Path) -> usize {
         std::fs::read_dir(dir).unwrap().count()
+    }
+
+    fn strings(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     /// Catches: an `ssh` left running, or its directory left behind, once runnerctl is done; and a clone (as the
@@ -610,6 +848,34 @@ mod tests {
         assert_eq!(ssh.starts.load(Ordering::SeqCst), 2, "ssh started again");
     }
 
+    /// Catches: an open given up on (a timeout, `q` in the TUI) leaving the `ssh` it started running and its
+    /// private directory behind.
+    #[tokio::test]
+    async fn an_open_given_up_on_stops_its_ssh_and_removes_its_directory() {
+        let base = TestDir::new("ssh-cancel");
+        let ssh = FakeSsh::new(Remote::NeverListens);
+        let given_up = tokio::time::timeout(Duration::from_millis(200), open(&ssh, &base.0)).await;
+        assert!(given_up.is_err(), "still opening after 200ms");
+        assert_eq!(ssh.kills.load(Ordering::SeqCst), 1, "its ssh is stopped");
+        assert_eq!(entries(&base.0), 0, "the private directory is removed");
+    }
+
+    /// Catches: a real `ssh` child dropped without being stopped (a cancelled start, an error on the way), which
+    /// `std::process::Child` leaves running and keeps forwarding.
+    #[test]
+    fn a_dropped_ssh_child_is_killed_and_reaped() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        drop(SshChild(child));
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "sleep {pid} is gone"
+        );
+    }
+
     /// Catches: a refused key reported as "runnerd is not running", or the private directory left behind.
     #[tokio::test]
     async fn an_ssh_that_cannot_sign_in_fails_opening_and_says_how_to_sign_in() {
@@ -623,6 +889,26 @@ mod tests {
         );
         assert!(text.contains("run `ssh me@skiff` once"), "{text}");
         assert_eq!(entries(&base.0), 0, "the private directory is removed");
+    }
+
+    /// Catches: an `ssh` that bound the socket and then exited (another forward of the owner's config failed)
+    /// taken as a forward that is set up.
+    #[tokio::test]
+    async fn an_ssh_that_bound_its_socket_then_exited_fails_opening() {
+        let base = TestDir::new("ssh-bound-exited");
+        let ssh = FakeSsh::new(Remote::BindsThenExits);
+        let error = open(&ssh, &base.0).await.unwrap_err().to_string();
+        assert!(error.contains("forwarding failed"), "{error}");
+    }
+
+    /// Catches: the moment between OpenSSH creating the socket and listening on it reported as ssh having failed.
+    #[tokio::test]
+    async fn a_forward_that_listens_a_moment_after_its_socket_appears_is_used() {
+        let base = TestDir::new("ssh-late");
+        let ssh = FakeSsh::new(Remote::ListensLate);
+        let client = open(&ssh, &base.0).await.unwrap();
+        ssh.set(Remote::Serves);
+        assert_eq!(client.get::<String>("/v1/hello").await.unwrap(), "hi");
     }
 
     /// Catches: a daemon that is down there worded as a broken HTTP exchange.
@@ -639,22 +925,74 @@ mod tests {
         );
     }
 
-    /// Catches: an option the owner's config could override, or a target placed where ssh reads options.
+    /// Catches: a daemon restart hours ago, still the last line of ssh's log, blamed for a later break while the
+    /// daemon runs.
+    #[tokio::test]
+    async fn a_daemon_that_was_down_once_is_not_blamed_for_a_later_break() {
+        let base = TestDir::new("ssh-stale");
+        let ssh = FakeSsh::new(Remote::DaemonDown);
+        let client = open(&ssh, &base.0).await.unwrap();
+        client.get::<String>("/v1/hello").await.unwrap_err();
+        ssh.set(Remote::Serves);
+        assert_eq!(client.get::<String>("/v1/hello").await.unwrap(), "hi");
+        ssh.set(Remote::HangsUp);
+        let error = client.get::<String>("/v1/hello").await.unwrap_err();
+        assert!(
+            matches!(error, ClientError::Transport(_)),
+            "the break as it was: {error}"
+        );
+    }
+
+    /// Catches: ssh exiting mid-request (keepalives found the network gone) shown as a bare transport error
+    /// without the machine or what ssh said.
+    #[tokio::test]
+    async fn ssh_exiting_mid_request_names_the_machine_and_what_ssh_said() {
+        let base = TestDir::new("ssh-exits");
+        let ssh = FakeSsh::new(Remote::Serves);
+        let client = open(&ssh, &base.0).await.unwrap();
+        ssh.set(Remote::ExitsMidRequest);
+        let error = client.get::<String>("/v1/hello").await.unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Unreachable { machine, reason }
+                if machine == "skiff" && reason.contains("Broken pipe")),
+            "{error}"
+        );
+    }
+
+    /// Catches: a private directory whose path has a `:`, which `-L` would split in the wrong place, handed to ssh.
+    #[tokio::test]
+    async fn a_private_directory_with_a_colon_is_refused_before_ssh_runs() {
+        let base = TestDir::new("ssh-colon");
+        let odd = base.0.join("ci:1");
+        std::fs::create_dir(&odd).unwrap();
+        let ssh = FakeSsh::new(Remote::Serves);
+        let error = open(&ssh, &odd).await.unwrap_err().to_string();
+        assert!(error.contains(':'), "{error}");
+        assert_eq!(ssh.starts.load(Ordering::SeqCst), 0, "ssh never ran");
+        assert_eq!(entries(&odd), 0, "the private directory is removed");
+    }
+
+    /// Catches: an option the owner's `~/.ssh/config` could set that changes how this child behaves: forking
+    /// away from runnerctl, running a remote command, logging too little or too much to read; and a target placed
+    /// where ssh reads options.
     #[test]
-    fn the_forward_takes_no_prompt_no_shared_connection_and_ends_its_options_before_the_target() {
+    fn the_forward_overrides_what_the_owners_config_could_change_and_ends_its_options_before_the_target()
+     {
         let target = "me@skiff".parse().unwrap();
-        let args = forward_args(
+        let args = strings(&forward_args(
             Path::new("/run/user/1000/runnerctl-1-0/runnerd.sock"),
             Path::new("/run/user/1001/runnerd.sock"),
             &target,
-        );
-        let args: Vec<String> = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+        ));
         for option in [
             "BatchMode=yes",
             "ControlPath=none",
+            "ControlMaster=no",
+            "ForkAfterAuthentication=no",
+            "RemoteCommand=none",
+            "PermitLocalCommand=no",
+            "LogLevel=INFO",
+            "ServerAliveInterval=15",
             "StreamLocalBindUnlink=yes",
             "ExitOnForwardFailure=yes",
         ] {
@@ -670,47 +1008,86 @@ mod tests {
             args[end - 3],
             "/run/user/1000/runnerctl-1-0/runnerd.sock:/run/user/1001/runnerd.sock"
         );
+
+        let args = strings(&command_args(&target, "true"));
+        for option in [
+            "SessionType=default",
+            "RemoteCommand=none",
+            "ForkAfterAuthentication=no",
+            "ServerAliveInterval=15",
+        ] {
+            assert!(args.iter().any(|arg| arg == option), "{option} in {args:?}");
+        }
+        assert_eq!(args[args.len() - 3..], ["--", "me@skiff", "true"]);
     }
 
-    /// Catches: a sign-in `BatchMode` could not ask for reported as a bare "Permission denied" with no way forward.
+    /// Catches: `machine add` hanging forever on a connection that stalled after it was set up.
+    #[test]
+    fn a_command_that_runs_past_its_time_is_killed_and_reported() {
+        let mut sleeper = std::process::Command::new("sleep");
+        sleeper.arg("30");
+        let started = std::time::Instant::now();
+        let error = output_within(&mut sleeper, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "gave up in time"
+        );
+        let mut echo = std::process::Command::new("sh");
+        echo.args(["-c", "echo out; echo err >&2"]);
+        let output = output_within(&mut echo, Duration::from_secs(10)).unwrap();
+        assert!(output.success, "sh ran to its end");
+        assert_eq!(
+            (output.stdout.as_str(), output.stderr.as_str()),
+            ("out\n", "err\n")
+        );
+    }
+
+    fn reason(error: ClientError) -> String {
+        match error {
+            ClientError::Unreachable { reason, .. } => reason,
+            other => panic!("unreachable, not {other}"),
+        }
+    }
+
+    /// Catches: a sign-in `BatchMode` could not ask for reported as a bare "Permission denied" with no way forward;
+    /// and that advice given where signing in by hand does not help.
     #[test]
     fn a_failure_that_needed_a_person_says_to_sign_in_once_by_hand() {
         let target = "skiff".parse().unwrap();
-        let ClientError::Unreachable { reason, .. } = failed(
-            "skiff",
-            &target,
+        let said = |stderr: &str, how| reason(failed("skiff", &target, stderr, how));
+        let refused = said(
             "me@skiff: Permission denied (publickey).\n",
             Failure::Exited,
-        ) else {
-            panic!("unreachable")
-        };
-        assert!(reason.contains("BatchMode=yes"), "{reason}");
-        assert!(reason.contains("run `ssh skiff` once"), "{reason}");
-        assert!(
-            reason.ends_with("(ssh said: me@skiff: Permission denied (publickey).)"),
-            "{reason}"
         );
-        let ClientError::Unreachable { reason, .. } = failed(
-            "skiff",
-            &target,
+        assert!(refused.contains("BatchMode=yes"), "{refused}");
+        assert!(refused.contains("run `ssh skiff` once"), "{refused}");
+        assert!(
+            refused.ends_with("(ssh said: me@skiff: Permission denied (publickey).)"),
+            "{refused}"
+        );
+        let browser = said(
             "# Tailscale SSH requires an additional check.\n# To authenticate, visit: https://login.tailscale.com/a/x\n",
             Failure::TimedOut,
-        ) else {
-            panic!("unreachable")
-        };
-        assert!(reason.contains("browser check"), "{reason}");
-        assert!(reason.contains("within 20s"), "{reason}");
-        let ClientError::Unreachable { reason, .. } = failed(
-            "skiff",
-            &target,
-            "ssh: Could not resolve hostname skiff: Name or service not known\n",
-            Failure::Exited,
-        ) else {
-            panic!("unreachable")
-        };
-        assert!(
-            !reason.contains("BatchMode"),
-            "a DNS failure needs no sign-in: {reason}"
         );
+        assert!(browser.contains("browser check"), "{browser}");
+        assert!(browser.contains("within 20s"), "{browser}");
+        let old = said(
+            "command-line line 0: Bad configuration option: forkafterauthentication\n",
+            Failure::Exited,
+        );
+        assert!(old.contains("needs OpenSSH 8.7 or later"), "{old}");
+        for stderr in [
+            "ssh: Could not resolve hostname skiff: Name or service not known\n",
+            "ssh: Could not resolve hostname login.lab.internal: Name or service not known\n",
+            "ssh: connect to host skiff.tailscale.example port 22: Connection refused\n",
+            "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key for skiff has changed and you have requested strict checking.\n",
+        ] {
+            let text = said(stderr, Failure::Exited);
+            assert!(
+                !text.contains("BatchMode"),
+                "signing in by hand does not help: {text}"
+            );
+        }
     }
 }

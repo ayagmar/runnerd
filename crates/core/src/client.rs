@@ -21,8 +21,8 @@ use tokio::net::UnixStream;
 
 pub use hyper::{Method, StatusCode};
 
-use crate::ssh::Tunnel;
 pub use crate::ssh::{Forwarding, OpenSsh, SshOutput, SshProgram, remote_socket};
+use crate::ssh::{Mark, Tunnel};
 
 use crate::config::machines::Machine;
 
@@ -363,7 +363,7 @@ impl Client {
         let path = with_query(&format!("/v1/records/{job}/shell"), query)?;
         let response = self
             .in_time(async {
-                let mut sender = self.connect().await?;
+                let (mut sender, mark) = self.connect().await?;
                 let request = Request::builder()
                     .method(Method::POST)
                     .uri(path)
@@ -372,10 +372,10 @@ impl Client {
                     .header(header::UPGRADE, SHELL_PROTOCOL)
                     .body(Full::new(Bytes::new()))
                     .map_err(transport)?;
-                sender
-                    .send_request(request)
-                    .await
-                    .map_err(|error| self.broken(transport(error)))
+                match sender.send_request(request).await {
+                    Ok(response) => Ok(response),
+                    Err(error) => Err(self.broken(transport(error), mark).await),
+                }
             })
             .await?;
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
@@ -385,30 +385,38 @@ impl Client {
         Ok(TokioIo::new(upgraded))
     }
 
-    /// Connects to the socket, ready for one request.
+    /// Connects to the socket, ready for one request; through a forward, also where the connection began in its
+    /// log.
     async fn connect(
         &self,
-    ) -> Result<hyper::client::conn::http1::SendRequest<Full<Bytes>>, ClientError> {
-        if let Some(tunnel) = &self.tunnel {
-            tunnel.ensure().await?;
-        }
-        let stream = UnixStream::connect(&self.socket).await.map_err(|error| {
-            match (error.kind(), &self.tunnel) {
-                (io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused, Some(tunnel)) => {
-                    tunnel.closed()
-                }
-                (io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused, None) => {
-                    ClientError::NotRunning(self.socket.clone())
-                }
-                _ => transport(format_args!("{}: {error}", self.socket.display())),
-            }
-        })?;
+    ) -> Result<
+        (
+            hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+            Option<Mark>,
+        ),
+        ClientError,
+    > {
+        let (stream, mark) = if let Some(tunnel) = &self.tunnel {
+            let opened = tunnel.connect().await?;
+            (opened.stream, Some(opened.mark))
+        } else {
+            let stream =
+                UnixStream::connect(&self.socket)
+                    .await
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                            ClientError::NotRunning(self.socket.clone())
+                        }
+                        _ => transport(format_args!("{}: {error}", self.socket.display())),
+                    })?;
+            (stream, None)
+        };
         let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(transport)?;
         // Drives the connection until the response body is read or dropped, or the terminal it became closes.
         tokio::spawn(connection.with_upgrades());
-        Ok(sender)
+        Ok((sender, mark))
     }
 }
 
@@ -440,7 +448,7 @@ impl Client {
         body: Option<Body>,
         last_event_id: Option<u64>,
     ) -> Result<Response<Incoming>, ClientError> {
-        let mut sender = self.connect().await?;
+        let (mut sender, mark) = self.connect().await?;
         let mut request = Request::builder()
             .method(method)
             .uri(path)
@@ -456,18 +464,18 @@ impl Client {
         let request = request
             .body(Full::new(Bytes::from(bytes)))
             .map_err(transport)?;
-        sender
-            .send_request(request)
-            .await
-            .map_err(|error| self.broken(transport(error)))
+        match sender.send_request(request).await {
+            Ok(response) => Ok(response),
+            Err(error) => Err(self.broken(transport(error), mark).await),
+        }
     }
 
-    /// `error`, for a request whose connection broke before its answer: through a forward whose `ssh` could not
-    /// open the remote socket, the daemon there is not running.
-    fn broken(&self, error: ClientError) -> ClientError {
-        match &self.tunnel {
-            Some(tunnel) => tunnel.broken(error),
-            None => error,
+    /// `error`, for a request begun at `mark` whose connection broke before its answer: through a forward, what
+    /// `ssh` said since or that it exited.
+    async fn broken(&self, error: ClientError, mark: Option<Mark>) -> ClientError {
+        match (&self.tunnel, mark) {
+            (Some(tunnel), Some(mark)) => tunnel.broken(error, mark).await,
+            _ => error,
         }
     }
 
