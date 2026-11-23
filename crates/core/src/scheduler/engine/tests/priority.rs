@@ -941,7 +941,7 @@ fn named(id: u64, name: &str) -> QueuedJob {
 }
 
 /// `ms` since the epoch as GitHub writes a time.
-fn rfc3339(ms: u64) -> String {
+pub(super) fn rfc3339(ms: u64) -> String {
     let (days, secs) = (ms / 86_400_000, ms / 1000 % 86_400);
     // Days to a civil date, from Howard Hinnant's `civil_from_days`.
     let shifted = days + 719_468;

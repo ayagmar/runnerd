@@ -2937,7 +2937,9 @@ async fn a_finished_job_keeps_its_timeline_steps_and_log_across_a_restart() {
         .jobs
         .insert(1, details(1, "in_progress", None));
     let dir = TestDir::new("restart");
-    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    // GitHub's times below are fixed: the history keeps the job's log and record past them, whenever this runs.
+    let config = format!("{CONFIG}\n[history]\nlogs = \"87600h\"\njobs = \"87600h\"\n");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
     let mut events = handle.store.subscribe();
     engine.recover().await.unwrap();
     until_state(&handle, 1, JobState::Running).await;
@@ -2948,7 +2950,7 @@ async fn a_finished_job_keeps_its_timeline_steps_and_log_across_a_restart() {
     drop((engine, handle));
 
     // The daemon restarts mid-job: the capture resumes after the stored line, then the job ends.
-    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
     engine.recover().await.unwrap();
     until_log_lines(&handle, 1, 2).await;
     github
