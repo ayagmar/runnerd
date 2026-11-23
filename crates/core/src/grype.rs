@@ -210,12 +210,25 @@ impl Link {
         });
     }
 
-    /// What clients show of the store: `None` while it is off or before its task first published.
+    /// What clients show of the store: `None` while it is off or before its task first published. A database past
+    /// the limit by the clock reads as not mounted and stale, whenever the task last woke.
     pub fn status(&self) -> Option<api::GrypeDatabase> {
         if !*self.enabled.borrow() {
             return None;
         }
-        self.status.borrow().clone()
+        let mut status = self.status.borrow().clone()?;
+        // By the clock, as `runner` reads it: the task may not have woken since the host slept past the limit.
+        if let Some(built_at) = status.held.as_ref().map(|held| held.built_at)
+            && !mountable(built_at, unix_now())
+        {
+            status.mounted = false;
+            status.failure.get_or_insert(api::GrypeFailure {
+                kind: api::GrypeFailureKind::Stale,
+                detail: String::new(),
+                since: stale_at(built_at),
+            });
+        }
+        Some(status)
     }
 
     /// What a runner container mounts and its environment gets, read once as it starts: the clock is read here, as

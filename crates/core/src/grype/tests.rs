@@ -1064,3 +1064,53 @@ async fn the_import_s_containers_are_cleared_before_the_store_opens_and_when_the
         "a stop clears what it left"
     );
 }
+
+/// Review round 2, note 1. The bug it catches: after the host slept past the age limit, clients still showing the
+/// database as mounted, with no warning, while starts already get none, until the task's timer fires.
+#[test]
+fn the_status_says_a_database_past_the_limit_is_not_mounted_and_stale_whenever_the_task_last_woke()
+{
+    let dir = TestDir::new("grype-status-sleep");
+    let link = Link::new(Some(dir.0.clone()), &Config::parse(CONFIG).unwrap());
+    let built_at = unix_now() - GRYPE_MAX_AGE_SECS;
+    let published = api::GrypeDatabase {
+        held: Some(api::HeldGrypeDatabase {
+            built_at,
+            schema: "v6.1.10".to_owned(),
+            bytes: 1 << 30,
+        }),
+        mounted: true,
+        checked_at: Some(built_at + 3600),
+        failure: None,
+    };
+    link.status.send_replace(Some(published.clone()));
+    let status = link.status().unwrap();
+    assert!(!status.mounted, "not mounted, as starts get none");
+    assert_eq!(
+        status.failure.map(|failure| (failure.kind, failure.since)),
+        Some((GrypeFailureKind::Stale, stale_at(built_at)))
+    );
+
+    // A failure the task published is what it says first, as `Keeper::status` has it.
+    let listing = api::GrypeFailure {
+        kind: GrypeFailureKind::Listing,
+        detail: String::new(),
+        since: built_at,
+    };
+    link.status.send_replace(Some(api::GrypeDatabase {
+        failure: Some(listing.clone()),
+        ..published.clone()
+    }));
+    assert_eq!(link.status().unwrap().failure, Some(listing));
+
+    // A young one is shown as the task published it.
+    let young = api::GrypeDatabase {
+        held: Some(api::HeldGrypeDatabase {
+            built_at: unix_now() - 3600,
+            ..published.held.clone().unwrap()
+        }),
+        ..published
+    };
+    link.status.send_replace(Some(young.clone()));
+    assert_eq!(link.status(), Some(young));
+}
