@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
 use runnerd_core::api::Status;
 
 /// The fake `ssh`: prints the remote runtime directory for a command, or forwards `-L local:remote` until killed,
@@ -91,12 +92,30 @@ impl Home {
     }
 
     fn runnerctl(&self, args: &[&str]) -> Output {
+        let mut child = self.spawn(args);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                child.kill().unwrap();
+                panic!("runnerctl {args:?} did not finish within 20 s");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().unwrap()
+    }
+
+    /// Lines the fake `ssh` logged: one per run.
+    fn ssh_runs(&self) -> usize {
+        std::fs::read_to_string(self.0.join("ssh.log")).map_or(0, |log| log.lines().count())
+    }
+
+    fn spawn(&self, args: &[&str]) -> std::process::Child {
         let path = format!(
             "{}:{}",
             self.0.join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_runnerctl"))
+        Command::new(env!("CARGO_BIN_EXE_runnerctl"))
             .args(args)
             .env("PATH", path)
             .env("HOME", &self.0)
@@ -109,16 +128,7 @@ impl Home {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() > deadline {
-                child.kill().unwrap();
-                panic!("runnerctl {args:?} did not finish within 20 s");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        child.wait_with_output().unwrap()
+            .unwrap()
     }
 
     /// Whether the last forwarding `ssh` still runs, or its private directory is still there.
@@ -135,9 +145,14 @@ impl Home {
         (!left.is_empty()).then(|| format!("left in the runtime dir: {left:?}"))
     }
 
-    /// Serves a fake daemon whose status names `machine` on the remote socket.
+    /// Serves a fake daemon answering `status` on the remote socket.
     fn serve(&self, status: Status) {
-        let app = Router::new().route(
+        self.serve_app(Router::new(), status);
+    }
+
+    /// Serves `app` on the remote socket, with `status` as its status.
+    fn serve_app(&self, app: Router, status: Status) {
+        let app = app.route(
             "/v1/status",
             get(move || {
                 let status = status.clone();
@@ -232,12 +247,24 @@ fn what_cannot_work_over_ssh_is_refused_with_what_does() {
     let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
     assert!(added.status.success(), "{}", text(&added.stderr));
 
+    let runs = home.ssh_runs();
     let web = home.runnerctl(&["--machine", "skiff", "web"]);
     assert!(!web.status.success(), "plain web is refused");
     assert!(
         text(&web.stderr).contains("web --qr"),
         "{}",
         text(&web.stderr)
+    );
+    let tui = home.runnerctl(&["--machine", "skiff", "tui"]);
+    assert!(
+        text(&tui.stderr).contains("needs a terminal"),
+        "{}",
+        text(&tui.stderr)
+    );
+    assert_eq!(
+        home.ssh_runs(),
+        runs,
+        "a command refused anyway starts no ssh, so a machine that is down cannot hide why"
     );
     assert_eq!(home.forward_left(), None);
 
@@ -283,5 +310,67 @@ fn a_remote_daemon_that_is_down_is_named_and_doctor_runs_nothing_here() {
         "{}",
         text(&doctor.stdout)
     );
+    assert_eq!(home.forward_left(), None);
+}
+
+/// Catches: a command runnerctl prints to run next (`pause --force`, `cancel --confirm`, signing in again) that
+/// leaves out `--machine`, so running it acts on this machine's daemon instead of the one asked.
+#[test]
+fn a_command_printed_to_run_next_asks_the_same_machine() {
+    let home = Home::new();
+    let app = Router::new()
+        .route(
+            "/v1/repositories/pause",
+            post(|| async { (StatusCode::CONFLICT, "o/app has a running job") }),
+        )
+        .route("/v1/dashboard/sign-out", post(|| async { axum::Json(()) }));
+    home.serve_app(app, runnerd_fixtures::daemon().status);
+    let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+
+    let paused = home.runnerctl(&["--machine", "skiff", "pause", "--all"]);
+    assert!(
+        text(&paused.stderr).contains("`runnerctl --machine skiff pause --force --all`"),
+        "{}",
+        text(&paused.stderr)
+    );
+    let signed_out = home.runnerctl(&["--machine", "skiff", "web", "--sign-out-all"]);
+    assert!(signed_out.status.success(), "{}", text(&signed_out.stderr));
+    assert!(
+        text(&signed_out.stdout).contains("`runnerctl --machine skiff web --qr`"),
+        "{}",
+        text(&signed_out.stdout)
+    );
+}
+
+/// Catches: `runnerctl --machine skiff watch` ended by SIGTERM (a `timeout`, a service manager) leaving its `ssh`
+/// running and forwarding, and its private directory behind.
+#[test]
+fn a_terminated_runnerctl_stops_its_ssh() {
+    let home = Home::new();
+    let app = Router::new().route("/v1/events", get(std::future::pending::<String>));
+    home.serve_app(app, runnerd_fixtures::daemon().status);
+    let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    let _ = std::fs::remove_file(home.0.join("ssh.pid"));
+
+    let mut watch = home.spawn(&["--machine", "skiff", "watch"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !home.0.join("ssh.pid").exists() {
+        assert!(Instant::now() < deadline, "watch started no ssh");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Past opening the forward, waiting on the event stream.
+    std::thread::sleep(Duration::from_millis(500));
+    let killed = Command::new("kill")
+        .args(["-TERM", &watch.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "SIGTERM sent");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while watch.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "runnerctl ended on SIGTERM");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(home.forward_left(), None);
 }

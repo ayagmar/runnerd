@@ -48,11 +48,13 @@ pub(crate) fn file() -> Result<PathBuf, Error> {
         .ok_or_else(|| Error::Local("neither XDG_CONFIG_HOME nor HOME is set".to_owned()))
 }
 
-/// Where the forward's private directory goes: `$XDG_RUNTIME_DIR`, else the system's temporary directory.
+/// Where the forward's private directory goes: `$XDG_RUNTIME_DIR` when it is an absolute path without `:`, which
+/// `ssh -L` would split, else the system's temporary directory.
 pub(crate) fn private_base() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute() && !dir.to_string_lossy().contains(':'))
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// The machines in `path`; none when it does not exist.
@@ -68,7 +70,8 @@ pub(crate) fn read(path: &Path) -> Result<Machines, Error> {
     }
 }
 
-/// Writes `machines` to `path` whole: a new file renamed over the old, so a crash leaves one or the other.
+/// Writes `machines` to `path` whole: a new file of this process renamed over the old, so a crash leaves one or the
+/// other and two runnerctls never write one new file.
 fn write(path: &Path, machines: &Machines) -> Result<(), Error> {
     let local =
         |error: std::io::Error| Error::Local(format!("cannot write {}: {error}", path.display()));
@@ -76,7 +79,7 @@ fn write(path: &Path, machines: &Machines) -> Result<(), Error> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(local)?;
     }
-    let new = path.with_extension("toml.new");
+    let new = path.with_extension(format!("toml.{}.new", std::process::id()));
     std::fs::write(&new, text).map_err(local)?;
     std::fs::rename(&new, path).map_err(local)
 }
@@ -156,9 +159,8 @@ async fn add(
     private: &Path,
 ) -> Result<Machine, Error> {
     check_name(&name).map_err(Error::Local)?;
-    let mut machines = read(path)?;
     // A name already taken is refused before ssh runs.
-    if let Ok(other) = machines.get(&name) {
+    if let Ok(other) = read(path)?.get(&name) {
         return Err(Error::Local(format!(
             "a machine named {name} is already added, reached with ssh {}; `runnerctl machine rm {name}` first",
             other.ssh
@@ -196,6 +198,8 @@ async fn add(
             .map(|machine| machine.id),
         None => None,
     };
+    // Read again: another runnerctl may have changed the list while ssh ran.
+    let mut machines = read(path)?;
     machines
         .add(machine.clone(), local_id.as_deref())
         .map_err(Error::Local)?;
@@ -294,6 +298,38 @@ mod tests {
             1,
             "nothing refused was kept"
         );
+    }
+
+    /// Catches: a machine added or removed by another runnerctl while this `add` waited on ssh, lost when this one
+    /// writes back the list it read before.
+    #[tokio::test]
+    async fn add_keeps_a_machine_another_runnerctl_added_meanwhile() {
+        let dir = crate::testing::TempDir::new();
+        let path = dir.0.join("machines.toml");
+        let meanwhile = path.clone();
+        let status = status(Some("1a2b3c4d"));
+        let remote = Router::new().route(
+            "/v1/status",
+            get(move || {
+                let status = status.clone();
+                let path = meanwhile.clone();
+                async move {
+                    std::fs::write(
+                        &path,
+                        "[[machine]]\nname = \"dory\"\nssh = \"dory\"\nsocket = \"/run/user/1002/runnerd.sock\"\nid = \"9f9f9f9f\"\n",
+                    )
+                    .unwrap();
+                    axum::Json(status)
+                }
+            }),
+        );
+        let ssh = FakeSsh::serving(remote, "/run/user/1001\n");
+        run(add("skiff"), true, &path, None, ssh, &dir.0)
+            .await
+            .unwrap();
+        let machines = read(&path).unwrap();
+        assert!(machines.get("dory").is_ok(), "dory is kept");
+        assert!(machines.get("skiff").is_ok(), "skiff is added");
     }
 
     /// Catches: a 0.1.5 daemon, which names no machine id, being kept with an empty id no duplicate check can match.
