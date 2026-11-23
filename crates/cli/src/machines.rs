@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use runnerd_core::api::Status;
-use runnerd_core::client::{Client, Endpoint, OpenSsh, SshProgram, remote_socket};
+use runnerd_core::api::{JobPage, JobQuery, MachineReading, Status};
+use runnerd_core::client::{Client, ClientError, Endpoint, OpenSsh, SshProgram, remote_socket};
 use runnerd_core::config::machines::{Machine, Machines, SshTarget, check_name, check_socket};
 
 use crate::{Error, output, print_json};
@@ -86,6 +86,87 @@ pub(crate) async fn client(path: &Path, name: &str) -> Result<Client, Error> {
     let machines = read(path)?;
     let machine = machines.get(name).map_err(Error::Local)?.clone();
     Ok(Client::open(Endpoint::Ssh(machine), Arc::new(OpenSsh), &private_base()).await?)
+}
+
+/// What this machine's daemon and every added machine's answer to `query`, read at once, this machine first. One
+/// that cannot be reached is a reading of why; `local` is `None` without a socket to ask.
+pub(crate) async fn readings(
+    local: Option<Client>,
+    machines: &Machines,
+    query: &JobQuery,
+    program: Arc<dyn SshProgram>,
+    private: &Path,
+) -> Vec<MachineReading> {
+    let mut tasks = Vec::new();
+    let query = query.clone();
+    let local_query = query.clone();
+    tasks.push(tokio::spawn(async move {
+        match local {
+            Some(client) => ask(None, &client, &local_query).await,
+            None => MachineReading {
+                machine: THIS_MACHINE.to_owned(),
+                status: Err("XDG_RUNTIME_DIR is not set; pass --socket".to_owned()),
+                jobs: Err("XDG_RUNTIME_DIR is not set; pass --socket".to_owned()),
+            },
+        }
+    }));
+    for machine in machines.all() {
+        let machine = machine.clone();
+        let program = program.clone();
+        let private = private.to_owned();
+        let query = query.clone();
+        tasks.push(tokio::spawn(async move {
+            let name = machine.name.clone();
+            match Client::open(Endpoint::Ssh(machine), program, &private).await {
+                Ok(client) => ask(Some(name), &client, &query).await,
+                Err(error) => unread(name, &error),
+            }
+        }));
+    }
+    let mut readings = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if let Ok(reading) = task.await {
+            readings.push(reading);
+        }
+    }
+    readings
+}
+
+/// What this machine is called when its daemon does not say.
+const THIS_MACHINE: &str = "this machine";
+
+/// Reads one daemon's status and jobs. `name` is the machine's in `machines.toml`; for this machine, its daemon's.
+async fn ask(name: Option<String>, client: &Client, query: &JobQuery) -> MachineReading {
+    let status = client.get::<Status>("/v1/status").await;
+    let jobs = client.get_query::<JobPage>("/v1/jobs", query).await;
+    let machine = name.unwrap_or_else(|| {
+        status
+            .as_ref()
+            .ok()
+            .and_then(|status| status.machine.as_ref())
+            .map_or_else(|| THIS_MACHINE.to_owned(), |machine| machine.name.clone())
+    });
+    MachineReading {
+        machine,
+        status: status.map_err(|error| reason(&error)),
+        jobs: jobs.map_err(|error| reason(&error)),
+    }
+}
+
+fn unread(machine: String, error: &ClientError) -> MachineReading {
+    MachineReading {
+        machine,
+        status: Err(reason(error)),
+        jobs: Err(reason(error)),
+    }
+}
+
+/// Why a machine could not be read, without the machine's name, which its line starts with.
+fn reason(error: &ClientError) -> String {
+    match error {
+        ClientError::Unreachable { reason, .. } => reason.clone(),
+        error => error.to_string(),
+    }
 }
 
 /// `runnerctl machine …`. `local` is this machine's daemon, asked for its id so a machine that is this one is

@@ -167,3 +167,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0158](0158-a-host-has-a-name-that-its-status-and-messages-carry.md) | A host has a name that its status and messages carry | Accepted |
 | [0159](0159-time-the-host-slept-is-downtime-not-waiting.md) | Time the host slept is downtime, not waiting | Accepted |
 | [0164](0164-runnerctl-reaches-another-machine-over-an-ssh-forward.md) | runnerctl reaches another machine over an SSH forward | Accepted |
+| [0165](0165-one-view-over-several-machines-is-merged-by-core.md) | One view over several machines is merged by core | Accepted |

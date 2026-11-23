@@ -9,6 +9,7 @@
     reason = "tests fail by panicking"
 )]
 
+use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::routing::get;
-use runnerd_core::api::Status;
+use runnerd_core::api::{Fleet, JobPage, Status};
 
 /// The fake `ssh`: prints the remote runtime directory for a command, or forwards `-L local:remote` until killed,
 /// writing its pid where the test can find it.
@@ -137,13 +138,25 @@ impl Home {
 
     /// Serves a fake daemon whose status names `machine` on the remote socket.
     fn serve(&self, status: Status) {
-        let app = Router::new().route(
-            "/v1/status",
-            get(move || {
-                let status = status.clone();
-                async move { axum::Json(status) }
-            }),
-        );
+        let page = JobPage {
+            jobs: runnerd_fixtures::daemon().summaries(),
+            next: None,
+        };
+        let app = Router::new()
+            .route(
+                "/v1/status",
+                get(move || {
+                    let status = status.clone();
+                    async move { axum::Json(status) }
+                }),
+            )
+            .route(
+                "/v1/jobs",
+                get(move || {
+                    let page = page.clone();
+                    async move { axum::Json(page) }
+                }),
+            );
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
             .block_on(async { tokio::net::UnixListener::bind(self.0.join("remote/runnerd.sock")) })
@@ -284,4 +297,56 @@ fn a_remote_daemon_that_is_down_is_named_and_doctor_runs_nothing_here() {
         text(&doctor.stdout)
     );
     assert_eq!(home.forward_left(), None);
+}
+
+/// Catches: one machine that is down failing the whole view, a job shown twice, or the exit code saying all is well
+/// when a machine could not be read.
+#[test]
+fn fleet_reads_every_machine_and_names_the_one_that_is_down() {
+    let home = Home::new();
+    home.serve(runnerd_fixtures::daemon().status);
+    let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    let file = home.0.join("config/runnerd/machines.toml");
+    let mut machines = std::fs::read_to_string(&file).unwrap();
+    let _ = write!(
+        machines,
+        "\n[[machine]]\nname = \"dory\"\nssh = \"dory\"\nsocket = \"{}\"\nid = \"0d0d0d0d\"\n",
+        home.0.join("remote/gone.sock").display()
+    );
+    std::fs::write(&file, machines).unwrap();
+
+    let read = home.runnerctl(&["fleet", "--json"]);
+    assert_eq!(read.status.code(), Some(1), "a machine could not be read");
+    let fleet: Fleet = serde_json::from_slice(&read.stdout).unwrap();
+    let names: Vec<&str> = fleet
+        .machines
+        .iter()
+        .map(|machine| machine.name.as_str())
+        .collect();
+    assert_eq!(names, ["this machine", "skiff", "dory"]);
+    assert!(
+        fleet.machines[0]
+            .summary()
+            .contains("runnerd is not running"),
+        "{}",
+        fleet.machines[0].summary()
+    );
+    assert!(
+        fleet.machines[2]
+            .summary()
+            .contains("runnerd is not running there"),
+        "{}",
+        fleet.machines[2].summary()
+    );
+    let page = runnerd_fixtures::daemon().summaries();
+    assert_eq!(fleet.jobs.len(), page.len(), "each of skiff's jobs once");
+    assert!(
+        fleet.jobs.iter().all(|job| job.machine == "skiff"),
+        "skiff's records"
+    );
+    assert_eq!(home.forward_left(), None);
+
+    let both = home.runnerctl(&["--machine", "skiff", "fleet"]);
+    assert!(!both.status.success(), "fleet reads every machine");
 }

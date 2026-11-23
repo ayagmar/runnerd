@@ -23,6 +23,10 @@ runnerctl --machine skiff logs 9001 --follow
 
 `runnerctl machine list` shows the machines, `runnerctl machine rm skiff` forgets one.
 
+## Every machine at once
+
+`runnerctl fleet` reads this machine's daemon and every added one together. It prints a line per machine (running, queued, slots held, version) and one page of all their jobs, newest first, with the machine whose record shows. A job both machines saw shows once, from the machine that ran it, not as `elsewhere` from the other. A machine that cannot be read gets a line saying why, and `fleet` exits 1. `--before` and `--limit` page as `runnerctl jobs` does, and `--json` prints the merged view.
+
 ## When it fails
 
 `ssh` runs with `BatchMode=yes`, so it cannot ask for a password, a key's passphrase, a new host key or Tailscale SSH's browser check. When one of those is needed, the error says so: run `ssh me@skiff.tail0b5e.ts.net` once yourself, then try again. Your `ControlMaster` settings are not used.

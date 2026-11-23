@@ -65,9 +65,14 @@ pub const HOST_SHORT: u64 = 9302;
 /// A queued job that fits, behind [`HOST_SHORT`], which waited long enough that no younger job starts before it.
 pub const BEHIND_MEMORY: u64 = 9303;
 
+mod fleet;
 mod lens;
 mod logs;
 
+pub use fleet::{
+    DORY_DOWN, FleetFacts, FleetJobFact, MachineFact, SKIFF_ONLY, fleet, fleet_facts,
+    fleet_readings,
+};
 pub use lens::{
     DeltaFact, EndFact, GapFact, LENS_BASELINE, LENS_COMPARED, LENS_FIRST_RUN, LENS_KEPT,
     LENS_ORPHAN, LENS_REMOVED, LENS_SINCE, LENS_SKIPPED, LENS_UNKNOWN_END, LENS_UNWATCHED,

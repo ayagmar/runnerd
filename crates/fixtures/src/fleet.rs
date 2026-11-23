@@ -1,0 +1,166 @@
+//! Three machines read together (ADR 0165): this one, `tern`, as [`daemon`] answers; `skiff`, an older daemon whose
+//! status names no machine, which ran [`ELSEWHERE`] and a newer job; and `dory`, which cannot be reached. With the
+//! facts core computes from them.
+
+use runnerd_core::api::{Fleet, JobPage, JobRunner, JobState, MachineReading, Tone};
+
+use crate::{ELSEWHERE, NOW, daemon};
+
+/// A job only `skiff` ran, newer than every job of `tern`.
+pub const SKIFF_ONLY: u64 = 9500;
+
+/// Why `dory` cannot be read.
+pub const DORY_DOWN: &str =
+    "ssh dory failed (ssh said: ssh: connect to host dory port 22: Connection timed out)";
+
+/// What a client reads from the three machines, `tern` first.
+pub fn fleet_readings() -> Vec<MachineReading> {
+    let tern = daemon();
+    let mut skiff_status = tern.status.clone();
+    skiff_status.machine = None;
+    "0.1.5".clone_into(&mut skiff_status.version);
+    skiff_status.shutting_down = false;
+    let ran = |id: u64, state: JobState| {
+        let mut job = tern
+            .job(ELSEWHERE)
+            .map_or_else(|| tern.summaries()[0].clone(), |job| job.summary.clone());
+        job.id = id;
+        job.state = state;
+        job.conclusion = state.is_final().then(|| "success".to_owned());
+        job.timeline.queued_at = NOW - 600;
+        job.runner = Some(JobRunner {
+            name: "runnerd-1a2b3c4d-skiff-jvm-1-1700000000".to_owned(),
+            profile: "jvm".to_owned(),
+            slot: 1,
+            memory_cap: None,
+            cpu_cap: None,
+        });
+        job
+    };
+    vec![
+        MachineReading {
+            machine: "tern".to_owned(),
+            status: Ok(tern.status.clone()),
+            jobs: Ok(JobPage {
+                jobs: tern.summaries(),
+                next: None,
+            }),
+        },
+        MachineReading {
+            machine: "skiff".to_owned(),
+            status: Ok(skiff_status),
+            jobs: Ok(JobPage {
+                jobs: vec![
+                    ran(SKIFF_ONLY, JobState::Running),
+                    ran(ELSEWHERE, JobState::Completed),
+                ],
+                next: None,
+            }),
+        },
+        MachineReading {
+            machine: "dory".to_owned(),
+            status: Err(DORY_DOWN.to_owned()),
+            jobs: Err(DORY_DOWN.to_owned()),
+        },
+    ]
+}
+
+/// A machine's line, as core words and tones it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineFact {
+    /// Its name.
+    pub name: String,
+    /// [`runnerd_core::api::FleetMachine::summary`].
+    pub summary: String,
+    /// [`runnerd_core::api::FleetMachine::tone`].
+    pub tone: Tone,
+}
+
+/// What every client of the fleet shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetFacts {
+    /// Each machine, in order.
+    pub machines: Vec<MachineFact>,
+    /// Each job shown, newest first.
+    pub jobs: Vec<FleetJobFact>,
+}
+
+/// A job of the fleet's page and the machine whose record of it shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetJobFact {
+    /// The job's ID.
+    pub id: u64,
+    /// The machine.
+    pub machine: String,
+}
+
+/// Core's facts of a merged fleet.
+pub fn fleet_facts(fleet: &Fleet) -> FleetFacts {
+    FleetFacts {
+        machines: fleet
+            .machines
+            .iter()
+            .map(|machine| MachineFact {
+                name: machine.name.clone(),
+                summary: machine.summary(),
+                tone: machine.tone(),
+            })
+            .collect(),
+        jobs: fleet
+            .jobs
+            .iter()
+            .map(|job| FleetJobFact {
+                id: job.job.id,
+                machine: job.machine.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The fleet of [`fleet_readings`], one page of up to 50 jobs.
+pub fn fleet() -> Fleet {
+    Fleet::merge(fleet_readings(), 50)
+}
+
+#[cfg(test)]
+mod tests {
+    use runnerd_core::api::{Reach, Tone};
+
+    use super::{DORY_DOWN, FleetJobFact, SKIFF_ONLY, fleet, fleet_facts};
+    use crate::ELSEWHERE;
+
+    /// Catches: the job skiff ran shown as tern's `elsewhere`, skiff's older status failing to read, and dory hiding
+    /// the others.
+    #[test]
+    fn the_fleet_shows_each_job_once_with_the_machine_that_ran_it_and_names_the_one_down() {
+        let fleet = fleet();
+        let facts = fleet_facts(&fleet);
+        let skiff = |id| FleetJobFact {
+            id,
+            machine: "skiff".to_owned(),
+        };
+        assert_eq!(facts.jobs[0], skiff(SKIFF_ONLY));
+        assert!(facts.jobs.contains(&skiff(ELSEWHERE)), "{:?}", facts.jobs);
+        assert_eq!(
+            facts.jobs.iter().filter(|job| job.id == ELSEWHERE).count(),
+            1,
+            "once"
+        );
+        assert!(
+            matches!(fleet.machines[1].reach, Reach::Read { id: None, .. }),
+            "skiff's older status reads, without an id"
+        );
+        assert!(
+            facts.machines[1].summary.ends_with("runnerd 0.1.5"),
+            "{}",
+            facts.machines[1].summary
+        );
+        assert_eq!(
+            facts.machines[2].summary,
+            format!("cannot be read: {DORY_DOWN}")
+        );
+        assert_eq!(facts.machines[2].tone, Tone::Bad);
+        assert_eq!(fleet.next, None);
+        assert!(!fleet.all_read(), "dory was not read");
+    }
+}

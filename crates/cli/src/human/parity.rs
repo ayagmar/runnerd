@@ -344,3 +344,30 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_with_each_profile
         assert!(text.contains(refusal), "{text}");
     }
 }
+
+/// Catches: `runnerctl fleet` wording a machine's line itself, or showing the job skiff ran under the machine that
+/// saw it elsewhere.
+#[test]
+fn fleet_states_each_machine_as_core_words_it_and_each_job_under_the_machine_that_ran_it() {
+    let fleet = runnerd_fixtures::fleet();
+    let facts = runnerd_fixtures::fleet_facts(&fleet);
+    let text = super::fleet(&fleet, NOW, PLAIN);
+    for machine in &facts.machines {
+        let line = line_of(&text, &[machine.name.as_str()]);
+        assert!(line.ends_with(&machine.summary), "{line}");
+    }
+    let coloured_text = super::fleet(&fleet, NOW, COLOUR);
+    let dory = &facts.machines[2];
+    assert!(
+        coloured(&coloured_text, &dory.summary, dory.tone.into()),
+        "dory in core's tone"
+    );
+    for job in &facts.jobs {
+        let row = line_of(&text, &[job.id.to_string().as_str()]);
+        assert_eq!(
+            row.split_whitespace().nth(1),
+            Some(job.machine.as_str()),
+            "{row}"
+        );
+    }
+}

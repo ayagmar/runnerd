@@ -11,9 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand, ValueEnum};
 use runnerd_core::api::{
     ActionQuery, ActionResult, Caches, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event,
-    EventQuery, HostWait, Insights, InsightsQuery, Job, JobAction, JobPage, JobQuery, JobState,
-    LogQuery, NotifyTest, NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
-    RemoveRecordsQuery, RemovedRecords, Resize, Savings, ShellQuery, Sizing, SizingQuery, Status,
+    EventQuery, Fleet, HostWait, Insights, InsightsQuery, Job, JobAction, JobPage, JobQuery,
+    JobState, LogQuery, NotifyTest, NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused,
+    Records, RemoveRecordsQuery, RemovedRecords, Resize, Savings, ShellQuery, Sizing, SizingQuery,
+    Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
@@ -227,6 +228,19 @@ enum Command {
     ///
     /// With --machine, only --qr and --sign-out-all: the login link is a file on that machine.
     Web(WebArgs),
+    /// Show every machine's status and one page of all their jobs, newest first: this machine's daemon and each one
+    /// `runnerctl machine add` named, read over SSH at once. A job several machines saw shows once, from the one that
+    /// ran it.
+    ///
+    /// A machine that cannot be read is shown with why, and the exit code is 1.
+    Fleet {
+        /// Only jobs older than this job ID: the next page.
+        #[arg(long)]
+        before: Option<u64>,
+        /// At most this many jobs [default: 50, at most 500].
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Add, list or forget the other machines runnerctl reaches over SSH with --machine.
     Machine {
         #[command(subcommand)]
@@ -404,6 +418,14 @@ async fn start(cli: Cli) -> Result<ExitCode, Error> {
         )
         .await;
     }
+    if let Command::Fleet { before, limit } = command {
+        if machine.is_some() {
+            return Err(Error::Local(
+                "runnerctl fleet reads every machine; --machine names one".to_owned(),
+            ));
+        }
+        return fleet(socket.map(Client::new), json, before, limit).await;
+    }
     let client =
         match machine {
             Some(name) => machines::client(&machines::file()?, &name).await?,
@@ -412,6 +434,41 @@ async fn start(cli: Cli) -> Result<ExitCode, Error> {
             })?),
         };
     run(&client, json, command).await
+}
+
+/// The largest page `runnerctl fleet` asks for, as the daemon caps `/v1/jobs`.
+const FLEET_LIMIT_MAX: u32 = 500;
+
+/// `runnerctl fleet`: every machine read at once and merged by core.
+async fn fleet(
+    local: Option<Client>,
+    json: bool,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<ExitCode, Error> {
+    let limit = limit.unwrap_or(50).clamp(1, FLEET_LIMIT_MAX);
+    let query = JobQuery {
+        before,
+        limit: Some(limit),
+        ..JobQuery::default()
+    };
+    let machines = machines::read(&machines::file()?)?;
+    let readings = machines::readings(
+        local,
+        &machines,
+        &query,
+        std::sync::Arc::new(runnerd_core::client::OpenSsh),
+        &machines::private_base(),
+    )
+    .await;
+    let fleet = Fleet::merge(readings, usize::try_from(limit).unwrap_or(usize::MAX));
+    let all_read = fleet.all_read();
+    if json {
+        print_json(&fleet)?;
+    } else {
+        output::text(&human::fleet(&fleet, now(), output::paint()));
+    }
+    Ok(exit(all_read))
 }
 
 /// `$XDG_RUNTIME_DIR/runnerd.sock`, where `runnerd serve` listens by default.
@@ -625,8 +682,8 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
         Command::Web(args) => return web(client, &args).await,
-        // `start` runs it without a client.
-        Command::Machine { .. } => {}
+        // `start` runs them without a client.
+        Command::Machine { .. } | Command::Fleet { .. } => {}
     }
     Ok(ExitCode::SUCCESS)
 }
