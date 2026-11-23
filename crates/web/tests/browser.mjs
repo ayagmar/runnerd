@@ -308,6 +308,29 @@ try {
       kept.hidden > 0 && Math.abs(kept.moved) <= 1,
       `${sizes[1].name}: ${kept.hidden} lines hidden above the reader move their line ${kept.moved}px`,
     );
+    // A scroll up in the same moment a line comes: the line arrives before the browser reports the scroll, and must
+    // not take the reader back down. Once a CI flake when the demo's next line landed on the 40px nudge above.
+    await page.locator('[data-jump]').tap();
+    await page.waitForTimeout(1500);
+    const raced = await page.evaluate(async () => {
+      const tail = document.getElementById('log-lines');
+      scrollBy({ top: -40, behavior: 'instant' });
+      const line = [...tail.children].find((li) => li.getClientRects().length > 0 && li.getBoundingClientRect().top >= 0);
+      const before = line.getBoundingClientRect().top;
+      const li = document.createElement('li');
+      li.value = tail.lastElementChild.value + 1;
+      li.innerHTML = `<span class="ln">${li.value}</span><span class="text">appended</span>`;
+      tail.append(li);
+      await new Promise((done) => setTimeout(done, 300));
+      return {
+        jump: !document.querySelector('[data-jump]').hidden,
+        moved: Math.round(line.getBoundingClientRect().top - before),
+      };
+    });
+    check(
+      raced.jump && Math.abs(raced.moved) <= 1,
+      `${sizes[1].name}: a line that comes with a scroll up leaves the reader's line where it is (${raced.moved}px)`,
+    );
     // The log comes last on a phone, after the charts and the latest runs, so they stay near the top.
     const order = await page.evaluate(() =>
       ['metrics', 'runs', 'log'].map((id) => document.getElementById(id)?.getBoundingClientRect().top ?? -1),
