@@ -116,11 +116,13 @@ fn host_reads_as_core_says_it(html: &str, daemon: &Daemon, facts: &Facts) {
 }
 
 #[tokio::test]
-async fn why_jobs_wait_for_caches_a_crash_tore_reads_as_core_says_it() {
-    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::torn()).await;
-    let html = dashboard.page(&cookie, "/").await.body;
-    for wait in &facts.waits {
-        assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
+async fn why_jobs_wait_for_caches_a_crash_tore_or_on_battery_reads_as_core_says_it() {
+    for daemon in [runnerd_fixtures::torn(), runnerd_fixtures::on_battery()] {
+        let (dashboard, cookie, _, facts) = dashboard_of(daemon).await;
+        let html = dashboard.page(&cookie, "/").await.body;
+        for wait in &facts.waits {
+            assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
+        }
     }
 }
 

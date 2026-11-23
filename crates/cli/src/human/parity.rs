@@ -62,6 +62,17 @@ fn status_states_a_host_limit_past_memory_max_as_core_does() {
 }
 
 #[test]
+fn status_states_why_jobs_wait_on_battery_as_core_does() {
+    let daemon = runnerd_fixtures::on_battery();
+    let facts = facts(&daemon);
+    let text = status(&daemon.status, NOW, PLAIN);
+    for wait in &facts.waits {
+        let row = line_of(&text, &[&wait.job.to_string()]);
+        assert!(row.ends_with(&wait.reason), "{}: {row}", wait.reason);
+    }
+}
+
+#[test]
 fn status_states_why_jobs_wait_for_caches_a_crash_tore_as_core_does() {
     let daemon = runnerd_fixtures::torn();
     let facts = facts(&daemon);

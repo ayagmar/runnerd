@@ -846,6 +846,9 @@ pub enum Waiting {
         /// mounts them. Empty while it has not tried, or Docker failed.
         volumes: Vec<String>,
     },
+    /// The host runs on its battery and `[host] on_battery` is `pause`, so no runner starts until it is on mains power
+    /// again (ADR 0161).
+    OnBattery,
     /// A reason from a newer daemon than this client knows, so a reason added later does not keep the client from
     /// reading the status.
     #[serde(other)]
@@ -855,7 +858,8 @@ pub enum Waiting {
 /// What a [`Waiting`] reason waits on, which clients draw it by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
-    /// Something the owner can act on: a pause, runners that failed to take a job, or labels no pool serves.
+    /// Something the owner can act on: a pause, the host on battery, runners that failed to take a job, or labels no
+    /// pool serves.
     Act,
     /// Something that clears by itself shortly: a runner starting, a reseed, an image pull, an older job's start.
     Soon,
@@ -876,7 +880,10 @@ impl Waiting {
     /// What it waits on.
     pub fn kind(&self) -> WaitKind {
         match self {
-            Waiting::Paused | Waiting::Backoff { .. } | Waiting::NoPool { .. } => WaitKind::Act,
+            Waiting::Paused
+            | Waiting::Backoff { .. }
+            | Waiting::NoPool { .. }
+            | Waiting::OnBattery => WaitKind::Act,
             Waiting::Torn { volumes } if !volumes.is_empty() => WaitKind::Act,
             Waiting::Unknown => WaitKind::Other,
             Waiting::Torn { .. }
@@ -907,6 +914,9 @@ impl Waiting {
         };
         match self {
             Waiting::Paused => format!("{} is paused", job.repository),
+            Waiting::OnBattery => {
+                "The host is on battery; runners start once it is plugged in".to_owned()
+            }
             Waiting::Unknown => "Waits for a reason this client does not know yet".to_owned(),
             Waiting::NoPool { labels } if labels.is_empty() => {
                 "It asks for no labels, so no profile serves it".to_owned()

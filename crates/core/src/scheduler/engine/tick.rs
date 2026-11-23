@@ -30,9 +30,9 @@ use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Plan, Pool, Preparing,
-    Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef, StartFor,
-    StopReason, plan,
+    Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Pause, Plan, Pool,
+    Preparing, Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef,
+    StartFor, StopReason, plan,
 };
 use crate::store::Store;
 use crate::time;
@@ -369,6 +369,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         pace.lap(Phase::Following, self.passes_in_tick);
         self.look_for_sleep();
+        self.look_at_power();
         let (plan, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => {
@@ -829,7 +830,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     name: repository.name.clone(),
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
-                    paused: self.control.is_paused(&repository.name),
+                    // The owner's pause first: it outlasts the battery.
+                    paused: if self.control.is_paused(&repository.name) {
+                        Some(Pause::Repository)
+                    } else if self.on_battery() {
+                        Some(Pause::Battery)
+                    } else {
+                        None
+                    },
                     held: state.health(&repository.profile).and_then(PoolHealth::held),
                     queued: self.listed_demand(repository, &taken),
                     runner_memory: None,

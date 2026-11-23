@@ -1630,3 +1630,83 @@ fn a_reading_long_after_the_last_starts_a_new_drive_window() {
         "the next window starts after the gap"
     );
 }
+
+#[test]
+fn only_a_system_battery_that_discharges_puts_the_host_on_battery() {
+    use super::power::{Power, read};
+    // Each host: its supplies as (name, type, scope, status), `None` for a file the kernel leaves out.
+    type Supplies<'a> = &'a [(&'a str, &'a str, Option<&'a str>, Option<&'a str>)];
+    let hosts: [(&str, Supplies<'_>, Power); 9] = [
+        // A desktop: nothing listed, or no directory at all.
+        ("desktop", &[], Power::Mains),
+        ("missing", &[], Power::Mains),
+        // A laptop that charges only over USB-C has no Mains supply: plugged in, its battery charges.
+        (
+            "usb-c",
+            &[
+                ("ucsi-source-psy-1", "USB", None, Some("Charging")),
+                ("BAT0", "Battery", None, Some("Charging")),
+            ],
+            Power::Mains,
+        ),
+        // Plugged in and held at a charge limit, or full.
+        (
+            "limit",
+            &[("BAT0", "Battery", None, Some("Not charging"))],
+            Power::Mains,
+        ),
+        (
+            "full",
+            &[("BAT0", "Battery", Some("System"), Some("Full"))],
+            Power::Mains,
+        ),
+        // A mouse's battery is the mouse's.
+        (
+            "mouse",
+            &[
+                ("AC", "Mains", None, None),
+                (
+                    "hidpp_battery_0",
+                    "Battery",
+                    Some("Device"),
+                    Some("Discharging"),
+                ),
+            ],
+            Power::Mains,
+        ),
+        // A battery whose status cannot be read says nothing.
+        ("unread", &[("BAT0", "Battery", None, None)], Power::Mains),
+        // Unplugged: the battery runs the host, whatever another battery says.
+        (
+            "unplugged",
+            &[
+                ("BAT0", "Battery", None, Some("Discharging")),
+                ("BAT1", "Battery", Some("System"), Some("Not charging")),
+            ],
+            Power::Battery,
+        ),
+        (
+            "system",
+            &[("BAT0", "Battery", Some("System"), Some("Discharging"))],
+            Power::Battery,
+        ),
+    ];
+    let dir = TestDir::new("power");
+    for (host, supplies, power) in hosts {
+        let sys = dir.0.join(host);
+        if host != "missing" {
+            std::fs::create_dir_all(sys.join("class/power_supply")).unwrap();
+        }
+        for (name, kind, scope, status) in supplies {
+            let supply = sys.join("class/power_supply").join(name);
+            std::fs::create_dir_all(&supply).unwrap();
+            std::fs::write(supply.join("type"), format!("{kind}\n")).unwrap();
+            for (file, value) in [("scope", scope), ("status", status)] {
+                if let Some(value) = value {
+                    std::fs::write(supply.join(file), format!("{value}\n")).unwrap();
+                }
+            }
+        }
+        assert_eq!(read(&sys), power, "{host}");
+    }
+}

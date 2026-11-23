@@ -1529,7 +1529,7 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
                     name: pool.repository.clone(),
                     profile: pool.profile.clone(),
                     labels: vec![pool.profile.clone()],
-                    paused: false,
+                    paused: None,
                     held: None,
                     queued: matching
                         .map(|(id, _)| QueuedJob {
