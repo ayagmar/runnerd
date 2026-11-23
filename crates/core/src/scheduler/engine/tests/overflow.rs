@@ -329,3 +329,94 @@ async fn after_a_wake_a_job_without_a_queue_time_waits_overflow_after_again() {
     tick_after(&mut engine, &clock, 30).await;
     assert_eq!(registrations(&github), 1, "45 s since the wake");
 }
+
+// Catches finding M3 as the review found it open: the full primary frees a slot and registers a runner for the job,
+// which the runners listing before the start shows online and idle, and this host starts a second one beside it.
+#[tokio::test]
+async fn a_job_waits_while_the_runners_listing_shows_the_primarys_fresh_idle_runner_for_it() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("overflow-fresh-peer"),
+    );
+    let (mut engine, handle, clock) = overflow(&github, &docker, &dir).await;
+    {
+        let mut state = github.0.lock().unwrap();
+        state.runners = vec![peer(800, true), peer(801, true)];
+        state.queued = vec![queued_at(1, clock.now_ms() - 600_000)];
+    }
+    tick_after(&mut engine, &clock, 0).await;
+    // The primary frees a slot and registers a runner, which GitHub has not yet given the job.
+    github.0.lock().unwrap().runners.push(peer(802, false));
+    tick_after(&mut engine, &clock, 15).await;
+    assert_eq!(
+        registrations(&github),
+        0,
+        "the primary's idle runner may take it"
+    );
+    assert!(
+        matches!(waiting(&handle)[..], [Some(api::Waiting::Overflow { .. })]),
+        "left to the primary: {:?}",
+        waiting(&handle)
+    );
+    tick_after(&mut engine, &clock, 15).await;
+    assert_eq!(
+        registrations(&github),
+        1,
+        "the same runner idle a listing later is not getting it"
+    );
+}
+
+// Catches finding 2 of the review: on an idle repository the runners are listed every third probe, so a job first
+// listed here waited for that turn, three poll intervals, rather than the next listing.
+#[tokio::test]
+async fn after_a_restart_an_old_job_starts_at_the_next_scheduled_listing() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("overflow-pace"),
+    );
+    let (mut engine, _handle, clock) = overflow(&github, &docker, &dir).await;
+    github.0.lock().unwrap().queued = vec![queued_at(1, clock.now_ms() - 3_600_000)];
+    let interval = Duration::from_secs(15);
+    for _ in 0..2 {
+        clock.advance(interval);
+        engine.age_listings(interval);
+        engine
+            .tick_listing(Shutdown::No, crate::scheduler::engine::tick::Scope::Due)
+            .await;
+    }
+    assert_eq!(
+        registrations(&github),
+        1,
+        "listed twice with its runners between"
+    );
+}
+
+// Catches finding 3 of the review: a job this host already took on held again when the next runners listing failed,
+// so its status says it is left to the primary while this host's runner boots for it.
+#[tokio::test]
+async fn a_job_once_released_stays_released_when_a_runners_listing_fails() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("overflow-released"),
+    );
+    let (mut engine, handle, clock) = overflow(&github, &docker, &dir).await;
+    github.0.lock().unwrap().queued = vec![queued_at(1, clock.now_ms() - 600_000)];
+    tick_after(&mut engine, &clock, 0).await;
+    tick_after(&mut engine, &clock, 15).await;
+    assert_eq!(registrations(&github), 1);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .failed_runners
+        .insert("o/r".to_owned(), reqwest::StatusCode::BAD_GATEWAY);
+    tick_after(&mut engine, &clock, 15).await;
+    assert!(
+        !matches!(waiting(&handle)[..], [Some(api::Waiting::Overflow { .. })]),
+        "this host's runner boots for it: {:?}",
+        waiting(&handle)
+    );
+}

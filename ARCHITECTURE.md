@@ -456,7 +456,8 @@ always returns, so the daemon closes and flushes the history.
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - Machines that serve the same labels do not talk to each other. One is the primary; another with `[host] role =
   "overflow"` leaves each queued job out of its plan, as `Waiting::Overflow`, until GitHub queued it
-  `overflow_after` ago and it was listed twice there with a runners listing between, keeps no warm runner, and gives
+  `overflow_after` ago, it was listed twice there with a runners listing between, and that listing shows no other
+  machine's runner newly idle with labels that match it; a job once released stays so. It keeps no warm runner, and gives
   an idle runner `OVERFLOW_IDLE_TIMEOUT`, which the plan takes as `Repository::idle_after`. The deferral is its own
   wait cause, which sizing leaves out ([ADR 0162](docs/adr/0162-an-overflow-host-starts-a-runner-only-for-a-job-no-other-host-took-in-time.md)).
 - `scheduler::plan` and `scheduler::warm` do no I/O and read no clock.

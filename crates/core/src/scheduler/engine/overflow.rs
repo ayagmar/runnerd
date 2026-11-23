@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::github::QueuedJob;
+use crate::github::{QueuedJob, Runner};
 
 /// What an overflow host saw of the queued jobs and of the runners listings.
 ///
@@ -17,8 +17,8 @@ use crate::github::QueuedJob;
 pub(super) struct Overflow {
     /// By job ID, the jobs the last listing of their repository showed.
     seen: BTreeMap<u64, Sighting>,
-    /// By repository, the listing whose runners listing answered last; none while the last one failed or was refused.
-    runners: BTreeMap<String, u64>,
+    /// By repository, its last runners listing that answered; none while the last one failed or was refused.
+    runners: BTreeMap<String, Listed>,
 }
 
 /// One queued job as this host saw it.
@@ -26,47 +26,102 @@ pub(super) struct Overflow {
 struct Sighting {
     /// `owner/name`, whose listings show it.
     repository: String,
+    /// The job as the last listing showed it.
+    job: QueuedJob,
     /// When a listing first showed it, in ms since the epoch.
     first_at: u64,
     /// The listing that first showed it.
     first: u64,
     /// The listing that last showed it.
     last: u64,
+    /// Whether it was ever this host's to take: once it was, nothing holds it again, as a runner may boot for it.
+    released: bool,
+}
+
+/// A runners listing of one repository that answered.
+#[derive(Debug, Clone, Default)]
+struct Listed {
+    /// The engine's listing it was part of.
+    listing: u64,
+    /// By runner ID, the other machines' runners it showed online and idle.
+    idle: BTreeMap<u64, Idle>,
+}
+
+/// Another machine's runner a runners listing showed online and idle.
+#[derive(Debug, Clone)]
+struct Idle {
+    /// Its labels' names.
+    labels: Vec<String>,
+    /// The first listing of the ones in a row that showed it idle.
+    since: u64,
 }
 
 impl Overflow {
-    /// A listing of `repository`'s queued jobs, the engine's `listing`, answered with `jobs` at `now` (ms): those it
-    /// shows are seen in it, and those it no longer shows are forgotten.
+    /// A listing of `repository`'s queued jobs, the engine's `listing`, answered with `jobs` at `now` (ms), with
+    /// `after` the host's `overflow_after`: those it shows are seen in it, and those it no longer shows are forgotten.
+    /// Those it then may take are this host's for good, since the engine plans its starts next. Says whether it
+    /// showed a job not seen here before, which waits for the next runners listing.
     pub(super) fn queued_listed(
         &mut self,
         repository: &str,
         jobs: &[QueuedJob],
         listing: u64,
         now: u64,
-    ) {
+        after: Duration,
+    ) -> bool {
         self.seen.retain(|id, sighting| {
             sighting.repository != repository || jobs.iter().any(|job| job.id == *id)
         });
+        let mut new = false;
         for job in jobs {
             self.seen
                 .entry(job.id)
-                .and_modify(|sighting| sighting.last = sighting.last.max(listing))
-                .or_insert_with(|| Sighting {
-                    repository: repository.to_owned(),
-                    first_at: now,
-                    first: listing,
-                    last: listing,
+                .and_modify(|sighting| {
+                    sighting.last = sighting.last.max(listing);
+                    sighting.job = job.clone();
+                })
+                .or_insert_with(|| {
+                    new = true;
+                    Sighting {
+                        repository: repository.to_owned(),
+                        job: job.clone(),
+                        first_at: now,
+                        first: listing,
+                        last: listing,
+                        released: false,
+                    }
                 });
         }
+        self.release(repository, now, after);
+        new
     }
 
-    /// `repository`'s runners listing of the engine's `listing` answered.
-    pub(super) fn runners_listed(&mut self, repository: &str, listing: u64) {
-        self.runners.insert(repository.to_owned(), listing);
+    /// `repository`'s runners listing of the engine's `listing` answered, showing `idle` online and idle of the other
+    /// machines' runners.
+    pub(super) fn runners_listed<'runner>(
+        &mut self,
+        repository: &str,
+        listing: u64,
+        idle: impl IntoIterator<Item = &'runner Runner>,
+    ) {
+        let before = self.runners.remove(repository).unwrap_or_default();
+        let idle = idle
+            .into_iter()
+            .map(|runner| {
+                let since = before
+                    .idle
+                    .get(&runner.id)
+                    .map_or(listing, |idle| idle.since);
+                let labels = runner.labels.clone();
+                (runner.id, Idle { labels, since })
+            })
+            .collect();
+        self.runners
+            .insert(repository.to_owned(), Listed { listing, idle });
     }
 
     /// `repository`'s runners listing failed, or the rate limit refused it: what other machines registered is not
-    /// known until one answers again.
+    /// known until one answers again, so no job is released meanwhile. One released before stays so.
     pub(super) fn runners_unknown(&mut self, repository: &str) {
         self.runners.remove(repository);
     }
@@ -85,27 +140,66 @@ impl Overflow {
 
     /// Until when, in seconds since the epoch, an overflow host leaves `job` to the other machines at `now` (ms), with
     /// `after` its `[host] overflow_after`; `None` once it may start a runner for it. It may once GitHub queued it
-    /// `after` ago, or, where GitHub did not say when, this host first saw it `after` ago; and it was listed twice
-    /// here, the second time after a runners listing of its repository that began after the first. Until then it is
-    /// held, and past the first condition `until` is in the past.
+    /// `after` ago, or, where GitHub did not say when, this host first saw it `after` ago; it was listed twice here,
+    /// the second time after a runners listing of its repository that began after the first; and that runners
+    /// listing shows no other machine's runner idle with labels that match it that the one before did not. A runner
+    /// still idle a listing later is not getting it from GitHub. Until then it is held, and past the first condition
+    /// `until` is in the past. Once it may, it may for as long as it is listed.
     pub(super) fn holds(&self, job: &QueuedJob, now: u64, after: Duration) -> Option<u64> {
-        let after = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
         let Some(sighting) = self.seen.get(&job.id) else {
             // Not listed here yet: as one listed now.
-            return Some(now.saturating_add(after) / 1000);
+            return Some(now.saturating_add(millis(after)) / 1000);
         };
-        let queued = if job.created_at == 0 {
-            sighting.first_at
-        } else {
-            job.created_at
+        if sighting.released {
+            return None;
+        }
+        self.held_until(sighting, now, after)
+    }
+
+    /// `holds` for a job seen here and not released.
+    fn held_until(&self, sighting: &Sighting, now: u64, after: Duration) -> Option<u64> {
+        let queued = match sighting.job.created_at {
+            0 => sighting.first_at,
+            at => at,
         };
-        let until = queued.saturating_add(after);
-        let relisted = self
+        let until = queued.saturating_add(millis(after));
+        let free = self
             .runners
             .get(&sighting.repository)
-            .is_some_and(|&runners| sighting.first < runners && runners <= sighting.last);
-        (until > now || !relisted).then_some(until / 1000)
+            .is_some_and(|runners| {
+                sighting.first < runners.listing
+                    && runners.listing <= sighting.last
+                    && !runners.idle.values().any(|idle| {
+                        idle.since == runners.listing
+                            && crate::scheduler::matches(&sighting.job, &idle.labels)
+                    })
+            });
+        (until > now || !free).then_some(until / 1000)
     }
+
+    /// Marks the jobs of `repository` that are this host's to take at `now` as such for good.
+    fn release(&mut self, repository: &str, now: u64, after: Duration) {
+        let released: Vec<u64> = self
+            .seen
+            .iter()
+            .filter(|(_, sighting)| {
+                sighting.repository == repository
+                    && !sighting.released
+                    && self.held_until(sighting, now, after).is_none()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in released {
+            if let Some(sighting) = self.seen.get_mut(&id) {
+                sighting.released = true;
+            }
+        }
+    }
+}
+
+/// `duration` in ms, saturating.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -126,9 +220,9 @@ mod tests {
     /// A tick of listing `listing` at `now`: the runners of `o/r` (when `runners`) and then its queued `jobs`.
     fn tick(overflow: &mut Overflow, listing: u64, now: u64, runners: bool, jobs: &[QueuedJob]) {
         if runners {
-            overflow.runners_listed("o/r", listing);
+            overflow.runners_listed("o/r", listing, []);
         }
-        overflow.queued_listed("o/r", jobs, listing, now);
+        overflow.queued_listed("o/r", jobs, listing, now, AFTER);
     }
 
     #[test]
@@ -204,31 +298,78 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_runners_listing_holds_every_job_until_one_answers() {
+    fn a_failed_runners_listing_holds_a_job_until_one_answers_and_releases_none_it_held() {
+        // Catches a job held again after it was released, while a runner of this host boots for it (review finding 3).
         let mut overflow = Overflow::default();
-        let old = job(1, T0 - 3_600_000);
+        let (old, other) = (job(1, T0 - 3_600_000), job(2, T0 - 3_600_000));
         tick(&mut overflow, 1, T0, true, std::slice::from_ref(&old));
+        overflow.runners_unknown("o/r");
         tick(
             &mut overflow,
             2,
             T0 + 5_000,
-            true,
-            std::slice::from_ref(&old),
+            false,
+            &[old.clone(), other.clone()],
         );
-        assert_eq!(overflow.holds(&old, T0 + 5_000, AFTER), None);
-        overflow.runners_unknown("o/r");
         assert!(
             overflow.holds(&old, T0 + 5_000, AFTER).is_some(),
-            "a failed runners listing says nothing of other machines' runners"
+            "no runners listing answered since it was first listed"
         );
         tick(
             &mut overflow,
             3,
             T0 + 10_000,
             true,
-            std::slice::from_ref(&old),
+            &[old.clone(), other.clone()],
         );
         assert_eq!(overflow.holds(&old, T0 + 10_000, AFTER), None);
+        overflow.runners_unknown("o/r");
+        assert_eq!(
+            overflow.holds(&old, T0 + 10_000, AFTER),
+            None,
+            "released, and a runner may boot for it"
+        );
+        assert_eq!(
+            overflow.holds(&other, T0 + 10_000, AFTER),
+            None,
+            "listed twice with a runners listing between, so released too"
+        );
+    }
+
+    #[test]
+    fn a_fresh_idle_runner_of_another_machine_holds_the_jobs_it_matches_for_one_listing() {
+        // Catches finding M3: the primary registered a runner for the job, which GitHub has not given it yet.
+        let mut overflow = Overflow::default();
+        let old = QueuedJob {
+            labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+            ..job(1, T0 - 3_600_000)
+        };
+        let peer = |id, labels: &[&str]| Runner {
+            id,
+            name: format!("runnerd-0123abcd-desk-app-1-{id}"),
+            status: "online".to_owned(),
+            busy: false,
+            labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+        };
+        let (fresh, elsewhere) = (
+            peer(5, &["self-hosted", "app"]),
+            peer(6, &["self-hosted", "jvm"]),
+        );
+        overflow.runners_listed("o/r", 1, []);
+        overflow.queued_listed("o/r", std::slice::from_ref(&old), 1, T0, AFTER);
+        overflow.runners_listed("o/r", 2, [&fresh, &elsewhere]);
+        overflow.queued_listed("o/r", std::slice::from_ref(&old), 2, T0 + 5_000, AFTER);
+        assert!(
+            overflow.holds(&old, T0 + 5_000, AFTER).is_some(),
+            "runner 5 just came idle and matches it"
+        );
+        overflow.runners_listed("o/r", 3, [&fresh, &elsewhere]);
+        overflow.queued_listed("o/r", std::slice::from_ref(&old), 3, T0 + 10_000, AFTER);
+        assert_eq!(
+            overflow.holds(&old, T0 + 10_000, AFTER),
+            None,
+            "runner 5 idle a listing later is not getting it; runner 6 never matched"
+        );
     }
 
     #[test]
@@ -295,8 +436,8 @@ mod tests {
         let mut overflow = Overflow::default();
         let old = job(1, T0 - 3_600_000);
         tick(&mut overflow, 1, T0, true, std::slice::from_ref(&old));
-        overflow.runners_listed("o/s", 2);
-        overflow.queued_listed("o/s", &[], 2, T0 + 5_000);
+        overflow.runners_listed("o/s", 2, []);
+        overflow.queued_listed("o/s", &[], 2, T0 + 5_000, AFTER);
         assert!(
             overflow.holds(&old, T0 + 5_000, AFTER).is_some(),
             "o/s's runners say nothing of o/r's"

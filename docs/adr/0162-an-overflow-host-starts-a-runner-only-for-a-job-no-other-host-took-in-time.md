@@ -2,8 +2,8 @@
 
 Status: **Accepted** (2026-11-23). Adds `[host] role`, `[host] overflow_after`, `config::Role`,
 `Config::warm`, `scheduler::OVERFLOW_IDLE_TIMEOUT`, `scheduler::idle_after`, `scheduler::Repository::idle_after`,
-`api::Waiting::Overflow`, `api::WaitCause::Overflow`, `sizing::Ran::overflow_waited`, `config::Warning::OverflowKeepsNoWarm`
-and `config::Warning::OverflowAutoSizing`; the engine gains `engine/overflow.rs`.
+`api::Waiting::Overflow`, `api::WaitCause::Overflow`, `sizing::Ran::overflow_waited`, `github::Runner::labels`,
+`config::Warning::OverflowKeepsNoWarm` and `config::Warning::OverflowAutoSizing`; the engine gains `engine/overflow.rs`.
 
 ## Context
 
@@ -36,11 +36,19 @@ The audit of the multi-machine plan (findings H1, M2, M3 and M4) named what a ro
 - **An idle runner stops sooner.** The plan takes the idle expiry as input, `Repository::idle_after`:
   `IDLE_TIMEOUT` (300 s) on a primary, `OVERFLOW_IDLE_TIMEOUT` (120 s) on an overflow host. A runner an overflow host
   started for a job the primary then took leaves within two minutes, not five.
-- **A job is the overflow host's once both hold:** its age is `overflow_after` or more, counted from GitHub's
-  `created_at`, or from when this host first listed it when `created_at` is 0; and this host listed it twice, the
-  second time after a runners listing of its repository that began after the first. A runners listing that fails or
-  that the rate limit refuses holds every job of the repository until one answers. `engine/overflow.rs` owns what this
-  host saw of each job and of the runners listings; it reads no clock.
+- **A job is the overflow host's once all three hold:** its age is `overflow_after` or more, counted from GitHub's
+  `created_at`, or from when this host first listed it when `created_at` is 0; this host listed it twice, the second
+  time after a runners listing of its repository that began after the first; and that runners listing shows no other
+  machine's runner online and idle, with labels that match the job, that the runners listing before it did not show
+  so. Such a fresh runner is most likely one the primary just registered for the job. If the same runner is still
+  idle a runners listing later with the job still queued, GitHub is not giving it the job, and it holds nothing.
+  GitHub lists each runner's `labels` as objects with a `name`; `github::Runner::labels` keeps the names.
+- **Released for good.** The first queued listing after which a job is the host's marks it so, and nothing holds it
+  again while it is listed: the engine plans its starts right after, so a runner may be booting for it. A runners
+  listing that fails or that the rate limit refuses releases no job until one answers, and leaves a job released
+  before as it is. A job first listed here owes its repository a runners listing at the next probe, so the second
+  listing comes at the next interval, not at the runners' turn three probes on.
+- `engine/overflow.rs` owns what this host saw of each job and of the runners listings; it reads no clock.
 - **Held jobs are left out before the plan.** `Engine::plan` takes them out of each pool's queued jobs, after the
   jobs this machine's runners may have taken, so they count for no demand, no barrier, no slot wait and no host wait,
   and an idle runner covers only jobs the host may serve. Each says `Waiting::Overflow { until }`: until when its
@@ -72,6 +80,7 @@ listed before the sleep holds after it (ADR 0159).
   (accepted in the wire check), and reads the `overflow` cause as `Other`.
 - On an overflow host, insights and the dashboard's waits still count the deferral as part of a job's wait, which is
   what the job saw; the per-cause split names it, and only sizing leaves it out.
-- The overflow host still cannot see a runner the primary registered for a job seconds ago: GitHub lists no runner's
-  labels, and this change counts none. If duplicates still show on the laptop, a later change counts the other
-  machines' fresh runners before an overflow start.
+- A runner the primary registers between the overflow host's runners listing and its start is not seen; the gate
+  narrows that window to one listing, and the overflow host's spare runner then stops after 120 s.
+- A fresh idle runner on the other machine holds a matching job one runners listing longer even when it came for
+  another job; with the default `poll_interval` that is up to 15 s more on a job that already waited 45 s.

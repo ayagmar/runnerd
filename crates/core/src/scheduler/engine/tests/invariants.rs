@@ -2031,6 +2031,7 @@ impl Case {
             name,
             status: "online".to_owned(),
             busy: true,
+            labels: Vec::new(),
         });
         drop(github);
         self.orphans.push(id);

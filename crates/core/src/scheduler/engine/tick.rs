@@ -1454,12 +1454,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             if listed {
                 self.listed_after_wake(began);
-                self.overflow.queued_listed(
+                let first_seen = self.overflow.queued_listed(
                     &repository,
                     &queued,
                     listing.listing,
                     self.clock.now_ms(),
+                    self.config.host.overflow_after,
                 );
+                // A job first seen here waits for a runners listing after this one: the next probe makes it.
+                if first_seen && self.config.host.is_overflow() {
+                    self.owe_runners_listing(&repository);
+                }
                 self.claims
                     .listing_answered(&repository, listing, floor, &queued);
                 for occupant in self
@@ -1496,11 +1501,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// slot holds. A repository whose runners listing failed has them listed at its next probe.
     async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>, listing: Mark) {
         for (repository, answer) in listings {
-            if answer.is_err() {
-                self.owe_runners_listing(&repository);
-                self.overflow.runners_unknown(&repository);
-            } else {
-                self.overflow.runners_listed(&repository, listing.listing);
+            match &answer {
+                Err(_) => {
+                    self.owe_runners_listing(&repository);
+                    self.overflow.runners_unknown(&repository);
+                }
+                // Another machine's runners online and idle, which GitHub may give a job they match.
+                Ok(runners) => self.overflow.runners_listed(
+                    &repository,
+                    listing.listing,
+                    runners.iter().filter(|runner| {
+                        runner.status == "online"
+                            && !runner.busy
+                            && !runner.name.starts_with(&self.runner_prefix)
+                    }),
+                ),
             }
             // Whether this machine still has a runner registered on it.
             let mut left = false;
