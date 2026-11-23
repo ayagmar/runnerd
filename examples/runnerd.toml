@@ -8,6 +8,9 @@ isolation = "sysbox"
 # from their history, and one runner of each profile with the mirror must fit MemoryMax; "caps" reserves every
 # runner's memory cap, and then slots × memory over all profiles with the mirror must fit.
 admission = "measured"
+# A second machine on the same labels takes only the jobs this one could not: role = "overflow" there starts a runner
+# for a job queued overflow_after ago, and keeps no warm runners. This one stays the primary, the default.
+# role = "primary"
 
 [caches]
 mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h", max_size = "10G" }

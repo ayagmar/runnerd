@@ -85,6 +85,12 @@ const ACCEPTED: &[Accepted] = &[
         item: "waiting/on-battery",
         adr: "0161",
     },
+    // An older client reads an overflow host's reason as `Unknown` and says the job waits for a reason it does not know.
+    Accepted {
+        reader: Reader::Previous,
+        item: "waiting/overflow",
+        adr: "0162",
+    },
 ];
 
 /// A document's items as JSON, by label.

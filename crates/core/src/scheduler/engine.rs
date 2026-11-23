@@ -10,7 +10,7 @@
 //! `leftovers` (the containers still to read or remove once nothing occupies them), `listing` (what a repository's last listing of queued jobs showed), `listing_pace` (when a repository is listed next), `ledger` (the jobs followed on GitHub, queued or closing), `claims` (what a repository's listings may show that this machine's runners took), `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `upkeep` (what each
 //! profile's measures and reseeds are doing and have due), `presence` (which repositories are listed or draining), `registrations` (what is remembered of a registration with no slot), `watches` (how each runner's container is watched: its log capture and what broken ones left), `mirror` (whether the mirror runs and at what cap), `build_cache` (each runner's side of the shared build cache and whether its job
 //! may write), `history` (what the store records), `warm` (how many warm runners each repository wants), `control` (the
-//! API's commands), `stop` (how far the daemon's stop has got), `sleep` and `wake` (whether the host slept, and what a wake undoes and holds back) and `status` (what it publishes).
+//! API's commands), `stop` (how far the daemon's stop has got), `sleep` and `wake` (whether the host slept, and what a wake undoes and holds back), `overflow` (which queued jobs an overflow host leaves to the other machines for now) and `status` (what it publishes).
 
 mod admission;
 mod battery;
@@ -30,6 +30,7 @@ mod listing;
 mod listing_pace;
 mod mirror;
 mod open_waits;
+mod overflow;
 mod pool_health;
 mod presence;
 mod records;
@@ -494,6 +495,9 @@ pub struct Engine<G = Github, D = Docker> {
     sleep: sleep::Sleep,
     /// What powers the host, as the last tick read it (ADR 0161).
     battery: battery::Battery,
+    /// What an overflow host saw of the queued jobs and the runners listings, which says the jobs it leaves to the
+    /// other machines for now (ADR 0162).
+    overflow: overflow::Overflow,
     memory_max: Option<u64>,
     /// The CPUs the slice may use, in millicores, read at start.
     cpus: Option<u64>,
@@ -704,6 +708,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             clock: Clock::default(),
             sleep: sleep::Sleep::default(),
             battery: battery::Battery::default(),
+            overflow: overflow::Overflow::default(),
             isolation: isolation::backend(config.host.isolation),
             // An earlier run may have left the mirror up, so the first idle tick stops it.
             mirror: Mirror::unknown(config.mirror_memory()),

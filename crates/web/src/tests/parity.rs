@@ -131,6 +131,24 @@ async fn why_jobs_wait_for_caches_a_crash_tore_or_on_battery_reads_as_core_says_
 }
 
 #[tokio::test]
+async fn why_an_overflow_host_leaves_jobs_to_the_primary_reads_as_core_says_it() {
+    let (dashboard, cookie, daemon, _) = dashboard_of(runnerd_fixtures::overflow()).await;
+    let before = crate::now();
+    let html = dashboard.page(&cookie, "/").await.body;
+    let after = crate::now();
+    // The dashboard reads the wall clock, as the time left does.
+    let status = &daemon.status;
+    for job in &status.queued {
+        let waiting = job.waiting.as_ref().unwrap();
+        let reasons = [before, after].map(|now| waiting.reason(job, status, now));
+        assert!(
+            reasons.iter().any(|reason| html.contains(reason.as_str())),
+            "{reasons:?}: {html}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_host_credit_and_the_growth_a_held_job_waits_for_read_as_core_says_them() {
     let (dashboard, cookie, daemon, facts) = dashboard_of(runnerd_fixtures::host_credit()).await;
     let html = dashboard.page(&cookie, "/").await.body;

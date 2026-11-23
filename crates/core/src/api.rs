@@ -862,6 +862,13 @@ pub enum Waiting {
     /// The host runs on its battery and `[host] on_battery` is `pause`, so no runner starts until it is on mains power
     /// again (ADR 0161).
     OnBattery,
+    /// This host is an overflow host (ADR 0162): it leaves the job to the other machines until `until` (seconds since
+    /// the Unix epoch), `[host] overflow_after` after GitHub queued it, and until GitHub listed it twice here with
+    /// the runners listed between the two.
+    Overflow {
+        /// When its time to the other machines is up; it may be past while the second listing is awaited.
+        until: u64,
+    },
     /// A reason from a newer daemon than this client knows, so a reason added later does not keep the client from
     /// reading the status.
     #[serde(other)]
@@ -903,7 +910,8 @@ impl Waiting {
             | Waiting::RunnerStarting
             | Waiting::Reseeding { .. }
             | Waiting::PullingImage { .. }
-            | Waiting::BehindStart { .. } => WaitKind::Soon,
+            | Waiting::BehindStart { .. }
+            | Waiting::Overflow { .. } => WaitKind::Soon,
             Waiting::NoSlot { .. }
             | Waiting::Memory { .. }
             | Waiting::HostMemory { .. }
@@ -949,6 +957,13 @@ impl Waiting {
                 },
                 duration(until.saturating_sub(now))
             ),
+            Waiting::Overflow { until } if *until > now => format!(
+                "Left to the primary machine for {} more",
+                duration(until - now)
+            ),
+            Waiting::Overflow { .. } => {
+                "Left to the primary machine until GitHub lists it again".to_owned()
+            }
             Waiting::RunnerStarting => match starting_for(job, status) {
                 Some(slot) => format!("A runner is starting for it in {slot}"),
                 None => "A runner is starting for it".to_owned(),

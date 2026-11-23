@@ -617,7 +617,7 @@ impl GithubApi for FakeGithub {
         &self,
         repository: &str,
         name: &str,
-        _labels: &[String],
+        labels: &[String],
     ) -> Result<(Runner, JitConfig), github::Error> {
         self.blocked()?;
         let _registering = Registering::new(self);
@@ -689,6 +689,7 @@ impl GithubApi for FakeGithub {
                 name: name.to_owned(),
                 status: "offline".to_owned(),
                 busy: false,
+                labels: labels.to_vec(),
             };
             state.runners.push(runner.clone());
             let mut held = false;
@@ -2268,6 +2269,7 @@ fn runner(id: u64, name: &str, busy: bool) -> Runner {
         name: name.to_owned(),
         status: "online".to_owned(),
         busy,
+        labels: vec!["self-hosted".to_owned(), "app".to_owned()],
     }
 }
 
@@ -7926,6 +7928,7 @@ mod invariants;
 mod ledger;
 mod occupant;
 mod open_waits;
+mod overflow;
 mod pacing;
 mod pool_health;
 mod pools;

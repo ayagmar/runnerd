@@ -96,6 +96,27 @@ fn status_states_why_jobs_wait_for_caches_a_crash_tore_as_core_does() {
 }
 
 #[test]
+fn status_states_why_an_overflow_host_leaves_jobs_to_the_primary_as_core_does() {
+    let daemon = runnerd_fixtures::overflow();
+    let facts = facts(&daemon);
+    let reasons: Vec<&str> = facts
+        .waits
+        .iter()
+        .map(|wait| wait.reason.as_str())
+        .collect();
+    assert!(
+        reasons.contains(&"Left to the primary machine for 30s more")
+            && reasons.contains(&"Left to the primary machine until GitHub lists it again"),
+        "the fixture's jobs wait both ways: {reasons:?}"
+    );
+    let text = status(&daemon.status, NOW, PLAIN);
+    for wait in &facts.waits {
+        let row = line_of(&text, &[&wait.job.to_string()]);
+        assert!(row.ends_with(&wait.reason), "{}: {row}", wait.reason);
+    }
+}
+
+#[test]
 fn status_states_a_host_credit_and_the_growth_a_held_job_waits_for_as_core_does() {
     let daemon = runnerd_fixtures::host_credit();
     let facts = facts(&daemon);
