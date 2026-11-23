@@ -1314,7 +1314,7 @@ impl Store {
         self.read(read::notify_state).await
     }
 
-    /// The jobs queued at or after `since` (ms), whatever became of them, as warm runners learn from them.
+    /// The jobs queued at or after `since` (ms) that did not run elsewhere, as warm runners learn from them.
     pub async fn warm(&self, since: u64) -> Result<Vec<warm::Seen>, StoreError> {
         self.read(move |db| read::warm(db, since)).await
     }
