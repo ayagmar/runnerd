@@ -75,9 +75,9 @@ fn assert_rows(html: &str, facts: &[JobRow], figures: bool) {
     for fact in facts {
         let row = row_of(html, fact.job);
         let badge = format!(
-            "<span class=\"badge {}\">{}</span>",
+            "<span class=\"badge {}\" title=\"{label}\"><span class=\"badge-label\">{label}</span></span>",
             outcome_kind_class(fact.kind),
-            fact.label
+            label = fact.label
         );
         assert!(row.contains(&badge), "{badge}: {row}");
         assert!(text(row).contains(&fact.name), "{}: {row}", fact.name);
@@ -116,11 +116,17 @@ fn host_reads_as_core_says_it(html: &str, daemon: &Daemon, facts: &Facts) {
 }
 
 #[tokio::test]
-async fn why_jobs_wait_for_caches_a_crash_tore_reads_as_core_says_it() {
-    let (dashboard, cookie, _, facts) = dashboard_of(runnerd_fixtures::torn()).await;
-    let html = dashboard.page(&cookie, "/").await.body;
-    for wait in &facts.waits {
-        assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
+async fn why_jobs_wait_for_caches_a_crash_tore_or_on_battery_reads_as_core_says_it() {
+    for daemon in [runnerd_fixtures::torn(), runnerd_fixtures::on_battery()] {
+        let hold = daemon.status.battery_line();
+        let (dashboard, cookie, _, facts) = dashboard_of(daemon).await;
+        let html = dashboard.page(&cookie, "/").await.body;
+        if let Some(hold) = hold {
+            assert!(html.contains(hold), "{hold}: {html}");
+        }
+        for wait in &facts.waits {
+            assert!(html.contains(&wait.reason), "{}: {html}", wait.reason);
+        }
     }
 }
 
@@ -216,9 +222,9 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
     let shown = text(&html);
     let job = &facts.job;
     let badge = format!(
-        "<span class=\"badge {}\">{}</span>",
+        "<span class=\"badge {}\" title=\"{label}\"><span class=\"badge-label\">{label}</span></span>",
         outcome_kind_class(job.row.kind),
-        job.row.label
+        label = job.row.label
     );
     assert!(html.contains(&badge), "{badge}");
     for label in &job.milestones {

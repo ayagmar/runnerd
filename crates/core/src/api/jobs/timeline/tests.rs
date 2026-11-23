@@ -23,6 +23,7 @@ fn job(id: u64, queued_at: u64) -> JobSummary {
         log: LogSummary::default(),
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,
@@ -289,4 +290,27 @@ fn a_newer_daemons_end_reads_as_other() {
     let end: BarEnd = serde_json::from_str(r#"{"kind": "estimated", "at": 5}"#).unwrap();
     assert_eq!(end, BarEnd::Other);
     assert_eq!(end.at(), None);
+}
+
+#[test]
+fn a_bar_of_a_job_that_ran_elsewhere_says_where_in_plain_text() {
+    // Catches a timeline that hands a client the runner name a database or a newer daemon holds as is: a tab or an
+    // escape in a bar's outcome, or a name of only white space read as run on nothing.
+    let mut named = job(7, 1200);
+    named.state = JobState::Elsewhere;
+    named.timeline.finished_at = Some(1300);
+    named.elsewhere_runner = Some("ci\t\u{1b}[31m1".to_owned());
+    let mut blank = named.clone();
+    blank.id = 8;
+    blank.elsewhere_runner = Some(" \t ".to_owned());
+    let timeline = SlotTimeline::of(&[named, blank], WINDOW, vec![WINDOW], 0);
+    let said: Vec<(u64, String)> = timeline
+        .unassigned
+        .iter()
+        .map(|bar| (bar.job, bar.outcome().label.into_owned()))
+        .collect();
+    assert_eq!(
+        said,
+        [(7, "ran on ci 1".to_owned()), (8, "elsewhere".to_owned())]
+    );
 }

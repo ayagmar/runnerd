@@ -334,6 +334,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
         },
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,
@@ -448,6 +449,21 @@ impl Fixtures {
                 },
             };
             add(&spec, &mut noise);
+        }
+        // Two of the newest finished jobs ran elsewhere: on a peer with the longest host name, and on a runner of
+        // another kind whose name is as long as GitHub allows, so the outcome columns meet the widest badge.
+        for (at, runner) in [
+            (3, "runnerd-4f2a91c0-workstationbuild0001-jvm-1-1763000000"),
+            (
+                4,
+                "arc-prod-eu-west-1-linux-x64-runners-7b8c9d-k9x2p-abcdefghijklm",
+            ),
+        ] {
+            let job = &mut jobs[at];
+            job.summary.state = JobState::Elsewhere;
+            job.summary.runner = None;
+            job.summary.elsewhere_runner = Some(runner.to_owned());
+            job.steps.clear();
         }
         let host = (0..900u64)
             .rev()
@@ -613,6 +629,7 @@ impl Fixtures {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            on_battery: false,
             action_archives: Some(action_archives),
             machine: Some(runnerd_core::api::Machine {
                 id: "4f2a91c0".to_owned(),
@@ -1567,7 +1584,7 @@ fn job_action(fake: &Fake, id: u64, action: JobAction, query: &ActionQuery) -> R
             },
             superseded,
             confirm: Some(token),
-            paused,
+            held: paused.then_some(runnerd_core::api::Held::Paused),
             siblings,
             more,
         });

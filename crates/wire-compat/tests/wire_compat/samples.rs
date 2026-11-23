@@ -49,6 +49,7 @@ pub(crate) fn status() -> Status {
         shutting_down: true,
         stopping: Some(Stopping::LeavesJobs),
         github_limited_until: Some(1_790_000_000),
+        on_battery: true,
         action_archives: Some(action_archives()),
         budget: budget(),
         profiles: vec![profile_status()],
@@ -278,6 +279,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
         Waiting::Torn {
             volumes: vec!["runnerd-jvm-slot-2".to_owned()],
         },
+        Waiting::OnBattery,
     ];
     for waiting in &every {
         match waiting {
@@ -295,6 +297,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
             | Waiting::BehindStart { .. }
             | Waiting::NoPool { .. }
             | Waiting::Torn { .. }
+            | Waiting::OnBattery
             // What a client reads a later daemon's reason as; no daemon sends it, so it has no sample.
             | Waiting::Unknown => {}
         }
@@ -824,6 +827,7 @@ pub(crate) fn job_summary() -> JobSummary {
         },
         runner_fault: true,
         slept: true,
+        elsewhere_runner: Some("runnerd-7c3e5a19-skiff-jvm-2-1763000000".to_owned()),
         failure_cause: Some(FailureCause::ActionArchive),
         rerun_at: Some(1_763_000_000),
         probe: Some(RunnerProbe::Mount),
@@ -1521,6 +1525,7 @@ pub(crate) fn wait_cause() -> Vec<WaitCause> {
         WaitCause::Booting,
         WaitCause::Preparing,
         WaitCause::Paused,
+        WaitCause::Battery,
         WaitCause::Backoff,
         WaitCause::NoPool,
         WaitCause::Other,
@@ -1536,6 +1541,7 @@ pub(crate) fn wait_cause() -> Vec<WaitCause> {
             | WaitCause::Booting
             | WaitCause::Preparing
             | WaitCause::Paused
+            | WaitCause::Battery
             | WaitCause::Backoff
             | WaitCause::NoPool
             | WaitCause::Other => {}
@@ -2268,6 +2274,7 @@ fn timeline_bar(job: u64, started_at: Option<u64>, end: BarEnd) -> TimelineBar {
         conclusion: Some("success".to_owned()),
         runner_fault: true,
         slept: true,
+        elsewhere_runner: Some("runnerd-7c3e5a19-skiff-jvm-2-1761400000".to_owned()),
         queued_at: 1_761_400_000,
         started_at,
         end,

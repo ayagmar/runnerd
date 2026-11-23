@@ -722,6 +722,7 @@ fn as_sized(runs: &[Run], average: u64) -> Vec<crate::sizing::Ran> {
             reserved: None,
             host_waited: 0,
             slot_waited: 0,
+            held: 0,
             unseen: 0,
             cpu_periods: run.cpu_periods,
             cpu_throttled: run.cpu_throttled,
@@ -874,6 +875,37 @@ fn waits_are_split_warm_and_cold_and_longer_ones_are_a_notice() {
             before: 20,
             now: 300
         }
+    );
+}
+
+// Catches M1 of review 1 of #344: an hour a laptop on battery held its jobs read as an hour of waiting for a runner.
+#[test]
+fn time_the_host_on_battery_held_a_job_is_not_a_wait_for_a_runner() {
+    let mut runs: Vec<Run> = (0..6).map(|n| waited(n, 200, 20, false)).collect();
+    runs.extend((10..16).map(|n| {
+        let mut run = waited(n, 10, 3600 + 20, false);
+        run.causes = Some(
+            [
+                (api::WaitCause::Battery, 3600 * 1000),
+                (api::WaitCause::Slot, 20 * 1000),
+            ]
+            .into(),
+        );
+        run
+    }));
+    let found = insights(&whole(&runs), &config(), 14, NOW);
+    assert_eq!(
+        found.waits[0].now.all.p95,
+        Some(20),
+        "the hour on battery is left out"
+    );
+    assert!(
+        found
+            .insights
+            .iter()
+            .all(|insight| insight.key != "waits:halyard/api"),
+        "no waits insight: {:?}",
+        found.insights
     );
 }
 

@@ -58,6 +58,7 @@ fn status() -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        on_battery: false,
         action_archives: None,
         machine: None,
         budget: Budget {
@@ -170,6 +171,7 @@ fn job(state: JobState) -> Job {
             log: LogSummary::default(),
             runner_fault: false,
             slept: false,
+            elsewhere_runner: None,
             failure_cause: None,
             rerun_at: None,
             probe: None,
@@ -637,7 +639,7 @@ fn job_action(
             },
             superseded: None,
             confirm: Some(token),
-            paused: false,
+            held: None,
             siblings: vec![sibling],
             more: false,
         });

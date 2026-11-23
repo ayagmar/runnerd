@@ -41,7 +41,7 @@ pub const RUNNING: u64 = 9101;
 pub const NOT_BUSY: u64 = 9102;
 /// A job its runner was lost with.
 pub const LOST: u64 = 9201;
-/// A job another machine's runner ran.
+/// A job another machine's runner ran: runnerd on `skiff` (ADR 0163).
 pub const ELSEWHERE: u64 = 9202;
 /// A job whose run failed before any runner took it.
 pub const STARTUP_FAILURE: u64 = 9203;
@@ -221,6 +221,7 @@ fn status() -> Status {
         shutting_down: true,
         stopping: Some(api::Stopping::WaitsForJobs),
         github_limited_until: Some(NOW + 750),
+        on_battery: false,
         action_archives: None,
         machine: Some(api::Machine {
             id: "4f2a91c0".to_owned(),
@@ -362,6 +363,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         log: LogSummary::default(),
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,
@@ -436,6 +438,7 @@ fn not_run_here() -> [JobSummary; 3] {
         finished_at: Some(NOW - 9100),
         ..Timeline::default()
     };
+    elsewhere.elsewhere_runner = Some("runnerd-7c3e5a19-skiff-jvm-2-1763000000".to_owned());
     let mut never_started = summary(
         NEVER_STARTED,
         LEDGER,
@@ -1809,6 +1812,19 @@ pub fn torn() -> Daemon {
     daemon
 }
 
+/// The fixtures on a host on battery under `[host] on_battery = "pause"`: the status says so, and every queued job a
+/// pool serves waits for mains power (ADR 0161).
+pub fn on_battery() -> Daemon {
+    let mut daemon = daemon();
+    daemon.status.on_battery = true;
+    for queued in &mut daemon.status.queued {
+        if !queued.waiting.as_ref().is_some_and(Waiting::cannot_start) {
+            queued.waiting = Some(Waiting::OnBattery);
+        }
+    }
+    daemon
+}
+
 /// `GET /v1/attention` at revision 1 of the instance `fixtures` for `daemon`, `doctor` and the insights at [`NOW`]:
 /// core's items (`api::attention_items`). For the fixtures: the doctor's failure, the token or the listings, labels no
 /// pool serves, the long wait for the host's memory, the warning insights and the rate limit.
@@ -1950,7 +1966,7 @@ pub fn job_actions(daemon: &Daemon) -> JobActionFixtures {
         attempt: 2,
         completed: false,
     };
-    let preview = |action, run, superseded, paused, siblings: Vec<JobSummary>, more| {
+    let preview = |action, run, superseded, paused: bool, siblings: Vec<JobSummary>, more| {
         let confirm = matches!(run, api::RunSeen::Now { .. })
             .then(|| format!("{:032x}", u128::from(job.id) * 0x9e37_79b9));
         api::ActionPreview::new(api::PreviewFacts {
@@ -1959,7 +1975,7 @@ pub fn job_actions(daemon: &Daemon) -> JobActionFixtures {
             run,
             superseded,
             confirm,
-            paused,
+            held: paused.then_some(api::Held::Paused),
             siblings,
             more,
         })
@@ -2138,7 +2154,7 @@ mod tests {
             "a CPU cap held back as a warning and as a notice"
         );
         assert_eq!(label(LOST), Some("lost"));
-        assert_eq!(label(ELSEWHERE), Some("elsewhere"));
+        assert_eq!(label(ELSEWHERE), Some("ran on skiff"));
         assert_eq!(label(NEVER_STARTED), Some("cancelled in queue"));
         assert_eq!(label(STARTUP_FAILURE), Some("startup failure"));
         assert_eq!(label(TIMED_OUT), Some("timed out"));

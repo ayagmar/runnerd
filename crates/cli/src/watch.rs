@@ -338,6 +338,9 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
     if let Some(limited) = status.github_line() {
         let _ = write!(out, "  {}", paint.paint(Tone::Busy, limited));
     }
+    if let Some(battery) = status.battery_line() {
+        let _ = write!(out, "  {}", paint.paint(Tone::Busy, battery));
+    }
     if let Some(stopping) = status.stopping_line() {
         let _ = write!(out, "  {}", paint.paint(Tone::Busy, stopping));
     }
@@ -509,6 +512,7 @@ mod tests {
             log: LogSummary::default(),
             runner_fault: false,
             slept: false,
+            elsewhere_runner: None,
             failure_cause: None,
             rerun_at: None,
             probe: None,
@@ -535,6 +539,7 @@ mod tests {
                 shutting_down: false,
                 stopping: None,
                 github_limited_until: None,
+                on_battery: false,
                 action_archives: None,
                 machine: None,
                 budget: Budget {

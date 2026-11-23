@@ -87,6 +87,7 @@ fn app() -> App {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            on_battery: false,
             action_archives: None,
             machine: None,
             budget: Budget {
@@ -119,6 +120,61 @@ fn app() -> App {
     App::new(live, None, Vec::new(), Vec::new())
 }
 
+#[test]
+fn jobs_another_runner_ran_leave_room_for_every_jobs_name_at_80_by_24() {
+    // Catches an outcome column as wide as the longest runner name GitHub allows, which leaves the job and
+    // repository columns no room, and a badge whose upper case is wider than the label it measured.
+    let elsewhere = |id: u64, name: &str, runner: &str| {
+        let mut job = summary(id, JobState::Elsewhere);
+        job.runner = None;
+        name.clone_into(&mut job.name);
+        job.conclusion = Some("success".to_owned());
+        job.timeline.finished_at = Some(1200);
+        job.elsewhere_runner = Some(runner.to_owned());
+        job
+    };
+    let jobs = vec![
+        elsewhere(
+            51,
+            "far",
+            "arc-prod-eu-west-1-linux-x64-runners-7b8c9d-k9x2p-abcdefghijklm",
+        ),
+        elsewhere(52, "near", "runnerd-4f2a91c0-workstationbuild0001-jvm-1-1"),
+        elsewhere(53, "wide", &"ß".repeat(40)),
+        summary(54, JobState::Completed),
+    ];
+    let mut app = app();
+    app.live.recent.clone_from(&jobs);
+    let overview = screen(&app, 80, 24, false);
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, jobs, None));
+    let history = screen(&app, 80, 24, false);
+    for (shown, screen) in [("overview", &overview), ("history", &history)] {
+        for expected in [
+            "CI / far",
+            "CI / near",
+            "CI / wide",
+            "CI / build",
+            "RAN ON WORKSTATIONBUILD0001",
+            "RAN ON ARC-PROD-EU-WEST-1-…",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{shown} shows {expected}: {screen}"
+            );
+        }
+        // What follows `RAN ON ` takes no more than a host name may, even where upper case widens it.
+        for line in screen.lines() {
+            if let Some((_, after)) = line.split_once("RAN ON ") {
+                let machine = after.split(' ').next().unwrap_or_default();
+                assert!(machine.width() <= 20, "{shown} cuts {machine:?}: {screen}");
+            }
+        }
+        let widest = screen.lines().map(UnicodeWidthStr::width).max().unwrap();
+        assert!(widest <= 80, "{shown} stays within 80 cells: {screen}");
+    }
+}
+
 fn summary(id: u64, state: JobState) -> JobSummary {
     JobSummary {
         id,
@@ -149,6 +205,7 @@ fn summary(id: u64, state: JobState) -> JobSummary {
         log: LogSummary::default(),
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,

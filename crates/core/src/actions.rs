@@ -29,7 +29,7 @@ use self::faults::Faults;
 use self::flights::{Boarding, Flights, Issued, Landed, Origin, Redeemed, Withheld};
 use self::policy::{Denied, Policy};
 use crate::api::{
-    self, ActionAnswer, ActionPreview, ActionRefusal, ActionResult, ActionTarget, JobAction,
+    self, ActionAnswer, ActionPreview, ActionRefusal, ActionResult, ActionTarget, Held, JobAction,
     JobSummary, PreviewFacts, RunSeen, SIBLINGS_MAX, Superseded, UnknownCause,
 };
 use crate::github::{ActionFailure, AttemptJob, GithubApi, JobActionRequest, Permit, RunNow};
@@ -276,7 +276,14 @@ impl JobActions {
             RunSeen::Unread { .. } => None,
         };
         Ok(Asked::Preview(Box::new(ActionPreview::new(PreviewFacts {
-            paused: self.control.is_paused(&target.repository),
+            // The owner's pause first: it outlasts the battery.
+            held: if self.control.is_paused(&target.repository) {
+                Some(Held::Paused)
+            } else if self.control.on_battery() {
+                Some(Held::OnBattery)
+            } else {
+                None
+            },
             target,
             job_attempt: summary.run_attempt,
             run,

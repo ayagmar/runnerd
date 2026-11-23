@@ -29,6 +29,7 @@ fn status(admission: AdmissionPolicy, memory_max: Option<u64>) -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        on_battery: false,
         action_archives: None,
         machine: None,
         budget: Budget {
@@ -436,6 +437,7 @@ fn job(memory_cap: Option<u64>, cpu_cap: Option<u64>) -> Job {
             log: LogSummary::default(),
             runner_fault: false,
             slept: false,
+            elsewhere_runner: None,
             failure_cause: None,
             rerun_at: None,
             probe: None,

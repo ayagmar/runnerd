@@ -9,7 +9,7 @@ use std::fmt;
 use super::{
     FailureCause, Job, JobState, JobSummary, RunnerProbe, Sample, SampleSeries, Step, Timeline,
 };
-use crate::api::{QueuedJob, Record, Tone, Toned};
+use crate::api::{Machine, QueuedJob, Record, Tone, Toned};
 
 /// The outcome of a job that failed across a sleep of its host (`JobSummary::slept`).
 const HOST_SLEPT: &str = "host slept";
@@ -125,6 +125,7 @@ impl JobSummary {
             Ended {
                 runner_fault: self.runner_fault,
                 slept: self.slept,
+                elsewhere_runner: self.elsewhere_runner.as_deref(),
             },
         )
     }
@@ -323,26 +324,39 @@ impl JobSummary {
 
 /// What befell a job apart from its conclusion, as its record keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Ended {
+pub(crate) struct Ended<'record> {
     /// Its log says the runner failed it (`JobSummary::runner_fault`).
     pub(crate) runner_fault: bool,
     /// The host slept while it ran (`JobSummary::slept`).
     pub(crate) slept: bool,
+    /// The runner that ran it elsewhere (`JobSummary::elsewhere_runner`).
+    pub(crate) elsewhere_runner: Option<&'record str>,
 }
 
 /// [`JobSummary::outcome`] of a job in `state`, concluded `conclusion`, that `started` here or not. A failure the log
 /// says the runner caused reads `runner fault`; one across a sleep of the host, `host slept`, as the sleep ended the
-/// runner's session.
+/// runner's session. One that ran elsewhere on a runner GitHub names reads which machine ran it: `ran on skiff`.
 pub(crate) fn outcome_of(
     state: JobState,
     conclusion: Option<&str>,
     started: bool,
-    ended: Ended,
+    ended: Ended<'_>,
 ) -> Outcome {
     let Ended {
         runner_fault,
         slept,
+        elsewhere_runner,
     } = ended;
+    if state == JobState::Elsewhere
+        && let Some(runner) = elsewhere_runner
+            .map(str::trim)
+            .filter(|runner| !runner.is_empty())
+    {
+        return Outcome {
+            label: Cow::Owned(Machine::ran_on(runner)),
+            kind: OutcomeKind::Ended,
+        };
+    }
     match (state, conclusion) {
         (JobState::Queued, _) => Outcome::new("queued", OutcomeKind::Waiting),
         (JobState::Running, _) => Outcome::new("running", OutcomeKind::Running),
