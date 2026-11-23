@@ -480,3 +480,140 @@ async fn a_job_a_capture_recorded_first_leaves_out_the_downtime_its_wait_went_th
         "both waited out the downtime whole, before any listing"
     );
 }
+
+/// GitHub's details of job `id` of run 10, started at `started_at` (ms), completed with `conclusion` at
+/// `completed_at` if it has one.
+fn details(id: u64, started_at: u64, finished: Option<(&str, u64)>) -> crate::github::JobDetails {
+    crate::github::JobDetails {
+        id,
+        run_id: 10,
+        run_attempt: 1,
+        name: format!("job {id}"),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: if finished.is_some() {
+            "completed"
+        } else {
+            "in_progress"
+        }
+        .to_owned(),
+        conclusion: finished.map(|(conclusion, _)| conclusion.to_owned()),
+        started_at: Some(rfc3339(started_at)),
+        completed_at: finished.map(|(_, at)| rfc3339(at)),
+        runner_name: Some("r".to_owned()),
+        steps: Vec::new(),
+    }
+}
+
+// Catches a sleep of the host counted as waiting by the store (ADR 0159): a job queued through it, one GitHub queued
+// while the host slept and runnerd recorded after, one a runner took just before the host slept that runnerd only
+// heard of after, and a second sleep after the first; and a job running across the sleep read as failing for its code.
+#[tokio::test]
+async fn a_sleep_of_the_host_is_downtime_for_the_waits_through_it_and_marks_the_jobs_running_across_it()
+ {
+    let dir = TestDir::new("store-slept");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let queue = |store: &Store, id: u64, at: u64| {
+        store.queued(
+            "o/r",
+            &QueuedJob {
+                created_at: at,
+                ..queued(id)
+            },
+            crate::time::now_ms(),
+        );
+    };
+    let store = Store::open_at(&path, start).unwrap();
+    keep_since(&path, start);
+    queue(&store, 1, start + 10 * SECOND);
+    queue(&store, 6, start + 15 * SECOND);
+    // Job 2 runs when the host goes to sleep.
+    queue(&store, 2, start + 5 * SECOND);
+    store.claimed(2, 10, "r", start + 8 * SECOND);
+    store.host_sample(HostSample {
+        at: (start + 20 * SECOND) / SECOND,
+        cpu: 0,
+        memory: 0,
+    });
+    // The host sleeps an hour from 20 s on.
+    let (slept, woke) = (start + 20 * SECOND, start + 20 * SECOND + HOUR);
+    store.downtime(slept, woke);
+    // GitHub queued job 4 while it slept, and job 5 after.
+    queue(&store, 4, start + 30 * SECOND);
+    queue(&store, 5, woke + 60 * SECOND);
+    let started = woke + 100 * SECOND;
+    for job in [1, 4, 5, 6] {
+        store.claimed(job, 10, "r", started);
+    }
+    // A runner took job 6 two seconds before the host slept; runnerd heard of it only after.
+    store.details(details(6, slept - 2 * SECOND, None));
+    store.details(details(
+        2,
+        start + 8 * SECOND,
+        Some(("failure", woke + 5 * SECOND)),
+    ));
+    for job in [1, 4, 5, 6] {
+        store.lost(job, started + 60 * SECOND);
+    }
+    store.flush().await;
+    let waited = |summary: &crate::api::JobSummary| {
+        crate::sizing::Wait {
+            queued_at: summary.timeline.queued_at * SECOND,
+            started_at: summary.timeline.started_at.unwrap() * SECOND,
+            unseen: summary.timeline.unseen * SECOND,
+        }
+        .counted(0)
+            / SECOND
+    };
+    for (job, wait) in [(1, 110), (4, 100), (5, 40), (6, 3)] {
+        let summary = store.job(job).await.unwrap().unwrap().summary;
+        assert_eq!(waited(&summary), wait, "job {job}'s counted wait");
+        assert!(!summary.slept, "job {job} did not run while the host slept");
+    }
+    let ran = store.job(2).await.unwrap().unwrap().summary;
+    assert!(ran.slept, "job 2 ran while the host slept");
+    assert_eq!(
+        (ran.outcome().label.as_ref(), ran.outcome().kind),
+        ("host slept", crate::api::OutcomeKind::Failed)
+    );
+    assert_eq!(
+        ran.failure_line(),
+        Some("the host slept while it ran, which ended its runner's session with GitHub")
+    );
+    assert!(ran.is_failure(), "it still failed");
+    assert_eq!(waited(&ran), 3, "its wait ended before the sleep");
+    // A second sleep after the first: a job queued before both leaves both out.
+    queue(&store, 7, start + 12 * SECOND);
+    let (again, woke_again) = (woke + 2 * HOUR, woke + 3 * HOUR);
+    store.downtime(again, woke_again);
+    store.claimed(7, 10, "r", woke_again + 7 * SECOND);
+    store.flush().await;
+    let seven = store.job(7).await.unwrap().unwrap().summary;
+    assert_eq!(
+        waited(&seven),
+        (woke_again + 7 * SECOND - (start + 12 * SECOND) - 2 * HOUR) / SECOND,
+        "job 7 leaves out both sleeps"
+    );
+    // The sleeps split the sessions: runnerd watched until each began, and again from each wake.
+    drop(store);
+    let db = Connection::open(&path).unwrap();
+    let sessions: Vec<(u64, Option<u64>)> = db
+        .prepare("SELECT started_at, sampled_at FROM sessions ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        sessions,
+        [
+            (start, Some(slept)),
+            (woke, Some(again)),
+            (woke_again, None)
+        ]
+    );
+}

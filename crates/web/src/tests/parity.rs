@@ -191,8 +191,9 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         );
         assert!(html.contains(&reason), "{reason}");
     }
-    // The latest eight jobs, the two running ones among them: all but the oldest four finished ones.
-    let latest = &facts.rows[..facts.rows.len() - 4];
+    // The latest eight jobs, the two running ones among them: all but the oldest five finished ones, as the fixtures
+    // list them.
+    let latest = &facts.rows[..facts.rows.len() - 5];
     assert_rows(&html, latest, false);
 }
 
@@ -859,6 +860,7 @@ async fn a_jobs_failure_rerun_and_probe_show_as_core_words_them() {
     let (dashboard, cookie, _, facts) = dashboard().await;
     for (job, line) in [
         (runnerd_fixtures::ACTION_ARCHIVE, facts.failure_line),
+        (runnerd_fixtures::SLEPT, facts.slept_line),
         (runnerd_fixtures::RUNNER_FAULT, facts.rerun_line.as_str()),
         (runnerd_fixtures::RUNNER_FAULT, facts.probe_line.as_str()),
         (

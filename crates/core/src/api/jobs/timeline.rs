@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::facts::outcome_of;
+use super::facts::{Ended, outcome_of};
 use super::log::title;
 use super::{JobState, JobSummary, JobTitle, Outcome, job_title};
 
@@ -122,6 +122,9 @@ pub struct TimelineBar {
     pub conclusion: Option<String>,
     /// Whether the runner failed it rather than its code.
     pub runner_fault: bool,
+    /// Whether the host slept while it ran (`JobSummary::slept`); false from a daemon older than it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slept: bool,
     /// When GitHub queued it: its wait starts here.
     pub queued_at: u64,
     /// When its runner started it, which ends its wait; `None` until then, or when the history does not have it.
@@ -148,6 +151,7 @@ impl TimelineBar {
             state: job.state,
             conclusion: job.conclusion.clone(),
             runner_fault: job.runner_fault,
+            slept: job.slept,
             queued_at: job.timeline.queued_at,
             started_at: job.timeline.started_at,
             end,
@@ -161,7 +165,10 @@ impl TimelineBar {
             self.state,
             self.conclusion.as_deref(),
             self.started_at.is_some(),
-            self.runner_fault,
+            Ended {
+                runner_fault: self.runner_fault,
+                slept: self.slept,
+            },
         )
     }
 

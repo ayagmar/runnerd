@@ -414,6 +414,14 @@ enum Step {
     RunnerGoesStillListed(usize),
     /// GitHub says a job whose runner went completed, and stops listing it.
     OpenJobCompletes(usize),
+    /// The host sleeps `minutes`: the wall clock and the time suspended move on together (ADR 0159).
+    Sleep {
+        minutes: u64,
+    },
+    /// The wall clock steps `minutes` forward, as a time daemon steps a clock that booted wrong: no sleep.
+    ClockJumps {
+        minutes: u64,
+    },
     /// A forced pause of `o/r` or `o/s`: their runs are cancelled.
     ForcedPause {
         second: bool,
@@ -493,7 +501,7 @@ enum ReadFailure {
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
     (0..EVENTS)
-        .map(|_| match rng.below(125) {
+        .map(|_| match rng.below(127) {
             0..=17 => Step::Queue {
                 second: rng.below(3) == 0,
                 labels: match rng.below(10) {
@@ -580,6 +588,12 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 } else {
                     Labels::Heavy
                 },
+            },
+            125 => Step::Sleep {
+                minutes: [1, 4, 90][rng.index() % 3],
+            },
+            126 => Step::ClockJumps {
+                minutes: [5, 180][rng.index() % 2],
             },
             _ => Step::Tick,
         })
@@ -895,6 +909,13 @@ impl Seen {
     }
 }
 
+/// A sleep of the host, as the model keeps it until the next sample.
+#[derive(Debug, Clone, Copy)]
+struct Woke {
+    sampled_before: bool,
+    registrations: usize,
+}
+
 struct Case {
     /// What the checks saw.
     seen: Seen,
@@ -955,6 +976,9 @@ struct Case {
     /// The second every engine of the case starts from as its last runner's, as when each restart comes within one
     /// second of the clock; 0 for the clock's.
     names_from: u64,
+    /// The host's last sleep this engine has not settled from in the model: whether it had been sampled before, and
+    /// the registrations GitHub had then.
+    woke: Option<Woke>,
 }
 
 fn violation(case: &Case, invariant: &'static str, detail: String) -> Result<(), Violation> {
@@ -1010,6 +1034,7 @@ impl Case {
             trace: None,
             step: 0,
             names_from: 0,
+            woke: None,
         }
     }
 
@@ -1333,6 +1358,7 @@ impl Case {
                 );
                 drop(docker);
                 self.host = Some(reading);
+                self.woke = None;
             }
             Step::SampleDuringStart {
                 percent,
@@ -1374,6 +1400,16 @@ impl Case {
                 self.a_restart_takes_the_host_credit_back()?;
             }
             Step::Elapse => self.elapse(),
+            Step::Sleep { minutes } => {
+                self.clock.sleep(Duration::from_mins(minutes));
+                if self.woke.is_none() {
+                    self.woke = Some(Woke {
+                        sampled_before: self.handle.store.latest_host_sample().is_some(),
+                        registrations: self.registrations(),
+                    });
+                }
+            }
+            Step::ClockJumps { minutes } => self.clock.advance(Duration::from_mins(minutes)),
             Step::GrowthWindow { percent } => {
                 // Not by the clock, which a start does not read: its runners would read old at once.
                 self.engine
@@ -1391,6 +1427,7 @@ impl Case {
                 );
                 drop(docker);
                 self.host = Some(reading);
+                self.woke = None;
             }
             Step::Settle => self.settle(),
             Step::PastRuns => {
@@ -2536,6 +2573,8 @@ impl Case {
         self.engine = engine;
         self.engine.named = self.names_from;
         self.handle = handle;
+        // A new engine takes the time suspended as it finds it: the store's downtime covers the time before it.
+        self.woke = None;
         // The store keeps the host's reading in memory only, and a sample still to come goes to the old store.
         self.host = None;
         self.exits.clear();
@@ -2765,6 +2804,7 @@ impl Case {
         self.note_slow_start(starts.len());
         let mut started: BTreeSet<String> = starts.iter().cloned().collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
+        self.nothing_registers_before_a_sample_after_a_sleep()?;
         let seeds = self
             .engine
             .seed_memories()
@@ -2969,6 +3009,7 @@ impl Case {
         self.no_slot_is_left_starting()?;
         self.runner_names_are_unique()?;
         self.no_build_cache_left_open_without_a_runner()?;
+        self.nothing_registers_before_a_sample_after_a_sleep()?;
         let bound = self.starts_after_a_reading(&order);
         self.starts_fit_the_budget(&after, bound.as_ref().unwrap_or(&starts))?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
@@ -2978,6 +3019,34 @@ impl Case {
         self.the_count_keeps_its_bounds(&after)?;
         self.note_states();
         self.no_removal_of_a_running_job()
+    }
+
+    /// ADR 0159: after a sleep of a host the sampler read before, no runner registers until a sample from after it is
+    /// in: the budget would count by readings from before the sleep.
+    fn nothing_registers_before_a_sample_after_a_sleep(&self) -> Result<(), Violation> {
+        match self.woke {
+            Some(woke) if woke.sampled_before && self.registrations() > woke.registrations => {
+                violation(
+                    self,
+                    "nothing registers before a sample after a sleep",
+                    format!(
+                        "{} registrations before a sample, after {} before the sleep",
+                        self.registrations(),
+                        woke.registrations
+                    ),
+                )
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The registrations GitHub had so far.
+    fn registrations(&self) -> usize {
+        self.github
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("register "))
+            .count()
     }
 
     /// ADR 0110: a job an idle runner will take stopped waiting for a slot and for the host's memory when that runner
@@ -3998,7 +4067,9 @@ fn steady(line: &str) -> String {
 
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
 async fn run(steps: &[Step]) -> Result<Seen, Violation> {
-    run_case(steps, Case::new()).await.map(|case| case.seen)
+    Box::pin(run_case(steps, Case::new()))
+        .await
+        .map(|case| case.seen)
 }
 
 async fn run_case(steps: &[Step], mut case: Case) -> Result<Case, Violation> {
@@ -4384,7 +4455,11 @@ const A_LISTING_BESIDE_A_NEWLY_BUSY_RUNNER: [Step; 13] = [
 
 const A_BUSY_ORPHAN: [Step; 2] = [Step::BusyOrphan, Step::Tick];
 
-const AN_OVERSIZED_SNAPSHOT: [Step; 5] = [
+/// After the first seed's tick: a trim that starts while a reseed runs may measure a snapshot the reseed replaces, so it
+/// marks none.
+const AN_OVERSIZED_SNAPSHOT: [Step; 7] = [
+    Step::Tick,
+    Step::Tick,
     Step::OversizedSnapshot,
     Step::Tick,
     host_has(3),
@@ -4522,7 +4597,7 @@ async fn the_trace_of_each_seed() {
     {
         let mut case = Case::new();
         case.trace = Some(Vec::new());
-        let case = run_case(&steps_of(seed), case)
+        let case = Box::pin(run_case(&steps_of(seed), case))
             .await
             .unwrap_or_else(|found| {
                 panic!("seed {seed} breaks {}: {}", found.invariant, found.detail)
@@ -4872,7 +4947,7 @@ async fn a_runner_started_after_a_restart_never_takes_a_name_nothing_recorded() 
     let mut case = Case::new();
     case.names_from = time::now_ms() / 1000 + 3600;
     case.engine.named = case.names_from;
-    let broken = run_case(&steps, case)
+    let broken = Box::pin(run_case(&steps, case))
         .await
         .err()
         .map(|found| (found.invariant, found.detail));

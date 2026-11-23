@@ -295,6 +295,26 @@ impl OpenWaits {
         waited
     }
 
+    /// The host slept from `from` (ms) on (ADR 0159): every wait and cause ends there, as nothing waited for a slot,
+    /// the host or a cause while it slept, and the next plan opens them again from its own time. A take stays until
+    /// the next commit. Says what to record.
+    pub(super) fn slept(&mut self, from: u64) -> (Vec<Waited>, Vec<CauseWaited>) {
+        let waited = self.close(|_, _| true, from);
+        let mut caused = Vec::new();
+        for (job, waits) in &mut self.open {
+            if let Some(open) = waits.take_cause() {
+                caused.push(CauseWaited {
+                    job: *job,
+                    cause: open.cause,
+                    ms: from.saturating_sub(open.since),
+                });
+            }
+        }
+        self.open.retain(|_, waits| !waits.is_empty());
+        self.checkpointed = self.checkpointed.max(from);
+        (waited, caused)
+    }
+
     /// The next `hold` is a checkpoint, as it would be `CAUSE_CHECKPOINT` on.
     #[cfg(test)]
     pub(super) fn checkpoint_due(&mut self) {

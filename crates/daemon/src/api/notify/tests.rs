@@ -152,6 +152,7 @@ fn finished(id: u64, state: JobState, conclusion: Option<&str>) -> Event {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            slept: false,
             failure_cause: None,
             rerun_at: None,
             probe: None,
@@ -294,6 +295,34 @@ async fn a_burst_of_failures_is_one_message() {
         "five failures, how many more, the lost one: {lines:#?}"
     );
     assert_eq!(lines[5], "and 25 more");
+}
+
+// Catches a failure the host's sleep caused sent as a red build of the code: the line says why it failed (ADR 0159).
+#[tokio::test]
+async fn a_job_the_host_s_sleep_failed_says_so_in_its_line() {
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = config_text(&dir, &webhook(&format!("http://{}/hook", endpoint.address)));
+    let notifier = Running::start(&store, &config).await;
+
+    let mut slept = failed(1);
+    if let Event::JobFinished { job } = &mut slept {
+        job.slept = true;
+    }
+    store.event(slept);
+    store.event(failed(2));
+    endpoint.wait_for(1).await;
+    notifier.stop().await;
+
+    let sent = endpoint.notifications();
+    let lines: Vec<&str> = sent[0].message.lines().collect();
+    assert!(
+        lines[0].ends_with(
+            "failed on main: the host slept while it ran, which ended its runner's session with GitHub"
+        ),
+        "{lines:#?}"
+    );
+    assert!(lines[1].ends_with("failed on main"), "{lines:#?}");
 }
 
 /// A warning that `halyard/api`'s test is flaky.

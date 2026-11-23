@@ -551,12 +551,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Whether a start of `repository` in `profile` must not launch, or, readied, go on: a stop was asked for, as a
     /// runner started since could take a job a detaching stop leaves running; what runners wrote unsynced may be torn
-    /// and is not emptied yet (ADR 0141); GitHub's rate limit is used up; or a
+    /// and is not emptied yet (ADR 0141); the host woke and the engine has not settled (ADR 0159); GitHub's rate limit
+    /// is used up; or a
     /// failure holds back its pool, which, as the plan starts nothing in a held pool, came since. Its pool's other
     /// starts in flight go on, and so do its repository's other pools and other repositories.
     fn launch_barred(&self, repository: &str, profile: &str) -> bool {
         self.control.mode() != Shutdown::No
             || self.unsynced.is_torn()
+            || self.holds_starts()
             || self.github_limit().is_some()
             || self.backing_off(repository, profile, SystemTime::now())
     }

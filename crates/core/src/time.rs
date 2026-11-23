@@ -1,5 +1,6 @@
 //! Timestamps as GitHub and Docker write them (RFC 3339 in UTC, such as `2026-10-22T19:27:25Z` or
-//! `2026-10-22T19:27:25.233122085Z`), and the clock as runnerd records it. Pure functions apart from `now_ms`.
+//! `2026-10-22T19:27:25.233122085Z`), and the clock as runnerd records it. Pure functions apart from `now_ms` and
+//! `suspended_ms`.
 
 #[cfg(feature = "host")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +9,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "host")]
 pub(crate) fn now_ms() -> u64 {
     ms(SystemTime::now())
+}
+
+/// How long the host must have slept between two looks for runnerd to take it as a sleep, in ms: a pause of a few
+/// seconds keeps the runners' sessions with GitHub, and its time in the waits is no more than a tick's.
+#[cfg(feature = "host")]
+pub(crate) const SLEPT_AFTER_MS: u64 = 30_000;
+
+/// How long the host has been suspended since it booted, in ms: `CLOCK_BOOTTIME` less `CLOCK_MONOTONIC`. Linux stops
+/// the monotonic clock, which tokio's timers go by, while the host sleeps, and the boot clock goes on; nothing else
+/// moves them apart, so this grows by exactly the time the host slept. A step of the wall clock, as a time daemon
+/// makes on a laptop that booted with a wrong one, leaves it as it was (ADR 0159).
+#[cfg(feature = "host")]
+pub(crate) fn suspended_ms() -> u64 {
+    use rustix::time::{ClockId, clock_gettime};
+    let ms = |clock: ClockId| {
+        let time = clock_gettime(clock);
+        i128::from(time.tv_sec) * 1000 + i128::from(time.tv_nsec) / 1_000_000
+    };
+    // Read the monotonic clock last: a read between the two can only make the difference smaller.
+    let boot = ms(ClockId::Boottime);
+    let monotonic = ms(ClockId::Monotonic);
+    u64::try_from(boot.saturating_sub(monotonic)).unwrap_or(0)
 }
 
 /// Milliseconds since the Unix epoch of a time.

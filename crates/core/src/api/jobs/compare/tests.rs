@@ -33,6 +33,7 @@ fn summary(id: u64, queued_at: u64) -> JobSummary {
         },
         log: LogSummary::default(),
         runner_fault: false,
+        slept: false,
         failure_cause: None,
         rerun_at: None,
         probe: None,

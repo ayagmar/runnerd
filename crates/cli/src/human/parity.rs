@@ -218,6 +218,9 @@ fn a_jobs_failure_rerun_and_probe_show_as_core_words_them() {
     let text = job(shown, NOW, PLAIN);
     assert!(text.contains(facts.failure_line), "{text}");
     assert!(text.contains(&facts.unprobed_line), "{text}");
+    let shown = daemon.job(runnerd_fixtures::SLEPT).unwrap();
+    let text = job(shown, NOW, PLAIN);
+    assert!(text.contains(facts.slept_line), "{text}");
     let shown = daemon.job(runnerd_fixtures::RUNNER_FAULT).unwrap();
     let text = job(shown, NOW, PLAIN);
     assert!(text.contains(&facts.rerun_line), "{text}");

@@ -7864,6 +7864,7 @@ mod presence;
 mod priority;
 mod records;
 mod registrations;
+mod sleep;
 mod start;
 mod stop;
 mod unsynced;

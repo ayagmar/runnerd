@@ -55,7 +55,7 @@ macro_rules! record_mark {
 }
 
 /// How many columns `SUMMARY` has: a query that adds one after them reads it at this index.
-const SUMMARY_COLUMNS: usize = 53;
+const SUMMARY_COLUMNS: usize = 54;
 
 /// The columns `summary_from` reads, in its order.
 const SUMMARY: &str = concat!(
@@ -68,7 +68,7 @@ const SUMMARY: &str = concat!(
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
      j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at, j.runner_fault, ",
     record_mark!(),
-    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at, r.probe",
+    ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at, r.probe, j.slept",
     " FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
 );
 
@@ -296,6 +296,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             .map(failure_cause),
         rerun_at: row.get::<_, Option<u64>>(51)?.map(secs),
         probe: row.get::<_, Option<String>>(52)?.as_deref().map(probe),
+        slept: row.get(53)?,
         record_mark: row
             .get::<_, Option<String>>(45)?
             .as_deref()
@@ -1397,7 +1398,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
          r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
          j.cpu_throttled, j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.seen_at, \
-         j.wait_causes, j.unseen_unlisted FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         j.wait_causes, j.unseen_unlisted, j.slept FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
     .query_map([since], |row| {
@@ -1437,6 +1438,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             disk: stored_disk(row, 27)?,
             seen_at: row.get(31)?,
             unseen_unlisted: row.get(33)?,
+            slept: row.get(34)?,
             causes: row
                 .get::<_, Option<String>>(32)?
                 .map(|text| stored_causes(&text)),

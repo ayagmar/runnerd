@@ -39,7 +39,8 @@ CREATE TABLE jobs (
     -- as a wait for a slot.
     host_waited INTEGER NOT NULL DEFAULT 0,
     -- How much of its wait passed while no runnerd ran, as the daemon that started after measured it from its
-    -- history's last sign of life (ADR 0081); waits for a slot leave it out. 0 in rows from before schema 16.
+    -- history's last sign of life (ADR 0081), or while the host slept (ADR 0159); waits for a slot leave it out. 0 in
+    -- rows from before schema 16.
     unseen INTEGER NOT NULL DEFAULT 0,
     -- What held its CPU back, kept once the record is final as the totals above are (ADR 0079): the periods of its
     -- CPU quota in which it had work and those it was throttled in, and the milliseconds a task of it waited for a
@@ -79,7 +80,10 @@ CREATE TABLE jobs (
     -- When runnerd asked GitHub to re-run the failed jobs of this job's run because its runner failed it (ADR 0153),
     -- in milliseconds; set on each job of that attempt the runner failed, once GitHub accepted. NULL for every other job,
     -- and in rows from before schema 27.
-    rerun_at INTEGER
+    rerun_at INTEGER,
+    -- Whether the host slept while it ran (ADR 0159): set on each job running when the daemon saw the host wake. 0 in
+    -- rows from before schema 29.
+    slept INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

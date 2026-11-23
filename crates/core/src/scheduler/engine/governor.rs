@@ -4,7 +4,7 @@
 //! jobs' reads and the repositories' listings (ADR 0128), and nothing that sends a registration or a delete asks it anything. It must not parse a header or word a
 //! count: `github::Github` reads the limit, and the log line is `Change::line`.
 //!
-//! Nothing survives a restart, and a reload keeps what it learned. A new engine starts at `Steady`, the pace of
+//! Nothing survives a restart or a sleep of the host, and a reload keeps what it learned. A new engine starts at `Steady`, the pace of
 //! before the governor, and learns the limit from the next answers: a step is judged only after `MIN_SPAN` of
 //! readings, so at most that long at the old pace, in which the hour's budget is not spent. The limit used up, or a
 //! secondary limit, still stops the requests as it did (ADR 0112); this only keeps the count from getting there.
@@ -292,6 +292,12 @@ impl Governor {
             to: self.step(),
             cause: cause?,
         })
+    }
+
+    /// The host slept (ADR 0159): the readings go, as at a restart. Their times are on the clock that stopped while it
+    /// slept, so the spend of others meanwhile would read as spent in the seconds before it.
+    pub(super) fn slept(&mut self) {
+        self.readings.clear();
     }
 
     /// How long the running jobs are read apart.

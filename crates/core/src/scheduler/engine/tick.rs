@@ -333,6 +333,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let began = SystemTime::now();
         let mut pace = Pace::new();
         self.passes_in_tick = std::time::Duration::ZERO;
+        // First: the governor must not read the time the host slept as spent in seconds, and nothing listed before the
+        // sleep holds after it.
+        self.look_for_sleep();
         self.pace_by_limit();
         self.collect_reseeds().await;
         self.collect_measures().await;
@@ -437,6 +440,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.idle_caches(mode, began).await;
         self.keep_records().await;
         self.prune();
+        self.settle_wake();
         listed_at
     }
 
@@ -450,6 +454,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// queued jobs, as every tick's; jobs runners took since are left out (`listed_demand`).
     pub(super) async fn turnover(&mut self) {
         let began = tokio::time::Instant::now();
+        // A pass the host's wake brings before the tick does: what it undoes is undone before any release or start.
+        self.look_for_sleep();
         let mut releases = Releases::default();
         let mut freed = self.begin_releases(&mut releases).await;
         if freed == 0 && releases.waits.is_empty() {
@@ -551,7 +557,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
     pub(super) async fn refill(&mut self) -> usize {
-        if self.control.mode() != Shutdown::No || self.github_limit().is_some() {
+        if self.control.mode() != Shutdown::No
+            || self.github_limit().is_some()
+            || self.holds_starts()
+        {
             return 0;
         }
         // The jobs captures named since: their runners are busy, and their jobs no longer queued.
@@ -862,6 +871,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         );
         let stops = self.over_budget(&plan.decisions);
         plan.decisions.extend(stops);
+        let stops = self.slept_stops(&plan.decisions);
+        plan.decisions.extend(stops);
         (plan, admitting)
     }
 
@@ -1061,8 +1072,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             Holder::Runner(occupant) => Some(RunnerSlot {
                 repository: occupant.repository.clone(),
-                // Its capture named its job before a listing showed it busy: it waits for none of those queued.
-                busy: occupant.engaged(),
+                // Its capture named its job before a listing showed it busy: it waits for none of those queued. Nor
+                // does one up before the host slept, whose session GitHub ended: it stops (`slept_stops`).
+                busy: occupant.engaged() || self.slept_through(&occupant.runner_name),
                 started_at: occupant.started_at,
                 memory: self.takes(occupant),
                 cpu: self.reserves_cpu(&occupant.footprint()),
@@ -1301,7 +1313,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// whether it is above its guard's line, from the same readings the tick's plan counts by. Once a tick, before its
     /// plan; never from a pass or a status read. With pooling off, none: turning it on begins the brake again.
     pub(super) fn look_at_growth(&mut self) {
-        if !self.pools() {
+        // Until a sample from after a wake is in, every reading is from before the sleep: a look then would find the
+        // count below its guard's line for no reason of the host's.
+        if !self.pools() || self.holds_starts() {
             return;
         }
         let now = self.now();
@@ -1385,6 +1399,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             };
             if listed {
+                self.listed_after_wake();
                 self.claims
                     .listing_answered(&repository, listing, floor, &queued);
                 for occupant in self

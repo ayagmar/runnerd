@@ -105,6 +105,13 @@ impl Measured {
         self.growth.begin_again(now);
     }
 
+    /// The host slept from `from` (ms) on: the growth count's looks go, and its guard's brake (`growth::Growth::slept`);
+    /// every job's waits and causes end at `from`. Says what to record.
+    fn slept(&mut self, from: u64) -> (Vec<Waited>, Vec<CauseWaited>) {
+        self.growth.slept();
+        self.job_waits.slept(from)
+    }
+
     /// The growth count's looks and brake, `by` older.
     #[cfg(test)]
     pub(super) fn age_growth(&mut self, by: Duration) {
@@ -704,6 +711,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn note_stop_causes(&mut self) {
         self.take_found();
         let caused = self.measured.end_causes(time::now_ms());
+        self.record_causes(caused);
+    }
+
+    /// The host slept from `from` (ms) on (ADR 0159): the open waits and causes count up to then and end, and the
+    /// growth count's looks and guard go.
+    pub(super) fn note_slept(&mut self, from: u64) {
+        let (waited, caused) = self.measured.slept(from);
+        self.record_waited(waited);
         self.record_causes(caused);
     }
 
