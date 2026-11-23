@@ -63,6 +63,7 @@ fn serve(socket: &Path) {
         github_limited_until: None,
         on_battery: false,
         action_archives: None,
+        grype_database: None,
         machine: None,
         budget: Budget {
             admission: runnerd_core::api::AdmissionPolicy::Caps,

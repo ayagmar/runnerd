@@ -36,6 +36,7 @@ fn engine_with_archives(
             },
             build_cache: None,
             action_archives: Some(dir.0.join("actions")),
+            grype_database: None,
             unsynced: dir.0.join("unsynced"),
             durability: Durability::new(|| {}, |_| false),
         },

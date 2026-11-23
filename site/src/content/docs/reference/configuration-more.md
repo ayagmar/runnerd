@@ -24,6 +24,8 @@ The rest of `runnerd.toml`'s keys; [Configuration](../configuration/) has the ru
 | `actions.enabled` | `true` | runners read the actions their jobs use from runnerd's verified [action archives](../../guides/caches/#action-archives) |
 | `actions.keep` | `"14d"` | how long an archive stays after no served repository pins it any more |
 | `actions.directory` | `$XDG_CACHE_HOME/runnerd/actions` | the archives |
+| `grype.enabled` | `true` | runners read Grype's vulnerability database from [runnerd's copy](../../guides/caches/#grype-database), read-only |
+| `grype.directory` | `$XDG_CACHE_HOME/runnerd/grype` | the database |
 
 ## `[history]`
 

@@ -87,6 +87,9 @@ pub(super) fn caches(
     if let Some(archives) = &caches.actions {
         lines.extend(archive_lines(archives, now, width, theme));
     }
+    if let Some(grype) = &caches.grype {
+        lines.extend(grype_lines(grype, now, width, theme));
+    }
     let lines = super::clip(lines, usize::from(build_area.height), theme);
     frame.render_widget(Paragraph::new(lines), build_area);
 }
@@ -156,6 +159,32 @@ fn archive_lines(
             super::wrap(&failure.line(), width)
                 .into_iter()
                 .map(|line| Line::styled(line, theme.of(archives.tone()))),
+        );
+    }
+    lines
+}
+
+/// The Grype database's lines: its heading in bold, what it is, then its failure in its tone, wrapped.
+fn grype_lines(
+    grype: &api::GrypeDatabase,
+    now: u64,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(""),
+        Line::styled("Grype database", super::bold()),
+    ];
+    lines.extend(
+        super::wrap(&grype.line(now), width)
+            .into_iter()
+            .map(Line::from),
+    );
+    if let Some(failure) = &grype.failure {
+        lines.extend(
+            super::wrap(&failure.line(), width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.of(grype.tone()))),
         );
     }
     lines

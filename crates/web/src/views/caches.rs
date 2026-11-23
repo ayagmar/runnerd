@@ -5,7 +5,7 @@ use crate::views::Here;
 use maud::{Markup, html};
 use runnerd_core::api::{
     ActionArchives, BUILD_CACHE_TOOLS, BuildCacheStats, CacheHistory, CacheKind, CacheVolume,
-    Caches, Section, Status,
+    Caches, GrypeDatabase, Section, Status,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -77,6 +77,9 @@ pub(crate) fn render(view: &CachesView, here: Here<'_>) -> Markup {
         (volumes(view))
         @if let Some(archives) = &view.caches.actions {
             (action_archives(archives, view.now))
+        }
+        @if let Some(grype) = &view.caches.grype {
+            (grype_database(grype, view.now))
         }
     };
     page(
@@ -170,6 +173,21 @@ fn build_cache(build: &BuildCacheStats) -> Markup {
         div.build-cache {
             (figure_list("build-figures", &build.figures()))
             p.muted { "For " (BUILD_CACHE_TOOLS) ". " (format::sentence(&build.actions_cache_line())) "." }
+        }
+    }
+}
+
+/// The Grype database runners read: what it is, and its failure in its tone.
+fn grype_database(grype: &GrypeDatabase, now: u64) -> Markup {
+    html! {
+        section.grype-database aria-label="Grype database" {
+            h2 { "Grype database" }
+            p.muted { (format::sentence(&grype.line(now))) "." }
+            @if let Some(failure) = &grype.failure {
+                ul.archive-failures class=(super::tone_class(grype.tone())) {
+                    li { (failure.line()) }
+                }
+            }
         }
     }
 }

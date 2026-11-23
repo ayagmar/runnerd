@@ -542,6 +542,7 @@ fn empty(fixtures: &mut fake::Fixtures) {
         volumes: vec![],
         build: None,
         actions: None,
+        grype: None,
     };
     fixtures.insights = Some(runnerd_core::api::Insights {
         since: at - 14 * 86_400,

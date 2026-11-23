@@ -89,6 +89,9 @@ pub enum AttentionKind {
     /// Action archives runnerd should keep for its runners failed to be read, downloaded or kept (ADR 0147): jobs
     /// download those actions themselves.
     ActionArchives,
+    /// runnerd's Grype database could not be updated, or is too old to mount (ADR 0160): scans may download their
+    /// own.
+    GrypeDatabase,
     /// GitHub refused runnerd's automatic re-run of a run its runner failed (ADR 0153): it holds that repository's
     /// re-runs for an hour.
     RerunRefused,
@@ -225,6 +228,7 @@ pub fn attention_items(
     );
     items.extend(github(status, now));
     items.extend(action_archives(status));
+    items.extend(grype_database(status));
     items.extend(rerun_refused(status));
     items.sort_by(|a, b| {
         rank(a.tone)
@@ -470,6 +474,20 @@ fn action_archives(status: &Status) -> Option<AttentionItem> {
         title: archives.attention_title()?,
         subject: Subject::Github,
         since: archives.failing_since(),
+        fix: None,
+    })
+}
+
+/// The Grype database's failure, as one warning: scans still run, downloading their own database.
+fn grype_database(status: &Status) -> Option<AttentionItem> {
+    let database = status.grype_database.as_ref()?;
+    Some(AttentionItem {
+        key: "grype-database".to_owned(),
+        kind: AttentionKind::GrypeDatabase,
+        tone: database.tone(),
+        title: database.attention_title()?,
+        subject: Subject::Host,
+        since: database.failure.as_ref().map(|failure| failure.since),
         fix: None,
     })
 }

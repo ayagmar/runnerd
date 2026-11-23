@@ -772,25 +772,47 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
 /// Where the action archives are kept: `[caches.actions] directory` or `$XDG_CACHE_HOME/runnerd/actions`, absolute,
 /// as Docker mounts it into each runner. Kept whether `[caches.actions]` is on or not, so a reload can turn it on.
 fn action_archives_directory(config: &Config) -> Option<PathBuf> {
-    let directory = config.caches.actions.directory.clone().or_else(|| {
+    cache_directory(
+        config.caches.actions.directory.as_deref(),
+        "actions",
+        "action archives",
+        "caches.actions.directory",
+    )
+}
+
+/// Where the Grype database is kept: `[caches.grype] directory` or `$XDG_CACHE_HOME/runnerd/grype`, absolute, as
+/// Docker mounts it into each runner. Kept whether `[caches.grype]` is on or not, so a reload can turn it on.
+fn grype_database_directory(config: &Config) -> Option<PathBuf> {
+    cache_directory(
+        config.caches.grype.directory.as_deref(),
+        "grype",
+        "Grype database",
+        "caches.grype.directory",
+    )
+}
+
+/// `configured`, or `name` under `$XDG_CACHE_HOME/runnerd` (`~/.cache/runnerd`), absolute; `None`, warning that no
+/// `what` is kept and `key` sets it, when neither resolves.
+fn cache_directory(
+    configured: Option<&Path>,
+    name: &str,
+    what: &str,
+    key: &str,
+) -> Option<PathBuf> {
+    let directory = configured.map(Path::to_owned).or_else(|| {
         std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
-            .map(|dir| dir.join("runnerd/actions"))
+            .map(|dir| dir.join("runnerd").join(name))
     });
     let Some(directory) = directory else {
-        warn!(
-            "no action archives: neither XDG_CACHE_HOME nor HOME is set; set caches.actions.directory"
-        );
+        warn!("no {what}: neither XDG_CACHE_HOME nor HOME is set; set {key}");
         return None;
     };
     match std::path::absolute(&directory) {
         Ok(directory) => Some(directory),
         Err(error) => {
-            warn!(
-                "no action archives: cannot resolve {}: {error}",
-                directory.display()
-            );
+            warn!("no {what}: cannot resolve {}: {error}", directory.display());
             None
         }
     }
@@ -899,6 +921,7 @@ async fn serve(
     let peers = config.web.peers.clone();
     let build_cache = open_build_cache(&config, &socket);
     let action_archives = action_archives_directory(&config);
+    let grype_database = grype_database_directory(&config);
     let (engine, handle) = Engine::new(
         config,
         github,
@@ -914,6 +937,7 @@ async fn serve(
             paths: Paths::default(),
             build_cache,
             action_archives,
+            grype_database,
             unsynced,
             durability: Durability::host(),
         },
