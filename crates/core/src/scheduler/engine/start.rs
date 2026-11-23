@@ -546,6 +546,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         while let Some(joined) = in_flight.tasks.try_join_next_with_id() {
             self.fold_joined(joined, in_flight, carried).await;
         }
+        // The host may have slept while the batch's starts ran.
+        self.look_for_sleep();
         self.launch_barred(repository, profile)
     }
 

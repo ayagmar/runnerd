@@ -26,8 +26,9 @@ enum Woke {
 /// look on, the settling is the last wake's, and the runners are those that were up before the last sleep, whether or
 /// not the engine has settled since.
 ///
-/// Nothing of it survives a restart: a daemon that starts takes the time suspended as it finds it, and the time before
-/// it is the store's downtime (ADR 0081). A reload keeps it.
+/// Nothing of it survives a restart but the runners that predate the last sleep, which a daemon that starts finds
+/// again from when the history says it began (`predate`): it takes the time suspended as it finds it, and the time
+/// before it is the store's downtime (ADR 0081). A reload keeps it.
 #[derive(Debug, Default)]
 pub(super) struct Sleep {
     /// The time suspended since boot at the last look, in ms (`Clock::suspended_ms`); `None` before the first.
@@ -64,9 +65,12 @@ impl Sleep {
         Some(slept)
     }
 
-    /// A listing of queued jobs answered since the wake.
-    pub(super) fn listed(&mut self) {
-        if let Woke::Settling { listed, .. } = &mut self.woke {
+    /// A listing of queued jobs that began at `began` (ms, as `look`'s `now`) answered. One that began before the wake
+    /// may hold what GitHub listed before the sleep, so it does not settle anything.
+    pub(super) fn listed(&mut self, began: u64) {
+        if let Woke::Settling { at, listed, .. } = &mut self.woke
+            && began >= *at
+        {
             *listed = true;
         }
     }
@@ -95,6 +99,12 @@ impl Sleep {
             return true;
         }
         false
+    }
+
+    /// `runners` were up before the last sleep began, as a daemon that starts finds them: none of them is a runner to
+    /// keep waiting for a job either.
+    pub(super) fn predate(&mut self, runners: impl IntoIterator<Item = String>) {
+        self.predating.extend(runners);
     }
 
     /// Whether `runner` was up when the engine saw the last sleep.
@@ -130,7 +140,12 @@ mod tests {
         assert!(sleep.predates("r1"), "r1 was up before the sleep");
         assert!(!sleep.predates("r2"), "r2 was not");
         assert!(sleep.settling(Some(5_001)), "no listing answered yet");
-        sleep.listed();
+        sleep.listed(5_000_499);
+        assert!(
+            sleep.settling(Some(5_001)),
+            "a listing that began before the wake may show what GitHub listed before the sleep"
+        );
+        sleep.listed(5_000_500);
         assert!(
             sleep.settling(Some(5_000)),
             "a sample of the wake's second may be older"
@@ -156,7 +171,7 @@ mod tests {
         sleep.look(0, 1_000, [], false);
         assert!(sleep.look(SLEPT_AFTER_MS, 2_000_000, [], false).is_some());
         assert!(sleep.settling(None), "no listing answered yet");
-        sleep.listed();
+        sleep.listed(u64::MAX);
         assert!(sleep.settle(None), "nothing else to wait for");
     }
 }

@@ -117,7 +117,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (28, "ALTER TABLE runners ADD COLUMN probe TEXT;"),
     (
         29,
-        "ALTER TABLE jobs ADD COLUMN slept INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE jobs ADD COLUMN slept_from INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN slept_ended_by INTEGER;",
     ),
 ];
 
@@ -1343,6 +1344,11 @@ impl Store {
     /// The newest named job each slot ran, for the engine after a restart.
     pub async fn slot_jobs(&self) -> Result<Vec<SlotJob>, StoreError> {
         self.read(read::slot_jobs).await
+    }
+
+    /// When the host's last sleep began (ms), if a daemon saw one (ADR 0159).
+    pub async fn last_sleep_began(&self) -> Result<Option<u64>, StoreError> {
+        self.read(read::last_sleep_began).await
     }
 
     /// The latest second a runner was named for (`runner_named`), or any runner name starting with `prefix` carries,

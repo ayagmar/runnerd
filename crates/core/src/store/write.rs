@@ -21,6 +21,11 @@ use crate::record;
 use crate::sync::lock;
 use crate::time;
 
+/// How long after the host woke GitHub may still fail a job for its sleep, in ms (ADR 0159): it fails a job whose
+/// runner went silent while the host slept, or once the runner reconnects to a session that has ended. A job that
+/// ended later survived the sleep.
+pub(super) const SLEPT_GRACE_MS: u64 = 5 * 60 * 1000;
+
 /// Makes an event its repository's latest in `announced`.
 const ANNOUNCE_REPOSITORY: &str =
     "INSERT OR REPLACE INTO announced (repository, event) VALUES (?1, ?2)";
@@ -356,8 +361,11 @@ impl Writer<'_> {
         self.change("record that the host slept", |_| {
             downtime.credit_queued(&self.db)?;
             self.db.execute(
-                "UPDATE jobs SET slept = 1 WHERE state = 'running'",
-                [],
+                "UPDATE jobs SET slept_from = ?1, slept_ended_by = ?2 WHERE state = 'running'",
+                params![
+                    downtime.from,
+                    downtime.until.saturating_add(SLEPT_GRACE_MS)
+                ],
             )?;
             // Samples the sampler took after the wake and before this write are the new session's.
             self.db.execute(
@@ -370,6 +378,18 @@ impl Writer<'_> {
                 [downtime.until],
             )?;
             session.set(Some(self.db.last_insert_rowid()));
+            // A sign of life after the sleep, so a daemon that starts next does not count the sleep as its downtime
+            // again, should no sample from after the wake be stored before it stops.
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('opened_at', max(?1, coalesce((SELECT value \
+                 FROM meta WHERE key = 'opened_at'), 0)))",
+                [downtime.until],
+            )?;
+            // So a daemon that starts next knows which runners it adopts lived through this sleep.
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('slept_from', ?1)",
+                [downtime.from],
+            )?;
             Ok(())
         });
         if let Some(session) = session.get() {

@@ -494,8 +494,8 @@ always returns, so the daemon closes and flushes the history.
   recording itself as one). Sizing, insights, activity and stats count it; a job's own page shows its whole wait and
   words the rest; arrivals (`simulate`, warm runners) keep `queued_at` ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
 - A sleep of the host is downtime too: the engine sees it as a rise of `CLOCK_BOOTTIME` minus `CLOCK_MONOTONIC`
-  (`time::suspended_ms`) and sends `Write::Downtime`, which adds it to `unseen`, marks the jobs running across it
-  (`jobs.slept`) and splits the session. Until a listing answers and a fresh host sample is in, no runner starts;
+  (`time::suspended_ms`) wherever it resumes and sends `Write::Downtime`, which adds it to `unseen`, records the sleep
+  on the jobs running across it (`jobs.slept_from`, `jobs.slept_ended_by`) and splits the session. Until a listing answers and a fresh host sample is in, no runner starts;
   `engine/sleep.rs` owns that state and `engine/wake.rs` what a wake undoes
   ([ADR 0159](docs/adr/0159-time-the-host-slept-is-downtime-not-waiting.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one

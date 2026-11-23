@@ -216,3 +216,112 @@ async fn after_a_sleep_nothing_starts_until_a_listing_answers() {
         "the first listing that answers settles it"
     );
 }
+
+/// Whether the history marks `job` as having run across a sleep.
+async fn marked_slept(handle: &Handle, dir: &TestDir, job: u64) -> bool {
+    handle.store.flush().await;
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .query_row(
+            "SELECT slept_from IS NOT NULL FROM jobs WHERE id = ?1",
+            [job],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+// Catches review 1's scenario A: a runner that takes its job seconds after the wake, before any tick. Its take is the
+// first the engine hears of the sleep; recorded first, the job reads as running across a sleep it only queued across,
+// and the store's downtime finds it running and leaves its wait whole.
+#[tokio::test]
+async fn a_take_reported_on_waking_is_recorded_after_the_sleep() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine-take-on-wake"),
+    );
+    let (mut engine, handle, clock) = busy_and_idle_ticked(&github, &docker, &dir).await;
+    github.0.lock().unwrap().queued = vec![job(2)];
+    sample_host(&handle, &clock);
+    engine.tick(Shutdown::No).await;
+    clock.sleep(Duration::from_hours(1));
+    let idle = identity("ci", ID_A).runner_name("app", 2, 1);
+    engine.note_found(&crate::scheduler::engine::history::Found::named(idle, 2));
+    assert!(
+        !marked_slept(&handle, &dir, 2).await,
+        "job 2 started after the sleep"
+    );
+    assert!(marked_slept(&handle, &dir, 1).await, "job 1 ran across it");
+}
+
+// Catches review 1's scenario B: the host sleeps while a tick's starts run, and a registration on the connection the
+// sleep broke fails. Counted, it holds the pool back for a failure that says nothing of it.
+#[tokio::test]
+async fn a_registration_that_fails_after_a_sleep_in_the_starts_holds_no_pool() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine-sleep-in-start"),
+    );
+    let config = CONFIG.replace("slots = 2", "slots = 3");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let clock = Clock::stopped();
+    engine.clock = clock.clone();
+    sample_host(&handle, &clock);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    {
+        let mut state = github.0.lock().unwrap();
+        state.strict = true;
+        for id in 1..=3 {
+            state.queued.push(job(id));
+            state.queued_on.insert(id, "o/r".to_owned());
+        }
+    }
+    // The host sleeps as the first registration answers; the next ones fail on the broken connection.
+    let asleep = clock.clone();
+    github.0.lock().unwrap().on_register = Some(Box::new(move |state| {
+        asleep.sleep(Duration::from_hours(1));
+        state.fail_registrations = 2;
+    }));
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine
+            .pool_hold("o/r", "app")
+            .and_then(|hold| hold.held)
+            .map(|held| held.cause),
+        None,
+        "no failure after the sleep holds the pool: {:?}",
+        github.calls()
+    );
+}
+
+// Catches review 1's finding 4: a restart between a wake and the stop of a runner that lived through the sleep adopts
+// that runner as one ready for a job, though GitHub may have ended its session.
+#[tokio::test]
+async fn after_a_restart_an_idle_runner_that_lived_through_the_last_sleep_still_goes() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine-slept-restart"),
+    );
+    let (engine, handle) = stop_fixture(&github, &docker, &dir);
+    // The daemon saw the host sleep after the idle runner started, and stopped before it stopped that runner.
+    let from = crate::time::now_ms() + 1000;
+    handle.store.downtime(from, from + 3_600_000);
+    handle.store.flush().await;
+    drop((engine, handle));
+    let (mut engine, _handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &CONFIG.replace("slots = 2", "slots = 3"),
+    );
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        removed(&docker.calls()),
+        ["remove container-2"],
+        "the idle runner from before the sleep goes; the busy one stays"
+    );
+}

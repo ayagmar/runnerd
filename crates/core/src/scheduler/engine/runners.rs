@@ -383,6 +383,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         // A runner up before the host slept lost its session with GitHub, and one that leaves while the engine settles
         // after a wake may have met a network not back yet: neither says anything of the pool (ADR 0159).
+        self.look_for_sleep();
         let says_nothing = !matches!(logged, Logged::TookJob)
             && (self.holds_starts() || self.slept_through(&occupant.runner_name));
         if let Some(health) = self
@@ -722,6 +723,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         cause: HoldCause,
         error: String,
     ) {
+        // A failure on a connection the host's sleep broke counts once the engine sees that sleep.
+        self.look_for_sleep();
         if self.holds_starts() {
             info!(
                 "{repository}: not holding back {profile} for a failure while settling after the host woke: {error}"

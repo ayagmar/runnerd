@@ -5,7 +5,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::read::{self, byte_prefix, secs, state_name, text};
+use super::read::{self, SLEPT, byte_prefix, secs, state_name, text};
 use crate::api::{
     self, BarEnd, BaselineRead, JobComparison, JobState, RunnerSpan, SlotKey, SlotTimeline,
     SlottedBar, SlottedRunner, Span, StepUsage, TimelineBar, TimelineRows, Unavailable,
@@ -82,7 +82,7 @@ pub(super) fn timeline(
             .prepare_cached(&format!(
                 "SELECT j.id, j.repository, {}, {}, j.state, \
                  j.conclusion, j.runner_fault, j.queued_at, j.started_at, j.finished_at, j.runner, r.profile, \
-                 r.slot, r.removed_at, j.slept FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+                 r.slot, r.removed_at, {SLEPT} FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
                  WHERE j.queued_at < ?2 AND (min(j.finished_at, coalesce(r.removed_at, j.finished_at)) / 1000 > ?4 \
                  OR (j.finished_at IS NULL \
                  AND (j.state IN {OPEN} OR (r.name IS NOT NULL AND (r.removed_at IS NULL OR r.removed_at / 1000 > ?4)) \

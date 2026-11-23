@@ -489,8 +489,8 @@ fn details(id: u64, started_at: u64, finished: Option<(&str, u64)>) -> crate::gi
         }
         .to_owned(),
         conclusion: finished.map(|(conclusion, _)| conclusion.to_owned()),
-        started_at: Some(rfc3339(started_at)),
-        completed_at: finished.map(|(_, at)| rfc3339(at)),
+        started_at: Some(crate::time::rfc3339(started_at)),
+        completed_at: finished.map(|(_, at)| crate::time::rfc3339(at)),
         runner_name: Some("r".to_owned()),
         steps: Vec::new(),
     }
@@ -603,5 +603,71 @@ async fn a_sleep_of_the_host_is_downtime_for_the_waits_through_it_and_marks_the_
             (woke, Some(again)),
             (woke_again, None)
         ]
+    );
+}
+
+// Catches review 1's finding 2: every job running at a wake read as failed for the sleep, however long it ran on. A
+// job that ends during the sleep or within the grace after it failed for the sleep; one that ran on past the grace
+// survived it, and one that had ended before the sleep began had nothing to do with it.
+#[tokio::test]
+async fn only_a_job_that_ended_during_a_sleep_or_just_after_failed_for_it() {
+    let dir = TestDir::new("store-slept-grace");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let store = Store::open_at(&path, start).unwrap();
+    keep_since(&path, start);
+    let (slept, woke) = (start + 20 * SECOND, start + 20 * SECOND + HOUR);
+    let grace = super::super::write::SLEPT_GRACE_MS;
+    let ended = [
+        (1, slept + 10 * SECOND),
+        (2, woke + grace),
+        (3, woke + grace + SECOND),
+        // It ended just before the sleep, and the store had not heard yet.
+        (4, slept - SECOND),
+    ];
+    for (job, _) in ended {
+        store.queued("o/r", &queued(job), start);
+        store.claimed(job, 10, "r", start + 2 * SECOND);
+    }
+    store.downtime(slept, woke);
+    for (job, at) in ended {
+        store.details(details(job, start + 2 * SECOND, Some(("failure", at))));
+    }
+    store.flush().await;
+    for (job, failed_for_it) in [(1, true), (2, true), (3, false), (4, false)] {
+        let summary = store.job(job).await.unwrap().unwrap().summary;
+        assert_eq!(summary.slept, failed_for_it, "job {job}");
+    }
+}
+
+// Catches review 1's finding 3: a daemon killed after a wake and before any later sign of life is stored counts the
+// sleep again as its own downtime, so the jobs queued across it leave it out twice.
+#[tokio::test]
+async fn a_restart_after_a_wake_does_not_count_the_sleep_again() {
+    let dir = TestDir::new("store-slept-restart");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let store = Store::open_at(&path, start).unwrap();
+    keep_since(&path, start);
+    store.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: start + 5 * SECOND,
+            ..queued(1)
+        },
+        start + 5 * SECOND,
+    );
+    let (slept, woke) = (start + 20 * SECOND, start + 20 * SECOND + HOUR);
+    store.downtime(slept, woke);
+    store.flush().await;
+    drop(store);
+    let store = Store::open_at(&path, woke + 10 * SECOND).unwrap();
+    store.claimed(1, 10, "r", woke + 10 * SECOND);
+    store.flush().await;
+    let summary = store.job(1).await.unwrap().unwrap().summary;
+    assert_eq!(
+        summary.timeline.unseen,
+        HOUR / SECOND + 10,
+        "the sleep and the 10 s no daemon ran, each once"
     );
 }

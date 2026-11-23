@@ -4,7 +4,7 @@
 //! samples, and runners whose sessions GitHub ended as runners ready for a job. `sleep::Sleep` owns the state; this
 //! adds the engine's side: it reads the clocks, tells the store and undoes what the sleep made wrong.
 
-use tracing::info;
+use tracing::{info, warn};
 
 use super::Engine;
 use crate::api::duration;
@@ -15,10 +15,14 @@ use crate::time;
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Looks whether the host slept since the last look, by how far the time it spent suspended rose; a step of the
-    /// wall clock moves nothing it reads. After a sleep: the store takes it as downtime, the open waits end where it
-    /// began, the governor's readings and the growth count's looks go, every pool's waits end, and every repository's
-    /// queued jobs are unknown until it is listed again, which it is at once, with its runners. Starts wait until the engine has settled (`holds_starts`), and
-    /// the runners that were up stop once idle (`slept_stops`).
+    /// wall clock moves nothing it reads. It looks wherever the engine resumes: first in a tick and in a pass, again
+    /// after a tick's listings and before what the tick records, when a runner's capture reports a take, and before a
+    /// command, a start's launch or a failure that counts against a pool. A look is two clock reads.
+    ///
+    /// After a sleep: the store takes it as downtime, the open waits end where it began, the governor's readings and
+    /// the growth count's looks go, every pool's waits end, and every repository's queued jobs are unknown until it is
+    /// listed again, which it is at once, with its runners. Starts wait until the engine has settled
+    /// (`holds_starts`), and the runners that were up stop once idle (`slept_stops`).
     pub(super) fn look_for_sleep(&mut self) {
         let present: Vec<String> = self
             .occupied()
@@ -51,6 +55,32 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// After a restart: the adopted runners that started before the host's last sleep began, which the history keeps,
+    /// lived through it, and GitHub may have ended their sessions. A restart between a wake and their stop must not
+    /// count them as covering a queued job again.
+    pub(super) async fn recover_sleep(&mut self) {
+        let began = match self.store.last_sleep_began().await {
+            Ok(Some(began)) => began,
+            Ok(None) => return,
+            Err(error) => {
+                warn!("cannot read when the host last slept: {error}");
+                return;
+            }
+        };
+        let predating: Vec<String> = self
+            .occupied()
+            .filter(|(_, occupant)| time::ms(occupant.started_at) < began)
+            .map(|(_, occupant)| occupant.runner_name.clone())
+            .collect();
+        if !predating.is_empty() {
+            info!(
+                "{} adopted runners started before the host last slept: they stop once idle",
+                predating.len()
+            );
+        }
+        self.sleep.predate(predating);
+    }
+
     /// Whether the last wake holds every start back, and keeps a failed start or a runner that leaves without a job
     /// from counting against its pool: until a host sample from after it is in and a listing of queued jobs answered.
     pub(super) fn holds_starts(&self) -> bool {
@@ -63,9 +93,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.sleep.predates(runner)
     }
 
-    /// A listing of queued jobs answered: the wake waits for it no more.
-    pub(super) fn listed_after_wake(&mut self) {
-        self.sleep.listed();
+    /// A listing of queued jobs that began at `began` (`Clock::now_ms`) answered: the wake waits for it no more, if
+    /// it began after the wake.
+    pub(super) fn listed_after_wake(&mut self, began: u64) {
+        self.sleep.listed(began);
     }
 
     /// Ends the wake's hold once nothing holds it.

@@ -81,9 +81,11 @@ CREATE TABLE jobs (
     -- in milliseconds; set on each job of that attempt the runner failed, once GitHub accepted. NULL for every other job,
     -- and in rows from before schema 27.
     rerun_at INTEGER,
-    -- Whether the host slept while it ran (ADR 0159): set on each job running when the daemon saw the host wake. 0 in
-    -- rows from before schema 29.
-    slept INTEGER NOT NULL DEFAULT 0
+    -- The last sleep of the host it ran across (ADR 0159), in milliseconds: when the sleep began, and how long after the
+    -- wake GitHub may still fail a job for it. A job that ended between the two failed for the sleep. Set on each job
+    -- running when the daemon saw the host wake; NULL for every other job, and in rows from before schema 29.
+    slept_from INTEGER,
+    slept_ended_by INTEGER
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
@@ -256,8 +258,9 @@ CREATE TABLE cache_sizes (
 ) WITHOUT ROWID;
 
 -- mirror_log_until: the Docker timestamp (ns) of the last mirror log line counted; mirror_log_seen: how many lines
--- logged at exactly that time were counted; opened_at: when a daemon last opened the history, a sign of life that
--- ends a downtime (ADR 0081); runner_named: the latest second a runner's name ends in, kept before GitHub or Docker
+-- logged at exactly that time were counted; opened_at: when a daemon last opened the history or saw the host wake, a
+-- sign of life that ends a downtime (ADR 0081, 0159); slept_from: when the host's last sleep began (ADR 0159), so a
+-- daemon that starts knows the runners it adopts that lived through it; runner_named: the latest second a runner's name ends in, kept before GitHub or Docker
 -- knows the name, so a restart never names a runner the same.
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
