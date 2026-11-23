@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::outline::Outlining;
 use super::read::{self, secs};
 use super::{
-    Downtime, HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord,
+    Downtime, Downtimes, HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord,
     SampleRecord, Write, logged,
 };
 use crate::api::{self, Event, EventEnvelope};
@@ -20,6 +20,11 @@ use crate::github::{JobDetails, JobStep, NamedRun, QueuedJob};
 use crate::record;
 use crate::sync::lock;
 use crate::time;
+
+/// How long after the host woke GitHub may still fail a job for its sleep, in ms (ADR 0159): it fails a job whose
+/// runner went silent while the host slept, or once the runner reconnects to a session that has ended. A job that
+/// ended later survived the sleep.
+pub(super) const SLEPT_GRACE_MS: u64 = 5 * 60 * 1000;
 
 /// Makes an event its repository's latest in `announced`.
 const ANNOUNCE_REPOSITORY: &str =
@@ -32,8 +37,8 @@ const ANNOUNCE_PROFILE: &str =
 pub(super) struct Started {
     /// The writer's connection.
     pub(super) db: Connection,
-    /// The time before this daemon when no runnerd ran.
-    pub(super) downtime: Option<Downtime>,
+    /// The time before this daemon when no runnerd ran, if any.
+    pub(super) downtimes: Downtimes,
     /// This daemon's row in `sessions`, which it notes each host sample it stores in.
     pub(super) session: i64,
 }
@@ -51,9 +56,9 @@ pub(super) fn run(
     events: &broadcast::Sender<Arc<EventEnvelope>>,
     held: &Mutex<Vec<api::HostSample>>,
 ) {
-    let writer = Writer {
+    let mut writer = Writer {
         db: started.db,
-        downtime: started.downtime,
+        downtimes: started.downtimes,
         session: started.session,
         events,
         held,
@@ -66,9 +71,10 @@ pub(super) fn run(
 
 struct Writer<'store> {
     db: Connection,
-    /// The time before this daemon when no runnerd ran, which a job queued before it first records waited through.
-    downtime: Option<Downtime>,
-    /// This daemon's row in `sessions`.
+    /// The time before this daemon when no runnerd ran and each time the host slept since, which a job queued before
+    /// one first records waited through.
+    downtimes: Downtimes,
+    /// This daemon's row in `sessions`, a new one after each sleep.
     session: i64,
     events: &'store broadcast::Sender<Arc<EventEnvelope>>,
     /// `Store::held`.
@@ -95,8 +101,9 @@ impl Writer<'_> {
         clippy::too_many_lines,
         reason = "one arm per kind of write, each a call; split, it would only move the match"
     )]
-    fn apply(&self, write: Write) {
+    fn apply(&mut self, write: Write) {
         match write {
+            Write::Downtime { from, until } => self.slept(Downtime { from, until }),
             Write::Queued {
                 repository,
                 job,
@@ -348,6 +355,53 @@ impl Writer<'_> {
             }
             Ok(())
         });
+    }
+
+    /// The host slept through `downtime` (ADR 0159): the jobs queued now leave it out of their waits, and those
+    /// recorded later that were queued before it will; the jobs running now ran across it. The held host samples are
+    /// stored in the session that ends where the sleep began, and a new session begins where it ended. If the
+    /// change fails, the jobs keep their waits as they were, and the session goes on.
+    fn slept(&mut self, downtime: Downtime) {
+        self.store_host_samples();
+        let session = std::cell::Cell::new(None);
+        self.change("record that the host slept", |_| {
+            downtime.credit_queued(&self.db)?;
+            self.db.execute(
+                "UPDATE jobs SET slept_from = ?1, slept_ended_by = ?2 WHERE state = 'running'",
+                params![
+                    downtime.from,
+                    downtime.until.saturating_add(SLEPT_GRACE_MS)
+                ],
+            )?;
+            // Samples the sampler took after the wake and before this write are the new session's.
+            self.db.execute(
+                "UPDATE sessions SET sampled_at = min(coalesce(sampled_at, ?2), ?2) WHERE id = ?1",
+                params![self.session, downtime.from],
+            )?;
+            self.db.execute(
+                "INSERT INTO sessions (started_at, sampled_at) SELECT ?1, max(at) FROM host_samples \
+                 WHERE at >= ?1",
+                [downtime.until],
+            )?;
+            session.set(Some(self.db.last_insert_rowid()));
+            // A sign of life after the sleep, so a daemon that starts next does not count the sleep as its downtime
+            // again, should no sample from after the wake be stored before it stops.
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('opened_at', max(?1, coalesce((SELECT value \
+                 FROM meta WHERE key = 'opened_at'), 0)))",
+                [downtime.until],
+            )?;
+            // So a daemon that starts next knows which runners it adopts lived through this sleep.
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('slept_from', ?1)",
+                [downtime.from],
+            )?;
+            Ok(())
+        });
+        if let Some(session) = session.get() {
+            self.downtimes.push(downtime);
+            self.session = session;
+        }
     }
 
     /// Stores the held host samples in one transaction, and notes the latest in this daemon's session: runnerd was
@@ -652,7 +706,7 @@ impl Writer<'_> {
         } else {
             job.created_at
         };
-        let unseen = self.downtime.map_or(0, |downtime| downtime.of(queued_at));
+        let unseen = self.downtimes.of(queued_at);
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, workflow, name, branch, url, labels, state, \
              queued_at, unseen, seen_at, wait_causes, unseen_unlisted) \
@@ -734,9 +788,9 @@ impl Writer<'_> {
         let captured_first = self.captured_first(details.id, queued_at, started_at)?;
         // A runner that outlived the last daemon may have started it while none ran: what the downtime gave it
         // after that start was no wait. Once, when GitHub's start first says so.
-        let after_start = match (self.downtime, started_at) {
-            _ if captured_first.is_some() => 0,
-            (Some(downtime), Some(started_at)) if started_at < downtime.until => self
+        let after_start = match started_at {
+            _ if captured_first.is_some() || self.downtimes.is_empty() => 0,
+            Some(started_at) => self
                 .db
                 .query_row(
                     "SELECT queued_at, started_at FROM jobs WHERE id = ?1",
@@ -744,9 +798,10 @@ impl Writer<'_> {
                     |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<u64>>(1)?)),
                 )
                 .optional()?
-                .filter(|(_, known)| known.is_none_or(|known| known >= downtime.until))
-                .map_or(0, |(queued_at, _)| downtime.after(queued_at, started_at)),
-            _ => 0,
+                .map_or(0, |(queued_at, known)| {
+                    self.downtimes.after(queued_at, started_at, known)
+                }),
+            None => 0,
         };
         let updated = self.db.execute(
             "UPDATE jobs SET run_id = ?2, run_attempt = ?3, name = ?4, workflow = ?5, branch = ?6, url = ?7, \
@@ -798,7 +853,7 @@ impl Writer<'_> {
         queued_at: Option<u64>,
         started_at: Option<u64>,
     ) -> rusqlite::Result<Option<Unseen>> {
-        let (Some(downtime), Some(queued_at)) = (self.downtime, queued_at) else {
+        let Some(queued_at) = queued_at.filter(|_| !self.downtimes.is_empty()) else {
             return Ok(None);
         };
         let row = self
@@ -814,8 +869,8 @@ impl Writer<'_> {
             let started_at = started_at.unwrap_or(captured);
             let listed = seen_at.map_or(started_at, |seen_at| seen_at.min(started_at));
             Unseen {
-                unseen: downtime.during(queued_at, started_at),
-                unlisted: downtime.during(queued_at, listed),
+                unseen: self.downtimes.during(queued_at, started_at),
+                unlisted: self.downtimes.during(queued_at, listed),
             }
         }))
     }
@@ -1398,7 +1453,7 @@ mod tests {
     use rusqlite::Connection;
     use tokio::sync::broadcast;
 
-    use super::Writer;
+    use super::{Downtimes, Writer};
     use crate::testdir::TestDir;
 
     fn synchronous(db: &Connection) -> u8 {
@@ -1415,7 +1470,7 @@ mod tests {
         let held = Mutex::new(Vec::new());
         let writer = Writer {
             db,
-            downtime: None,
+            downtimes: Downtimes::default(),
             session: 0,
             events: &events,
             held: &held,

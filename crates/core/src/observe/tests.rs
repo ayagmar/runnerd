@@ -1581,3 +1581,52 @@ fn a_service_read_once_without_its_count_takes_no_more_than_its_slice_rose() {
         "Docker's rise at most system.slice's 300K, not its 1320K since boot: {owners:?}"
     );
 }
+
+// Catches the CPU of the first sample after a sleep divided by the hours asleep, which reads as an idle container
+// (ADR 0159).
+#[test]
+fn after_a_sleep_cpu_is_use_over_the_time_awake() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000, 0, 1_000_000);
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    state.sample(&runners, 10_000);
+    // The host slept an hour; awake, the container used 3 CPU seconds in the 2 s before the next sample.
+    state.slept(3_600_000);
+    container(&paths, "a", 10, 4_000, 0, 4_000_000);
+    let after = state.sample(&runners, 10_000 + 3_600_000 + 2_000).samples;
+    assert_eq!(after[0].cpu, 1500);
+}
+
+// Catches a drive's window stretched across a sleep the sampler did not see, so what the drive wrote while the host
+// was down, or during a resume, counts as written in the minutes before it (ADR 0159).
+#[test]
+fn a_reading_long_after_the_last_starts_a_new_drive_window() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    drive(&paths, 1500, 0);
+    assert_eq!(windows.add(disks.read(&paths, &slice, 300_000)), None);
+    drive(&paths, 9000, 0);
+    let closed = windows
+        .add(disks.read(&paths, &slice, 300_000 + 3_600_000))
+        .expect("the gap ends the window");
+    assert_eq!(
+        (closed.start, closed.end, closed.drive),
+        (0, 300_000, Some(500 * 512)),
+        "the window ends at the last reading before the gap, without what rose across it"
+    );
+    drive(&paths, 9100, 0);
+    let next = windows.add(disks.read(&paths, &slice, 300_000 + 3_600_000 + 600_000));
+    assert_eq!(
+        next.map(|window| window.drive),
+        Some(Some(100 * 512)),
+        "the next window starts after the gap"
+    );
+}

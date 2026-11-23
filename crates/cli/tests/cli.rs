@@ -169,6 +169,7 @@ fn job(state: JobState) -> Job {
             metrics: JobMetrics::default(),
             log: LogSummary::default(),
             runner_fault: false,
+            slept: false,
             failure_cause: None,
             rerun_at: None,
             probe: None,

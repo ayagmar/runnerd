@@ -551,6 +551,7 @@ fn list(jobs: &[api::RunningJob]) -> String {
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Carries out a command from the API.
     pub(super) async fn command(&mut self, command: Command) {
+        self.look_for_sleep();
         match command {
             Command::Pause {
                 target,

@@ -131,6 +131,16 @@ impl<Id: Ord> Growth<Id> {
         );
     }
 
+    /// The host slept (ADR 0159): the looks go, as runners' sessions and readings from before it say nothing of the
+    /// growth after, and so does a brake a look below the guard's line set, as the readings went stale while it slept.
+    /// A brake for growth stands: what ran still grew.
+    pub fn slept(&mut self) {
+        self.looks.clear();
+        if matches!(self.braked, Some(Braked::Guarded { .. })) {
+            self.braked = None;
+        }
+    }
+
     /// Takes a plan's look at `now`: what each runner `used`, the `room` the count keeps for growth and whether it was
     /// above its `guard`'s line. If the runners present at an earlier look in the window grew, together, past the room
     /// that look kept, the brake engages until `BRAKE_FOR` from now; else below the guard's line with no brake standing,

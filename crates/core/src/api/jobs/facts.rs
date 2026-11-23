@@ -11,6 +11,14 @@ use super::{
 };
 use crate::api::{QueuedJob, Record, Tone, Toned};
 
+/// The outcome of a job that failed across a sleep of its host (`JobSummary::slept`).
+const HOST_SLEPT: &str = "host slept";
+
+/// What every client writes under the outcome of a job that failed across a sleep of its host: what failed it, as
+/// `failure_line` says it, ahead of anything its log shows, which the sleep caused too.
+const SLEPT_LINE: &str =
+    "the host slept while it ran, which ended its runner's session with GitHub";
+
 /// What kind of outcome a job's or a step's is, for each client to colour as it colours that meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutcomeKind {
@@ -105,24 +113,34 @@ impl JobSummary {
 
     /// Its outcome: where it is while it can change, then how it ended. Its kind is [`OutcomeKind::Failed`] or
     /// [`OutcomeKind::RunnerFault`] exactly when it [failed](JobSummary::is_failure); a job that concluded failed and
-    /// that the runner failed reads `runner fault` (`runner_fault`) and counts as failed all the same. A job that left the queue without starting, as one a newer push
-    /// cancelled, did not run elsewhere: it reads `cancelled in queue`, or as it concluded.
+    /// that the runner failed reads `runner fault` (`runner_fault`), and one that failed or was lost across a sleep of
+    /// its host `host slept` (`slept`); each counts as failed all the same. A job that left the queue without
+    /// starting, as one a newer push cancelled, did not run elsewhere: it reads `cancelled in queue`, or as it
+    /// concluded.
     pub fn outcome(&self) -> Outcome {
         outcome_of(
             self.state,
             self.conclusion.as_deref(),
             self.timeline.started_at.is_some(),
-            self.runner_fault,
+            Ended {
+                runner_fault: self.runner_fault,
+                slept: self.slept,
+            },
         )
     }
 
-    /// What its log says failed it, as every client writes it under its outcome: `the runner could not download or
-    /// unpack an action while it set up the job`. `None` for a job that did not fail, and for one whose log does not
-    /// say (`failure_cause`).
+    /// What failed it apart from its code, as every client writes it under its outcome: that the host slept while it
+    /// ran (`slept`), unless its log says the runner failed it, or else what its log says, such as `the runner could
+    /// not download or unpack an action while it set up the job`. `None` for a job that did not fail, and for one
+    /// neither says anything of (`failure_cause`).
     pub fn failure_line(&self) -> Option<&'static str> {
-        self.failure_cause
-            .filter(|_| self.is_failure())
-            .and_then(FailureCause::line)
+        if !self.is_failure() {
+            return None;
+        }
+        if self.slept && !self.runner_fault {
+            return Some(SLEPT_LINE);
+        }
+        self.failure_cause.and_then(FailureCause::line)
     }
 
     /// That runnerd re-ran it, as every client writes it under its outcome: `runnerd re-ran the run's failed jobs as
@@ -303,16 +321,32 @@ impl JobSummary {
     }
 }
 
-/// [`JobSummary::outcome`] of a job in `state`, concluded `conclusion`, that `started` here or not.
+/// What befell a job apart from its conclusion, as its record keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ended {
+    /// Its log says the runner failed it (`JobSummary::runner_fault`).
+    pub(crate) runner_fault: bool,
+    /// The host slept while it ran (`JobSummary::slept`).
+    pub(crate) slept: bool,
+}
+
+/// [`JobSummary::outcome`] of a job in `state`, concluded `conclusion`, that `started` here or not. A failure the log
+/// says the runner caused reads `runner fault`; one across a sleep of the host, `host slept`, as the sleep ended the
+/// runner's session.
 pub(crate) fn outcome_of(
     state: JobState,
     conclusion: Option<&str>,
     started: bool,
-    runner_fault: bool,
+    ended: Ended,
 ) -> Outcome {
+    let Ended {
+        runner_fault,
+        slept,
+    } = ended;
     match (state, conclusion) {
         (JobState::Queued, _) => Outcome::new("queued", OutcomeKind::Waiting),
         (JobState::Running, _) => Outcome::new("running", OutcomeKind::Running),
+        (JobState::Lost, _) if slept => Outcome::new(HOST_SLEPT, OutcomeKind::Failed),
         (JobState::Lost, _) => Outcome::new("lost", OutcomeKind::Failed),
         (JobState::Elsewhere, Some("cancelled")) if !started => {
             Outcome::new("cancelled in queue", OutcomeKind::Ended)
@@ -327,6 +361,9 @@ pub(crate) fn outcome_of(
             if runner_fault && failed_conclusion(conclusion) =>
         {
             Outcome::new("runner fault", OutcomeKind::RunnerFault)
+        }
+        (JobState::Completed, Some(conclusion)) if slept && failed_conclusion(conclusion) => {
+            Outcome::new(HOST_SLEPT, OutcomeKind::Failed)
         }
         (JobState::Completed, Some(conclusion)) => Outcome::concluded(conclusion),
     }

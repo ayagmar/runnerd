@@ -39,7 +39,8 @@ CREATE TABLE jobs (
     -- as a wait for a slot.
     host_waited INTEGER NOT NULL DEFAULT 0,
     -- How much of its wait passed while no runnerd ran, as the daemon that started after measured it from its
-    -- history's last sign of life (ADR 0081); waits for a slot leave it out. 0 in rows from before schema 16.
+    -- history's last sign of life (ADR 0081), or while the host slept (ADR 0159); waits for a slot leave it out. 0 in
+    -- rows from before schema 16.
     unseen INTEGER NOT NULL DEFAULT 0,
     -- What held its CPU back, kept once the record is final as the totals above are (ADR 0079): the periods of its
     -- CPU quota in which it had work and those it was throttled in, and the milliseconds a task of it waited for a
@@ -79,7 +80,12 @@ CREATE TABLE jobs (
     -- When runnerd asked GitHub to re-run the failed jobs of this job's run because its runner failed it (ADR 0153),
     -- in milliseconds; set on each job of that attempt the runner failed, once GitHub accepted. NULL for every other job,
     -- and in rows from before schema 27.
-    rerun_at INTEGER
+    rerun_at INTEGER,
+    -- The last sleep of the host it ran across (ADR 0159), in milliseconds: when the sleep began, and how long after the
+    -- wake GitHub may still fail a job for it. A job that ended between the two failed for the sleep. Set on each job
+    -- running when the daemon saw the host wake; NULL for every other job, and in rows from before schema 30.
+    slept_from INTEGER,
+    slept_ended_by INTEGER
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
@@ -259,8 +265,9 @@ CREATE TABLE cache_sizes (
 ) WITHOUT ROWID;
 
 -- mirror_log_until: the Docker timestamp (ns) of the last mirror log line counted; mirror_log_seen: how many lines
--- logged at exactly that time were counted; opened_at: when a daemon last opened the history, a sign of life that
--- ends a downtime (ADR 0081); runner_named: the latest second a runner's name ends in, kept before GitHub or Docker
+-- logged at exactly that time were counted; opened_at: when a daemon last opened the history or saw the host wake, a
+-- sign of life that ends a downtime (ADR 0081, 0159); slept_from: when the host's last sleep began (ADR 0159), so a
+-- daemon that starts knows the runners it adopts that lived through it; runner_named: the latest second a runner's name ends in, kept before GitHub or Docker
 -- knows the name, so a restart never names a runner the same.
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,

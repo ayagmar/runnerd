@@ -465,6 +465,19 @@ impl Sampler {
         self.disk = Some((target, Windows::default()));
     }
 
+    /// The host slept `ms` since the last pass (ADR 0159): no CPU time passed meanwhile, so the next pass measures CPU
+    /// use over the time awake only, and the drive's window ends at the last reading before the sleep. Says the window
+    /// to store, if it spans any time.
+    pub fn slept(&mut self, ms: u64) -> Option<disk::Window> {
+        for last in self.previous.values_mut() {
+            last.at = last.at.saturating_add(ms);
+        }
+        if let Some((at, _)) = &mut self.previous_host {
+            *at = at.saturating_add(ms);
+        }
+        self.close_window()
+    }
+
     /// The window of the drive's figures being added up, if it spans any time: what a stop stores.
     pub fn close_window(&mut self) -> Option<disk::Window> {
         self.disk.as_mut().and_then(|(_, windows)| windows.close())
@@ -596,6 +609,8 @@ pub async fn run(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut watching = tracked.clone();
     let released = async move { while watching.changed().await.is_ok() {} };
+    // How long the host was suspended at the last pass: a rise is a sleep (`time::suspended_ms`).
+    let mut suspended = time::suspended_ms();
     tokio::pin!(released);
     loop {
         tokio::select! {
@@ -610,6 +625,14 @@ pub async fn run(
         }
         if let Ok(target) = disk.try_recv() {
             lock(&state).watch_disk(target);
+        }
+        let now_suspended = time::suspended_ms();
+        let slept = now_suspended.saturating_sub(suspended);
+        suspended = now_suspended;
+        if slept >= time::SLEPT_AFTER_MS
+            && let Some(window) = lock(&state).slept(slept)
+        {
+            store.disk_window(window);
         }
         let containers = tracked.borrow().clone();
         let state = state.clone();

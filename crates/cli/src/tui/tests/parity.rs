@@ -2204,6 +2204,7 @@ fn a_jobs_failure_rerun_and_probe_show_as_core_words_them() {
     let facts = facts(&daemon);
     for (job, line) in [
         (runnerd_fixtures::ACTION_ARCHIVE, facts.failure_line),
+        (runnerd_fixtures::SLEPT, facts.slept_line),
         (runnerd_fixtures::RUNNER_FAULT, facts.rerun_line.as_str()),
         (runnerd_fixtures::RUNNER_FAULT, facts.probe_line.as_str()),
         (

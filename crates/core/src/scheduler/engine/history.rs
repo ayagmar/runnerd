@@ -308,6 +308,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Notes the job a runner's capture found.
     pub(super) fn note_found(&mut self, found: &Found) {
+        // A take reported on waking is the first the engine hears of the sleep: the job's wait must leave it out.
+        self.look_for_sleep();
         self.ledger.stop_queued(found.job);
         // GitHub picks which job a runner takes, which may not be the one the plan started it for (ADR 0110).
         self.note_taken(found.job, found.at);

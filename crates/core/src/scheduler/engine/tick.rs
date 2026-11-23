@@ -333,6 +333,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let began = SystemTime::now();
         let mut pace = Pace::new();
         self.passes_in_tick = std::time::Duration::ZERO;
+        // First: the governor must not read the time the host slept as spent in seconds, and nothing listed before the
+        // sleep holds after it.
+        self.look_for_sleep();
         self.pace_by_limit();
         self.collect_reseeds().await;
         self.collect_measures().await;
@@ -349,34 +352,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_shells().await;
         self.kill_cancelled().await;
         pace.lap(Phase::Collecting, self.passes_in_tick);
-        // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
-        // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
-        // order sees the job queued and its runner busy, and starts a second runner for it.
-        let listed_at = tokio::time::Instant::now();
-        let Probes { runners, queued } = self.probes(mode, scope, listed_at);
-        // What a runner takes from here on, this listing may still show queued.
-        self.listing = Mark {
-            listing: self.listing.listing + 1,
-            at: listed_at,
-        };
-        let listing = self.listing;
-        let listings = self
-            .serving(
-                list(self.github.clone(), self.store.clone(), runners, queued),
-                Meanwhile::Turnover,
-            )
-            .await;
-        pace.lap(Phase::Listing, self.passes_in_tick);
-        self.apply_runners(listings.runners, listing).await;
-        if mode == Shutdown::No {
-            self.apply_queued(listings.queued, listing);
-            self.refresh_warm().await;
-            self.note_queued();
-        } else {
-            for (_, state) in self.repositories.iter_listed_mut() {
-                state.listing_mut().stop();
-            }
-        }
+        let listed_at = self.list(mode, scope, &mut pace).await;
+        self.look_for_sleep();
         self.forget_unlisted();
         self.take_found();
         let described = self.follow_jobs().await;
@@ -391,6 +368,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.look_at_growth();
         }
         pace.lap(Phase::Following, self.passes_in_tick);
+        self.look_for_sleep();
         let (plan, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => {
@@ -419,7 +397,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 applied.deferred
             );
         }
-        // The last plan's: a pool an earlier plan held may have started since.
+        // The last plan's: a pool an earlier plan held may have started since. Not across a sleep in the starts.
+        self.look_for_sleep();
         self.note_waits(&applied.held, applied.barrier);
         pace.done(self.config.host.poll_interval, plans);
         // Whether a job waits for the host's memory once this plan's starts took theirs, as the status says it.
@@ -438,6 +417,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.idle_caches(mode, began).await;
         self.keep_records().await;
         self.prune();
+        self.settle_wake();
         listed_at
     }
 
@@ -451,6 +431,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// queued jobs, as every tick's; jobs runners took since are left out (`listed_demand`).
     pub(super) async fn turnover(&mut self) {
         let began = tokio::time::Instant::now();
+        // A pass the host's wake brings before the tick does: what it undoes is undone before any release or start.
+        self.look_for_sleep();
         let mut releases = Releases::default();
         let mut freed = self.begin_releases(&mut releases).await;
         if freed == 0 && releases.waits.is_empty() {
@@ -552,7 +534,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
     pub(super) async fn refill(&mut self) -> usize {
-        if self.control.mode() != Shutdown::No || self.github_limit().is_some() {
+        if self.control.mode() != Shutdown::No
+            || self.github_limit().is_some()
+            || self.holds_starts()
+        {
             return 0;
         }
         // The jobs captures named since: their runners are busy, and their jobs no longer queued.
@@ -602,6 +587,46 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A plan's waits count whichever path ran it, and only once its starts are done.
         self.note_waits(&plan.held, plan.barrier);
         started
+    }
+
+    /// Lists the runners and queued jobs of the repositories `scope` makes due, and applies what GitHub answered;
+    /// says when the listing began, on Tokio's clock.
+    async fn list(
+        &mut self,
+        mode: Shutdown,
+        scope: Scope,
+        pace: &mut Pace,
+    ) -> tokio::time::Instant {
+        // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
+        // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
+        // order sees the job queued and its runner busy, and starts a second runner for it.
+        let listed_at = tokio::time::Instant::now();
+        let Probes { runners, queued } = self.probes(mode, scope, listed_at);
+        // What a runner takes from here on, this listing may still show queued.
+        self.listing = Mark {
+            listing: self.listing.listing + 1,
+            at: listed_at,
+        };
+        let listing = self.listing;
+        let listing_began = self.clock.now_ms();
+        let listings = self
+            .serving(
+                list(self.github.clone(), self.store.clone(), runners, queued),
+                Meanwhile::Turnover,
+            )
+            .await;
+        pace.lap(Phase::Listing, self.passes_in_tick);
+        self.apply_runners(listings.runners, listing).await;
+        if mode == Shutdown::No {
+            self.apply_queued(listings.queued, listing, listing_began);
+            self.refresh_warm().await;
+            self.note_queued();
+        } else {
+            for (_, state) in self.repositories.iter_listed_mut() {
+                state.listing_mut().stop();
+            }
+        }
+        listed_at
     }
 
     /// What a tick in `mode` listing `scope` lists from `at`, each repository it probes noting that it did: in a stop
@@ -863,6 +888,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         );
         let stops = self.over_budget(&plan.decisions);
         plan.decisions.extend(stops);
+        let stops = self.slept_stops(&plan.decisions);
+        plan.decisions.extend(stops);
         (plan, admitting)
     }
 
@@ -1062,8 +1089,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             Holder::Runner(occupant) => Some(RunnerSlot {
                 repository: occupant.repository.clone(),
-                // Its capture named its job before a listing showed it busy: it waits for none of those queued.
-                busy: occupant.engaged(),
+                // Its capture named its job before a listing showed it busy: it waits for none of those queued. Nor
+                // does one up before the host slept, whose session GitHub ended: it stops (`slept_stops`).
+                busy: occupant.engaged() || self.slept_through(&occupant.runner_name),
                 started_at: occupant.started_at,
                 memory: self.takes(occupant),
                 cpu: self.reserves_cpu(&occupant.footprint()),
@@ -1302,7 +1330,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// whether it is above its guard's line, from the same readings the tick's plan counts by. Once a tick, before its
     /// plan; never from a pass or a status read. With pooling off, none: turning it on begins the brake again.
     pub(super) fn look_at_growth(&mut self) {
-        if !self.pools() {
+        // Until a sample from after a wake is in, every reading is from before the sleep: a look then would find the
+        // count below its guard's line for no reason of the host's.
+        if !self.pools() || self.holds_starts() {
             return;
         }
         let now = self.now();
@@ -1354,7 +1384,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// meanwhile is skipped, but the jobs its listing recorded are followed until GitHub says what became of them. A
     /// claim on a listed job made after the listing began, or less than `poll_interval` before, outlives it
     /// (`Mark::ends`).
-    fn apply_queued(&mut self, listings: Vec<Listed>, listing: Mark) {
+    fn apply_queued(&mut self, listings: Vec<Listed>, listing: Mark, began: u64) {
         let floor = self.config.host.poll_interval;
         let taken = self.taken();
         let now = self.now();
@@ -1386,6 +1416,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             };
             if listed {
+                self.listed_after_wake(began);
                 self.claims
                     .listing_answered(&repository, listing, floor, &queued);
                 for occupant in self
