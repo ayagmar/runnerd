@@ -1451,3 +1451,90 @@ fn a_window_without_every_top_level_cgroup_s_count_is_not_split() {
         .unwrap();
     assert_eq!(window.owners, None, "the root's count gone");
 }
+
+/// A restarted service starts its counters again while its slice keeps what it wrote: taking the difference of
+/// lifetime counters moved the dead service's lifetime bytes into "other system services" in one tick. A top-level
+/// cgroup that went did the same to no cgroup's share.
+#[test]
+fn a_restarted_service_or_a_gone_cgroup_moves_no_bytes_between_owners() {
+    const K: u64 = 1024;
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    let slice = paths.slice("ci.slice");
+    cgroups(&paths, 1, 1600);
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    // Docker restarted: its cgroup is new, at 10K; system.slice kept its 300K and wrote 300K more.
+    cgroups(&paths, 2, 1600);
+    io_stat_of(&paths.cgroup.join("system.slice/docker.service"), 10 * K, 10);
+    let owners = windows
+        .add(disks.read(&paths, &slice, 600_000))
+        .unwrap()
+        .owners
+        .unwrap();
+    assert_eq!(owners.docker, Some(10 * K), "the new cgroup's count from 0");
+    assert_eq!(
+        owners.system,
+        (300 - 10 - 30 + 10) * K,
+        "system.slice's rise less Docker's and containerd's, and init.scope's"
+    );
+    // init.scope went: what it wrote before is the root's already, and its rise is nothing, not its lifetime.
+    std::fs::remove_dir_all(paths.cgroup.join("init.scope")).unwrap();
+    cgroups(&paths, 3, 1600);
+    std::fs::remove_dir_all(paths.cgroup.join("init.scope")).unwrap();
+    let owners = windows
+        .add(disks.read(&paths, &slice, 1_200_000))
+        .unwrap()
+        .owners
+        .unwrap();
+    // The root rose by 490K + 1600K; the children left by 100K + 300K + 80K.
+    assert_eq!(owners.kernel, (490 + 1600 - 480) * K);
+}
+
+/// The owner's Docker root is an ext4 in a file on btrfs, on loop0: runnerd, the services and btrfs write the drive,
+/// not the loop device, so reading the loop's lines showed every writer but Docker at 0 and the 16K inference compared
+/// one file system's writes with another's commits.
+#[test]
+fn on_a_root_in_a_file_the_split_reads_the_physical_drive() {
+    const K: u64 = 1024;
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let lo = paths.sys.join("devices/virtual/block/loop0");
+    std::fs::create_dir_all(lo.join("loop")).unwrap();
+    std::fs::write(lo.join("dev"), "7:0\n").unwrap();
+    std::fs::write(lo.join("loop/backing_file"), "/var/lib/runnerd/docker.img\n").unwrap();
+    std::os::unix::fs::symlink(&lo, paths.sys.join("class/block/loop0")).unwrap();
+    std::os::unix::fs::symlink(&lo, paths.sys.join("dev/block/7:0")).unwrap();
+    let mountinfo = paths.proc.join("self/mountinfo");
+    let mut mounts = std::fs::read_to_string(&mountinfo).unwrap();
+    mounts.push_str("50 40 7:0 / /var/lib/docker rw,relatime shared:9 - ext4 /dev/loop0 rw\n");
+    std::fs::write(&mountinfo, mounts).unwrap();
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    assert_eq!(disks.store().as_deref(), Some("loop0"));
+    let slice = paths.slice("ci.slice");
+    // Docker's daemon writes the store on loop0 as well as the drive: only the drive's line is its share.
+    let docker_store = |step: u64| {
+        let path = paths.cgroup.join("system.slice/docker.service/io.stat");
+        let stat = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!("{stat}7:0 rbytes=0 wbytes={} rios=0 wios=1 dbytes=0 dios=0\n", 999 * K * step),
+        )
+        .unwrap();
+    };
+    cgroups(&paths, 1, 1600);
+    docker_store(1);
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    cgroups(&paths, 2, 1600);
+    docker_store(2);
+    let window = windows.add(disks.read(&paths, &slice, 600_000)).unwrap();
+    let owners = window.owners.expect("split on the drive");
+    assert_eq!(owners.docker, Some(120 * K));
+    assert_eq!(owners.runnerd, Some(20 * K), "runnerd writes the drive");
+    assert_eq!(owners.user, 60 * K);
+    assert_eq!(owners.kernel_write(), Some(16 * K), "btrfs's writes on the drive");
+}

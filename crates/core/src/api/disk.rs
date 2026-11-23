@@ -181,7 +181,9 @@ pub struct DriveShares {
 /// What each writer runnerd tells apart by cgroup sent the disks under Docker's root (ADR 0157), from `io.stat`: the
 /// root cgroup's line counts every write to them, and each child's what its processes sent, so the root's less its
 /// children's is what no cgroup sent, the kernel's own threads and the file system's writes on no one's account. Bytes,
-/// as the disks were sent them, after compression; the runner slice's are [`DriveShares::slice`], apart from these.
+/// as the physical disks were sent them, after compression; the runner slice's are [`DriveShares::slice`], apart from
+/// these. When Docker's root is a file system in a file, a loop device writes it to the drive, partly on no cgroup's
+/// account: `kernel` then holds that part, which the shares leave out as the slice's (`DriveShares::parts`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriveOwners {
     /// runnerd's own cgroup, its `systemd` unit's; `None` when it could not be told apart: unread, the root, or one
@@ -205,10 +207,14 @@ pub struct DriveOwners {
 }
 
 impl DriveOwners {
-    /// Both added together; a figure either lacks is absent.
+    /// Both added together. A writer either has counts: one stretch without its cgroup, as while a service
+    /// restarted, left its bytes with the others and loses none it had; it is absent only when both lack it.
     #[must_use]
     pub fn plus(self, other: DriveOwners) -> DriveOwners {
-        let both = |a: Option<u64>, b: Option<u64>| Some(a?.saturating_add(b?));
+        let both = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
         DriveOwners {
             runnerd: both(self.runnerd, other.runnerd),
             docker: both(self.docker, other.docker),
