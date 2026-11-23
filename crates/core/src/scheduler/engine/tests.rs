@@ -2699,14 +2699,29 @@ async fn only_this_machines_runners_without_a_container_are_deleted() {
     assert_eq!(deleted, ["delete 2"]);
 }
 
+/// When `details`' job was queued, in seconds: an hour before the first test asked, the same for every test after.
+/// A fixed date would age out of the history's windows, which read back from now (ADR 0070's 30 days, the 30 days a
+/// log is kept, the 90 days a job is).
+fn queued_at() -> u64 {
+    static AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| crate::time::now_ms() / 1000 - 3600)
+}
+
+/// `seconds` after `details`' job was queued, as GitHub writes a time.
+fn after_queued(seconds: u64) -> String {
+    crate::time::rfc3339((queued_at() + seconds) * 1000)
+}
+
+/// GitHub's details of job `id`: queued at `queued_at`, started 19s later, its two steps done 3s after that, and
+/// completed, if it is, 85s after it was queued.
 fn details(id: u64, status: &str, conclusion: Option<&str>) -> JobDetails {
     let step = |number: u32, name: &str| JobStep {
         number,
         name: name.to_owned(),
         status: "completed".to_owned(),
         conclusion: Some("success".to_owned()),
-        started_at: Some("2026-10-22T19:27:25Z".to_owned()),
-        completed_at: Some("2026-10-22T19:27:27Z".to_owned()),
+        started_at: Some(after_queued(20)),
+        completed_at: Some(after_queued(22)),
     };
     JobDetails {
         id,
@@ -2717,11 +2732,11 @@ fn details(id: u64, status: &str, conclusion: Option<&str>) -> JobDetails {
         head_branch: Some("main".to_owned()),
         html_url: None,
         labels: vec!["self-hosted".to_owned(), "app".to_owned()],
-        created_at: Some("2026-10-22T19:27:05Z".to_owned()),
+        created_at: Some(after_queued(0)),
         status: status.to_owned(),
         conclusion: conclusion.map(str::to_owned),
-        started_at: Some("2026-10-22T19:27:24Z".to_owned()),
-        completed_at: (status == "completed").then(|| "2026-10-22T19:28:30Z".to_owned()),
+        started_at: Some(after_queued(19)),
+        completed_at: (status == "completed").then(|| after_queued(85)),
         runner_name: Some(identity("ci", ID_A).runner_name("app", 1, 1)),
         steps: vec![step(1, "Set up job"), step(2, "Run make")],
     }
@@ -3011,8 +3026,8 @@ async fn a_finished_job_keeps_its_timeline_steps_and_log_across_a_restart() {
     assert_eq!(store.job(1).await.unwrap().unwrap(), job);
     assert_eq!(job.summary.conclusion.as_deref(), Some("success"));
     let timeline = &job.summary.timeline;
-    assert_eq!(timeline.started_at, Some(1_792_697_244));
-    assert_eq!(timeline.finished_at, Some(1_792_697_310));
+    assert_eq!(timeline.started_at, Some(queued_at() + 19));
+    assert_eq!(timeline.finished_at, Some(queued_at() + 85));
     assert!(timeline.cleaned_at.is_some());
     let steps: Vec<(&str, Option<u64>)> = job
         .steps
@@ -3022,8 +3037,8 @@ async fn a_finished_job_keeps_its_timeline_steps_and_log_across_a_restart() {
     assert_eq!(
         steps,
         [
-            ("Set up job", Some(1_792_697_247)),
-            ("Run make", Some(1_792_697_247))
+            ("Set up job", Some(queued_at() + 22)),
+            ("Run make", Some(queued_at() + 22))
         ]
     );
     let log: Vec<String> = store
