@@ -362,6 +362,40 @@ async fn a_runs_expected_jobs_get_runners_before_github_queues_them() {
 }
 
 #[tokio::test]
+async fn runs_another_machine_ran_teach_this_one_no_burst() {
+    // Catches warm learning from jobs another machine took: a host that never runs o/r's bursts would start runners
+    // for them on every new run.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let config = warm_config().replace("slots = 2", "slots = 4");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    // Three runs of CI two days ago, three jobs each, all taken by another machine's runners.
+    let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
+    for run in 1..=3 {
+        for n in 0..3 {
+            let id = run * 10 + n;
+            handle
+                .store
+                .queued("o/r", &ci_job(id, run, then + run * MINUTE), time::now_ms());
+            handle.store.elsewhere(JobDetails {
+                runner_name: Some(identity("laptop", ID_B).runner_name("app", 1, 1)),
+                ..details(id, "completed", Some("success"))
+            });
+        }
+    }
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    check_ends(&mut engine).await;
+
+    // The first job of a new run: a runner for it and one warm, none for jobs this machine never saw.
+    github.0.lock().unwrap().queued = vec![ci_job(100, 50, time::now_ms())];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+}
+
+#[tokio::test]
 async fn warm_runners_start_no_more_than_the_budget_holds() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
