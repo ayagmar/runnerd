@@ -120,7 +120,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "ALTER TABLE runners ADD COLUMN docker_held INTEGER;\n\
          ALTER TABLE runners ADD COLUMN docker_share INTEGER;",
     ),
-    (30, "ALTER TABLE disk_windows ADD COLUMN owners TEXT;"),
+    (31, "ALTER TABLE disk_windows ADD COLUMN owners TEXT;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.

@@ -59,6 +59,7 @@ mod figure;
 mod insights;
 mod jobs;
 mod labels;
+mod machine;
 mod queue;
 mod records;
 mod results;
@@ -131,6 +132,7 @@ pub use jobs::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
+pub use machine::Machine;
 pub use queue::{HostWait, WaitCause};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
@@ -204,6 +206,9 @@ pub struct Status {
     /// the store opened, and from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_archives: Option<ActionArchives>,
+    /// The machine the daemon runs on (ADR 0158); absent from a daemon before 0.1.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<Machine>,
 }
 
 /// The memory budget runners and the mirror share, in bytes.

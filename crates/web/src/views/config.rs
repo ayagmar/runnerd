@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use maud::{Markup, html};
 use qrcode::QrCode;
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Check, ConfigCheck, ConfigFile, Doctor, DoctorQuery, FreePart, Resize, Section, Sizing, Tone,
 };
@@ -225,7 +226,7 @@ fn quoted(revision: &str) -> Option<String> {
 
 /// The whole page; `proxies` are `[web] origins`, where another device can be signed in. The doctor comes first, so
 /// a problem is read before the file; then the editor, the verdict on its text, and signing in a device.
-pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
+pub(crate) fn render(view: &ConfigView, proxies: &[String], machine: Option<&Machine>) -> Markup {
     let path = html! { p.muted.config-path { code { (view.file.path) } } };
     let lines = line_count(&view.text);
     let main = html! {
@@ -271,7 +272,13 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             }
         }
     };
-    page(Section::Config.title(), Some(Page::Config), None, &main)
+    page(
+        Section::Config.title(),
+        machine,
+        Some(Page::Config),
+        None,
+        &main,
+    )
 }
 
 /// The check's verdict, what its admission rule holds to `MemoryMax` and the budget that is, and its warnings.

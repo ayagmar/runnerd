@@ -189,6 +189,10 @@ pub(super) fn status() -> Status {
         stopping: None,
         github_limited_until: None,
         action_archives: None,
+        machine: Some(runnerd_core::api::Machine {
+            id: "4f2a91c0".to_owned(),
+            name: "tern".to_owned(),
+        }),
         budget: Budget {
             admission: runnerd_core::api::AdmissionPolicy::Caps,
             held: false,
@@ -2529,6 +2533,43 @@ async fn the_savings_leave_lost_jobs_out_and_say_so() {
         savings.month.headline().ends_with("(10 jobs not priced)"),
         "{}",
         savings.month.headline()
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_reload_that_renames_the_host_warns_it_takes_effect_at_the_next_start() {
+    // Catches a rename that reads as done while runner names, the status and messages keep the old name.
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let put = async |client: &reqwest::Client, text: String| -> ConfigCheck {
+        let response = client
+            .put("http://runnerd/v1/config")
+            .body(text)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&body(response).await).unwrap()
+    };
+    let named = EXAMPLE.replacen("[host]\n", "[host]\nname = \"tern\"\n", 1);
+    let renamed = put(&daemon.client, named.clone()).await;
+    assert!(
+        renamed
+            .warnings
+            .contains(&"host.name takes effect when runnerd restarts".to_owned()),
+        "{:?}",
+        renamed.warnings
+    );
+    daemon.reloads.recv().await.unwrap();
+    let again = put(&daemon.client, named.replacen("slots = 2", "slots = 1", 1)).await;
+    assert!(
+        !again
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("host.name")),
+        "the name did not change: {:?}",
+        again.warnings
     );
     daemon.stop().await;
 }

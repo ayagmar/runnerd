@@ -613,6 +613,10 @@ impl Fixtures {
             stopping: None,
             github_limited_until: None,
             action_archives: Some(action_archives),
+            machine: Some(runnerd_core::api::Machine {
+                id: "4f2a91c0".to_owned(),
+                name: "tern".to_owned(),
+            }),
             budget: Budget {
                 admission: runnerd_core::api::AdmissionPolicy::Caps,
                 held: false,

@@ -882,7 +882,7 @@ async fn serve(
         Github::new(github::API_URL, Box::new(github::gh_token)).map_err(|error| fail(&error))?;
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
-    let identity = HostIdentity::read().map_err(|error| fail(&error))?;
+    let identity = HostIdentity::read(config.host.name.as_deref()).map_err(|error| fail(&error))?;
     let History {
         store,
         announced,

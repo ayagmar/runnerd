@@ -301,6 +301,13 @@ pub(super) async fn replace(
             .warnings
             .push("history.database takes effect when runnerd restarts".to_owned());
     }
+    // Read once at start (ADR 0158): runner names, the status and messages keep the old name until then.
+    let name = |config: &Config| config.host.name.clone();
+    if current.as_ref().map(name) != Some(name(&config)) {
+        checked
+            .warnings
+            .push("host.name takes effect when runnerd restarts".to_owned());
+    }
     // The engine writes the file between its ticks and runs with the config before the next: nothing runs under a
     // config whose file was not written, and nothing changes if it was not.
     let (path, written, sync) = (file.path.clone(), text.clone(), state.sync_dir);

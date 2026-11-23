@@ -871,3 +871,34 @@ async fn a_jobs_failure_rerun_and_probe_show_as_core_words_them() {
         assert!(text(&html).contains(&line), "{line}");
     }
 }
+
+#[tokio::test]
+async fn every_page_title_names_the_machine_as_core_words_it() {
+    // Catches a page that forgets the machine, so two machines' dashboards in one browser read the same.
+    let (dashboard, cookie, daemon, _) = dashboard().await;
+    let machine = daemon.status.machine.as_ref();
+    assert!(machine.is_some(), "the fixture names its machine");
+    let job = &daemon
+        .jobs
+        .iter()
+        .find(|job| job.summary.id == TIMED_OUT)
+        .unwrap()
+        .summary;
+    let job_path = format!("/jobs/{TIMED_OUT}");
+    let job_title = job.title().to_string();
+    for (path, title) in [
+        ("/", View::Overview.title()),
+        ("/history", Section::History.title()),
+        ("/records", Section::Records.title()),
+        ("/caches", Section::Caches.title()),
+        ("/sizing", Section::Sizing.title()),
+        ("/insights", View::Insights.title()),
+        ("/config", Section::Config.title()),
+        (job_path.as_str(), job_title.as_str()),
+    ] {
+        let html = dashboard.page(&cookie, path).await.body;
+        let want =
+            maud::html! { title { (runnerd_core::api::Machine::page_title(machine, title)) } };
+        assert!(html.contains(&want.into_string()), "{path}: {html}");
+    }
+}

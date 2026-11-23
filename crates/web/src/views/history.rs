@@ -4,6 +4,7 @@
 //! works without scripts and can be bookmarked; what a list shows and how it is cut is core's (`JobList`).
 
 use maud::{Markup, html};
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     BarEnd, Bucket, Column, Feature, GapKind, JOBS_HEADING, JobList, JobOrder, JobQuery, JobRange,
     JobSort, JobState, JobSummary, Lane, RecordFilter, Section, SlotTimeline, SortOrder, Stats,
@@ -417,7 +418,7 @@ fn days(stats: &Stats, now: u64) -> Vec<StatsSummary> {
 }
 
 /// The whole page.
-pub(crate) fn render(history: &History) -> Markup {
+pub(crate) fn render(history: &History, machine: Option<&Machine>) -> Markup {
     let main = html! {
         (heading(runnerd_core::api::View::Jobs.title(), Some(Page::History), Some(lenses(history))))
         @match history.filter.lens() {
@@ -430,7 +431,13 @@ pub(crate) fn render(history: &History) -> Markup {
             Lens::Trends => { (trends(history)) }
         }
     };
-    page(Section::History.title(), Some(Page::History), None, &main)
+    page(
+        Section::History.title(),
+        machine,
+        Some(Page::History),
+        None,
+        &main,
+    )
 }
 
 /// The lenses, as links that keep the filters.

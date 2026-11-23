@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use runnerd_core::api::{
     Digest, Event, HostMemory, Insight, InsightKind, JobMetrics, JobState, JobSummary, LogSummary,
-    LongWait, Notification, NotifyEvent, Priority, Severity, Timeline,
+    LongWait, Machine, Notification, NotifyEvent, Priority, Severity, Timeline,
 };
 use runnerd_core::config::{Config, DayTime};
 use runnerd_core::github::QueuedJob;
@@ -22,8 +22,8 @@ use runnerd_core::store::Store;
 use tokio::sync::{Mutex, watch};
 
 use super::{
-    ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, parse_offset,
-    run, send_due, start, test_message,
+    ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, from,
+    parse_offset, run, send_due, start, test_message,
 };
 use crate::testdir::Dir;
 
@@ -174,6 +174,15 @@ struct Running {
 
 impl Running {
     async fn start(store: &Store, config: &Arc<Mutex<ConfigText>>) -> Running {
+        Running::start_on(store, config, None).await
+    }
+
+    /// The notifier of a daemon on `machine`.
+    async fn start_on(
+        store: &Store,
+        config: &Arc<Mutex<ConfigText>>,
+        machine: Option<Machine>,
+    ) -> Running {
         let (stop, stopping) = watch::channel(false);
         let (replaced, revision) = watch::channel(String::new());
         let task = tokio::spawn(run(Notifier {
@@ -182,6 +191,7 @@ impl Running {
             replaced: revision,
             stopping,
             setup: SETUP,
+            machine,
         }));
         // Waits until the history holds where each target starts, so no event the test stores comes before a new
         // target's "now". A fixed sleep lost that race on a slow CI runner.
@@ -266,6 +276,27 @@ async fn a_failure_is_delivered_once_across_a_restart() {
 }
 
 #[tokio::test]
+async fn a_message_says_which_machine_sent_it() {
+    // Catches a message from one of two machines that reads the same as the other's.
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = config_text(&dir, &webhook(&format!("http://{}/hook", endpoint.address)));
+    let machine = Machine {
+        id: "4f2a91c0".to_owned(),
+        name: "tern".to_owned(),
+    };
+    let notifier = Running::start_on(&store, &config, Some(machine.clone())).await;
+
+    store.event(failed(2));
+    endpoint.wait_for(1).await;
+    notifier.stop().await;
+
+    let sent = &endpoint.notifications()[0];
+    assert_eq!(sent.title, "halyard/api: CI / test 2 failed on tern");
+    assert_eq!(sent.machine, Some(machine));
+}
+
+#[tokio::test]
 async fn a_burst_of_failures_is_one_message() {
     let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
@@ -329,7 +360,7 @@ async fn an_insight_is_told_once_and_again_only_after_it_went_away_for_a_day() {
     let t0 = 1_800_000_000_000;
     let looks = async |target: &mut super::Target, held: Vec<Insight>, at: u64| {
         target.look(&held, at);
-        send_due(&store, &http, &timing, target).await;
+        send_due(&store, &http, &timing, None, target).await;
     };
 
     looks(&mut target, vec![flaky()], t0).await;
@@ -504,7 +535,7 @@ async fn a_host_wait_is_told_once_a_window_across_restarts_stale_looks_and_ended
             }
             let runs = super::insight_runs_of(&store, &config, 14, now);
             target.look(&super::warnings(&runs.await.unwrap(), &config, now), now);
-            send_due(&store, &http, &timing, &mut target).await;
+            send_due(&store, &http, &timing, None, &mut target).await;
             assert!(
                 !must_tell || target.told.contains_key(&format!("host-held:{window}")),
                 "seed {seed}: the first fresh hold past 30 minutes in window {window}, at {at}, was not told"
@@ -570,7 +601,7 @@ async fn a_digest_delivered_after_midnight_counts_for_the_day_it_was_made() {
         &config,
         (midnight - 10 * 60) * 1000,
     ));
-    send_due(&store, &http, &SETUP.timing, &mut target).await;
+    send_due(&store, &http, &SETUP.timing, None, &mut target).await;
 
     assert_eq!(endpoint.count(), 1);
     let last = store.notify_state().await.unwrap()["phone"]["digest"] / 1000;
@@ -832,6 +863,39 @@ async fn a_long_message_is_cut_to_discords_limits_and_a_429_is_not_delivered() {
 }
 
 #[tokio::test]
+async fn a_long_discord_title_keeps_the_machine_that_sent_it() {
+    // Catches the cut taking " on tern" off a long matrix job's title, the only place the embed names the machine.
+    let endpoint = Endpoint::start().await;
+    let config = Config::parse(&discord(&format!(
+        "http://{}/api/webhooks/123/abc",
+        endpoint.address
+    )))
+    .unwrap();
+    let http = client(SETUP.timing.timeout).unwrap();
+    let tern = Machine {
+        id: "4f2a91c0".to_owned(),
+        name: "tern".to_owned(),
+    };
+    let long = from(
+        Some(&tern),
+        Notification {
+            title: format!("halyard/api: CI / test ({}) failed", "é".repeat(300)),
+            ..test_message("chat")
+        },
+    );
+
+    deliver(&http, &config.notify.targets[0], &long)
+        .await
+        .unwrap();
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&endpoint.received.lock().unwrap()[0].2).unwrap();
+    let title = body["embeds"][0]["title"].as_str().unwrap();
+    assert_eq!(title.chars().count(), 256);
+    assert!(title.ends_with("é… on tern"), "{title}");
+}
+
+#[tokio::test]
 async fn a_discord_test_message_is_a_green_embed() {
     let endpoint = Endpoint::start().await;
     let config = Config::parse(&discord(&format!(
@@ -1048,14 +1112,14 @@ async fn an_insight_told_before_a_long_downtime_is_not_told_again_while_it_holds
     let mut target = start(&store, None, phone, &config).await.unwrap();
     let t0 = 1_800_000_000_000;
     target.look(&[flaky()], t0);
-    send_due(&store, &http, &timing, &mut target).await;
+    send_due(&store, &http, &timing, None, &mut target).await;
     assert_eq!(endpoint.count(), 1, "told once");
 
     // The host is off for a weekend; the job is still flaky when the daemon starts again.
     let kept = store.notify_state().await.unwrap().remove("phone");
     let mut target = start(&store, kept, phone, &config).await.unwrap();
     target.look(&[flaky()], t0 + 60 * HOUR);
-    send_due(&store, &http, &timing, &mut target).await;
+    send_due(&store, &http, &timing, None, &mut target).await;
     assert_eq!(
         endpoint.count(),
         1,

@@ -832,7 +832,7 @@ async fn every_page_renders_from_the_daemons_data() {
         "Set up job: line 1",
         "/live/jobs/",
         // Named as every client names a job, so the tab says which workflow's build it is.
-        "<title>CI / build · runnerd</title>",
+        "<title>CI / build · runnerd on tern</title>",
     ] {
         assert!(job.body.contains(expected), "job page lacks {expected:?}");
     }
@@ -4134,4 +4134,31 @@ async fn a_volume_without_a_bound_shows_its_size_without_a_fill() {
         lane("runnerd-pnpm").contains("volume-fill"),
         "a volume with a bound fills against it"
     );
+}
+
+#[tokio::test]
+async fn a_daemon_whose_status_names_no_machine_is_read_once_and_titled_without_one() {
+    // Catches a dashboard that asks a 0.1.5 daemon for its status again on every page, since it names no machine.
+    let mut fixtures = fake::Fixtures::new(NOW);
+    fixtures.status.machine = None;
+    let dashboard = Dashboard::serving(&[], fixtures).await;
+    let cookie = dashboard.sign_in().await;
+    let sizing = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(
+        sizing.contains("<title>Sizing · runnerd</title>"),
+        "{sizing}"
+    );
+
+    // Were it asked again, the dashboard would now name the machine.
+    dashboard.fake.fixtures.lock().unwrap().status.machine = Some(runnerd_core::api::Machine {
+        id: "4f2a91c0".to_owned(),
+        name: "tern".to_owned(),
+    });
+    for path in ["/sizing", "/insights", "/config"] {
+        let html = dashboard.page(&cookie, path).await.body;
+        assert!(
+            !html.contains("runnerd on tern"),
+            "{path} read the status again: {html}"
+        );
+    }
 }

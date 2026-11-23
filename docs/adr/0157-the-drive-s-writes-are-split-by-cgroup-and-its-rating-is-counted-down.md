@@ -1,7 +1,7 @@
 # 0157. The drive's writes are split by cgroup, and its rating is counted down
 
 Status: **Accepted** (2026-11-23). Adds `api::DriveOwners`, `DriveShares::owners`, the `ShareOwner` variants
-`Docker`, `Containerd`, `System`, `User` and `Kernel`, `observe::disk::Window::owners`, schema 30
+`Docker`, `Containerd`, `System`, `User` and `Kernel`, `observe::disk::Window::owners`, schema 31
 (`disk_windows.owners`), `[host.drive]` (`config::Drive`, `config::DriveWritten`, `config::DriveBytes`),
 `api::Endurance`, `DiskWrites::endurance`, `insights::DriveRead`, `Store::drive_read_since` and
 `InsightKind::DriveWear`.
@@ -73,5 +73,5 @@ TB a day its rating lasts months. Nothing in runnerd said so.
 
 - The drive's line names the 68% for what it is. Its parts add up to the drive's bytes; what neither the root nor the
   writers counted, as a loop device's overhead, stays "no owner runnerd knows".
-- A release before this one refuses the database once this one migrates it to schema 30, as every schema step does.
+- A release before this one refuses the database once this one migrates it to schema 31, as every schema step does.
 - The days left move with the SMART count the owner pastes; runnerd never reads the drive's own counter.

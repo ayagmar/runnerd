@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
-use runnerd_core::api::{self, JobSummary, Section, Status, View};
+use runnerd_core::api::{self, JobSummary, Machine, Section, Status, View};
 
 use crate::assets;
 use crate::format;
@@ -189,6 +189,7 @@ const KEYS: [(&str, &str); 8] = [
 /// A full page: the navigation, `main`, and, with `live`, the event stream that keeps its regions current.
 pub(crate) fn page(
     title: &str,
+    machine: Option<&Machine>,
     active: Option<Page>,
     live: Option<&Live<'_>>,
     main: &Markup,
@@ -208,7 +209,7 @@ pub(crate) fn page(
                 meta name="theme-color" content="#e9ece9" media="(prefers-color-scheme: light)";
                 meta name="theme-color" content="#070908" media="(prefers-color-scheme: dark)";
                 meta name="description" content="runnerd's dashboard: its slots, jobs, caches and config on this machine.";
-                title { (title) " · runnerd" }
+                title { (Machine::page_title(machine, title)) }
                 link rel="icon" href=(assets::path("mark.svg")) type="image/svg+xml";
                 link rel="manifest" href=(assets::path("manifest.webmanifest"));
                 link rel="preload" href=(assets::path("libre-franklin.woff2")) as="font" type="font/woff2" crossorigin;
@@ -334,7 +335,7 @@ pub(crate) fn signed_out(reason: SignedOut) -> Markup {
             p.muted { "Each link works once. A device stays signed in for 30 days after its last visit." }
         }
     };
-    page("Sign in", None, None, &main)
+    page("Sign in", None, None, None, &main)
 }
 
 /// A page for a daemon error, such as an unknown job.
@@ -346,7 +347,7 @@ pub(crate) fn error_page(title: &str, message: &str) -> Markup {
             p { a href="/" { "Back to the overview" } }
         }
     };
-    page(title, None, None, &main)
+    page(title, None, None, None, &main)
 }
 
 /// Whether a notice reports something done or something that failed.

@@ -11,6 +11,7 @@
 use std::fmt::Write as _;
 
 use maud::{Markup, html};
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     ActionPreview, Baseline, BuildCacheCounts, ChartLine, ChartLineKind, Color, CompareQuery,
     Feature, Job, JobAction, JobActions, JobComparison, JobPage, JobQuery, JobState, JobSummary,
@@ -307,7 +308,7 @@ pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 5] {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &JobView) -> Markup {
+pub(crate) fn render(view: &JobView, machine: Option<&Machine>) -> Markup {
     let summary = &view.job.summary;
     let url = format!("/live/jobs/{}", summary.id);
     let [head, timeline, steps, metrics, runs] = regions(view);
@@ -335,7 +336,13 @@ pub(crate) fn render(view: &JobView) -> Markup {
         (runs.1)
         (record(view))
     };
-    page(&summary.title().to_string(), None, live.as_ref(), &main)
+    page(
+        &summary.title().to_string(),
+        machine,
+        None,
+        live.as_ref(),
+        &main,
+    )
 }
 
 /// What a job's page shows only once the job is final, by id: the failure summary, the outlined log, the comparison

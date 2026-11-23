@@ -5,6 +5,7 @@
 //! above them, whether it is on and, per profile, what its next look changes or until when a recent change holds it.
 
 use maud::{Markup, html};
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
 };
@@ -32,7 +33,7 @@ impl SizingView {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &SizingView) -> Markup {
+pub(crate) fn render(view: &SizingView, machine: Option<&Machine>) -> Markup {
     let sizing = &view.sizing;
     let jobs: u64 = sizing
         .profiles
@@ -49,7 +50,13 @@ pub(crate) fn render(view: &SizingView) -> Markup {
         }
         p.muted.method { (format::sentence(&sizing.method_line())) "." }
     };
-    page(Section::Sizing.title(), Some(Page::Sizing), None, &main)
+    page(
+        Section::Sizing.title(),
+        machine,
+        Some(Page::Sizing),
+        None,
+        &main,
+    )
 }
 
 /// Whether auto sizing is on, in one line that opens to its rules and, per profile, what its next look changes, or
