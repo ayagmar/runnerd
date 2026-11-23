@@ -722,7 +722,7 @@ fn measured_slots(
     else {
         let next = current.saturating_add(1);
         return Raise::Refused(format!(
-            "{asked}; at {next} slots, beside the other profiles' {others}, each slot would keep {}, under the {} \
+            "{asked}; at {next} slots, beside the other profiles' {others}, each slot would keep on average {}, under the {} \
              auto sizing leaves each slot",
             kept(
                 disk,
@@ -735,7 +735,7 @@ fn measured_slots(
     Raise::To(SlotStep {
         to,
         reason: format!(
-            "{asked}; at {to} slots each slot keeps {}",
+            "{asked}; at {to} slots each slot keeps on average {}",
             kept(
                 disk,
                 others.saturating_add(current),

@@ -697,7 +697,7 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
         refused_slots: vec![api::SizingRefused {
             profile: "node".to_owned(),
             reason: "14 jobs since its last change waited 240s for a slot (p95) while memory and CPU had room, 5 at \
-                     once at most; at 3 slots, beside the other profiles' 6, each slot would keep 1G of Docker's \
+                     once at most; at 3 slots, beside the other profiles' 6, each slot would keep on average 1G of Docker's \
                      disk, down from 2G, under the 2G auto sizing leaves each slot"
                 .to_owned(),
         }],

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{StoreReport, StoreUse, needs, slot_shares, store_report};
+use super::{StoreReport, StoreUse, needs, slot_shares, steady, store_report};
 use crate::cache::docker_budget_gib;
 use crate::config::Config;
 
@@ -178,6 +178,16 @@ fn generated_splits_fit_the_disk_and_follow_the_needs() {
             for share in shares.values() {
                 assert!(*share >= floor.min(20), "{shares:?} keep the floor {floor}");
             }
+            for (name, need) in &measured {
+                if *need <= equal / G * G
+                    && slots[names.iter().position(|n| n == name).unwrap_or(0)] > 0
+                {
+                    assert!(
+                        shares[name] * G >= *need,
+                        "{name} fitted the equal split, so it keeps {need} bytes: {shares:?} {measured:?}"
+                    );
+                }
+            }
         }
         for (a, slots_a) in names.iter().zip(slots) {
             for (b, slots_b) in names.iter().zip(slots) {
@@ -219,6 +229,13 @@ fn the_last_report_of_a_runners_log_is_its_store_and_an_earlier_one_never_counts
     let forged =
         "runnerd: docker store held=99999999999 share=1\nrunnerd: docker store unmeasured\n";
     assert_eq!(store_report(forged), None);
+    // A killed process left `x` unfinished: the entrypoint's line starts on a line of its own, so it still counts.
+    assert_eq!(
+        store_report(
+            "runnerd: docker store held=99999999999 share=1\nx\nrunnerd: docker store unmeasured\n"
+        ),
+        None
+    );
     // An image from before the report, and lines it cannot read.
     assert_eq!(
         store_report("Job build completed with result: Failed\n"),
@@ -258,4 +275,55 @@ fn a_profiles_need_is_the_90th_percentile_of_its_last_reports() {
     let mut grown = uses("node", &[50; 100]);
     grown.extend(uses("node", &[1; 400]));
     assert_eq!(needs(&grown).get("node"), Some(&50));
+}
+
+// Catches: one scale for every measured profile, which pushes a profile that fitted the equal split under what it
+// holds once others ask for more than the total, so its stores are emptied after every job.
+#[test]
+fn a_profile_that_fitted_the_equal_share_keeps_what_it_holds_when_others_grow() {
+    // 99 GiB over 33 slots, 3 GiB each: jvm and node hold a GiB over whatever they get, light holds 2.8 GiB.
+    let config = config([10, 9, 8, 6]);
+    let shares = slot_shares(
+        99 * G,
+        &config,
+        &needing(&[
+            ("jvm", 5 * G),
+            ("node", 5 * G),
+            ("light", 2 * G + 8 * G / 10),
+            ("jvm-small", G / 2),
+        ]),
+    );
+    assert_eq!(shares["light"], 3, "light keeps its 2.8G: {shares:?}");
+    assert!(total(&config, &shares) <= 99 * G, "{shares:?}");
+    assert!(
+        shares["jvm"] > 3 && shares["node"] >= 3,
+        "the two that grew share what is left: {shares:?}"
+    );
+}
+
+// Catches: a share that drops and rises a GiB from one hourly read to the next, emptying the profile's stores at
+// each drop.
+#[test]
+fn a_need_that_moves_by_a_few_percent_keeps_its_value() {
+    let before = needing(&[("jvm", 4 * G), ("node", 3 * G)]);
+    let read = |jvm: u64, node: u64| {
+        steady(
+            &before,
+            needing(&[("jvm", jvm), ("node", node), ("light", G)]),
+        )
+    };
+    let kept = read(4 * G + 4 * G / 20, 3 * G - 3 * G / 20);
+    assert_eq!(kept["jvm"], 4 * G, "5% more keeps the need");
+    assert_eq!(kept["node"], 3 * G, "5% less keeps it too");
+    assert_eq!(
+        kept["light"], G,
+        "a profile read for the first time takes its need"
+    );
+    let moved = read(5 * G, 2 * G);
+    assert_eq!(moved["jvm"], 5 * G, "25% more is a new need");
+    assert_eq!(moved["node"], 2 * G);
+    assert!(
+        !steady(&before, needing(&[("node", 3 * G)])).contains_key("jvm"),
+        "a profile no longer read has no need"
+    );
 }

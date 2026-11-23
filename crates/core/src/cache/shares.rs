@@ -88,6 +88,28 @@ pub fn needs(uses: &[StoreUse]) -> BTreeMap<String, u64> {
         .collect()
 }
 
+/// How far a profile's need moves before its share follows, in percent of the need it had: each lower share empties
+/// the stores of the slots that start under it, so a need that wanders by a few percent from one read to the next
+/// keeps its share.
+const STEADY_PERCENT: u64 = 10;
+
+/// The needs to split by, from the `previous` ones and those just read: a profile's previous need while the new one
+/// is within `STEADY_PERCENT` of it, its new one otherwise. A profile no longer read has no need.
+pub fn steady(
+    previous: &BTreeMap<String, u64>,
+    fresh: BTreeMap<String, u64>,
+) -> BTreeMap<String, u64> {
+    fresh
+        .into_iter()
+        .map(|(profile, need)| match previous.get(&profile) {
+            Some(&before) if need.abs_diff(before) <= before / 100 * STEADY_PERCENT => {
+                (profile, before)
+            }
+            _ => (profile, need),
+        })
+        .collect()
+}
+
 /// The least share a slot gets, as a part of the equal share: a quarter of it, at least 1 GiB, at most all of it. So
 /// a profile whose stores hold little still keeps room for a job unlike its last ones, and the floors of every slot
 /// never add up to more than the total.
@@ -105,9 +127,12 @@ const GIB: u64 = 1 << 30;
 /// Each configured profile's slot share of `disk`, the bytes the slots' Docker stores may keep together, in whole
 /// GiB as `image/layers.sh` takes it. A profile `needs` has no figure for gets the equal share of every slot, as
 /// before runnerd measured the stores. The rest of `disk` goes to the measured profiles' slots in proportion to
-/// their needs and a quarter more, each between the floor (`FLOOR_PART`) and `SLOT_MAX_GIB`; what the cap leaves
-/// unused stays unused. Each share is rounded to whole GiB without the shares adding up to more than `disk`, and is
-/// at least 1 GiB, as the equal split's always was.
+/// their needs and a quarter more, each between its floor and `SLOT_MAX_GIB`; what the cap leaves unused stays
+/// unused. A profile's floor is what it asks for, rounded up to whole GiB, as far as the equal share in whole GiB, and
+/// never under a quarter of the equal share (`FLOOR_PART`): a profile whose stores fitted the equal split never gets
+/// less than they hold, so a profile that grows takes room only from those that hold less than their share. Each
+/// share is rounded to whole GiB without the shares adding up to more than `disk`, and is at least 1 GiB, as the
+/// equal split's always was.
 pub fn slot_shares(
     disk: u64,
     config: &Config,
@@ -116,6 +141,7 @@ pub fn slot_shares(
     let slots: u64 = config.profiles.values().map(|p| u64::from(p.slots)).sum();
     let equal = disk / slots.max(1);
     let floor = (equal / FLOOR_PART).max(GIB).min(equal);
+    let equal_gib = equal / GIB * GIB;
     let cap = SLOT_MAX_GIB * GIB;
     let mut shares = BTreeMap::new();
     let mut measured = Vec::new();
@@ -125,7 +151,9 @@ pub fn slot_shares(
         match needs.get(name) {
             Some(need) if count > 0 => {
                 let want = u128::from(*need) * u128::from(HEADROOM_PERCENT) / 100;
-                measured.push((name, count, u64::try_from(want).unwrap_or(u64::MAX)));
+                let want = u64::try_from(want).unwrap_or(u64::MAX);
+                let own = want.div_ceil(GIB).saturating_mul(GIB).min(equal_gib);
+                measured.push((name, count, want, own.max(floor)));
             }
             _ => {
                 left = left.saturating_sub(equal.saturating_mul(count));
@@ -136,7 +164,7 @@ pub fn slot_shares(
     let fill = |scale: f64| -> u64 {
         measured
             .iter()
-            .map(|(_, count, want)| count * spread(*want, scale, floor, cap))
+            .map(|(_, count, want, floor)| count * spread(*want, scale, *floor, cap))
             .sum()
     };
     // The largest scale whose shares fit in what is left: `fill` only grows with it.
@@ -158,8 +186,8 @@ pub fn slot_shares(
     let mut spare = left;
     let mut rounded: Vec<(&String, u64, u64, u64)> = measured
         .iter()
-        .map(|(name, count, want)| {
-            let bytes = spread(*want, low, floor, cap);
+        .map(|(name, count, want, floor)| {
+            let bytes = spread(*want, low, *floor, cap);
             spare = spare.saturating_sub(count * (bytes / GIB * GIB));
             (*name, *count, bytes / GIB, bytes % GIB)
         })

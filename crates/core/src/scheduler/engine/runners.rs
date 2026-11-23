@@ -79,7 +79,8 @@ impl Default for PrepareFailures {
 
 /// The last lines a runner logged, on one line, for a warning about one that took no job: its log goes with its
 /// container, so this is what is left to say why. The lines `run.sh` and its helper print on every exit say nothing
-/// of why, so they are left out. A runner that took no job logged no job's output.
+/// of why, so they are left out, as is the image's report of the slot's Docker store. A runner that took no job logged
+/// no job's output.
 fn last_said(logs: Option<&str>) -> String {
     let mut said: Vec<&str> = logs
         .unwrap_or_default()
@@ -89,6 +90,7 @@ fn last_said(logs: Option<&str>) -> String {
             !line.is_empty()
                 && !line.starts_with("Runner listener exit with")
                 && *line != "Exiting runner..."
+                && !line.starts_with(cache::shares::STORE_LINE.trim_end())
         })
         .rev()
         .take(LAST_SAID_LINES)

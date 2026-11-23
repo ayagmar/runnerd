@@ -24,24 +24,31 @@ large part of the SSD writes it exists to bound.
 ## Decision
 
 - **The image reports what the store held.** After a job, `image/job-cleanup.sh` removes the job's containers,
-  volumes, build contexts and git checkouts, then measures the store (`du -sxb`) before the build cache gives way,
+  volumes, build contexts and git checkouts, then measures the disk the store takes (`du -sx --block-size=1`, as the cleanup's own `size_gb` counts it) before
+  the build cache gives way,
   and writes `held=<bytes> share=<GiB>` to the root-only `/run/runnerd-docker-store`. The cleanup that runs when a
   container starts measures nothing: no job ran yet. Once the runner exited and every process of it ended, the
   entrypoint prints `runnerd: docker store held=<bytes> share=<GiB>`, or `runnerd: docker store unmeasured`, to the
-  container's log.
+  container's log, after a newline of its own so a line a killed process left unfinished cannot swallow it. The
+  warning for a runner that took no job leaves the line out of what it quotes.
 - **runnerd keeps it with the runner.** The engine already reads an ended runner's container log as it releases the
   slot; `cache::shares::store_report` takes the last such line, and the store keeps it in `runners.docker_held` and
   `runners.docker_share`. An image older than this prints no line and records nothing.
 - **A profile's need is the 90th percentile of what its stores held** after its last 100 reporting jobs of the last
   week (`cache::shares::needs`), with at least 5. The engine reads it from the history at its first tick and then
   once an hour (`scheduler::engine::shares`), so a restart has it before the first runner starts, and a share moves
-  at most hourly. A reload keeps it; the new slot counts apply from the next runner.
+  at most hourly. A read that fails is tried again at the next tick. A need within 10% of the one before keeps the
+  one before (`cache::shares::steady`): each lower share empties the stores of the slots that start under it, so a
+  p90 that wanders a little must not move a share down and up again. A reload keeps the needs; the new slot counts
+  apply from the next runner.
 - **The split** (`cache::shares::slot_shares`), of the same total ADR 0054 computes:
   - a profile with no need yet gets the equal share, so a host with no reports splits exactly as before;
   - the rest goes to the measured profiles' slots in proportion to their need plus a quarter, each slot between a
-    floor and `api::DOCKER_SLOT_MAX` (20 GiB, the image's default). The floor is a quarter of the equal share, at
-    least 1 GiB and at most the equal share, so the floors always fit and a profile that held little still has room
-    for an unusual job;
+    floor and `api::DOCKER_SLOT_MAX` (20 GiB, the image's default). A profile's floor is what it asks for, rounded
+    up to whole GiB, as far as the equal share in whole GiB, and never under a quarter of the equal share and 1 GiB.
+    So a profile whose stores fitted the equal split never gets less than they hold, and one that grows takes room
+    only from profiles that hold less than their share; a profile that held little still has room for an unusual
+    job. Each floor is at most the equal share, so the floors always fit;
   - shares are whole GiB, rounded down, and the GiB the rounding freed go back one per slot to the profiles that
     lost most, while they fit. The shares never add up to more than the total, and what the cap leaves stays free.
   On the owner's 33 slots and 99 GiB, with needs of 4, 3, 0.33 and 0.5 GiB, jvm gets 5 GiB, node 4, and light and
@@ -60,14 +67,15 @@ large part of the SSD writes it exists to bound.
   window held more than their share, and half or more did, insights add a notice (`store-overflow:<profile>`),
   worded in core (`Insight::store_overflow_sentence`): how many jobs, the p90 held against the share, what that cost,
   and the cause, either that the share is at the 20 GiB cap or that only more free disk raises every share.
-- Auto sizing's disk check (ADR 0090) still reasons on the equal share. The mean share per slot is the same, and a
-  new slot's profile share follows its need within the hour.
+- Auto sizing's disk check (ADR 0090) still reasons on the equal share, which is the mean share per slot, and its
+  reasons now say "on average". A new slot's profile share follows its need within the hour.
 
 ## What a job can and cannot do to it
 
 A step writing the `runnerd: docker store` line to its own output does nothing: step output goes to the job's log,
-not the container's. A step running as `runner` that writes into the listener's output reaches the container log,
-but the entrypoint's line comes after every process of the runner ended, so it is never the last line. A step that
+not the container's. A step running as `runner` that writes into the listener's output (`/proc/<pid>/fd/1`, its
+own user's) reaches the container log, but the entrypoint's line comes after every process of the runner ended and
+starts on a line of its own, so a forged line is never the last. A step that
 uses the container's Docker Engine as root can change the image's scripts, as ADR 0155 says of the probe. The most
 that does is move its own profile's share toward 20 GiB at the cost of the other profiles' shares, within the same
 total: disk use stays bounded, and the history shows the figures.

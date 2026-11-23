@@ -55,10 +55,10 @@ LAST_JOB_FILE=/state/.runnerd-last-job
 # `held=<bytes> share=<GiB>`.
 STORE_REPORT_FILE=/run/runnerd-docker-store
 
-# Size of a directory in bytes; 0 when it does not exist.
+# Disk a directory takes in bytes, as size_gb counts it, not its files' apparent size; 0 when it does not exist.
 size_bytes() {
     local size
-    size=$(du -sxb "$1" 2> /dev/null | cut -f1) || true
+    size=$(du -sx --block-size=1 "$1" 2> /dev/null | cut -f1) || true
     echo "${size:-0}"
 }
 

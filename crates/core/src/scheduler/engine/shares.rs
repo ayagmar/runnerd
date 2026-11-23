@@ -34,12 +34,13 @@ impl Shares {
     }
 
     /// Takes in what the history said at `now`: `uses` newest first, or `None` when it could not be read, which
-    /// keeps the needs as they were and tries again at the next due time.
+    /// keeps the needs as they were and tries again at the next tick. A need that moved little keeps its value
+    /// (`shares::steady`), so a share does not drop and rise again from one read to the next.
     pub(super) fn read(&mut self, uses: Option<&[shares::StoreUse]>, now: Instant) {
         if let Some(uses) = uses {
-            self.needs = shares::needs(uses);
+            self.needs = shares::steady(&self.needs, shares::needs(uses));
+            self.read_at = Some(now);
         }
-        self.read_at = Some(now);
     }
 
     /// The share in GiB of a slot of `profile` in `disk`, the bytes the stores may keep together.
