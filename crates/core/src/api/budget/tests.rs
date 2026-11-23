@@ -436,6 +436,7 @@ fn job(memory_cap: Option<u64>, cpu_cap: Option<u64>) -> Job {
             log: LogSummary::default(),
             runner_fault: false,
             slept: false,
+            elsewhere_runner: None,
             failure_cause: None,
             rerun_at: None,
             probe: None,

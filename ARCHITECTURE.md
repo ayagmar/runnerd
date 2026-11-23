@@ -226,6 +226,8 @@ queued → slot → container → removed
    A recorded job that left the listing, or whose repository left the config, is read each tick until GitHub says
    where it went; a 404, or 15 minutes of failed reads in a row, closes it as run elsewhere, and a runner here that
    later takes it takes its record back ([ADR 0109](docs/adr/0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md)).
+   One GitHub says another runner took keeps that runner's name, and its outcome says the machine its name carries,
+   `ran on <host>` (`api::Machine::of_runner`, [ADR 0163](docs/adr/0163-a-job-that-ran-elsewhere-says-which-machine-ran-it.md)).
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget, in the profile of
    the repository's pool whose labels match the job (each `[[repositories]]` entry is a pool;
    [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each

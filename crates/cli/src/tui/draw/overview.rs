@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Table, TableState};
 use runnerd_core::api::{
-    self, Activity, HealthKind, JobSummary, QueuedJob, RepositoryStatus, WaitKind,
+    self, Activity, HealthKind, JobSummary, OUTCOME_MAX, QueuedJob, RepositoryStatus, WaitKind,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -570,20 +570,31 @@ fn more_below(block: Block<'_>, hidden: usize, theme: Theme) -> Block<'_> {
     block.title_top(Line::styled(format!(" {hidden} more below "), theme.dim()).right_aligned())
 }
 
-/// An outcome as an upper-case badge.
+/// An outcome as an upper-case badge, in at most `OUTCOME_MAX` cells.
 pub(super) fn badge(job: &JobSummary, theme: Theme) -> Span<'static> {
     let (word, tone) = human::outcome(job);
     Span::styled(
-        word.to_uppercase(),
+        badge_text(&word),
         theme.tone(tone).add_modifier(Modifier::BOLD),
     )
 }
 
+/// `word` in upper case, cut to `OUTCOME_MAX` cells: upper case may be wider than the label core bounds, as `ß`
+/// becomes `SS`.
+fn badge_text(word: &str) -> String {
+    let upper = word.to_uppercase();
+    if upper.width() <= OUTCOME_MAX {
+        upper
+    } else {
+        fit(&upper, OUTCOME_MAX)
+    }
+}
+
 /// The cells the widest of `jobs`' badges takes, so a column of them never cuts an outcome such as `startup
-/// failure`.
+/// failure`, and never takes more than `OUTCOME_MAX`.
 pub(super) fn badge_width<'job>(jobs: impl IntoIterator<Item = &'job JobSummary>) -> usize {
     jobs.into_iter()
-        .map(|job| job.outcome().label.width())
+        .map(|job| badge_text(&job.outcome().label).width())
         .max()
         .unwrap_or(0)
 }

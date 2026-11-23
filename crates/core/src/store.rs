@@ -126,6 +126,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
          ALTER TABLE jobs ADD COLUMN slept_ended_by INTEGER;",
     ),
     (31, "ALTER TABLE disk_windows ADD COLUMN owners TEXT;"),
+    (32, "ALTER TABLE jobs ADD COLUMN elsewhere_runner TEXT;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
