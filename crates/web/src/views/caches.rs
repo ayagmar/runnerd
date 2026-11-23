@@ -2,6 +2,7 @@
 //! over the last 30 days, its action, the shared build cache's week as figures, and what the action archives hold.
 
 use maud::{Markup, html};
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     ActionArchives, BUILD_CACHE_TOOLS, BuildCacheStats, CacheHistory, CacheKind, CacheVolume,
     Caches, Section, Status,
@@ -59,7 +60,7 @@ fn action(volume: &CacheVolume) -> Markup {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &CachesView) -> Markup {
+pub(crate) fn render(view: &CachesView, machine: Option<&Machine>) -> Markup {
     let total: u64 = view.caches.volumes.iter().map(|volume| volume.bytes).sum();
     let figure = html! {
         p.page-figure title="Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." {
@@ -78,7 +79,13 @@ pub(crate) fn render(view: &CachesView) -> Markup {
             (action_archives(archives, view.now))
         }
     };
-    page(Section::Caches.title(), Some(Page::Caches), None, &main)
+    page(
+        Section::Caches.title(),
+        machine,
+        Some(Page::Caches),
+        None,
+        &main,
+    )
 }
 
 /// Every volume as a lane: what it is, its size, as a fill against its bound when it has one, its size over 30 days

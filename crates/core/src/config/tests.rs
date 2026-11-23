@@ -771,6 +771,39 @@ fn cpu_admission_is_off_unless_an_overcommit_above_0_is_set() {
 }
 
 #[test]
+fn a_host_name_is_lower_case_letters_and_digits_as_runner_names_carry_it() {
+    // Catches a name with a dash, which would make a runner name's host and profile ambiguous again (ADR 0158).
+    assert_eq!(Config::parse(MINIMAL).unwrap().host.name, None);
+    let with = |name: &str| {
+        MINIMAL.replace(
+            "isolation = \"sysbox\"",
+            &format!("isolation = \"sysbox\"\nname = {name:?}"),
+        )
+    };
+    let config = Config::parse(&with("tern2")).unwrap();
+    assert_eq!(config.host.name.as_deref(), Some("tern2"));
+    assert!(config.validate(Some(size("10G"))).is_ok());
+    let refused = |name: &str| {
+        Config::parse(&with(name))
+            .unwrap()
+            .validate(Some(size("10G")))
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        refused("work-laptop"),
+        "host.name is \"work-laptop\"; use 1 to 20 lower-case letters and digits, such as \"worklaptop\""
+    );
+    assert_eq!(
+        refused(""),
+        "host.name is \"\"; use 1 to 20 lower-case letters and digits"
+    );
+    for name in ["Tern", "a23456789012345678901", "te rn", "-"] {
+        assert!(refused(name).starts_with("host.name is "), "{name}");
+    }
+}
+
+#[test]
 fn a_memory_ceiling_is_unset_unless_given_and_takes_a_size() {
     assert_eq!(Config::parse(MINIMAL).unwrap().host.memory_ceiling, None);
     let config = Config::parse(&MINIMAL.replace(

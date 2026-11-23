@@ -446,7 +446,9 @@ always returns, so the daemon closes and flushes the history.
   or a log line. The entrypoint hands it to the runner's listener in `ACTIONS_RUNNER_INPUT_JITCONFIG`, never its
   arguments, which every user of the host reads; the listener drops it from the environment its job inherits.
 - The engine deletes only GitHub runner registrations whose names start with this machine's prefix
-  (`HostIdentity::prefix`); other machines serve the same repositories. Runner containers on the local Docker are
+  (`HostIdentity::prefix`); other machines serve the same repositories. The host segment after the prefix holds no
+  dash and is read once at start from `[host] name` or the host name; the status, notifications and dashboard titles
+  carry it as `api::Machine` ([ADR 0158](docs/adr/0158-a-host-has-a-name-that-its-status-and-messages-carry.md)). Runner containers on the local Docker are
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - `scheduler::plan` and `scheduler::warm` do no I/O and read no clock.
 - No two pools of a repository share a label or a profile (`Config::check_pools`), so at most one pool matches a

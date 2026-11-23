@@ -100,19 +100,24 @@ use crate::store::{Announced, MirrorPosition, Store};
 
 /// This machine as its runner names carry it: `runnerd-<id>-<host>-<profile>-<slot>-<secs>`. Only `runnerd-<id>-`
 /// identifies the machine, so a changed host name still matches the runners started before the change, and two
-/// machines with the same or overlapping host names never take each other's runners for their own.
+/// machines with the same or overlapping host names never take each other's runners for their own. The host holds no
+/// dash, so it is the text up to the next one (ADR 0158). Read once at start: a reload does not rename the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostIdentity {
     /// 8 hex digits: a hash of the systemd machine ID, never the ID itself, as machine-id(5) asks.
     id: String,
-    /// The host name in lower case, letters, digits and dashes, at most 20 characters: for people reading names.
+    /// `[host] name`, or the host name in lower case with only its letters and digits, at most 20 characters: for
+    /// people reading names.
     host: String,
 }
 
 impl HostIdentity {
-    /// This machine's identity, from `/etc/machine-id` and its host name.
-    pub fn read() -> std::io::Result<HostIdentity> {
-        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    /// This machine's identity, from `/etc/machine-id` and `name`, else its host name.
+    pub fn read(name: Option<&str>) -> std::io::Result<HostIdentity> {
+        let hostname = match name {
+            Some(name) => name.to_owned(),
+            None => std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default(),
+        };
         let machine_id = std::fs::read_to_string("/etc/machine-id")
             .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
             .map_err(|error| {
@@ -141,22 +146,14 @@ impl HostIdentity {
             .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
                 (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
             });
-        let host: String = hostname
-            .trim()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .take(20)
-            .collect();
-        let host = host.trim_matches('-');
+        let host: String = crate::config::host_segment(hostname);
         Some(HostIdentity {
             id: format!("{:08x}", hash >> 32),
-            host: if host.is_empty() { "host" } else { host }.to_owned(),
+            host: if host.is_empty() {
+                "host".to_owned()
+            } else {
+                host
+            },
         })
     }
 
@@ -169,6 +166,14 @@ impl HostIdentity {
     /// The name of a runner, and of its container, started in `slot` (1-based) of `profile` at `secs`.
     pub fn runner_name(&self, profile: &str, slot: usize, secs: u64) -> String {
         format!("{}{}-{profile}-{slot}-{secs}", self.prefix(), self.host)
+    }
+
+    /// The machine as the API shows it.
+    pub fn machine(&self) -> api::Machine {
+        api::Machine {
+            id: self.id.clone(),
+            name: self.host.clone(),
+        }
     }
 }
 
@@ -676,6 +681,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             repositories: announced.repositories,
             queued: Vec::new(),
             action_archives: None,
+            machine: Some(identity.machine()),
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();

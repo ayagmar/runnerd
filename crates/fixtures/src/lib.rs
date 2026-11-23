@@ -221,6 +221,10 @@ fn status() -> Status {
         stopping: Some(api::Stopping::WaitsForJobs),
         github_limited_until: Some(NOW + 750),
         action_archives: None,
+        machine: Some(api::Machine {
+            id: "4f2a91c0".to_owned(),
+            name: "tern".to_owned(),
+        }),
         budget: Budget {
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(24 * GIB),

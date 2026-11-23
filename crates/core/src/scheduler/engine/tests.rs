@@ -43,9 +43,30 @@ fn no_machines_runner_prefix_starts_another_machines_runner_names() {
 
 #[test]
 fn a_new_host_name_still_matches_the_runners_named_before() {
-    let before = identity("laptop", ID_A).runner_name("app", 1, 1_792_692_722);
-    let after = identity("laptop-dhcp-42", ID_A);
+    // The host name changed, or `[host] name` was set: runners from 0.1.5 carry the dashed host segment.
+    let before = "runnerd-%s-laptop-dhcp-42-app-1-1792692722";
+    let after = identity("tern", ID_A);
+    let before = before.replace("%s", &after.machine().id);
     assert!(before.starts_with(&after.prefix()), "{before}");
+    assert!(
+        identity("laptop-dhcp-42", ID_A)
+            .runner_name("app", 1, 1)
+            .starts_with(&after.prefix()),
+        "a renamed host keeps its prefix"
+    );
+}
+
+#[test]
+fn a_runner_names_host_is_the_text_up_to_the_next_dash() {
+    // Host and profile both held dashes, so `laptop-dhcp-42-my-app-…` could not be split (ADR 0158).
+    let host = identity("laptop-dhcp-42", ID_A);
+    let name = host.runner_name("my-app", 2, 7);
+    let rest = name.strip_prefix(&host.prefix()).unwrap();
+    assert_eq!(
+        rest.split_once('-').unwrap(),
+        ("laptopdhcp42", "my-app-2-7")
+    );
+    assert_eq!(host.machine().name, "laptopdhcp42");
 }
 
 #[test]
@@ -54,9 +75,13 @@ fn runner_names_are_short_safe_and_hide_the_machine_id() {
     let id = &name["runnerd-".len().."runnerd-".len() + 8];
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
     assert!(!ID_A.contains(id), "the machine ID shows in {name}");
-    assert_eq!(name, format!("runnerd-{id}-my-very-long-hostnam-app-2-7"));
+    assert_eq!(name, format!("runnerd-{id}-myverylonghostnameex-app-2-7"));
     assert_eq!(
         identity("", ID_A).runner_name("app", 2, 7),
+        format!("runnerd-{id}-host-app-2-7")
+    );
+    assert_eq!(
+        identity("---", ID_A).runner_name("app", 2, 7),
         format!("runnerd-{id}-host-app-2-7")
     );
     assert_eq!(HostIdentity::new("ci", "not-an-id"), None);
@@ -2264,6 +2289,25 @@ fn registered(calls: &[String]) -> Vec<&String> {
         .iter()
         .filter(|call| call.starts_with("register "))
         .collect()
+}
+
+#[tokio::test]
+async fn the_status_names_the_machine_whose_prefix_its_runners_carry() {
+    // Catches a status that drops the machine after the first publish, or names one its runners do not carry.
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    let machine = identity("ci", ID_A).machine();
+    assert_eq!(handle.status.borrow().machine.as_ref(), Some(&machine));
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().machine.as_ref(), Some(&machine));
+    assert!(
+        identity("ci", ID_A)
+            .runner_name("app", 1, 1)
+            .starts_with(&format!("runnerd-{}-{}-", machine.id, machine.name)),
+        "a runner name carries the id and name the status shows"
+    );
 }
 
 #[tokio::test]

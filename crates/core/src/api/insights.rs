@@ -446,6 +446,9 @@ pub struct Notification {
     /// The digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<Digest>,
+    /// The machine that sent it, which its title names (ADR 0158); absent from a daemon before 0.1.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<super::Machine>,
 }
 
 /// `POST /v1/notify/test` query parameters.

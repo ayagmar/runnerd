@@ -3,6 +3,7 @@
 //! profile's jobs queued; and each repository's waits this week against the week before. Reads only.
 
 use maud::{Markup, html};
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, LabelledFigure, ProfileQueue,
     RepositoryWaits, RunLink, ShareOwner, Tone, View, WriteTop,
@@ -31,7 +32,7 @@ impl InsightsView {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &InsightsView) -> Markup {
+pub(crate) fn render(view: &InsightsView, machine: Option<&Machine>) -> Markup {
     let insights = &view.insights;
     let day = &view.digest;
     let main = html! {
@@ -82,7 +83,13 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             (waits(&insights.waits))
         }
     };
-    page(View::Insights.title(), Some(Page::Insights), None, &main)
+    page(
+        View::Insights.title(),
+        machine,
+        Some(Page::Insights),
+        None,
+        &main,
+    )
 }
 
 /// An insight as a row: its kind and the number it is about, then core's sentence and the runs that show it.

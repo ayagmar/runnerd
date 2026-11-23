@@ -81,6 +81,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             repositories,
             queued,
             action_archives: self.archives.status(),
+            machine: Some(self.identity.machine()),
         };
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
