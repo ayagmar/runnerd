@@ -661,7 +661,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !self.caches_ready(slot, now).await {
             return Launch::Failed(launched);
         }
-        let image = self.runner_image(&slot.profile).await;
+        let Some(image) = self.runner_image(&slot.profile).await else {
+            warn!(
+                "{repository}: no runner starts until Docker says what its image does, which its slot's pnpm store \
+                 depends on"
+            );
+            return Launch::Failed(launched);
+        };
         let number = slot.index + 1;
         let secs = unix_secs(now).max(self.named + 1);
         self.named = secs;
@@ -685,20 +691,28 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// What `profile`'s image does when asked, as Docker says now: only what it does is asked of its runner. Docker
     /// is asked only when the config would ask anything of it: under `skip_syncs`, or for the slot's own pnpm store
-    /// (`cache::PnpmStore::depends_on_image`). An image Docker cannot tell about does nothing.
-    async fn runner_image(&self, profile: &str) -> docker::RunnerImage {
+    /// (`cache::PnpmStore::depends_on_image`). `None` when Docker could not say and the pnpm store depends on it: a
+    /// runner sent to the shared store on a failed inspect would have its entrypoint remove the slot's (ADR 0167). An
+    /// image Docker cannot tell about otherwise does nothing, as before the slot's store.
+    async fn runner_image(&self, profile: &str) -> Option<docker::RunnerImage> {
         let Some(profile) = self.config.profiles.get(profile) else {
-            return docker::RunnerImage::default();
+            return Some(docker::RunnerImage::default());
         };
-        if !self.config.host.skip_syncs
-            && !cache::PnpmStore::depends_on_image(&self.config.caches, profile)
-        {
-            return docker::RunnerImage::default();
+        let pnpm = cache::PnpmStore::depends_on_image(&self.config.caches, profile);
+        if !self.config.host.skip_syncs && !pnpm {
+            return Some(docker::RunnerImage::default());
         }
-        self.docker
-            .runner_image(&profile.image.reference())
-            .await
-            .unwrap_or_default()
+        match self.docker.runner_image(&profile.image.reference()).await {
+            Ok(image) => Some(image),
+            Err(error) if pnpm => {
+                warn!(
+                    "cannot read the labels of {}: {error}",
+                    profile.image.reference()
+                );
+                None
+            }
+            Err(_) => Some(docker::RunnerImage::default()),
+        }
     }
 
     /// Commits a readied start: opens its build cache and marks its slot `Starting`, for its task to run. It waits for

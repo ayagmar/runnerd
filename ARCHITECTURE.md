@@ -664,7 +664,9 @@ always returns, so the daemon closes and flushes the history.
   (`docker::SLOT_PNPM_STORE_LABEL`); the `runnerd-pnpm` volume otherwise. A runner of the slot's own store mounts no
   shared one and gets `RUNNERD_PNPM_SLOT_STORE=<max_size in bytes>`, and the entrypoint binds `/state/work`, the
   slot's workspace with its store at `.pnpm-store`, over `/home/runner/_work`, after emptying all but the store and
-  dropping a store over its limit: store and `node_modules` on one mount, so pnpm links instead of copying
+  dropping a store over its limit: store and `node_modules` on one mount, so pnpm links instead of copying. The
+  workspace goes again when the job ends. When the bind cannot be made, pnpm copies from the slot's store as from a
+  shared one; when Docker cannot say what the image carries, the runner waits for the next plan
   ([ADR 0167](docs/adr/0167-a-slot-keeps-its-own-pnpm-store-beside-the-jobs-workspace.md)).
 - Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner whose image
   carries the label `runnerd.skip-syncs=1` (`docker::SKIP_SYNCS_LABEL`) `RUNNERD_SKIP_SYNCS=1`

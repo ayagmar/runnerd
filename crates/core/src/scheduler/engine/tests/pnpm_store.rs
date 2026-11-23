@@ -83,3 +83,57 @@ async fn records_an_older_image_and_the_opt_out_keep_the_shared_pnpm_store() {
         );
     }
 }
+
+// Catches: a Docker that could not answer read as an image without the slot's store, so the runner goes to the shared
+// store and its entrypoint removes the slot's: one timed-out inspect costs the slot its packages.
+#[tokio::test]
+async fn a_runner_whose_image_docker_cannot_tell_about_waits_and_the_slots_store_stays() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("pnpm-store-inspect"),
+    );
+    docker.0.lock().unwrap().failing_image_inspects = true;
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(
+        docker.0.lock().unwrap().envs.is_empty(),
+        "no runner starts while Docker cannot say what its image does"
+    );
+
+    docker.0.lock().unwrap().failing_image_inspects = false;
+    engine.tick(Shutdown::No).await;
+    let state = docker.0.lock().unwrap();
+    let env = state
+        .envs
+        .values()
+        .next()
+        .expect("a runner started once Docker answered");
+    assert!(
+        env.iter()
+            .any(|var| var.starts_with(docker::SLOT_PNPM_STORE_ENV)),
+        "it keeps the slot's store: {env:?}"
+    );
+}
+
+// Catches: a failed inspect holding back runners whose pnpm store does not depend on it, as before the slot's store.
+#[tokio::test]
+async fn a_runner_of_the_shared_store_starts_though_docker_cannot_tell_about_its_image() {
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().failing_image_inspects = true;
+    let config = CONFIG.replace(
+        "pnpm = { max_size = \"5G\" }",
+        "pnpm = { max_size = \"5G\", store = \"shared\" }",
+    );
+    let (shared, asked) = first_runner(&config, &docker).await;
+    assert!(
+        shared && asked.is_empty(),
+        "it starts on the shared store: {asked:?}"
+    );
+}

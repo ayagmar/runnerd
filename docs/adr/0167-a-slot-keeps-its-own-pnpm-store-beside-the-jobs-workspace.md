@@ -70,7 +70,9 @@ the user that owns it, so a job can change what another profile's job installs t
   the container ([0031](0031-records-of-failed-jobs.md)). Its image carries the label `runnerd.slot-pnpm-store=1`,
   so an image from before this change, which would put a store on the container's own disk and fill it again every
   job, keeps the shared one. Core decides this in one place, `cache::PnpmStore::of`, and the runner's mounts and its
-  environment both follow that one value.
+  environment both follow that one value. When Docker fails to say what the image carries and the answer decides the
+  store, the runner does not start, and the next plan tries again: a runner sent to the shared store on a failed
+  inspect would remove the slot's.
 - **A slot's store runner** mounts no `runnerd-pnpm` volume and gets `RUNNERD_PNPM_SLOT_STORE=<max_size in bytes>`.
   Its entrypoint, before it mounts the layers or starts the Docker Engine:
   - empties `/state/work`, the last job's workspace, but for `.pnpm-store`, and removes that store whole when it
@@ -82,11 +84,15 @@ the user that owns it, so a job can change what another profile's job installs t
   `XDG_RUNTIME_DIR` stays at `/shared/pnpm/run`, which is now the container's own directory: the store has one
   container at a time, so its lock directory needs no sharing.
 - **The entrypoint falls back to the container's workspace, said on its output,** when the bind fails or when the
-  image holds anything under `_work` but an empty `_tool`, which the bind would hide. pnpm then fills a store on the
-  container's disk: slower, never wrong.
-- **What the scrub does is unchanged.** It still deletes `_work/_temp` and checkout's `extraheader` lines through the
-  bind, before the container exits, so no step script or token waits on the volume for the next job; it skips the
-  store when it looks for git configs.
+  image holds anything under `_work` but an empty `_tool`, which the bind would hide. It has emptied the slot's
+  workspace first, and points pnpm at the slot's store on the volume all the same: pnpm copies out of it across
+  mounts, as from the shared store, and the store stays warm. Never a store on the container's disk, which every job
+  would fill again and lose.
+- **The workspace goes with the job.** Once the runner exits and the scrub ran, the entrypoint empties the slot's
+  workspace but for the store, as the container's own workspace went with the container: no checkout, build tree or
+  file a step wrote waits on the volume while the slot is idle. Not on a requested stop, which has seconds; the
+  slot's next runner empties it then. The scrub still deletes `_work/_temp` and checkout's `extraheader` lines
+  first, and skips the store when it looks for git configs.
 - **A runner that does not get the slot's store removes `/state/work`**, so a slot whose runners go back to the
   shared store, by `"shared"`, by `record_failures` or by an image without the label after one with it, does not
   keep a store nothing reads.
@@ -104,15 +110,17 @@ the user that owns it, so a job can change what another profile's job installs t
 - **The shared store stays for `"shared"`, for profiles that keep records, and for older images.** Those runners
   still write it, and still copy out of it.
 - **Each slot fills its own store**, once, from the network, and again after its store went over `max_size`, after a
-  crash, or after its volume was cleaned. Each slot that runs pnpm jobs holds a store of up to `max_size`.
+  crash, or after its volume was cleaned. Each slot that runs pnpm jobs holds a store of up to `max_size`, so the disk
+  holds up to `slots` times `max_size` of them. The slots' Docker share counts what their volumes hold as room the
+  Docker Engines may use ([0156](0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)), stores included,
+  so it overstates that room by what the stores hold, as it already did by the layers.
 - **The old shared store is not removed.** While no runner uses it, it keeps what it held, under its limit;
   `runnerctl caches clean runnerd-pnpm` frees it.
-- **A container killed before its scrub**, as `docker stop` past its timeout does, leaves its step scripts and
-  checkout's token in the workspace on the slot's volume until the slot's next runner empties it before its job.
-  Before, they went with the container, unless it was kept as a record. No job reads them: the next runner empties
-  the workspace before its runner starts.
-- **Emptying the last workspace takes time at the start of the next runner of the slot**, the unlinking of its tree.
-  A warm runner does this before its job is given to it.
+- **A container stopped or killed before its end** leaves its workspace, step scripts and checkout's token on the
+  slot's volume until the slot's next runner empties it before its job. Before, they went with the container,
+  unless it was kept as a record. No job reads them: the next runner empties the workspace before its runner starts.
+- **Emptying the workspace takes time when the job ends**, the unlinking of its tree, while the slot is still
+  taken.
 
 ## Consequences
 

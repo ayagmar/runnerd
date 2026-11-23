@@ -1055,20 +1055,28 @@ mod tests {
     }
 
     // Catches: the slot's workspace bound over an image that holds something under `_work`, which the job would then
-    // not find, or pnpm pointed at a store the bind did not bring.
+    // not find; pnpm left with a store on the container's disk, which every job of the runner fills again and loses;
+    // the last job's workspace left on the slot's volume, for any later job of the profile to read.
     #[test]
     #[allow(
         clippy::unwrap_used,
         reason = "a test: a file it cannot write fails it"
     )]
-    fn an_image_that_holds_something_in_the_workspace_keeps_it_and_the_shared_store_path() {
+    fn an_image_that_holds_something_in_the_workspace_keeps_it_and_the_slots_store_beside_it() {
         let dir = TestDir::new("image-work");
         let (image, slot) = (dir.0.join("image"), dir.0.join("slot"));
         std::fs::create_dir_all(image.join("_tool/node/24.0.0")).unwrap();
-        std::fs::create_dir_all(&slot).unwrap();
+        for (path, text) in [
+            (".pnpm-store/v11/files/ab/cdef", "pkg"),
+            ("app/app/.env", "TOKEN=1"),
+        ] {
+            let path = slot.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
         let said = with_layers(
             "WORK=$1 SLOT_WORK=$2; unset pnpm_config_store_dir; \
-             if mount_slot_work 1000 2>&1; then echo bound; fi; echo \"store=${pnpm_config_store_dir:-}\"",
+             if mount_slot_work 1000000 2>&1; then echo bound; fi; echo \"store=${pnpm_config_store_dir:-}\"",
             &[&image, &slot],
         );
         assert!(
@@ -1077,12 +1085,17 @@ mod tests {
         );
         assert!(!said.contains("bound"), "nothing is bound: {said}");
         assert!(
-            said.ends_with("store=\n"),
-            "pnpm keeps the image's store path: {said}"
+            said.ends_with(&format!("store={}\n", slot.join(".pnpm-store").display())),
+            "pnpm keeps the slot's store, and copies from it: {said}"
         );
+        let left: Vec<String> = std::fs::read_dir(&slot)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [".pnpm-store"], "the last job's workspace is gone");
         assert!(
-            std::fs::read_dir(&slot).unwrap().next().is_none(),
-            "the slot's workspace is left alone"
+            slot.join(".pnpm-store/v11/files/ab/cdef").exists(),
+            "the store stays"
         );
     }
 
