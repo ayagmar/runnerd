@@ -246,7 +246,7 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
     else moveBy(tail, tail.getBoundingClientRect().bottom - foot() + 16);
     scrolled(tail);
   };
-  // The first line on screen, by its number, and where it is.
+  // The first line on screen, with its number, and where it is.
   let anchor = null;
   // The first shown line from number `from` on; with `onScreen`, the first whose foot is past the scroller's top.
   // Where the scroller's top is on screen: the box's for a tail with its own, the page's (0) for the page. An anchor
@@ -266,11 +266,13 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
     const box = tail.getBoundingClientRect();
     const spans = ownBox(tail) || (box.top < 1 && box.bottom > 0);
     const line = spans ? lineAt(tail, 0, true) : null;
-    anchor = line ? { value: line.value, top: line.getBoundingClientRect().top - origin(tail) } : null;
+    anchor = line ? { line, value: line.value, top: line.getBoundingClientRect().top - origin(tail) } : null;
   };
   const hold = (tail) => {
     if (!anchor) return;
-    const line = lineAt(tail, anchor.value, false);
+    // The line itself while it is still shown; once it is dropped or hidden, the first shown after its number.
+    const kept = anchor.line.isConnected && anchor.line.getClientRects().length > 0;
+    const line = kept ? anchor.line : lineAt(tail, anchor.value, false);
     if (!line) return;
     const by = line.getBoundingClientRect().top - origin(tail) - anchor.top;
     if (Math.abs(by) >= 1) {
@@ -313,9 +315,21 @@ for (const toggle of document.querySelectorAll('[data-follow]')) {
     },
     true,
   );
+  // The furthest the scroller goes: a position there that dropped is content that shrank under it, not the reader.
+  const furthest = (tail) =>
+    ownBox(tail) ? tail.scrollHeight - tail.clientHeight : document.scrollingElement.scrollHeight - innerHeight;
   const follow = () => {
     const tail = box();
     if (!tail) return;
+    // A line can come between the reader's scroll up and its event: taken as the reader's here, or the move to the end
+    // would take them back down and read as this script's own scroll.
+    const at = position(tail);
+    if ((ours === null || Math.abs(at - ours) >= 2) && at < last - 1 && at < furthest(tail) - 1) {
+      following = false;
+      // Their line moved down the screen with the scroll: held from there.
+      if (anchor) anchor.top += last - at;
+      last = at;
+    }
     if (toggle.checked && following) toEnd(tail);
     else hold(tail);
     mark(tail);
