@@ -130,7 +130,10 @@ async fn an_unchanged_answer_is_served_from_the_last_response() {
         }
         (
             [("etag", "\"v1\"")],
-            json(r#"{"runners":[{"id":7,"name":"runnerd-a","status":"online","busy":true}]}"#),
+            json(
+                r#"{"runners":[{"id":7,"name":"runnerd-a","status":"online","busy":true,"labels":[
+                    {"id":1,"name":"self-hosted","type":"read-only"},{"id":9,"name":"app","type":"custom"}]}]}"#,
+            ),
         )
             .into_response()
     })
@@ -140,6 +143,11 @@ async fn an_unchanged_answer_is_served_from_the_last_response() {
     let second = github.runners("o/r").await.unwrap();
     assert_eq!(first, second);
     assert_eq!(second[0].id, 7);
+    assert_eq!(
+        second[0].labels,
+        ["self-hosted", "app"],
+        "the labels' names"
+    );
     assert!(
         seen.lock().unwrap()[1]
             .headers

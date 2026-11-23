@@ -23,6 +23,7 @@ Every queued job says what holds it, in `runnerctl status`, the dashboard's over
 | Next after an older job, whose runner starts first | An older job's runner is about to take the slot, memory or CPU this one would start with. |
 | node is rebuilding its snapshot | Slot 1 is becoming the profile's [snapshot](../caches/#warm-caches); none of the profile's slots starts until it is done. |
 | Pulling node's image | A new runner image is pulling; the profile's slots wait for it. |
+| Left to the primary machine for 30s more | This is an [overflow host](../second-machine/): it leaves a job to the other machines for `overflow_after` after GitHub queued it. Past that it says *until GitHub lists it again*, and starts at the next listing. |
 | Emptying the caches a host crash may have torn | The host crashed while runners skipped their syncs, so runnerd empties the slots' volumes and shared caches before any runner starts. [Caches](../caches/) says what goes. |
 
 ## It needs you

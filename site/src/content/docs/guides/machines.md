@@ -3,7 +3,7 @@ title: How do I read another machine's runnerd?
 description: Add the machine once with runnerctl machine add, then pass --machine to any command; runnerctl forwards the daemon's socket over SSH.
 ---
 
-When a second machine runs its own daemon, `runnerctl` on this one reads it over SSH. Nothing listens on the network: `runnerctl` starts `ssh -N -L` for the length of one command and forwards a private socket to the other daemon's socket. The other machine needs runnerd 0.1.6 or later and your SSH key; it does not need `runnerctl`.
+When a [second machine](../second-machine/) runs its own daemon, `runnerctl` on this one reads it over SSH. Nothing listens on the network: `runnerctl` starts `ssh -N -L` for the length of one command and forwards a private socket to the other daemon's socket. The other machine needs runnerd 0.1.6 or later and your SSH key; it does not need `runnerctl`.
 
 Add it once, by a name of lower-case letters and digits:
 

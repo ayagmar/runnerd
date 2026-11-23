@@ -78,6 +78,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         host_waited: 0,
         slot_waited: 0,
         held: 0,
+        overflow_waited: 0,
         unseen: 0,
         cpu_periods: None,
         cpu_throttled: None,
@@ -1544,6 +1545,7 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
                     waits: waits.get(pool).copied().unwrap_or_default(),
                     usual,
                     warm: 0,
+                    idle_after: scheduler::IDLE_TIMEOUT,
                 }
             })
             .collect();

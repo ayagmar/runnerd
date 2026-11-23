@@ -1427,7 +1427,7 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
     // count.
     assert_eq!(
         rows.len(),
-        42,
+        44,
         "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();
@@ -1643,5 +1643,49 @@ fn a_drive_s_sizes_are_decimal_and_a_binary_unit_is_refused() {
             Err(crate::config::ConfigError::DriveDevice)
         ),
         "a blank device is refused"
+    );
+}
+
+#[test]
+fn an_overflow_host_keeps_no_warm_runner_and_is_warned_of_auto_sizing() {
+    // Catches finding H1 left silent: a config whose `warm` an overflow host ignores, and auto sizing there, which
+    // reads only the jobs the primary did not take (ADR 0162).
+    let primary = Config::parse(MINIMAL).unwrap();
+    assert_eq!(primary.host.role, super::Role::Primary);
+    assert_eq!(primary.host.overflow_after, Duration::from_secs(45));
+    assert_eq!(primary.warm(&primary.repositories[0]), 1);
+    let overflow = MINIMAL.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nrole = \"overflow\"\noverflow_after = \"1m\"",
+    );
+    let config = Config::parse(&overflow).unwrap();
+    assert_eq!(config.host.overflow_after, Duration::from_mins(1));
+    assert_eq!(config.warm(&config.repositories[0]), 0);
+    let warnings: Vec<String> = config
+        .validate(Some(size("10G")))
+        .unwrap()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            "[host] role = \"overflow\" keeps no warm runners and starts no bursts, so the warm of owner/app in app is \
+          not kept; set warm = 0 there to say so"
+        ]
+    );
+    let quiet = format!("{overflow}warm = 0\n\n[sizing]\nauto = true\n");
+    let warnings = Config::parse(&quiet)
+        .unwrap()
+        .validate(Some(size("10G")))
+        .unwrap();
+    assert_eq!(warnings, [Warning::OverflowAutoSizing]);
+    assert!(
+        Config::parse(&MINIMAL.replace(
+            "isolation = \"sysbox\"",
+            "isolation = \"sysbox\"\nrole = \"backup\""
+        ))
+        .is_err(),
+        "an unknown role is refused"
     );
 }

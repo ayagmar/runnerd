@@ -100,11 +100,37 @@ pub struct Host {
     /// The drive under Docker's root as its maker rates it (ADR 0157): absent, insights show no endurance.
     #[serde(default)]
     pub drive: Option<Drive>,
+    /// Whether this machine serves its repositories first, or only takes the jobs no other machine took in time
+    /// (ADR 0162). Default `primary`; one primary per set of labels.
+    #[serde(default)]
+    pub role: Role,
+    /// On an overflow host, how long after GitHub queued a job it may start a runner for it. Default 45 s. A primary
+    /// ignores it.
+    #[serde(default = "default_overflow_after", deserialize_with = "duration")]
+    pub overflow_after: Duration,
     /// What runnerd does while the host runs on its battery (ADR 0161): by default `pause`, which starts no runner and
     /// stops idle and warm ones, while busy ones finish. A host with no system battery is never on battery. A reload
     /// applies it at the next tick.
     #[serde(default)]
     pub on_battery: OnBattery,
+}
+
+/// `role` under `[host]`: whether this machine serves its repositories first or only as a backup to another (ADR
+/// 0162).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    /// It starts a runner for each queued job its pools serve, and keeps warm runners: one machine behaves this way
+    /// alone.
+    #[default]
+    Primary,
+    /// It starts a runner only for a job that another machine did not take within `overflow_after`, keeps no warm
+    /// runners and starts no bursts, and gives an idle runner `OVERFLOW_IDLE_TIMEOUT` before it stops it.
+    Overflow,
+}
+
+fn default_overflow_after() -> Duration {
+    Duration::from_secs(45)
 }
 
 /// `on_battery` under `[host]`: what runnerd does while the host runs on its battery (ADR 0161).
@@ -298,6 +324,11 @@ impl Host {
                 ),
             ),
         }
+    }
+
+    /// Whether this machine only takes the jobs no other machine took in time (`Role::Overflow`).
+    pub fn is_overflow(&self) -> bool {
+        self.role == Role::Overflow
     }
 
     /// Refuses a `name` that is not already its own host segment.
@@ -1432,6 +1463,13 @@ pub enum Warning {
         /// What every runner and the mirror may use at once.
         total: ByteSize,
     },
+    /// An overflow host keeps no warm runners, so the `warm` of these pools, by `owner/name in profile`, is not kept.
+    OverflowKeepsNoWarm {
+        /// The pools whose `warm` is above 0.
+        pools: Vec<String>,
+    },
+    /// An overflow host sizes its profiles from the jobs it ran, which are those the primary did not take in time.
+    OverflowAutoSizing,
 }
 
 impl fmt::Display for Warning {
@@ -1441,6 +1479,17 @@ impl fmt::Display for Warning {
                 f,
                 "the slice {slice} has no MemoryMax, so nothing holds runners to their {total} of caps; \
                  install a unit file for it"
+            ),
+            Warning::OverflowKeepsNoWarm { pools } => write!(
+                f,
+                "[host] role = \"overflow\" keeps no warm runners and starts no bursts, so the warm of {} is not \
+                 kept; set warm = 0 there to say so",
+                pools.join(", ")
+            ),
+            Warning::OverflowAutoSizing => write!(
+                f,
+                "[sizing] auto on an overflow host sizes its profiles from the jobs no other machine took in time, \
+                 the tail of the queue, not its usual jobs; size it by hand, or read runnerctl sizing first"
             ),
         }
     }
@@ -1506,6 +1555,15 @@ impl Config {
             (Some(config), check)
         } else {
             (None, check)
+        }
+    }
+
+    /// How many warm runners `repository` keeps: its `warm`, and none on an overflow host, which starts no bursts
+    /// either (ADR 0162): an idle runner there would take the next job before the primary starts one for it.
+    pub fn warm(&self, repository: &Repository) -> u32 {
+        match self.host.role {
+            Role::Primary => repository.warm,
+            Role::Overflow => 0,
         }
     }
 
@@ -1791,7 +1849,31 @@ impl Config {
             }
         }
         self.check_pools()?;
-        self.check_budget(memory_max)
+        let mut warnings = self.check_budget(memory_max)?;
+        warnings.extend(self.role_warnings());
+        Ok(warnings)
+    }
+
+    /// What an overflow host's config should know (ADR 0162): the repositories whose `warm` it does not keep, and
+    /// auto sizing, which reads only the jobs it ran, the tail the primary could not take.
+    fn role_warnings(&self) -> Vec<Warning> {
+        if self.host.role != Role::Overflow {
+            return Vec::new();
+        }
+        let mut warnings = Vec::new();
+        let warm: Vec<String> = self
+            .repositories
+            .iter()
+            .filter(|repository| repository.warm > 0)
+            .map(|repository| format!("{} in {}", repository.name, repository.profile))
+            .collect();
+        if !warm.is_empty() {
+            warnings.push(Warning::OverflowKeepsNoWarm { pools: warm });
+        }
+        if self.sizing.auto {
+            warnings.push(Warning::OverflowAutoSizing);
+        }
+        warnings
     }
 
     /// Holds what `[host] admission` needs to the slice's `MemoryMax`; warns when the slice has none to hold caps to.
