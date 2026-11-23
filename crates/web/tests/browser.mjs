@@ -371,6 +371,53 @@ try {
     await context.close();
   }
 
+  // A job another runner ran says where in its badge, cut to its column: the overview's latest jobs keep the badge
+  // clear of the job's name, the history and a job's page scroll nothing sideways, and the badge says it whole on
+  // hover.
+  for (const size of [sizes[0], sizes[1]]) {
+    const { context, page } = await signedIn(size);
+    const clear = () =>
+      page.evaluate(() => {
+        const found = [];
+        const box = (element) => element.getBoundingClientRect();
+        for (const badge of document.querySelectorAll('.badge')) {
+          if (!/^ran on /.test(badge.textContent.trim())) continue;
+          const row = badge.closest('a, tr, h1');
+          const name = row?.querySelector('.job-name');
+          if (name && box(name).width > 0 && box(badge).right > box(name).left + 1
+              && box(badge).left < box(name).right && box(badge).bottom > box(name).top
+              && box(badge).top < box(name).bottom) {
+            found.push(`"${badge.textContent.trim()}" covers its job's name`);
+          }
+          const label = badge.firstElementChild ?? badge;
+          if (label.scrollWidth > label.clientWidth + 1 && getComputedStyle(label).textOverflow !== 'ellipsis') {
+            found.push(`"${badge.textContent.trim()}" spills out of its badge`);
+          }
+          if (box(badge).right > innerWidth + 1) found.push(`"${badge.textContent.trim()}" ends past the page`);
+          if (badge.title !== badge.textContent.trim()) found.push(`"${badge.textContent.trim()}" has no whole title`);
+        }
+        if (document.documentElement.scrollWidth > innerWidth + 1) {
+          found.push(`the page scrolls sideways: ${document.documentElement.scrollWidth} > ${innerWidth}`);
+        }
+        return { found, seen: [...document.querySelectorAll('.badge')].filter((badge) => /^ran on /.test(badge.textContent.trim())).length };
+      });
+    await page.goto(new URL('/', login).href);
+    await page.waitForSelector('#recent .job-list');
+    const overview = await clear();
+    check(overview.seen >= 2 && overview.found.length === 0, `${size.name}: the latest jobs fit "ran on" badges (${overview.seen}) ${overview.found.join('; ')}`);
+    const link = await page.evaluate(() =>
+      [...document.querySelectorAll('#recent .job-list a')].find((a) => /arc-prod/i.test(a.textContent))?.getAttribute('href'));
+    await page.goto(new URL('/history', login).href);
+    await page.waitForSelector('.history-table tbody tr');
+    const history = await clear();
+    check(history.seen >= 2 && history.found.length === 0, `${size.name}: the history fits "ran on" badges (${history.seen}) ${history.found.join('; ')}`);
+    await page.goto(new URL(link ?? '/jobs/0', login).href);
+    await page.waitForSelector('h1 .badge');
+    const job = await clear();
+    check(job.seen >= 1 && job.found.length === 0, `${size.name}: a job's page fits its "ran on" badge ${job.found.join('; ')}`);
+    await context.close();
+  }
+
   // Reseeding a snapshot asks first, as emptying a volume does; dismissed, nothing is sent.
   for (const size of [sizes[0], sizes[1]]) {
     const { context, page } = await signedIn(size);

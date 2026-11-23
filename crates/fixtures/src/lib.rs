@@ -41,7 +41,7 @@ pub const RUNNING: u64 = 9101;
 pub const NOT_BUSY: u64 = 9102;
 /// A job its runner was lost with.
 pub const LOST: u64 = 9201;
-/// A job another machine's runner ran.
+/// A job another machine's runner ran: runnerd on `skiff` (ADR 0163).
 pub const ELSEWHERE: u64 = 9202;
 /// A job whose run failed before any runner took it.
 pub const STARTUP_FAILURE: u64 = 9203;
@@ -363,6 +363,7 @@ fn summary(id: u64, repository: &str, state: JobState, conclusion: Option<&str>)
         log: LogSummary::default(),
         runner_fault: false,
         slept: false,
+        elsewhere_runner: None,
         failure_cause: None,
         rerun_at: None,
         probe: None,
@@ -437,6 +438,7 @@ fn not_run_here() -> [JobSummary; 3] {
         finished_at: Some(NOW - 9100),
         ..Timeline::default()
     };
+    elsewhere.elsewhere_runner = Some("runnerd-7c3e5a19-skiff-jvm-2-1763000000".to_owned());
     let mut never_started = summary(
         NEVER_STARTED,
         LEDGER,
@@ -2152,7 +2154,7 @@ mod tests {
             "a CPU cap held back as a warning and as a notice"
         );
         assert_eq!(label(LOST), Some("lost"));
-        assert_eq!(label(ELSEWHERE), Some("elsewhere"));
+        assert_eq!(label(ELSEWHERE), Some("ran on skiff"));
         assert_eq!(label(NEVER_STARTED), Some("cancelled in queue"));
         assert_eq!(label(STARTUP_FAILURE), Some("startup failure"));
         assert_eq!(label(TIMED_OUT), Some("timed out"));
