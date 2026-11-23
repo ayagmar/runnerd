@@ -5668,3 +5668,44 @@ html:has(.editor-frame) {
   color: var(--muted);
   padding-left: 1.5rem;
 }
+
+/* `[web] peers` (ADR 0166): the other machines' dashboards, links after the wordmark in the top bar and under it in
+   the sidebar. Not the views' bar: it stays in the flow and takes no part in the view transition. */
+.top nav.peers {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.5rem;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  view-transition-name: none;
+}
+
+.top nav.peers a {
+  flex: none;
+  min-height: 44px;
+  padding-inline: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.top nav.peers a::after {
+  content: ' ↗';
+}
+
+@media (min-width: 60rem) {
+  .top nav.peers {
+    flex-direction: column;
+    margin: -0.75rem 0 0.75rem;
+  }
+
+  .top nav.peers a {
+    min-height: 2rem;
+    justify-content: flex-start;
+    padding-inline: 0.5rem;
+  }
+}

@@ -2,7 +2,7 @@
 //! or a line to type a search in. One at a time; the footer's questions (`prompts`) are apart, as the daemon asks
 //! those. It decides which option a key moves to; what a choice does is `app`'s, how it looks `draw`'s.
 
-use runnerd_core::api::{JobOrder, JobRange, RecordFilter};
+use runnerd_core::api::{self, JobOrder, JobRange, RecordFilter};
 
 /// What is open over the view. Nothing of it survives leaving the TUI.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,6 +30,8 @@ pub(crate) enum Pick {
     Record,
     Range,
     Order,
+    /// Which machine the TUI reads (ADR 0166).
+    Machine,
 }
 
 /// What choosing an option does.
@@ -42,14 +44,18 @@ pub(crate) enum Value {
     Record(Option<RecordFilter>),
     Range(JobRange),
     Order(JobOrder),
+    /// A machine of `machines.toml` by its name, or `None` for this machine's daemon.
+    Machine(Option<String>),
 }
 
 /// One line of a list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Choice {
     pub(crate) label: String,
-    /// What is set now, drawn beside the label in the list of filters.
+    /// What is set now, drawn beside the label in the list of filters; a machine's state in the list of machines.
     pub(crate) note: String,
+    /// What the note means, for its colour: quiet but for a machine's state.
+    pub(crate) tone: api::Tone,
     pub(crate) value: Value,
 }
 
@@ -67,6 +73,7 @@ impl Choice {
         Choice {
             label: label.into(),
             note: String::new(),
+            tone: api::Tone::Quiet,
             value,
         }
     }

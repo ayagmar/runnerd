@@ -2,8 +2,8 @@
 //! a re-run, jobs near their memory cap, one card each, warnings first; the last 24 hours in a line; why each
 //! profile's jobs queued; and each repository's waits this week against the week before. Reads only.
 
+use crate::views::Here;
 use maud::{Markup, html};
-use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Digest, DiskWrites, Endurance, HostHazard, Insight, InsightKind, Insights, LabelledFigure,
     ProfileQueue, RepositoryWaits, RunLink, ShareOwner, Tone, View, WriteTop,
@@ -32,7 +32,7 @@ impl InsightsView {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &InsightsView, machine: Option<&Machine>) -> Markup {
+pub(crate) fn render(view: &InsightsView, here: Here<'_>) -> Markup {
     let insights = &view.insights;
     let day = &view.digest;
     let main = html! {
@@ -85,7 +85,7 @@ pub(crate) fn render(view: &InsightsView, machine: Option<&Machine>) -> Markup {
     };
     page(
         View::Insights.title(),
-        machine,
+        here,
         Some(Page::Insights),
         None,
         &main,

@@ -141,6 +141,11 @@ pub(crate) enum Msg {
     Failed(String),
     /// A pause was refused because the repository, or one of them in a pause of all, runs a job.
     Busy(Refused),
+    /// Every machine's state, for the list of machines; `current` is the one read now.
+    Machines {
+        choices: Vec<MachineChoice>,
+        current: Option<String>,
+    },
 }
 
 /// The daemon's config file and what its check says of it.
@@ -288,9 +293,23 @@ pub(crate) enum Effect {
     },
     /// Write a profile's new memory and slots into the daemon's config.
     Resize(Resizing),
+    /// Read every machine's status, for the list of machines (ADR 0166).
+    Machines,
+    /// Read this machine, or the machine of `machines.toml` so named, instead; the loop's own, since it replaces the
+    /// client and the state.
+    Switch(Option<String>),
     /// Give the terminal back and stop, as Ctrl-Z does in a shell.
     Suspend,
     Quit,
+}
+
+/// A machine the list of machines offers, and what its daemon said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineChoice {
+    /// What choosing it reads: its name in `machines.toml`, or `None` for this machine's daemon.
+    pub(crate) target: Option<String>,
+    /// Its name and state, as core words them.
+    pub(crate) machine: api::FleetMachine,
 }
 
 /// A profile's advised memory and slots, as the sizing view showed them when `a` asked.
@@ -948,6 +967,7 @@ impl App {
             Msg::Done(text) => self.flash(text, api::Tone::Good),
             Msg::Failed(text) => self.flash(text, api::Tone::Bad),
             Msg::Busy(refused) => self.prompts.push(Prompt::Force(refused)),
+            Msg::Machines { choices, current } => self.list_machines(choices, current),
         }
         Vec::new()
     }
@@ -1177,6 +1197,24 @@ impl App {
         Some(Effect::Reasons)
     }
 
+    /// Opens the list of machines, each with its state as core words and tones it, on the one read now.
+    fn list_machines(&mut self, choices: Vec<MachineChoice>, current: Option<String>) {
+        self.flash = None;
+        let choices = choices
+            .into_iter()
+            .map(|choice| Choice {
+                note: choice.machine.summary(),
+                tone: choice.machine.tone(),
+                ..Choice::of(choice.machine.name, Value::Machine(choice.target))
+            })
+            .collect();
+        self.overlay = Overlay::Pick(Picker::new(
+            Pick::Machine,
+            choices,
+            &Value::Machine(current),
+        ));
+    }
+
     fn flash(&mut self, text: String, tone: api::Tone) {
         self.flash = Some(Flash { text, tone });
     }
@@ -1377,6 +1415,13 @@ impl App {
             KeyCode::Char('o') => return self.show(View::Overview),
             KeyCode::Char('h') => return self.show(View::History),
             KeyCode::Char('!') => return self.show_attention(),
+            KeyCode::Char('m') => {
+                self.flash(
+                    "reading every machine's state…".to_owned(),
+                    api::Tone::Quiet,
+                );
+                return vec![Effect::Machines];
+            }
             KeyCode::Char(digit @ '1'..='9') => {
                 let tab = usize::from(u8::try_from(digit).unwrap_or(b'1') - b'1');
                 return self.tab(tab);
@@ -1778,6 +1823,8 @@ impl App {
             (choices, Value::Text(set.clone()))
         };
         let (choices, current) = match pick {
+            // Opened by `Msg::Machines`, with what was read.
+            Pick::Machine => return,
             Pick::Filters => {
                 use api::Column;
                 let filter = |column: Column, pick: Pick, note: String| Choice {
@@ -1877,7 +1924,11 @@ impl App {
             (Value::Record(record), _) => history.record = *record,
             (Value::Range(range), _) => history.range = *range,
             (Value::Order(order), _) => history.order = *order,
-            (Value::Text(_), Pick::Filters | Pick::Record | Pick::Range | Pick::Order) => {}
+            (Value::Machine(target), _) => return vec![Effect::Switch(target.clone())],
+            (
+                Value::Text(_),
+                Pick::Filters | Pick::Record | Pick::Range | Pick::Order | Pick::Machine,
+            ) => {}
         }
         self.first_page()
     }

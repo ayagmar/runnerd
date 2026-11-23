@@ -1394,6 +1394,7 @@ async fn dashboard_for(dir: &Path, daemon: &Daemon, proxies: &[String]) -> std::
             .iter()
             .map(|origin| origin.parse().unwrap())
             .collect(),
+        Vec::new(),
         daemon.sessions.clone(),
         std::future::pending::<()>(),
     );

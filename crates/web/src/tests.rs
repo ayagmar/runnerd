@@ -102,6 +102,15 @@ impl Dashboard {
 
     /// The dashboard of a fake daemon answering with `fixtures`, behind `proxies` as `behind` takes them.
     async fn serving(proxies: &[&str], fixtures: fake::Fixtures) -> Dashboard {
+        Dashboard::linking(proxies, Vec::new(), fixtures).await
+    }
+
+    /// The dashboard `serving` starts, linking to `peers` as `[web] peers` sets.
+    async fn linking(
+        proxies: &[&str],
+        peers: Vec<runnerd_core::config::Peer>,
+        fixtures: fake::Fixtures,
+    ) -> Dashboard {
         let proxies = proxies
             .iter()
             .map(|origin| origin.parse().unwrap())
@@ -117,6 +126,7 @@ impl Dashboard {
             listener,
             socket,
             proxies,
+            peers,
             sessions.clone(),
             std::future::pending::<()>(),
         );
@@ -776,6 +786,7 @@ async fn a_browser_stays_signed_in_when_the_dashboard_restarts() {
     crate::spawn(
         listener,
         dashboard.dir.0.join("runnerd.sock"),
+        Vec::new(),
         Vec::new(),
         sessions.clone(),
         std::future::pending::<()>(),
@@ -4161,4 +4172,35 @@ async fn a_daemon_whose_status_names_no_machine_is_read_once_and_titled_without_
             "{path} read the status again: {html}"
         );
     }
+}
+
+/// Catches: `[web] peers` set but linked from no page, a link to a path rather than the peer's dashboard, or a peer
+/// link shown where none is configured.
+#[tokio::test]
+async fn every_page_links_to_the_peers_dashboards_and_none_without_peers() {
+    let peers = vec![runnerd_core::config::Peer {
+        name: "skiff".to_owned(),
+        origin: "https://skiff.tail0b5e.ts.net".parse().unwrap(),
+    }];
+    let dashboard = Dashboard::linking(&[], peers, fake::Fixtures::new(NOW)).await;
+    let cookie = dashboard.sign_in().await;
+    for path in ["/", "/history", "/config"] {
+        let page = dashboard.page(&cookie, path).await;
+        assert_eq!(page.status, StatusCode::OK, "{path}");
+        assert!(
+            page.body.contains(r#"<nav class="peers" aria-label="Machines"><a href="https://skiff.tail0b5e.ts.net/""#),
+            "{path} links to skiff: {}",
+            page.body
+        );
+    }
+    let alone = Dashboard::start().await;
+    let cookie = alone.sign_in().await;
+    assert!(
+        !alone
+            .page(&cookie, "/")
+            .await
+            .body
+            .contains("aria-label=\"Machines\""),
+        "no peers, no links"
+    );
 }

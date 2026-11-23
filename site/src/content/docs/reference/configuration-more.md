@@ -70,6 +70,7 @@ The oldest records go first.
 |---|---|---|
 | `origins` | `[]` | proxy addresses whose dashboard pages may write ([On your phone](../../guides/remote-dashboard/)): `https://host:port`, or `http` for loopback only |
 | `open` | unset | the one of `origins` that `runnerctl web` opens |
+| `peers` | `[]` | other machines' dashboards every page links to, each `{ name = "skiff", origin = "https://skiff.example.ts.net" }`: a name of lower-case letters and digits, and an origin checked as `origins` are, not one of them |
 
 ## `[notify]`
 

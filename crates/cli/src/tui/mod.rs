@@ -58,10 +58,14 @@ const DAY: u64 = 24 * 3600;
 /// Reads the snapshot, takes over the terminal and runs until `q`. The terminal is given back however it ends.
 pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(), Error> {
     let (events, mut app) = snapshot(client).await?;
+    let (mut machine, mut switched) = Switcher::new(client);
     // Before raw mode, so that no signal can end the process with the terminal raw.
     let mut signals = Signals::new().map_err(|error| local(&error))?;
+    // Keys come on one channel; what the daemon sends, on one per machine, dropped with what is in it on a switch,
+    // so a late answer from the machine left never reaches the next one's state.
     let (send, mut receive) = mpsc::unbounded_channel();
-    let feed = tokio::spawn(feed(client.clone(), events, send.clone(), RETRY));
+    let (mut requests, mut daemon) = Requests::new(client.clone());
+    let mut feeding = tokio::spawn(feed(client.clone(), events, requests.send.clone(), RETRY));
     // Where the last frame drew what a click can reach, for the keys thread to find what a click lands on.
     let hits = Arc::new(Mutex::new(Hits::default()));
     let mut keys = Keys::spawn(send.clone(), hits.clone());
@@ -71,14 +75,9 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
             // Raw mode may be on even though the alternate screen failed.
             let _ = output::restore();
             keys.stop();
-            feed.abort();
+            feeding.abort();
             return Err(local(&error));
         }
-    };
-    let mut requests = Requests {
-        client: client.clone(),
-        send,
-        log: None,
     };
     let theme = Theme { colour };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -103,6 +102,8 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
                 Some(msg) => msg,
                 None => break Ok(()),
             },
+            // Never closed: `requests` holds a sender.
+            Some(msg) = daemon.recv() => msg,
             received = signals.next() => {
                 let taken = match received {
                     Received::Quit => break Ok(()),
@@ -116,6 +117,11 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
                 continue;
             },
             () = keys.ended() => break Ok(()),
+            Some(answer) = switched.recv() => {
+                machine.take(answer, &mut app, &mut requests, &mut feeding, &mut daemon);
+                changed = true;
+                continue;
+            },
             _ = tick.tick() => {
                 changed = true;
                 continue;
@@ -131,13 +137,14 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
                 match effect {
                     Effect::Quit => quit = true,
                     Effect::Suspend => failed = suspend(&mut terminal, mouse).err().or(failed),
+                    Effect::Switch(_) | Effect::Machines => machine.start(effect, &requests.send),
                     effect => requests.make(effect),
                 }
             }
             if quit || failed.is_some() {
                 break;
             }
-            match receive.try_recv() {
+            match receive.try_recv().or_else(|_| daemon.try_recv()) {
                 Ok(next) => msg = next,
                 Err(_) => break,
             }
@@ -151,11 +158,158 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
     };
     let restored = give_back(terminal);
     keys.stop();
-    feed.abort();
+    feeding.abort();
     requests.close_log();
     unless_gone(ended)
         .and(unless_gone(restored))
         .map_err(|error| local(&error))
+}
+
+/// Which machine the TUI reads, and how it reads another (ADR 0166). Nothing of it survives leaving the TUI.
+struct Switcher {
+    /// This machine's daemon's socket, for the list of machines: the one read at start, unless that was another
+    /// machine's; `None` without one to ask.
+    this_machine: Option<std::path::PathBuf>,
+    /// The machine read now: its name in `machines.toml`, or `None` for this machine's daemon.
+    current: Option<String>,
+    /// Where a switch's read answers.
+    switched: UnboundedSender<Result<Switched, String>>,
+}
+
+impl Switcher {
+    /// The switcher of the TUI reading `client`, and where the answers of its switches arrive.
+    fn new(client: &Client) -> (Switcher, mpsc::UnboundedReceiver<Result<Switched, String>>) {
+        let (answers, receive) = mpsc::unbounded_channel();
+        let made = Switcher {
+            this_machine: match client.machine() {
+                None => Some(client.socket().to_owned()),
+                Some(_) => crate::default_socket(),
+            },
+            current: client.machine().map(|machine| machine.name.clone()),
+            switched: answers,
+        };
+        (made, receive)
+    }
+
+    /// Starts reading another machine for `Effect::Switch`, unless it is the one read now, or every machine's state
+    /// for `Effect::Machines`, answering on `daemon`.
+    fn start(&self, effect: Effect, daemon: &UnboundedSender<Msg>) {
+        match effect {
+            Effect::Switch(target) if target != self.current => {
+                tokio::spawn(switch(
+                    target,
+                    self.this_machine.clone(),
+                    self.switched.clone(),
+                ));
+            }
+            Effect::Machines => {
+                tokio::spawn(machines(
+                    self.this_machine.clone(),
+                    self.current.clone(),
+                    daemon.clone(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    /// Takes a switch's answer: the new machine's client, feed and state in place of the old, with a new channel for
+    /// what its daemon sends, so nothing still on its way from the old one arrives; or why not, flashed.
+    fn take(
+        &mut self,
+        answer: Result<Switched, String>,
+        app: &mut App,
+        requests: &mut Requests,
+        feeding: &mut JoinHandle<()>,
+        daemon: &mut mpsc::UnboundedReceiver<Msg>,
+    ) {
+        let to = match answer {
+            Ok(to) => to,
+            Err(why) => {
+                let _ = app.update(Msg::Failed(why));
+                return;
+            }
+        };
+        feeding.abort();
+        requests.close_log();
+        let (fresh, receive) = Requests::new(to.client.clone());
+        *requests = fresh;
+        *daemon = receive;
+        *feeding = tokio::spawn(feed(to.client, to.events, requests.send.clone(), RETRY));
+        *app = to.app;
+        self.current = to.target;
+    }
+}
+
+/// Another machine's daemon, read and ready to show (ADR 0166).
+struct Switched {
+    /// The machine of `machines.toml`, or `None` for this machine's daemon.
+    target: Option<String>,
+    client: Client,
+    events: Events,
+    app: App,
+}
+
+/// Opens a client of `target`, or of this machine's daemon at `local`, and reads its snapshot; why not, worded.
+async fn switch(
+    target: Option<String>,
+    local: Option<std::path::PathBuf>,
+    send: UnboundedSender<Result<Switched, String>>,
+) {
+    let opened = match &target {
+        Some(name) => match crate::machines::file() {
+            Ok(file) => crate::machines::client(&file, name).await,
+            Err(error) => Err(error),
+        },
+        None => local
+            .map(Client::new)
+            .ok_or_else(|| Error::Local("XDG_RUNTIME_DIR is not set".to_owned())),
+    };
+    let read = match opened {
+        Ok(client) => snapshot(&client).await.map(|(events, app)| Switched {
+            target: target.clone(),
+            client,
+            events,
+            app,
+        }),
+        Err(error) => Err(error),
+    };
+    let _ = send.send(read.map_err(|error| error.to_string()));
+}
+
+/// Reads every machine's state for the list of machines: this machine's daemon first, then `machines.toml`'s.
+async fn machines(
+    local: Option<std::path::PathBuf>,
+    current: Option<String>,
+    send: UnboundedSender<Msg>,
+) {
+    let added = match crate::machines::file().and_then(|file| crate::machines::read(&file)) {
+        Ok(added) => added,
+        Err(error) => {
+            let _ = send.send(Msg::Failed(error.to_string()));
+            return;
+        }
+    };
+    let query = JobQuery {
+        limit: Some(1),
+        ..JobQuery::default()
+    };
+    let readings = crate::machines::readings(
+        local.map(Client::new),
+        &added,
+        &query,
+        Arc::new(runnerd_core::client::OpenSsh),
+        &crate::machines::private_base(),
+    )
+    .await;
+    let targets =
+        std::iter::once(None).chain(added.all().iter().map(|machine| Some(machine.name.clone())));
+    let fleet = api::Fleet::merge(readings, 0);
+    let choices = targets
+        .zip(fleet.machines)
+        .map(|(target, machine)| app::MachineChoice { target, machine })
+        .collect();
+    let _ = send.send(Msg::Machines { choices, current });
 }
 
 /// Gives the terminal back for good.
@@ -468,13 +622,26 @@ struct Requests {
 }
 
 impl Requests {
+    /// The requests of `client`'s daemon, and where their answers and its events arrive: a channel of its own.
+    fn new(client: Client) -> (Requests, mpsc::UnboundedReceiver<Msg>) {
+        let (send, receive) = mpsc::unbounded_channel();
+        (
+            Requests {
+                client,
+                send,
+                log: None,
+            },
+            receive,
+        )
+    }
+
     /// Starts the request.
     fn make(&mut self, effect: Effect) {
         let client = self.client.clone();
         let send = self.send.clone();
         match effect {
             // The loop's own, since they act on the terminal.
-            Effect::Quit | Effect::Suspend => {}
+            Effect::Quit | Effect::Suspend | Effect::Switch(_) | Effect::Machines => {}
             Effect::OpenJob(id) => {
                 self.close_log();
                 self.log = Some(tokio::spawn(open_job(client, send, id)));

@@ -8,10 +8,10 @@
 //! colours from core's runs, a link per line, and a search of the lines' messages. A running job's log is its live
 //! tail. A daemon older than the outline gets the plain tail and says so; never an empty log.
 
+use crate::views::Here;
 use std::fmt::Write as _;
 
 use maud::{Markup, html};
-use runnerd_core::api::Machine;
 use runnerd_core::api::{
     ActionPreview, Baseline, BuildCacheCounts, ChartLine, ChartLineKind, Color, CompareQuery,
     Feature, Job, JobAction, JobActions, JobComparison, JobPage, JobQuery, JobState, JobSummary,
@@ -308,7 +308,7 @@ pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 5] {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &JobView, machine: Option<&Machine>) -> Markup {
+pub(crate) fn render(view: &JobView, here: Here<'_>) -> Markup {
     let summary = &view.job.summary;
     let url = format!("/live/jobs/{}", summary.id);
     let [head, timeline, steps, metrics, runs] = regions(view);
@@ -338,7 +338,7 @@ pub(crate) fn render(view: &JobView, machine: Option<&Machine>) -> Markup {
     };
     page(
         &summary.title().to_string(),
-        machine,
+        here,
         None,
         live.as_ref(),
         &main,

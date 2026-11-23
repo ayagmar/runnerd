@@ -804,17 +804,55 @@ pub struct Web {
     /// The one of `origins` that `runnerctl web` opens the dashboard on, such as a tailnet's address. Default none:
     /// it opens the loopback address.
     pub open: Option<Origin>,
+    /// Other machines' dashboards, which every page links to by name (ADR 0166). Default none.
+    pub peers: Vec<Peer>,
+}
+
+/// One of `[web] peers`: another machine's dashboard, as `{ name = "skiff", origin = "https://skiff.example.ts.net" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Peer {
+    /// What the link reads: lower-case letters and digits, as `[host] name`.
+    pub name: String,
+    /// Where that machine's dashboard is, checked as `[web] origins` are.
+    pub origin: Origin,
 }
 
 impl Web {
-    /// Refuses an `open` that is not one of `origins`.
+    /// Refuses an `open` that is not one of `origins`, and a peer with a bad name, a name or origin another peer
+    /// has, or one of `origins`, which are this dashboard's own.
     fn validate(&self) -> Result<(), ConfigError> {
-        match &self.open {
-            Some(open) if !self.origins.contains(open) => {
-                Err(ConfigError::OpenNotListed { open: open.clone() })
-            }
-            _ => Ok(()),
+        if let Some(open) = &self.open
+            && !self.origins.contains(open)
+        {
+            return Err(ConfigError::OpenNotListed { open: open.clone() });
         }
+        for (at, peer) in self.peers.iter().enumerate() {
+            let refuse = |why: String| {
+                Err(ConfigError::Peer {
+                    name: peer.name.clone(),
+                    why,
+                })
+            };
+            if let Err(why) = machines::check_name(&peer.name) {
+                return refuse(why);
+            }
+            if self.origins.contains(&peer.origin) {
+                return refuse(format!(
+                    "{} is one of [web] origins, this dashboard's own address",
+                    peer.origin
+                ));
+            }
+            for other in &self.peers[..at] {
+                if other.name == peer.name {
+                    return refuse("another peer has the same name".to_owned());
+                }
+                if other.origin == peer.origin {
+                    return refuse(format!("{} is {}'s origin too", peer.origin, other.name));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1316,6 +1354,14 @@ pub enum ConfigError {
     CpuOvercommit {
         /// The value set.
         value: f64,
+    },
+    /// A peer of `[web] peers` cannot be linked to.
+    #[error("web.peers {name}: {why}")]
+    Peer {
+        /// The peer's name, as set.
+        name: String,
+        /// Why not.
+        why: String,
     },
     /// `[web] open` is not one of `[web] origins`.
     #[error(

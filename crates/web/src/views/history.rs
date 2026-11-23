@@ -3,8 +3,8 @@
 //! the timeline of what each slot ran, and the trends of the last 30 days. The filters are a plain form, so a page
 //! works without scripts and can be bookmarked; what a list shows and how it is cut is core's (`JobList`).
 
+use crate::views::Here;
 use maud::{Markup, html};
-use runnerd_core::api::Machine;
 use runnerd_core::api::{
     BarEnd, Bucket, Column, Feature, GapKind, JOBS_HEADING, JobList, JobOrder, JobQuery, JobRange,
     JobSort, JobState, JobSummary, Lane, RecordFilter, Section, SlotTimeline, SortOrder, Stats,
@@ -418,7 +418,7 @@ fn days(stats: &Stats, now: u64) -> Vec<StatsSummary> {
 }
 
 /// The whole page.
-pub(crate) fn render(history: &History, machine: Option<&Machine>) -> Markup {
+pub(crate) fn render(history: &History, here: Here<'_>) -> Markup {
     let main = html! {
         (heading(runnerd_core::api::View::Jobs.title(), Some(Page::History), Some(lenses(history))))
         @match history.filter.lens() {
@@ -433,7 +433,7 @@ pub(crate) fn render(history: &History, machine: Option<&Machine>) -> Markup {
     };
     page(
         Section::History.title(),
-        machine,
+        here,
         Some(Page::History),
         None,
         &main,

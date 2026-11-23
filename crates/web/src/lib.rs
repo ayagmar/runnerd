@@ -21,7 +21,7 @@ use axum::routing::{delete, get, post};
 use maud::Markup;
 use runnerd_core::api::{Machine, Status};
 use runnerd_core::client::{Client, ClientError};
-use runnerd_core::config::Origin;
+use runnerd_core::config::{Origin, Peer};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -36,6 +36,7 @@ mod live;
 mod views;
 
 pub use auth::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions, login_file, session_file};
+use views::Here;
 use views::caches::CachesView;
 use views::config::{ConfigQuery, ConfigView};
 use views::history::{Filter, History};
@@ -54,6 +55,8 @@ pub(crate) struct App {
     daemon: Client,
     /// `[web] origins`, where the config page offers to sign a phone in.
     proxies: Arc<[String]>,
+    /// `[web] peers`, which every page links to.
+    peers: Arc<[Peer]>,
     /// Set when the dashboard stops, so live pages end.
     stopping: watch::Receiver<bool>,
     /// The machine the daemon runs on, which page titles name: read from its status once, as the daemon reads its
@@ -85,12 +88,18 @@ impl App {
         &self,
         loaded: Result<V, ClientError>,
         status: impl FnOnce(&V) -> Option<&Status>,
-        render: impl FnOnce(&V, Option<&Machine>) -> Markup,
+        render: impl FnOnce(&V, Here<'_>) -> Markup,
     ) -> Response {
         let rendered = match loaded {
             Ok(view) => {
                 let machine = self.machine(status(&view)).await;
-                Ok(render(&view, machine))
+                Ok(render(
+                    &view,
+                    Here {
+                        machine,
+                        peers: &self.peers,
+                    },
+                ))
             }
             Err(error) => Err(error),
         };
@@ -127,6 +136,7 @@ pub fn spawn(
     listener: TcpListener,
     socket: PathBuf,
     proxies: Vec<Origin>,
+    peers: Vec<Peer>,
     sessions: Arc<Sessions>,
     stop: impl Future + Send + 'static,
 ) -> JoinHandle<()> {
@@ -134,7 +144,7 @@ pub fn spawn(
         let stop = async {
             stop.await;
         };
-        if let Err(error) = serve(listener, &socket, &proxies, sessions, stop).await {
+        if let Err(error) = serve(listener, &socket, &proxies, &peers, sessions, stop).await {
             warn!("the dashboard stopped: {error}");
         }
     })
@@ -142,11 +152,13 @@ pub fn spawn(
 
 /// Serves the dashboard on `listener` for the daemon whose API is on `socket`, until `stop` completes. Pages from
 /// `proxies` (`[web] origins`), reverse proxies in front of it, may write too. A browser signed in to `sessions`
-/// is let in. Writes a one-time login link per address to `login_file(socket)` and removes it when done.
+/// is let in. Every page links to `peers` (`[web] peers`), other machines' dashboards. Writes a one-time login link
+/// per address to `login_file(socket)` and removes it when done.
 pub async fn serve(
     listener: TcpListener,
     socket: &Path,
     proxies: &[Origin],
+    peers: &[Peer],
     sessions: Arc<Sessions>,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
@@ -161,6 +173,7 @@ pub async fn serve(
     let app = router(
         Client::new(socket.to_owned()),
         auth.clone(),
+        peers.into(),
         stopping_receiver,
     );
     let served = axum::serve(listener, app)
@@ -173,7 +186,12 @@ pub async fn serve(
     served
 }
 
-fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>) -> Router {
+fn router(
+    daemon: Client,
+    auth: Arc<auth::Auth>,
+    peers: Arc<[Peer]>,
+    stopping: watch::Receiver<bool>,
+) -> Router {
     let proxies = auth.proxies().into();
     let pages = Router::new()
         .route("/", get(overview))
@@ -211,6 +229,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .with_state(App {
             daemon,
             proxies,
+            peers,
             stopping,
             machine: Arc::default(),
         });
@@ -352,7 +371,7 @@ async fn config(
     app.page(
         ConfigView::load(&app.daemon, query, now()).await,
         |_view| None,
-        |view, machine| views::config::render(view, &app.proxies, machine),
+        |view, here| views::config::render(view, &app.proxies, here),
     )
     .await
 }
