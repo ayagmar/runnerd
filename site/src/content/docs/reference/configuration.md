@@ -61,6 +61,9 @@ A key marked required must be set. Sizes take `K`, `M`, `G` or `T`, durations a 
 | `skip_syncs` | `true` | runners of an image with the filter are asked to answer `fsync` and the other sync calls without syncing, also on a descriptor the kernel would refuse, and to mount their layers so that stopping the runner syncs nothing; after a host crash, not an orderly reboot, runnerd empties the slots' volumes and the pnpm and Maven stores. `false` keeps the syncs, as does an image without the filter. A reload applies it from the next runner on ([What a crash can leave](../../guides/caches/#what-a-crash-can-leave)) |
 | `cpu_overcommit` | unset | a factor above 0, at most 16; a runner must also fit the slice's CPUs times it ([CPU admission](../../concepts/cpu/)) |
 | `memory_ceiling` | unset | for a VM whose memory grows on demand, the most it grows to ([A host whose memory grows](../../concepts/admission/#a-host-whose-memory-grows)) |
+| `drive.device`, `drive.endurance` | unset; both required in `[host.drive]` | the disk under Docker's root as runnerd names it (`"nvme3n1"`), and what its maker rates it to write in decimal units, `"600TB"`; `"600T"` is refused, since runnerd's `T` is 2⁴⁰ bytes ([Drive endurance](../../guides/insights/#drive-endurance)) |
+| `drive.written` | unset | what the drive's SMART log said it had written, and when: `{ bytes = "77.2TB", at = "2026-11-23T12:00:00Z" }`, from `smartctl`'s `Data Units Written`. Without it, insights show the rate and no days left |
+| `drive.warn_days` | `180` | days left at the last 7 days' rate under which an insight warns, which notifications and attention carry |
 
 ### `[profiles.<name>]`
 

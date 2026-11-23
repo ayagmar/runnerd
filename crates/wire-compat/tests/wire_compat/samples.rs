@@ -38,7 +38,8 @@ use runnerd_core::api::{
 };
 use runnerd_core::api::{CauseWait, Machine, ProfileQueue, WaitCause};
 use runnerd_core::api::{
-    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
+    Commits, DiskWrites, DiskWritten, DriveOwners, DriveShares, DriveWrites, Endurance, JobWrites,
+    Measure, WriteRate, WriteTop, WrittenSince,
 };
 
 pub(crate) fn status() -> Status {
@@ -1347,6 +1348,7 @@ fn insights_of_every_kind() -> Vec<Insight> {
                 InsightKind::HostHeld { .. }
                     | InsightKind::HostLow { .. }
                     | InsightKind::StoreOverflow { .. }
+                    | InsightKind::DriveWear { .. }
             )
         })
         .map(|kind| Insight {
@@ -1417,6 +1419,12 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             held: 4 << 30,
             share: 3 << 30,
         },
+        InsightKind::DriveWear {
+            device: "nvme0n1".to_owned(),
+            rated: 600_000_000_000_000,
+            left: Some(520_000_000_000_000),
+            days: Some(113),
+        },
     ];
     for kind in &every {
         match kind {
@@ -1430,6 +1438,7 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::HostHeld { .. }
             | InsightKind::HostLow { .. }
             | InsightKind::StoreOverflow { .. }
+            | InsightKind::DriveWear { .. }
             // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
             | InsightKind::Unknown => {}
         }
@@ -1564,12 +1573,41 @@ fn disk_writes() -> DiskWrites {
                 jobs: 140 << 30,
                 slice: Some(183 << 30),
                 daemon: Some(3 << 30),
+                owners: Some(DriveOwners {
+                    runnerd: Some(1 << 30),
+                    docker: Some(52 << 30),
+                    containerd: Some(5 << 30),
+                    system: 9 << 30,
+                    user: 2 << 30,
+                    kernel: 320 << 30,
+                    kernel_ios: 20_971_520,
+                }),
             },
             commits: Some(Commits {
                 count: 49_500,
                 watched: 23_760,
             }),
             store: Some("loop0".to_owned()),
+        }),
+        endurance: Some(Endurance {
+            device: "nvme0n1".to_owned(),
+            rated: 600_000_000_000_000,
+            written: Some(WrittenSince {
+                counted: 77_200_000_000_000,
+                at: 1_795_435_200,
+                read: 2_300_000_000_000,
+                watched: 39_600,
+                since: 43_200,
+            }),
+            week: Some(WriteRate {
+                bytes: 31_500_000_000_000,
+                watched: 590_400,
+            }),
+            day: Some(WriteRate {
+                bytes: 5_200_000_000_000,
+                watched: 86_400,
+            }),
+            warn_days: 180,
         }),
     }
 }

@@ -100,7 +100,9 @@ flowchart TB
   beside the history ([ADR 0100](docs/adr/0100-an-insight-for-jobs-held-for-the-hosts-memory.md),
   [ADR 0103](docs/adr/0103-a-job-the-host-limit-holds-with-room-free-is-not-short-of-memory.md)), and adds up what
   the window's jobs and the drive's stored windows wrote (`insights::disk`,
-  [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and splits each profile's queue
+  [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)) and how long `[host.drive]`'s
+  rated writes last at their rate ([ADR 0157](docs/adr/0157-the-drive-s-writes-are-split-by-cgroup-and-its-rating-is-counted-down.md)),
+  and splits each profile's queue
   time by the causes the engine's plans counted (`insights::queue`,
   [ADR 0154](docs/adr/0154-a-job-keeps-how-long-each-cause-held-it.md)), and finds the profiles whose slots' Docker
   stores keep outgrowing their share (`insights::stores`,
@@ -316,7 +318,9 @@ queued → slot → container → removed
    ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), what the container wrote to the disks under
    Docker's root from its `io.stat` (the loop device's line when that root is a file system in a file, whose
    backing file's disk is then the drive), and in windows of up to 10 minutes what those disks, the slice, the daemon itself
-   and btrfs's commits came to (`observe::disk`; the job's figure runs from its start to its container's last sample,
+   and btrfs's commits came to, with who else wrote to them by cgroup from the root's and each top-level cgroup's
+   `io.stat` ([ADR 0157](docs/adr/0157-the-drive-s-writes-are-split-by-cgroup-and-its-rating-is-counted-down.md))
+   (`observe::disk`; the job's figure runs from its start to its container's last sample,
    complete once the sampler first saw the cgroup go within two samples of it; `Engine::run` waits for the sampler to
    store its open window before it returns, [ADR 0143](docs/adr/0143-a-jobs-disk-writes-are-its-containers-io-counters.md)), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed

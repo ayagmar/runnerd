@@ -1265,6 +1265,10 @@ const REFERENCE_BASE: &[(&str, &[(&str, &str)])] = &[
             ("isolation", r#""sysbox""#),
         ],
     ),
+    (
+        "host.drive",
+        &[("device", r#""nvme0n1""#), ("endurance", r#""600TB""#)],
+    ),
     ("caches", &[]),
     (
         "caches.mirror",
@@ -1423,7 +1427,7 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
     // count.
     assert_eq!(
         rows.len(),
-        40,
+        41,
         "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();
@@ -1581,5 +1585,63 @@ labels = [\"app-light\"]
     assert!(
         error.contains("Owner/App") && error.contains("owner/app"),
         "{error}"
+    );
+}
+
+/// A drive's rating is in its maker's decimal terabytes: read as runnerd's binary `T`, 600 would be 10% more than the
+/// drive is rated for, and the days left 10% too many.
+#[test]
+fn a_drive_s_sizes_are_decimal_and_a_binary_unit_is_refused() {
+    let with = |drive: &str| {
+        Config::parse(&MINIMAL.replace(
+            "isolation = \"sysbox\"\n",
+            &format!("isolation = \"sysbox\"\n\n[host.drive]\ndevice = \"nvme3n1\"\n{drive}\n"),
+        ))
+    };
+    let config = with(
+        "endurance = \"600TB\"\nwritten = { bytes = \"77.2TB\", at = \"2026-11-23T12:00:00Z\" }",
+    )
+    .unwrap();
+    let drive = config.host.drive.unwrap();
+    assert_eq!(
+        drive.endurance,
+        crate::config::DriveBytes(600_000_000_000_000)
+    );
+    let written = drive.written.unwrap();
+    assert_eq!(written.bytes.0, 77_200_000_000_000);
+    assert_eq!(written.at, 1_795_435_200, "2026-11-23T12:00:00Z");
+    assert_eq!(drive.warn_days, 180);
+    assert_eq!(written.bytes.to_string(), "77.2TB");
+    for (refused, says) in [
+        ("endurance = \"600T\"", "decimal unit"),
+        ("endurance = \"600\"", "decimal unit"),
+        (
+            "endurance = \"600TB\"\nwritten = { bytes = \"77.2TB\", at = \"2026-11-23\" }",
+            "RFC 3339",
+        ),
+        (
+            "endurance = \"600TB\"\nwritten = { bytes = \"77.2TB\" }",
+            "at",
+        ),
+    ] {
+        let error = with(refused).unwrap_err().to_string();
+        assert!(error.contains(says), "{refused}: {error}");
+    }
+    assert_eq!(Config::parse(MINIMAL).unwrap().host.drive, None);
+    // A rating of nothing warned at once, and a blank device matched no disk and named none in the sentence.
+    let mut config = with("endurance = \"600TB\"").unwrap();
+    config.host.drive.as_mut().unwrap().endurance = crate::config::DriveBytes(0);
+    assert!(
+        matches!(config.validate(None), Err(crate::config::ConfigError::ZeroLimit { field }) if field == "host.drive.endurance"),
+        "a 0 rating is refused"
+    );
+    let mut blank = with("endurance = \"600TB\"").unwrap();
+    blank.host.drive.as_mut().unwrap().device = " ".to_owned();
+    assert!(
+        matches!(
+            blank.validate(None),
+            Err(crate::config::ConfigError::DriveDevice)
+        ),
+        "a blank device is refused"
     );
 }

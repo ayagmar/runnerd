@@ -498,7 +498,7 @@ async fn begin(
         })
         .ok()?;
     let mut set = vec![("event".to_owned(), event), ("digest".to_owned(), now)];
-    if let Ok(runs) = insight_runs_of(store, runnerd_core::api::INSIGHT_DAYS, now).await {
+    if let Ok(runs) = insight_runs_of(store, daemon, runnerd_core::api::INSIGHT_DAYS, now).await {
         set.extend(
             warnings(&runs, daemon, now)
                 .into_iter()
@@ -539,7 +539,7 @@ async fn step(
     // Read once for every target that wants them.
     let wants = |event| targets.values().any(|target| target.wants(event));
     let runs = if looking && (wants(NotifyEvent::Insights) || wants(NotifyEvent::Digest)) {
-        match insight_runs_of(store, runnerd_core::api::INSIGHT_DAYS, now_ms).await {
+        match insight_runs_of(store, config, runnerd_core::api::INSIGHT_DAYS, now_ms).await {
             Ok(runs) => Some(runs),
             // The runtime cancelled the read as the daemon exits: nothing went wrong, and nothing is left to send.
             Err(store_error) if store_error.is_shutdown() => return,
@@ -890,7 +890,7 @@ fn insight_title(insight: &Insight) -> String {
         ),
         None => insight.repository.clone(),
     };
-    let what = match insight.kind {
+    let what = match &insight.kind {
         runnerd_core::api::InsightKind::Slower { .. } => "got slower",
         runnerd_core::api::InsightKind::Flaky { .. } => "is flaky",
         runnerd_core::api::InsightKind::NearCap { .. } => "nears its memory cap",
@@ -901,6 +901,14 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::HostHeld { .. } => "waits for the host's memory",
         runnerd_core::api::InsightKind::HostLow { .. } => "ran the host low on memory",
         runnerd_core::api::InsightKind::StoreOverflow { .. } => "outgrows its Docker share",
+        // About the drive, which no repository owns.
+        runnerd_core::api::InsightKind::DriveWear { device, left, .. } => {
+            return if *left == Some(0) {
+                format!("{device} passed its rated writes")
+            } else {
+                format!("{device} nears its rated writes")
+            };
+        }
         runnerd_core::api::InsightKind::Unknown => "has an insight",
     };
     format!("{subject} {what}")

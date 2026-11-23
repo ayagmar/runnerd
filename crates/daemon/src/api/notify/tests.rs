@@ -562,8 +562,8 @@ async fn a_host_wait_is_told_once_a_window_across_restarts_stale_looks_and_ended
                     _ => {}
                 }
             }
-            let runs = super::insight_runs_of(&store, 14, now).await.unwrap();
-            target.look(&super::warnings(&runs, &config, now), now);
+            let runs = super::insight_runs_of(&store, &config, 14, now);
+            target.look(&super::warnings(&runs.await.unwrap(), &config, now), now);
             send_due(&store, &http, &timing, None, &mut target).await;
             assert!(
                 !must_tell || target.told.contains_key(&format!("host-held:{window}")),

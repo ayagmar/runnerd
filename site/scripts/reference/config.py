@@ -21,6 +21,7 @@ PAGES = [DOCS / "configuration.md", DOCS / "configuration-more.md"]
 BASE = {
     "": {},
     "host": {"slice": '"runnerd.slice"', "isolation": '"sysbox"'},
+    "host.drive": {"device": '"nvme0n1"', "endurance": '"600TB"'},
     "caches": {},
     "caches.mirror": {"enabled": "true", "memory": '"512M"', "cpus": "1", "ttl": '"168h"'},
     "caches.pnpm": {"max_size": '"5G"'},

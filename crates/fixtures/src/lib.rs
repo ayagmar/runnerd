@@ -30,6 +30,7 @@ pub const NOW: u64 = 1_792_677_787;
 
 const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
+const KIB: u64 = 1 << 10;
 
 /// The job whose page every client draws: timed out, with a step without an end time, a cancelled step with times,
 /// caps past the budget and a build cache that only stored and refused.
@@ -895,6 +896,26 @@ fn store_overflow(run: api::RunLink) -> api::Insight {
     }
 }
 
+/// The warning that the drive of [`endurance`] reaches its rating within its `warn_days`, as core makes it.
+fn drive_wear() -> api::Insight {
+    let endurance = endurance();
+    api::Insight {
+        key: "drive-wear:nvme0n1".to_owned(),
+        severity: api::Severity::Warning,
+        repository: String::new(),
+        workflow: None,
+        job: None,
+        sentence: endurance.sentence(),
+        kind: api::InsightKind::DriveWear {
+            device: endurance.device.clone(),
+            rated: endurance.rated,
+            left: endurance.left(),
+            days: endurance.days_left(api::RateSpan::Week),
+        },
+        runs: Vec::new(),
+    }
+}
+
 /// What the host's memory came to on the two days [`insights`] lists: today on a host credit, under a tenth of the
 /// host for 34 s; yesterday on none.
 fn host_days(at: u64) -> Vec<api::HostHazard> {
@@ -971,6 +992,7 @@ pub fn insights(at: u64) -> api::Insights {
         host: host_days(at),
         insights: vec![
             host_low(at),
+            drive_wear(),
             insight(
                 "host-held:2987",
                 api::Severity::Warning,
@@ -1091,7 +1113,7 @@ pub fn queue() -> Vec<api::ProfileQueue> {
 }
 
 /// The insights of [`insights`] with the drive's shares read in part: the runner slice over 1 h of the drive's 6 h 36
-/// m, and its own share unread.
+/// m, and its own share unread, not split by cgroup, as windows stored before runnerd split them.
 pub fn insights_read_in_part(at: u64) -> api::Insights {
     let mut insights = insights(at);
     if let Some(drive) = insights.disk.as_mut().and_then(|disk| disk.drive.as_mut()) {
@@ -1101,6 +1123,7 @@ pub fn insights_read_in_part(at: u64) -> api::Insights {
             jobs: 30 * GIB,
             slice: None,
             daemon: Some(GIB),
+            owners: None,
         };
     }
     insights
@@ -1117,6 +1140,7 @@ pub fn insights_drive_quiet(at: u64) -> api::Insights {
             jobs: 0,
             slice: Some(0),
             daemon: Some(0),
+            owners: None,
         };
     }
     insights
@@ -1139,7 +1163,8 @@ pub fn insights_long_writer(at: u64) -> api::Insights {
     insights
 }
 
-/// What jobs and the drive wrote over the insights' window: 6 h of the drive read, most of it no job's.
+/// What jobs and the drive wrote over the insights' window: 6 h of the drive read, most of it no job's, split by
+/// cgroup.
 fn disk_writes() -> api::DiskWrites {
     let top = |workflow: &str, job: Option<&str>, jobs: u32, total: u64| api::WriteTop {
         repository: LEDGER.to_owned(),
@@ -1149,6 +1174,7 @@ fn disk_writes() -> api::DiskWrites {
         total,
     };
     api::DiskWrites {
+        endurance: Some(endurance()),
         jobs: api::JobWrites {
             measured: 529,
             partial: 12,
@@ -1172,6 +1198,16 @@ fn disk_writes() -> api::DiskWrites {
                 jobs: 140 * GIB,
                 slice: Some(183 * GIB),
                 daemon: Some(3 * GIB),
+                // Split by cgroup, most of it no cgroup's in 16K writes, and 2G left over.
+                owners: Some(api::DriveOwners {
+                    runnerd: Some(GIB),
+                    docker: Some(52 * GIB),
+                    containerd: Some(5 * GIB),
+                    system: 9 * GIB,
+                    user: 2 * GIB,
+                    kernel: 320 * GIB,
+                    kernel_ios: 320 * GIB / (16 * KIB),
+                }),
             },
             commits: Some(api::Commits {
                 count: 49_500,
@@ -1179,6 +1215,32 @@ fn disk_writes() -> api::DiskWrites {
             }),
             store: Some("loop0".to_owned()),
         }),
+    }
+}
+
+/// The drive's endurance in [`disk_writes`]: rated 600TB, SMART's 77.2TB of 12 h before [`NOW`], and a week's rate
+/// that reaches the rating in under `warn_days`.
+fn endurance() -> api::Endurance {
+    const TB: u64 = 1_000_000_000_000;
+    api::Endurance {
+        device: "nvme0n1".to_owned(),
+        rated: 600 * TB,
+        written: Some(api::WrittenSince {
+            counted: 77_200_000_000_000,
+            at: NOW - 12 * 3600,
+            read: 2_300_000_000_000,
+            watched: 11 * 3600,
+            since: 12 * 3600,
+        }),
+        week: Some(api::WriteRate {
+            bytes: 31_500_000_000_000,
+            watched: 6 * 86_400 + 20 * 3600,
+        }),
+        day: Some(api::WriteRate {
+            bytes: 5_200_000_000_000,
+            watched: 86_400,
+        }),
+        warn_days: 180,
     }
 }
 

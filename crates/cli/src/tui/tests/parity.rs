@@ -1999,7 +1999,11 @@ fn the_insights_view_draws_what_jobs_and_the_drive_wrote_as_core_s_figures() {
             .collect();
         let bar = rows
             .iter()
-            .skip_while(|row| !row.contains(DiskWrites::SHARES_TITLE))
+            // The heading, not a caveat that starts with its title.
+            .skip_while(|row| {
+                !row.contains(DiskWrites::SHARES_TITLE)
+                    || row.contains(&format!("{}:", DiskWrites::SHARES_TITLE))
+            })
             .nth(1)
             .unwrap();
         for (glyph, part) in glyphs.iter().zip(&parts) {

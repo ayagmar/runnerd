@@ -264,6 +264,7 @@ async fn insights_read_the_drive_s_windows_and_pruning_drops_them_with_job_recor
         drive,
         slice: Some(MIB),
         daemon: Some(MIB),
+        owners: None,
         commits: None,
         store: Some("loop0".to_owned()),
     };
@@ -346,4 +347,85 @@ async fn a_counter_that_fell_before_the_job_s_first_sample_counts_from_zero_and_
     let done = written(&store).await.unwrap();
     assert_eq!(done.bytes, 25 * MIB);
     assert_eq!(done.measure, Measure::Partial);
+}
+
+/// Who wrote, by cgroup, survives a restart's reopen; a window from before runnerd split them, or with text a later
+/// release wrote, reads as not split rather than failing the read; and what `[host.drive]`'s disk wrote since its
+/// SMART count counts only that disk's windows after it.
+#[tokio::test]
+async fn a_window_keeps_its_split_by_cgroup_and_an_older_one_reads_as_not_split() {
+    let dir = TestDir::new("disk");
+    let path = dir.0.join("runnerd.db");
+    let owners = api::DriveOwners {
+        runnerd: Some(MIB),
+        docker: None,
+        containerd: Some(0),
+        system: 2 * MIB,
+        user: 3 * MIB,
+        kernel: 40 * MIB,
+        kernel_ios: 2560,
+    };
+    let window = |start: u64, device: &str, owners: Option<api::DriveOwners>| Window {
+        start,
+        end: start + 600_000,
+        device: device.to_owned(),
+        drive: Some(64 * MIB),
+        slice: Some(MIB),
+        daemon: Some(MIB),
+        owners,
+        commits: Some(12),
+        store: None,
+    };
+    {
+        let store = Store::open(&path).unwrap();
+        store.disk_window(window(1_000_000, "nvme0n1", Some(owners)));
+        store.disk_window(window(1_600_000, "nvme0n1", None));
+        store.disk_window(window(2_200_000, "nvme0n1", Some(owners)));
+        store.disk_window(window(2_800_000, "nvme1n1", Some(owners)));
+        store.flush().await;
+    }
+    // As 0.1.5 left a row, and as a later release might.
+    let db = Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE disk_windows SET owners = '{\"kernel\": \"many\"}' WHERE start = 2200000",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let read = store.insights(0).await.unwrap().disk;
+    assert_eq!(
+        read.iter().map(|window| window.owners).collect::<Vec<_>>(),
+        [Some(owners), None, None, Some(owners)]
+    );
+    let since = store
+        .drive_read_since("nvme0n1", 1_600_000, 3_400_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        since,
+        crate::insights::DriveRead {
+            bytes: 128 * MIB,
+            watched: 1_200_000,
+            until: 3_400_000,
+        },
+        "the windows of nvme0n1 from the count on"
+    );
+    // A window that closed after the insights' end is not read yet: it read more than the time since.
+    assert_eq!(
+        store
+            .drive_read_since("nvme0n1", 1_600_000, 2_799_999)
+            .await
+            .unwrap()
+            .watched,
+        600_000
+    );
+    assert_eq!(
+        store.drive_read_since("sda", 0, 3_400_000).await.unwrap(),
+        crate::insights::DriveRead {
+            until: 3_400_000,
+            ..crate::insights::DriveRead::default()
+        },
+        "a disk runnerd never read wrote nothing it counted"
+    );
 }

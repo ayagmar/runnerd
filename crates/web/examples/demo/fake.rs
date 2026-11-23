@@ -45,7 +45,8 @@ use runnerd_core::api::{
     WaitSpread, WeekWaits,
 };
 use runnerd_core::api::{
-    Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
+    Commits, DiskWrites, DiskWritten, DriveOwners, DriveShares, DriveWrites, Endurance, JobWrites,
+    Measure, WriteRate, WriteTop, WrittenSince,
 };
 use runnerd_core::api::{
     CompareQuery, JobComparison, JobList, RecordMark, SlotTimeline, StepUsage, TimelineQuery,
@@ -1088,7 +1089,7 @@ fn insights(fixtures: &Fixtures) -> Insights {
             },
         ],
         host: Vec::new(),
-        disk: Some(disk_writes()),
+        disk: Some(disk_writes(now)),
         queue: runnerd_fixtures::queue(),
     };
     // In the order the daemon serves them (`Insights::insights`): warnings first, then by repository, workflow and job.
@@ -1105,7 +1106,8 @@ fn insights(fixtures: &Fixtures) -> Insights {
 }
 
 /// What the demo's jobs and its drive wrote over the insights' window.
-fn disk_writes() -> DiskWrites {
+fn disk_writes(now: u64) -> DiskWrites {
+    const TB: u64 = 1_000_000_000_000;
     const G: u64 = 1 << 30;
     const M: u64 = 1 << 20;
     let top =
@@ -1117,6 +1119,27 @@ fn disk_writes() -> DiskWrites {
             total,
         };
     DiskWrites {
+        // Rated 600TB, its SMART count pasted two days ago, at about 1.1TB a day.
+        endurance: Some(Endurance {
+            device: "nvme0n1".to_owned(),
+            rated: 600 * TB,
+            written: Some(WrittenSince {
+                counted: 41_300_000_000_000,
+                at: now - 2 * 86_400,
+                read: 2_150_000_000_000,
+                watched: 2 * 86_400 - 1800,
+                since: 2 * 86_400,
+            }),
+            week: Some(WriteRate {
+                bytes: 7_600_000_000_000,
+                watched: 6 * 86_400 + 20 * 3600,
+            }),
+            day: Some(WriteRate {
+                bytes: 1_210_000_000_000,
+                watched: 86_400,
+            }),
+            warn_days: 180,
+        }),
         jobs: JobWrites {
             measured: 1_412,
             partial: 9,
@@ -1145,6 +1168,15 @@ fn disk_writes() -> DiskWrites {
                 jobs: 398 * G,
                 slice: Some(470 * G),
                 daemon: Some(7 * G),
+                owners: Some(DriveOwners {
+                    runnerd: Some(3 * G),
+                    docker: Some(121 * G),
+                    containerd: Some(11 * G),
+                    system: 14 * G,
+                    user: 6 * G,
+                    kernel: 682 * G,
+                    kernel_ios: 682 * G / (16 << 10),
+                }),
             },
             commits: Some(Commits {
                 count: 3_110_000,

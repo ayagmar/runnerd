@@ -281,6 +281,20 @@ pub enum InsightKind {
         /// The share the last of them had, in bytes.
         share: u64,
     },
+    /// The drive under Docker's root has written its rating, or reaches it within `[host.drive]`'s `warn_days` at the
+    /// last 7 days' rate (ADR 0157).
+    DriveWear {
+        /// The disk: `nvme3n1`.
+        device: String,
+        /// What its maker rates it to write, in bytes.
+        rated: u64,
+        /// What it may still write, in bytes; `None` without a SMART count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<u64>,
+        /// Days until it has written its rating at the last 7 days' rate; `None` past it, or at a rate of nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        days: Option<u64>,
+    },
     /// A kind from a later release, which this one reads only by its sentence. The daemon never sends it.
     #[serde(other)]
     Unknown,

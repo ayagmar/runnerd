@@ -53,6 +53,7 @@ mod attention;
 mod budget;
 mod control;
 mod disk;
+mod endurance;
 mod events;
 mod figure;
 mod insights;
@@ -90,9 +91,10 @@ pub use control::{
     DoctorState, DoctorSummary, PauseQuery, Paused, ReplaceQuery, RunningJob,
 };
 pub use disk::{
-    Commits, DiskWrites, DiskWritten, DriveShare, DriveShares, DriveWrites, JobWrites, Measure,
-    ShareOwner, WriteSection, WriteTop,
+    Commits, DiskWrites, DiskWritten, DriveOwners, DriveShare, DriveShares, DriveWrites, JobWrites,
+    Measure, ShareOwner, WriteSection, WriteTop,
 };
+pub use endurance::{Endurance, RateSpan, WriteRate, WrittenSince};
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use figure::LabelledFigure;
 pub use insights::{
