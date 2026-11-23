@@ -483,13 +483,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// A runner container's environment: whether its image skips the runner's sync calls, as `skips` says, its
     /// slot's share of what the slots' Docker Engines may keep, by what its profile's stores held after their jobs
     /// (ADR 0156), which its image's job cleanup holds it to, once the
-    /// caches' check has measured Docker's disk, where the action archives are while runners mount them, and
-    /// whether to collect the Sysbox probe verdict for this profile.
+    /// caches' check has measured Docker's disk, where the action archives are while runners mount them, Grype's
+    /// settings while runners mount its database, and whether to collect the Sysbox probe verdict for this profile.
     pub(super) fn runner_env(
         &self,
         profile: &str,
         skips: bool,
         archives: Option<&crate::archives::RunnerArchives>,
+        grype: Option<&crate::grype::RunnerGrype>,
     ) -> Vec<String> {
         let skip_syncs = skips.then(|| docker::SKIP_SYNCS.to_owned());
         let budget = self.docker_disk.borrow().map(|disk| {
@@ -506,6 +507,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .into_iter()
             .chain(budget)
             .chain(archives)
+            .chain(
+                grype
+                    .into_iter()
+                    .flat_map(|grype| grype.env.iter().cloned()),
+            )
             .chain(probe)
             .collect()
     }

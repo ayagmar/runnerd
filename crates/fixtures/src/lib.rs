@@ -228,6 +228,7 @@ fn status() -> Status {
         github_limited_until: Some(NOW + 750),
         on_battery: false,
         action_archives: None,
+        grype_database: None,
         machine: Some(api::Machine {
             id: "4f2a91c0".to_owned(),
             name: "tern".to_owned(),
@@ -671,6 +672,25 @@ fn caches() -> Caches {
             actions_cache: true,
         }),
         actions: Some(action_archives()),
+        grype: Some(grype_database()),
+    }
+}
+
+/// The Grype database: one built a day ago that runners mount, and a listing Anchore did not answer since.
+fn grype_database() -> api::GrypeDatabase {
+    api::GrypeDatabase {
+        held: Some(api::HeldGrypeDatabase {
+            built_at: NOW - 86_400 - 1800,
+            schema: "v6.1.10".to_owned(),
+            bytes: 1_300 * MIB,
+        }),
+        mounted: true,
+        checked_at: Some(NOW - 7 * 3600),
+        failure: Some(api::GrypeFailure {
+            kind: api::GrypeFailureKind::Listing,
+            detail: "Anchore answered 503 Service Unavailable".to_owned(),
+            since: NOW - 3600,
+        }),
     }
 }
 
@@ -1490,6 +1510,10 @@ pub struct Facts {
     pub action_archives: String,
     /// The action archive that failed, in a line.
     pub action_archive_failure: String,
+    /// What the Grype database is.
+    pub grype_database: String,
+    /// What failed of the Grype database, in a line.
+    pub grype_failure: String,
     /// The month's job minutes priced at GitHub's rates, with their basis.
     pub savings: String,
     /// The last 30 days', which reach the jobs of September.
@@ -1558,6 +1582,10 @@ fn job_line<T>(daemon: &Daemon, id: u64, line: impl Fn(&JobSummary) -> Option<T>
 #[expect(
     clippy::expect_used,
     reason = "test support: fixtures without their own jobs fail the test"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one line per fact of `Facts`, which split up would only be listed twice"
 )]
 pub fn facts(daemon: &Daemon) -> Facts {
     let status = &daemon.status;
@@ -1647,6 +1675,10 @@ pub fn facts(daemon: &Daemon) -> Facts {
         actions_cache: build.actions_cache_line(),
         action_archives: action_archives().line(NOW),
         action_archive_failure: action_archives().failures[0].line(),
+        grype_database: grype_database().line(NOW),
+        grype_failure: grype_database()
+            .failure
+            .map_or_else(String::new, |f| f.line()),
         savings: daemon.savings.month.headline(),
         savings_30_days: daemon.savings.last_30_days.headline(),
         stopping,

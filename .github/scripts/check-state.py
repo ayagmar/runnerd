@@ -61,6 +61,8 @@ ROOTS = (
     "crates/web/src/auth.rs:Credentials",
     "crates/core/src/archives.rs:Archives",
     "crates/core/src/archives.rs:Link",
+    "crates/core/src/grype.rs:Link",
+    "crates/core/src/grype/task.rs:Keeper",
 )
 ENGINE = "crates/core/src/scheduler/engine.rs:Engine"
 

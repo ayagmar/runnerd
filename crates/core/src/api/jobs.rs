@@ -1044,6 +1044,10 @@ pub struct Caches {
     /// older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<super::ActionArchives>,
+    /// The Grype database runnerd keeps for its runners, when `[caches.grype]` is on (ADR 0160); absent from an
+    /// older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grype: Option<super::GrypeDatabase>,
 }
 
 /// The shared build cache (ADR 0052): its size now, and what it served the jobs of the last 7 days.

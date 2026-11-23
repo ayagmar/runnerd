@@ -310,6 +310,13 @@ async fn the_build_cache_states_its_week_and_tools_as_core_does() {
         .expect("refreshed once");
     assert!(shown.contains(&sentence(held)), "{held}: {shown}");
     assert!(shown.contains(&facts.action_archive_failure), "{shown}");
+    // The Grype database's, the ages left out as above.
+    let (held, _) = facts
+        .grype_database
+        .split_once(" built")
+        .expect("a database held");
+    assert!(shown.contains(held), "{held}: {shown}");
+    assert!(shown.contains(&facts.grype_failure), "{shown}");
 }
 
 #[tokio::test]
