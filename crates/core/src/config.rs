@@ -55,6 +55,11 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
+    /// What runner names, the status, notifications and the dashboard call this machine: lower-case letters and
+    /// digits, at most 20. Absent, the host name with only its letters and digits (ADR 0158). Read at start; a reload
+    /// does not rename the host.
+    #[serde(default)]
+    pub name: Option<String>,
     /// The systemd slice every runner container is placed in; its `MemoryMax` is the budget.
     pub slice: String,
     /// How runner containers are kept from the host.
@@ -231,6 +236,19 @@ impl Host {
         }
     }
 
+    /// Refuses a `name` that is not already its own host segment.
+    fn check_name(&self) -> Result<(), ConfigError> {
+        match &self.name {
+            Some(value) if value.is_empty() || host_segment(value) != *value => {
+                Err(ConfigError::HostName {
+                    value: value.clone(),
+                    suggested: host_segment(value),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Refuses a `cpu_overcommit` that is not above 0 and at most `MAX_CPU_OVERCOMMIT`.
     fn check_cpu_overcommit(&self) -> Result<(), ConfigError> {
         match self.cpu_overcommit {
@@ -240,6 +258,19 @@ impl Host {
             _ => Ok(()),
         }
     }
+}
+
+/// The longest host segment of a runner name, and `[host] name`.
+pub const HOST_NAME_MAX: usize = 20;
+
+/// `name` as the host segment of a runner name: its letters and digits in lower case, at most `HOST_NAME_MAX` of them,
+/// so the segment holds no dash and is the text up to the next one. Empty when `name` has none.
+pub fn host_segment(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .take(HOST_NAME_MAX)
+        .collect()
 }
 
 /// The largest `cpu_overcommit` the config check takes.
@@ -1214,6 +1245,17 @@ pub enum ConfigError {
         /// The setting, such as `profiles.app.cpus`.
         field: String,
     },
+    /// `[host] name` holds more than lower-case letters and digits, more than `HOST_NAME_MAX` of them, or none.
+    #[error(
+        "host.name is {value:?}; use 1 to {HOST_NAME_MAX} lower-case letters and digits{}",
+        if suggested.is_empty() { String::new() } else { format!(", such as {suggested:?}") }
+    )]
+    HostName {
+        /// The value set.
+        value: String,
+        /// What it reads as with only its letters and digits; empty when it has none.
+        suggested: String,
+    },
     /// `cpu_overcommit` is not a number above 0 and at most `MAX_CPU_OVERCOMMIT`.
     #[error(
         "host.cpu_overcommit is {value}; set it above 0 and at most {MAX_CPU_OVERCOMMIT}, such as 1.0"
@@ -1644,6 +1686,7 @@ impl Config {
         self.check_sizing_bounds()?;
         self.caches.build.validate()?;
         self.caches.actions.validate()?;
+        self.host.check_name()?;
         self.host.check_cpu_overcommit()?;
         self.check_memory_ceiling()?;
         self.web.validate()?;

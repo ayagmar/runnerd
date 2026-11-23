@@ -14,7 +14,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{
-    Delivery, Digest, Event, EventEnvelope, Insight, JobState, JobSummary, Notification,
+    Delivery, Digest, Event, EventEnvelope, Insight, JobState, JobSummary, Machine, Notification,
     NotifyEvent, NotifyTest, NotifyTestQuery, Priority, RunnerFailure, Severity, job_title,
 };
 use runnerd_core::config::{Config, DayTime, Notify, NotifyTarget};
@@ -321,6 +321,8 @@ pub(super) struct Notifier {
     pub replaced: watch::Receiver<String>,
     pub stopping: watch::Receiver<bool>,
     pub setup: Setup,
+    /// The machine every message names, read once at start as the host's name is.
+    pub machine: Option<Machine>,
 }
 
 /// Sends what `[notify]` asks for until the server stops; reads `[notify]` again at every wake and as soon as the
@@ -332,6 +334,7 @@ pub(super) async fn run(notifier: Notifier) {
         mut replaced,
         mut stopping,
         setup,
+        machine,
     } = notifier;
     let http = match client(setup.timing.timeout) {
         Ok(http) => http,
@@ -360,7 +363,16 @@ pub(super) async fn run(notifier: Notifier) {
             next_look = Instant::now() + setup.timing.check;
         }
         if let Some(parsed) = parsed.filter(|_| !targets.is_empty()) {
-            step(&store, &http, &setup, &mut targets, &parsed, looking).await;
+            step(
+                &store,
+                &http,
+                &setup,
+                machine.as_ref(),
+                &mut targets,
+                &parsed,
+                looking,
+            )
+            .await;
         }
         let wake = targets
             .values()
@@ -518,6 +530,7 @@ async fn step(
     store: &Store,
     http: &reqwest::Client,
     setup: &Setup,
+    machine: Option<&Machine>,
     targets: &mut BTreeMap<String, Target>,
     config: &Config,
     looking: bool,
@@ -589,7 +602,7 @@ async fn step(
                 .map(|savings| savings.month);
             target.digest = Some(digest);
         }
-        send_due(store, http, &setup.timing, target).await;
+        send_due(store, http, &setup.timing, machine, target).await;
     }
 }
 
@@ -628,7 +641,13 @@ async fn read_events(store: &Store, target: &mut Target) -> EventsRead {
 }
 
 /// Sends the target's message and its digest if they are due, and records what was.
-async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target: &mut Target) {
+async fn send_due(
+    store: &Store,
+    http: &reqwest::Client,
+    timing: &Timing,
+    machine: Option<&Machine>,
+    target: &mut Target,
+) {
     let ready = target.due(timing).is_some_and(|due| due <= Instant::now());
     if !target.waiting() {
         // Nothing to send: the cursor moves past the events not wanted, and the insights still held are seen now.
@@ -642,7 +661,7 @@ async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target
             target.stored = target.cursor;
         }
     } else if ready {
-        let notification = message(target);
+        let notification = from(machine, message(target));
         match deliver(http, &target.config, &notification).await {
             Ok(()) => {
                 let (mut set, remove) = target.told_now();
@@ -673,7 +692,7 @@ async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target
     if let Some(digest) = target.digest.clone() {
         // The day it is for is the day it was made: one delivered after midnight still counts for the day before.
         let made = digest.until * 1000;
-        match deliver(http, &target.config, &digest_message(digest)).await {
+        match deliver(http, &target.config, &from(machine, digest_message(digest))).await {
             Ok(()) => {
                 if !store
                     .notify_record(
@@ -838,6 +857,7 @@ fn message(target: &Target) -> Notification {
         runners: runners.first.clone(),
         insights: found.clone(),
         digest: None,
+        machine: None,
     }
 }
 
@@ -899,6 +919,7 @@ fn digest_message(digest: Digest) -> Notification {
         runners: Vec::new(),
         insights: Vec::new(),
         digest: Some(digest),
+        machine: None,
     }
 }
 
@@ -910,6 +931,7 @@ pub(super) async fn test(
     Query(query): Query<NotifyTestQuery>,
 ) -> Response {
     let text = state.config.lock().await.text.clone();
+    let machine = state.handle.status.borrow().machine.clone();
     let notify = match Config::parse(&text) {
         Ok(config) => config.notify,
         Err(parse_error) => {
@@ -940,9 +962,13 @@ pub(super) async fn test(
     info!("notify: test message requested by {principal:?}");
     // All at once, so slow targets together still answer within the client's wait.
     let deliveries = futures_util::future::join_all(targets.iter().map(|target| async {
-        let error = deliver(&http, target, &test_message(&target.name))
-            .await
-            .err();
+        let error = deliver(
+            &http,
+            target,
+            &from(machine.as_ref(), test_message(&target.name)),
+        )
+        .await
+        .err();
         if let Some(why) = &error {
             warn!("notify {}: test not delivered: {why}", target.name);
         }
@@ -958,6 +984,15 @@ pub(super) async fn test(
     .into_response()
 }
 
+/// `notification` as `machine` sends it: its title names the machine, and so does its body.
+fn from(machine: Option<&Machine>, notification: Notification) -> Notification {
+    Notification {
+        title: Machine::notification_title(machine, &notification.title),
+        machine: machine.cloned(),
+        ..notification
+    }
+}
+
 /// What `runnerctl notify test` sends the target named `name`.
 fn test_message(name: &str) -> Notification {
     Notification {
@@ -970,6 +1005,7 @@ fn test_message(name: &str) -> Notification {
         runners: Vec::new(),
         insights: Vec::new(),
         digest: None,
+        machine: None,
     }
 }
 

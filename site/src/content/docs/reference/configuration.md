@@ -50,6 +50,7 @@ A key marked required must be set. Sizes take `K`, `M`, `G` or `T`, durations a 
 
 | Key | Default | |
 |---|---|---|
+| `name` | the host name's letters and digits | what runner names, `runnerctl status --json`, notifications and the dashboard's titles call this machine: 1 to 20 lower-case letters and digits. Read at start; a reload does not rename the host. Upgrade every machine that serves the same repositories, so their runner names all read the same way |
 | `slice` | required | the systemd slice runners run in; its `MemoryMax` is the [budget](../../concepts/terms/#slice-and-budget) |
 | `isolation` | required | `"sysbox"`, or `"unsafe-dind"` with `allow_unsafe = true` ([Isolation](../../security/#isolation)) |
 | `allow_unsafe` | `false` | lets `isolation = "unsafe-dind"` pass the check |

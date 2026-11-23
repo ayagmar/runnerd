@@ -832,7 +832,7 @@ async fn every_page_renders_from_the_daemons_data() {
         "Set up job: line 1",
         "/live/jobs/",
         // Named as every client names a job, so the tab says which workflow's build it is.
-        "<title>CI / build · runnerd</title>",
+        "<title>CI / build · runnerd on tern</title>",
     ] {
         assert!(job.body.contains(expected), "job page lacks {expected:?}");
     }

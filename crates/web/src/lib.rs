@@ -19,6 +19,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use maud::Markup;
+use runnerd_core::api::{Machine, Status};
 use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::Origin;
 use tokio::net::TcpListener;
@@ -55,6 +56,22 @@ pub(crate) struct App {
     proxies: Arc<[String]>,
     /// Set when the dashboard stops, so live pages end.
     stopping: watch::Receiver<bool>,
+    /// The machine the daemon runs on, which page titles name: read from its status once, as the daemon reads its
+    /// name once at start.
+    machine: Arc<tokio::sync::OnceCell<Machine>>,
+}
+
+impl App {
+    /// The machine the daemon runs on; `None` while its status does not answer or does not say.
+    async fn machine(&self) -> Option<&Machine> {
+        self.machine
+            .get_or_try_init(|| async {
+                let status: Status = self.daemon.get("/v1/status").await.map_err(|_| ())?;
+                status.machine.ok_or(())
+            })
+            .await
+            .ok()
+    }
 }
 
 pub(crate) fn now() -> u64 {
@@ -171,6 +188,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
             daemon,
             proxies,
             stopping,
+            machine: Arc::default(),
         });
     let login = Router::new()
         .route("/login", get(auth::login))
@@ -245,10 +263,11 @@ fn page(rendered: Result<Markup, ClientError>) -> Response {
 }
 
 async fn overview(State(app): State<App>) -> Response {
+    let machine = app.machine().await;
     page(
         Overview::load(&app.daemon, now())
             .await
-            .map(|overview| views::overview::render(&overview)),
+            .map(|overview| views::overview::render(&overview, machine)),
     )
 }
 
@@ -256,43 +275,48 @@ async fn history(
     State(app): State<App>,
     filter: Result<Query<Filter>, QueryRejection>,
 ) -> Response {
+    let machine = app.machine().await;
     let filter = lenient(filter);
     page(
         History::load(&app.daemon, filter, now())
             .await
-            .map(|history| views::history::render(&history)),
+            .map(|history| views::history::render(&history, machine)),
     )
 }
 
 async fn records(State(app): State<App>) -> Response {
+    let machine = app.machine().await;
     page(
         RecordsView::load(&app.daemon, now())
             .await
-            .map(|records| views::records::render(&records)),
+            .map(|records| views::records::render(&records, machine)),
     )
 }
 
 async fn caches(State(app): State<App>) -> Response {
+    let machine = app.machine().await;
     page(
         CachesView::load(&app.daemon, now())
             .await
-            .map(|caches| views::caches::render(&caches)),
+            .map(|caches| views::caches::render(&caches, machine)),
     )
 }
 
 async fn sizing(State(app): State<App>) -> Response {
+    let machine = app.machine().await;
     page(
         SizingView::load(&app.daemon, now())
             .await
-            .map(|sizing| views::sizing::render(&sizing)),
+            .map(|sizing| views::sizing::render(&sizing, machine)),
     )
 }
 
 async fn insights(State(app): State<App>) -> Response {
+    let machine = app.machine().await;
     page(
         InsightsView::load(&app.daemon, now())
             .await
-            .map(|insights| views::insights::render(&insights)),
+            .map(|insights| views::insights::render(&insights, machine)),
     )
 }
 
@@ -300,11 +324,12 @@ async fn config(
     State(app): State<App>,
     query: Result<Query<ConfigQuery>, QueryRejection>,
 ) -> Response {
+    let machine = app.machine().await;
     let query = lenient(query);
     page(
         ConfigView::load(&app.daemon, query, now())
             .await
-            .map(|config| views::config::render(&config, &app.proxies)),
+            .map(|config| views::config::render(&config, &app.proxies, machine)),
     )
 }
 
@@ -325,10 +350,11 @@ async fn job(
         return not_found();
     };
     let query = lenient(query);
+    let machine = app.machine().await;
     page(
         JobView::load(&app.daemon, id, now(), &query)
             .await
-            .map(|job| views::job::render(&job)),
+            .map(|job| views::job::render(&job, machine)),
     )
 }
 

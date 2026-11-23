@@ -5,6 +5,7 @@
 use maud::{Markup, html};
 use std::collections::BTreeSet;
 
+use runnerd_core::api::Machine;
 use runnerd_core::api::{Column, JobQuery, RecordFilter, Records, Section, Status, Tone};
 use runnerd_core::client::{Client, ClientError};
 
@@ -47,12 +48,18 @@ impl RecordsView {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &RecordsView) -> Markup {
+pub(crate) fn render(view: &RecordsView, machine: Option<&Machine>) -> Markup {
     let main = html! {
         (heading(runnerd_core::api::View::Jobs.title(), Some(Page::Records), None))
         (section(&view.status, &view.records, view.in_history.as_ref(), view.now))
     };
-    page(Section::Records.title(), Some(Page::Records), None, &main)
+    page(
+        Section::Records.title(),
+        machine,
+        Some(Page::Records),
+        None,
+        &main,
+    )
 }
 
 /// The records of failed jobs, each removable, and the limits they are kept within.

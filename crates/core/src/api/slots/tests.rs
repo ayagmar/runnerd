@@ -33,6 +33,7 @@ fn status() -> Status {
         stopping: None,
         github_limited_until: None,
         action_archives: None,
+        machine: None,
         budget: Budget::default(),
         profiles: vec![ProfileStatus {
             name: "jvm".to_owned(),
