@@ -153,6 +153,7 @@ fn finished(id: u64, state: JobState, conclusion: Option<&str>) -> Event {
             log: LogSummary::default(),
             runner_fault: false,
             slept: false,
+            elsewhere_runner: None,
             failure_cause: None,
             rerun_at: None,
             probe: None,

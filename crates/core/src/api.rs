@@ -107,6 +107,7 @@ pub use insights::{
 pub(crate) use jobs::SAMPLE_GAP_INTERVALS;
 #[cfg(feature = "host")]
 pub(crate) use jobs::TITLE_SOURCE_MAX;
+pub(crate) use jobs::title;
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
@@ -132,7 +133,7 @@ pub use jobs::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
-pub use machine::Machine;
+pub use machine::{Machine, OUTCOME_MAX};
 pub use queue::{HostWait, WaitCause};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,

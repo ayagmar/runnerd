@@ -1983,3 +1983,94 @@ async fn a_failed_job_keeps_what_its_log_says_failed_it_once_it_closes() {
     );
     assert_eq!(cause(2).await, (None, None));
 }
+
+/// GitHub's details of a job that left the queue and that `runner` ran, or none did.
+fn ran_elsewhere(id: u64, conclusion: &str, runner: Option<&str>) -> crate::github::JobDetails {
+    crate::github::JobDetails {
+        id,
+        run_id: 10,
+        run_attempt: 1,
+        name: format!("job {id}"),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some(conclusion.to_owned()),
+        started_at: Some("2025-11-13T02:13:30Z".to_owned()),
+        completed_at: Some("2025-11-13T02:20:00Z".to_owned()),
+        runner_name: runner.map(str::to_owned),
+        steps: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_job_another_machine_ran_says_which_machine_after_a_restart_and_on_a_database_from_schema_31()
+ {
+    // Catches the runner's name dropped on the close, a read that leaves the new column out, a migration that does
+    // not add it to a database the previous schema wrote, and a name with escapes that reaches a client as is.
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    // A database as schema 31 left it: the step to 32 adds the column.
+    drop(Store::open(&path).unwrap());
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("ALTER TABLE jobs DROP COLUMN elsewhere_runner; PRAGMA user_version = 31;")
+        .unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(user_version(&path), VERSION);
+    for id in 1..=6 {
+        store.queued("o/r", &queued(id), crate::time::now_ms());
+    }
+    store.elsewhere(ran_elsewhere(
+        1,
+        "success",
+        Some("runnerd-7c3e5a19-skiff-jvm-2-1763000000"),
+    ));
+    store.elsewhere(ran_elsewhere(
+        2,
+        "failure",
+        Some("GitHub Actions 1000001234"),
+    ));
+    store.elsewhere(ran_elsewhere(3, "success", Some("peer\u{1b}[31m-red")));
+    // A job GitHub skipped names an empty runner; one a newer push cancelled, none.
+    store.elsewhere(ran_elsewhere(4, "skipped", Some("")));
+    // A name of only white space and escapes is none: the job did not start, and reads as its run was cancelled.
+    store.elsewhere(ran_elsewhere(5, "cancelled", Some("\t \u{1b}[31m ")));
+    store.elsewhere(ran_elsewhere(6, "success", Some(" ci\t1 ")));
+    store.flush().await;
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let expected = [
+        (1, "ran on skiff"),
+        (2, "ran on GitHub Actions 1000…"),
+        (3, "ran on peer-red"),
+        (4, "skipped"),
+        (5, "cancelled in queue"),
+        (6, "ran on ci 1"),
+    ];
+    let listed = store.jobs(JobQuery::default()).await.unwrap().page.jobs;
+    for (id, said) in expected {
+        let job = store.job(id).await.unwrap().unwrap().summary;
+        assert_eq!(job.state, JobState::Elsewhere, "job {id}");
+        assert_eq!(job.outcome().label, said, "job {id}");
+        let row = listed.iter().find(|job| job.id == id).unwrap();
+        assert_eq!(row.outcome().label, said, "job {id} as listed");
+        assert!(!job.is_failure(), "job {id} is not this machine's failure");
+        assert_eq!(
+            job.timeline.started_at.is_some(),
+            job.elsewhere_runner.is_some(),
+            "job {id} started only where a runner took it"
+        );
+    }
+    let timeline = store
+        .timeline(api::Span {
+            from: 0,
+            to: 4_000_000_000,
+        })
+        .await
+        .unwrap();
+    let bar = timeline.unassigned.iter().find(|bar| bar.job == 1).unwrap();
+    assert_eq!(bar.outcome().label, "ran on skiff");
+}

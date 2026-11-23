@@ -28,6 +28,7 @@ pub use facts::{
 };
 #[cfg(feature = "host")]
 pub(crate) use log::TITLE_SOURCE_MAX;
+pub(crate) use log::title;
 pub use log::{
     Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,
     LogEvidence, LogGroup, LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch,
@@ -131,6 +132,10 @@ pub struct JobSummary {
     /// run time holds the sleep. False from a daemon older than it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub slept: bool,
+    /// For a job that ran elsewhere: the name of the runner GitHub says ran it (ADR 0163), which `outcome` words as
+    /// the machine it ran on. `None` for every other job, for one no runner took, and from a daemon older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elsewhere_runner: Option<String>,
     /// What became of its record, for a job the history notes one for: kept, removed or not made (ADR 0135).
     /// `None` for a job without a record note, and from a daemon older than the mark. Not `record`, which a `Job`
     /// that flattens this summary holds in full.
