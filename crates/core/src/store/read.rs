@@ -70,7 +70,7 @@ const OVERFLOW_WAITED: &str = "coalesce(json_extract(j.wait_causes, '$.overflow'
 pub(super) const SLEPT: &str = slept!();
 
 /// How many columns `SUMMARY` has: a query that adds one after them reads it at this index.
-const SUMMARY_COLUMNS: usize = 54;
+const SUMMARY_COLUMNS: usize = 55;
 
 /// The columns `summary_from` reads, in its order.
 const SUMMARY: &str = concat!(
@@ -85,7 +85,7 @@ const SUMMARY: &str = concat!(
     record_mark!(),
     ", j.disk_written, j.disk_write_ios, j.disk_dirty, j.disk_measure, j.failure_cause, j.rerun_at, r.probe, ",
     slept!(),
-    " FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
+    ", j.elsewhere_runner FROM jobs j LEFT JOIN runners r ON r.name = j.runner LEFT JOIN records rec ON rec.job = j.id"
 );
 
 /// [`api::RecordMark`] of the job `j` in SQL: the expression `SUMMARY` reads.
@@ -313,6 +313,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
         rerun_at: row.get::<_, Option<u64>>(51)?.map(secs),
         probe: row.get::<_, Option<String>>(52)?.as_deref().map(probe),
         slept: row.get(53)?,
+        elsewhere_runner: text(row, 54)?,
         record_mark: row
             .get::<_, Option<String>>(45)?
             .as_deref()

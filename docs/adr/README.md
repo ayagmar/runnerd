@@ -167,3 +167,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0158](0158-a-host-has-a-name-that-its-status-and-messages-carry.md) | A host has a name that its status and messages carry | Accepted |
 | [0159](0159-time-the-host-slept-is-downtime-not-waiting.md) | Time the host slept is downtime, not waiting | Accepted |
 | [0162](0162-an-overflow-host-starts-a-runner-only-for-a-job-no-other-host-took-in-time.md) | An overflow host starts a runner only for a job no other host took in time | Accepted |
+| [0163](0163-a-job-that-ran-elsewhere-says-which-machine-ran-it.md) | A job that ran elsewhere says which machine ran it | Accepted |
