@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 impl InsightKind {
     /// Its name as a label: `Slower`, `Flaky`, `Near its cap`, `Cold cache`, `Memory pressure`, `CPU cap`,
-    /// `Host memory`, `Host low`, `Waits`, or `Insight` for a kind from a later release.
+    /// `Host memory`, `Host low`, `Waits`, `Drive wear`, or `Insight` for a kind from a later release.
     pub fn label(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "Slower",
@@ -26,12 +26,13 @@ impl InsightKind {
             InsightKind::HostHeld { .. } => "Host memory",
             InsightKind::HostLow { .. } => "Host low",
             InsightKind::Waits { .. } => "Waits",
+            InsightKind::DriveWear { .. } => "Drive wear",
             InsightKind::Unknown => "Insight",
         }
     }
 
     /// Its name as one word, the API's `kind`: `slower`, `flaky`, `near-cap`, `cold-cache`, `throttled`,
-    /// `cpu-held`, `host-held`, `host-low` or `waits`; `unknown` for a kind from a later release.
+    /// `cpu-held`, `host-held`, `host-low`, `waits` or `drive-wear`; `unknown` for a kind from a later release.
     pub fn word(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "slower",
@@ -43,6 +44,7 @@ impl InsightKind {
             InsightKind::HostHeld { .. } => "host-held",
             InsightKind::HostLow { .. } => "host-low",
             InsightKind::Waits { .. } => "waits",
+            InsightKind::DriveWear { .. } => "drive-wear",
             InsightKind::Unknown => "unknown",
         }
     }
@@ -138,6 +140,19 @@ impl Insight {
                 ByteSize(*lowest).to_string(),
                 "least memory available".to_owned(),
             ),
+            InsightKind::DriveWear { days, rated, .. } => match days {
+                Some(days) => figure(
+                    days.to_string(),
+                    format!(
+                        "days to its rated {} at the last 7 days' rate",
+                        crate::config::DriveBytes(*rated)
+                    ),
+                ),
+                None => figure(
+                    crate::config::DriveBytes(*rated).to_string(),
+                    "rated writes, written".to_owned(),
+                ),
+            },
             InsightKind::Unknown => None,
         }
     }

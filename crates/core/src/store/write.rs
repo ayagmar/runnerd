@@ -196,7 +196,7 @@ impl Writer<'_> {
                 self.change("record a window of disk writes", |_| {
                     self.db.execute(
                         "INSERT OR REPLACE INTO disk_windows (start, end_at, device, store, drive, slice, \
-                         daemon, commits) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                         daemon, commits, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             window.start,
                             window.end,
@@ -205,7 +205,10 @@ impl Writer<'_> {
                             window.drive,
                             window.slice,
                             window.daemon,
-                            window.commits
+                            window.commits,
+                            window
+                                .owners
+                                .and_then(|owners| serde_json::to_string(&owners).ok())
                         ],
                     )?;
                     Ok(())

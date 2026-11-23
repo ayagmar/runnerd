@@ -47,11 +47,11 @@ The lines are the host's margin plus a quarter of its memory, and a tenth of its
 
 ### Disk writes
 
-Next, `runnerctl insights` and the dashboard say what the window's jobs wrote to the disk under Docker's root, which workflows and jobs wrote most, and what that disk wrote while runnerd read it. The dashboard draws it as figures, a bar of who wrote to the drive and ranked bars, with the sentences in a fold:
+Next, `runnerctl insights` and the dashboard say what the window's jobs wrote to the disk under Docker's root, which workflows and jobs wrote most, and what that disk wrote while runnerd read it. The dashboard draws it as figures, a bar of who wrote to the drive, the drive's endurance and ranked bars, with the sentences in a fold:
 
 <Shot
   name="part-disk"
-  alt="Insights' disk writes: jobs wrote 402G over 1412 jobs, 120M median and 780M p90 a job; nvme0n1 wrote 1.28T, 94.7G a day at this rate, with 2.6 btrfs commits a second; a bar of who wrote to the drive, 30% runner jobs, 5% the rest of the runner slice, 1% runnerd itself and 64% no owner runnerd knows; then the workflows and jobs that wrote most as ranked bars."
+  alt="Insights' disk writes: jobs wrote 402G over 1412 jobs, 120M median and 780M p90 a job; nvme0n1 wrote 1.28T, 94.7G a day at this rate, with 2.6 btrfs commits a second; a bar of who wrote to the drive, 30% runner jobs, 6% the rest of the runner slice, 9% the host's Docker daemon, 1% each for containerd, other system services and other user programs, and 52% no cgroup (the kernel); the drive's endurance, rated 600TB with 556.5TB left, 500 days at the last 7 days' rate; then the workflows and jobs that wrote most as ranked bars."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
@@ -63,8 +63,14 @@ disk writes:
     529 jobs wrote 145G: median 49M, p90 612M a job; 12 partial, counted as far as read; 3G more waited to be written back as their containers ended
   Drive:
     nvme0n1 wrote 574G over the 6h 36m runnerd read it: 2.04T a day at this rate
-    Runner jobs 24%; the rest of the runner slice 7% (seeds, the mirror, runners before and after their jobs, write-back after a container ended); no owner runnerd knows 68%
+    Runner jobs 24%; the rest of the runner slice 8% (seeds, the mirror, runners before and after their jobs, write-back after a container ended); runnerd itself 0%; the host's Docker daemon 9%; containerd 1%; other system services 2%; other user programs 0%; no cgroup (the kernel) 56% (16K a write); no owner runnerd knows 0%
+    What no cgroup wrote averaged 16K a write, btrfs's node size: likely file-system metadata, which btrfs writes on no one's account (inferred from the size, not measured)
     btrfs committed 2.0 times a second
+  Drive endurance:
+    nvme0n1 is rated to write 600TB (decimal terabytes, as drive makers and SMART count; runnerd's other sizes are binary, 1T = 1.1TB)
+    It has written at least 79.5TB: 77.2TB its SMART log said on Oct 22 02:03 UTC, per [host.drive], and 2.3TB runnerd read since, over 11h 00m of the 12h 00m since; what it wrote while runnerd did not read it is not counted
+    At the last 7 days' rate, 4.6TB a day over the 6d 20h runnerd read it: the 520.5TB left lasts 112 days
+    At the last 24 hours' rate, 5.2TB a day over the 1d 0h runnerd read it: the 520.5TB left lasts 100 days
   Workflows that wrote most:
     halyard/ledger CI: 99G over 426 jobs, 237.97M a job
   Jobs that wrote most:
@@ -75,10 +81,23 @@ disk writes:
 - Only the disks under Docker's root count: a partition counts as its whole disk; swap on zram does not count.
 - When Docker's root is a file system in a file, on a loop device, the jobs' and the runner slice's figures are bytes written to that file system, and the drive is the disk the file is on. The drive writes more than that for them: the inner file system's journal and the outer one's overhead. The drive section then says so in a line.
 - Pages still in memory when a container ends are written after it, to the runner slice's account, as is what seeds and the mirror write.
-- runnerd itself: what the daemon wrote, its history, logs and build cache among it.
-- No owner: the disk's writes outside the runner slice and runnerd, from the system, other programs and the file system's own work. btrfs commits appear only on btrfs.
+- runnerd itself: what the daemon wrote, its history, logs and build cache among it. Once the writes are split by cgroup, this is its cgroup's count, after compression, rather than `/proc/self/io`'s.
+- The rest is split by cgroup from `io.stat`: the host's Docker daemon (`system.slice/docker.service`, which creates and removes every runner container), containerd, other system services, other user programs (`user.slice` without runnerd), and no cgroup: the root cgroup's count less its children's, the kernel's own writes. On btrfs that last share is mostly metadata, which btrfs writes on no one's account; when its writes average btrfs's 16K node size the drive section says so, as an inference. A host without the io controller in every top-level cgroup is not split, nor are windows stored before runnerd split them: their rest is "no owner runnerd knows". btrfs commits appear only on btrfs.
 - When a reading of the runner slice failed, its shares are over the time it was read, and the line says how long that was.
 - The drive is read in windows of up to 10 minutes; the time runnerd was stopped is in none, and the daily rate is over the time read.
+
+### Drive endurance
+
+With `[host.drive]` set, the section also says how long the drive's rated writes last. runnerd cannot read the drive's SMART log without root, so you give it the rating and the last count, from `sudo smartctl -a /dev/nvme3n1` (`Data Units Written`, which smartctl also prints in TB):
+
+```toml
+[host.drive]
+device = "nvme3n1"
+endurance = "600TB"
+written = { bytes = "77.2TB", at = "2026-11-23T12:00:00Z" }
+```
+
+Sizes here are decimal, as drive makers rate them: `600TB` is 600 × 10¹² bytes. `600T` is refused, since runnerd's `T` elsewhere is 2⁴⁰ bytes, 10% more. runnerd adds what it read the drive write after `at`; what the drive wrote while runnerd was stopped is not counted, so the total is a floor and the line says how much of the time since was read. The rates are over the last 7 days and 24 hours of that disk's windows: when Docker's root moves to another disk, the old one's windows stop counting. Under 180 days left at the week's rate (`warn_days`), or past the rating, a warning insight names the drive, the overview lists it as needing attention, and notifications send it. Paste a fresh count now and then: the days left move with it.
 
 ### Why jobs queued
 

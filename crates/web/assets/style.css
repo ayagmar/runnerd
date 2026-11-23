@@ -4126,9 +4126,19 @@ th a.sort:hover {
   background: var(--swatch);
 }
 
+/* The drive's endurance: its title in the wait ink once its rating is near. */
+.endurance.tone-warn h3 {
+  color: var(--wait-ink);
+}
+
 .owner-jobs { --swatch: var(--p0); }
 .owner-slice { --swatch: var(--p2); }
 .owner-daemon { --swatch: var(--p3); }
+.owner-docker { --swatch: var(--p1); }
+.owner-containerd { --swatch: var(--p5); }
+.owner-system { --swatch: var(--p4); }
+.owner-user { --swatch: repeating-linear-gradient(45deg, var(--p4) 0 3px, var(--surface) 3px 5px); }
+.owner-kernel { --swatch: var(--line); }
 .owner-unknown { --swatch: repeating-linear-gradient(135deg, var(--line) 0 2px, transparent 2px 6px); }
 
 .share-key {

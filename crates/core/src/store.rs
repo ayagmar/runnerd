@@ -115,6 +115,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
          claimed_at INTEGER NOT NULL, PRIMARY KEY (repository, run_id, attempt)) WITHOUT ROWID;",
     ),
     (28, "ALTER TABLE runners ADD COLUMN probe TEXT;"),
+    (29, "ALTER TABLE disk_windows ADD COLUMN owners TEXT;"),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -1304,6 +1305,18 @@ impl Store {
     /// The last measurement of every volume, with its time (seconds), by name.
     pub async fn cache_sizes_now(&self) -> Result<Measured, StoreError> {
         self.read(read::latest_cache_sizes).await
+    }
+
+    /// What runnerd read `device` write in the windows that started at or after `since` (ms), and the time they span
+    /// (ADR 0157): what `[host.drive]`'s SMART count is added to.
+    pub async fn drive_read_since(
+        &self,
+        device: &str,
+        since: u64,
+    ) -> Result<crate::insights::DriveRead, StoreError> {
+        let device = device.to_owned();
+        self.read(move |db| read::drive_read_since(db, &device, since))
+            .await
     }
 
     /// What the build cache served and took from the runners started since `since` (ms), summed.

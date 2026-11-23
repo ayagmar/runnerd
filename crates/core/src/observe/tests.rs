@@ -942,6 +942,7 @@ fn docker_s_root_on_a_btrfs_partition_reads_as_its_whole_disk_and_its_file_syste
             drive: Some(2000 * 512),
             slice: Some(4096),
             daemon: None,
+            owners: None,
             commits: Some(15),
             store: None,
         }
@@ -1305,4 +1306,148 @@ fn docker_s_free_disk_in_a_file_in_a_file_is_the_least_down_to_the_disk() {
         60 * GIB,
         "the disk at the bottom unmeasured: the least of those measured"
     );
+}
+
+/// Writes a cgroup's `io.stat` with `bytes` in `ios` writes to the drive, beside zram's.
+fn io_stat_of(cgroup: &Path, bytes: u64, ios: u64) {
+    std::fs::create_dir_all(cgroup).unwrap();
+    std::fs::write(
+        cgroup.join("io.stat"),
+        format!(
+            "253:0 rbytes=0 wbytes=999999 rios=0 wios=99 dbytes=0 dios=0\n\
+             259:5 rbytes=4096 wbytes={bytes} rios=1 wios={ios} dbytes=0 dios=0\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A host's cgroups as `io.stat` counts them, in KiB, `step` times over: the runner slice, the host's Docker daemon
+/// and containerd in `system.slice` beside other services, `init.scope`, runnerd's own service in `user.slice` beside
+/// other programs, and the root's line, which counts every write, `kernel` KiB of them no cgroup's in 16 KiB writes.
+fn cgroups(paths: &Paths, step: u64, kernel: u64) {
+    const K: u64 = 1024;
+    let root = &paths.cgroup;
+    let runnerd = "user.slice/user-1000.slice/user@1000.service/app.slice/runnerd.service";
+    let at = |path: &str, kib: u64| io_stat_of(&root.join(path), kib * K * step, kib * step);
+    at("ci.slice", 100);
+    at("system.slice/docker.service", 120);
+    at("system.slice/containerd.service", 30);
+    at("system.slice", 300);
+    at("init.scope", 10);
+    at(runnerd, 20);
+    at("user.slice", 80);
+    // The children's 490 KiB in 490 writes, and the kernel's in 16 KiB writes.
+    io_stat_of(root, (490 + kernel) * K * step, (490 + kernel / 16) * step);
+    std::fs::write(paths.proc.join("self/cgroup"), format!("0::/{runnerd}\n")).unwrap();
+}
+
+/// The drive's 68% "no owner runnerd knows" was the host's Docker daemon, other services and the kernel: each is its
+/// own figure now, the runner slice and runnerd taken off the cgroup they sit in so no byte counts twice.
+#[test]
+fn the_drive_s_writers_split_by_cgroup_and_add_up_to_the_root_s_count() {
+    const K: u64 = 1024;
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    let slice = paths.slice("ci.slice");
+    cgroups(&paths, 1, 1600);
+    drive(&paths, 0, 0);
+    let mut windows = Windows::default();
+    assert_eq!(windows.add(disks.read(&paths, &slice, 0)), None);
+    cgroups(&paths, 3, 1600);
+    drive(&paths, 2 * (490 + 1600) * 2, 4);
+    let window = windows.add(disks.read(&paths, &slice, 600_000)).unwrap();
+    let owners = window.owners.expect("split by cgroup");
+    assert_eq!(window.slice, Some(200 * K));
+    assert_eq!(
+        owners,
+        api::DriveOwners {
+            runnerd: Some(40 * K),
+            docker: Some(240 * K),
+            containerd: Some(60 * K),
+            // system.slice's 600 less Docker's and containerd's, and init.scope's 20.
+            system: (600 - 240 - 60 + 20) * K,
+            // user.slice's 160 less runnerd's.
+            user: 120 * K,
+            kernel: 3200 * K,
+            kernel_ios: 200,
+        }
+    );
+    assert_eq!(owners.kernel_write(), Some(16 * K));
+    let named = window.slice.unwrap()
+        + owners.runnerd.unwrap()
+        + owners.docker.unwrap()
+        + owners.containerd.unwrap()
+        + owners.system
+        + owners.user
+        + owners.kernel;
+    assert_eq!(
+        named,
+        2 * (490 + 1600) * K,
+        "every byte the root counted, once"
+    );
+
+    // A host without the host's Docker daemon's cgroup: its share is absent, not 0, and its bytes are no one's.
+    cgroups_without_docker(&paths, 4);
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    cgroups_without_docker(&paths, 5);
+    let window = windows.add(disks.read(&paths, &slice, 600_000)).unwrap();
+    let owners = window.owners.unwrap();
+    assert_eq!(owners.docker, None);
+    assert_eq!(owners.containerd, None);
+    assert_eq!(
+        owners.system,
+        310 * K,
+        "system.slice's 300 and init.scope's 10"
+    );
+}
+
+/// [`cgroups`] at `step` with the host's Docker daemon and containerd gone from `system.slice`.
+fn cgroups_without_docker(paths: &Paths, step: u64) {
+    cgroups(paths, step, 1600);
+    std::fs::remove_dir_all(paths.cgroup.join("system.slice/docker.service")).unwrap();
+    std::fs::remove_dir_all(paths.cgroup.join("system.slice/containerd.service")).unwrap();
+}
+
+/// Without the io controller in a top-level cgroup, or the root's `io.stat`, what no cgroup wrote can't be told:
+/// the window is not split, and the rest of its figures stand. A reading that lacks the split leaves its window
+/// unsplit, as a restart's first window starts split again.
+#[test]
+fn a_window_without_every_top_level_cgroup_s_count_is_not_split() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let disks = Disks::resolve(&paths, Path::new("/var/lib/docker")).unwrap();
+    let slice = paths.slice("ci.slice");
+    cgroups(&paths, 1, 1600);
+    drive(&paths, 0, 0);
+    let mut windows = Windows::default();
+    windows.add(disks.read(&paths, &slice, 0));
+    // A top-level cgroup without the io controller.
+    std::fs::create_dir_all(paths.cgroup.join("machine.slice")).unwrap();
+    cgroups(&paths, 2, 1600);
+    let window = windows.add(disks.read(&paths, &slice, 600_000)).unwrap();
+    assert_eq!(window.owners, None, "not split");
+    assert!(window.slice.is_some(), "the slice's figure stands");
+    // With every count again, the window that starts on the unsplit reading stays unsplit, and the next splits.
+    std::fs::remove_dir_all(paths.cgroup.join("machine.slice")).unwrap();
+    cgroups(&paths, 3, 1600);
+    let window = windows.add(disks.read(&paths, &slice, 1_200_000)).unwrap();
+    assert_eq!(
+        window.owners, None,
+        "it started on a reading without the split"
+    );
+    cgroups(&paths, 4, 1600);
+    let window = windows.add(disks.read(&paths, &slice, 1_800_000)).unwrap();
+    assert!(window.owners.is_some(), "split again");
+    // A restart: a new daemon's windows start from its first reading.
+    let mut restarted = Windows::default();
+    restarted.add(disks.read(&paths, &slice, 1_900_000));
+    std::fs::remove_file(paths.cgroup.join("io.stat")).unwrap();
+    let window = restarted
+        .add(disks.read(&paths, &slice, 2_500_000))
+        .unwrap();
+    assert_eq!(window.owners, None, "the root's count gone");
 }

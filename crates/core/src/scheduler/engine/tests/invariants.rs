@@ -3998,7 +3998,9 @@ fn steady(line: &str) -> String {
 
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
 async fn run(steps: &[Step]) -> Result<Seen, Violation> {
-    run_case(steps, Case::new()).await.map(|case| case.seen)
+    Box::pin(run_case(steps, Case::new()))
+        .await
+        .map(|case| case.seen)
 }
 
 async fn run_case(steps: &[Step], mut case: Case) -> Result<Case, Violation> {
@@ -4522,7 +4524,7 @@ async fn the_trace_of_each_seed() {
     {
         let mut case = Case::new();
         case.trace = Some(Vec::new());
-        let case = run_case(&steps_of(seed), case)
+        let case = Box::pin(run_case(&steps_of(seed), case))
             .await
             .unwrap_or_else(|found| {
                 panic!("seed {seed} breaks {}: {}", found.invariant, found.detail)
@@ -4872,7 +4874,7 @@ async fn a_runner_started_after_a_restart_never_takes_a_name_nothing_recorded() 
     let mut case = Case::new();
     case.names_from = time::now_ms() / 1000 + 3600;
     case.engine.named = case.names_from;
-    let broken = run_case(&steps, case)
+    let broken = Box::pin(run_case(&steps, case))
         .await
         .err()
         .map(|found| (found.invariant, found.detail));

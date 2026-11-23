@@ -1450,6 +1450,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
         host: None,
         readings: host_readings(db, since)?,
         disk: disk_windows(db, since)?,
+        drive_read: None,
     })
 }
 
@@ -1464,13 +1465,32 @@ fn stored_causes(text: &str) -> BTreeMap<api::WaitCause, u64> {
     causes
 }
 
+/// What `device` wrote in the windows that read it and started at or after `since` (ms), and the ms they span.
+pub(super) fn drive_read_since(
+    db: &Connection,
+    device: &str,
+    since: u64,
+) -> rusqlite::Result<crate::insights::DriveRead> {
+    db.query_row(
+        "SELECT coalesce(sum(drive), 0), coalesce(sum(end_at - start), 0) FROM disk_windows \
+         WHERE device = ?1 AND start >= ?2 AND drive IS NOT NULL",
+        params![device, since],
+        |row| {
+            Ok(crate::insights::DriveRead {
+                bytes: row.get(0)?,
+                watched: row.get(1)?,
+            })
+        },
+    )
+}
+
 /// The windows of what the disks under Docker's root wrote that end at or after `since` (ms), oldest first.
 fn disk_windows(
     db: &Connection,
     since: u64,
 ) -> rusqlite::Result<Vec<crate::observe::disk::Window>> {
     db.prepare_cached(
-        "SELECT start, end_at, device, drive, slice, daemon, commits, store FROM disk_windows \
+        "SELECT start, end_at, device, drive, slice, daemon, commits, store, owners FROM disk_windows \
          WHERE end_at >= ?1 ORDER BY start",
     )?
     .query_map([since], |row| {
@@ -1483,6 +1503,10 @@ fn disk_windows(
             daemon: row.get(5)?,
             commits: row.get(6)?,
             store: row.get(7)?,
+            // Text no such object, as a later release's, reads as not split.
+            owners: row
+                .get::<_, Option<String>>(8)?
+                .and_then(|text| serde_json::from_str(&text).ok()),
         })
     })?
     .collect()

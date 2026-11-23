@@ -83,6 +83,7 @@ fn whole(runs: &[Run]) -> History {
         host: None,
         readings: Vec::new(),
         disk: Vec::new(),
+        drive_read: None,
     }
 }
 
@@ -1369,6 +1370,7 @@ fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_e
         drive: Some(drive),
         slice,
         daemon: Some(100 * M),
+        owners: None,
         commits: Some(7200),
         store: None,
     };
@@ -1418,10 +1420,219 @@ fn disk_writes_rank_workflows_and_jobs_and_set_the_jobs_against_the_drive_they_e
             jobs: 400 * M,
             slice: Some(3 * G),
             daemon: Some(200 * M),
+            owners: None,
         },
         "one window without the slice leaves the others' shares"
     );
     assert_eq!(drive.per_day(), 80 * G);
+}
+
+/// A window of the drive `nvme0n1` (or `device`) `hours_ago` hours before [`NOW`], an hour long, that wrote `drive`
+/// bytes, with the runner slice's `slice` and the split `owners`.
+fn drive_window(
+    device: &str,
+    hours_ago: u64,
+    drive: u64,
+    owners: Option<api::DriveOwners>,
+) -> crate::observe::disk::Window {
+    crate::observe::disk::Window {
+        start: NOW - hours_ago * HOUR,
+        end: NOW - (hours_ago - 1) * HOUR,
+        device: device.to_owned(),
+        drive: Some(drive),
+        slice: Some(drive / 4),
+        daemon: Some(drive / 100),
+        owners,
+        commits: None,
+        store: None,
+    }
+}
+
+/// Right after an upgrade the history holds windows from before runnerd split them: the shares are over the split
+/// ones only, and say so, so an old window's whole is never set against a split it did not have.
+#[test]
+fn the_drive_s_shares_are_over_its_split_windows_once_there_are_any() {
+    let owners = api::DriveOwners {
+        runnerd: Some(G / 10),
+        docker: Some(G),
+        containerd: Some(0),
+        system: G,
+        user: 0,
+        kernel: 5 * G,
+        kernel_ios: 5 * G / 16_384,
+    };
+    let history = History {
+        disk: vec![
+            drive_window("nvme0n1", 3, 8 * G, None),
+            drive_window("nvme0n1", 2, 8 * G, Some(owners)),
+            drive_window("nvme0n1", 1, 8 * G, Some(owners)),
+        ],
+        ..whole(&[])
+    };
+    let drive = insights(&history, &config(), 14, NOW)
+        .disk
+        .unwrap()
+        .drive
+        .unwrap();
+    assert_eq!(
+        drive.written,
+        24 * G,
+        "the drive's figure is over every window"
+    );
+    assert_eq!(drive.shares.watched, 2 * 3600);
+    assert_eq!(drive.shares.written, 16 * G);
+    assert_eq!(drive.shares.owners, Some(owners.plus(owners)));
+    assert!(
+        drive
+            .shares
+            .line(drive.watched)
+            .starts_with("Over the 2h 00m runnerd split the writes by cgroup: "),
+        "{}",
+        drive.shares.line(drive.watched)
+    );
+    // Only windows from before: not split, as before.
+    let old = History {
+        disk: vec![drive_window("nvme0n1", 1, 8 * G, None)],
+        ..whole(&[])
+    };
+    let shares = insights(&old, &config(), 14, NOW)
+        .disk
+        .unwrap()
+        .drive
+        .unwrap()
+        .shares;
+    assert_eq!(shares.owners, None);
+    assert!(
+        shares
+            .line(3600)
+            .contains("no owner runnerd knows 74% (not split by cgroup in these windows)"),
+        "{}",
+        shares.line(3600)
+    );
+}
+
+const TB: u64 = 1_000_000_000_000;
+
+/// [`CONFIG`] with `[host.drive]` for `nvme0n1` rated 600TB, and `written` its SMART count 24 hours before [`NOW`]
+/// when given.
+fn drive_config(written: Option<&str>) -> Config {
+    let written = written.map_or_else(String::new, |bytes| {
+        format!("written = {{ bytes = \"{bytes}\", at = \"2027-01-14T08:00:00Z\" }}\n")
+    });
+    Config::parse(&CONFIG.replace(
+        "admission = \"caps\"\n",
+        &format!(
+            "admission = \"caps\"\n\n[host.drive]\ndevice = \"nvme0n1\"\nendurance = \"600TB\"\n{written}"
+        ),
+    ))
+    .unwrap()
+}
+
+/// The owner's question: how many days until the drive has written its rating. A rate over the time runnerd did not
+/// read, the old disk's windows after Docker's root moved, a SMART count read in binary units, or a count without
+/// what was written since would each move the date.
+#[test]
+fn the_drive_s_endurance_counts_from_its_smart_count_at_the_rates_runnerd_read() {
+    // Two days ago at 4TB an hour of reading; the last day at 6TB an hour, one hour of it unread; another disk.
+    let mut disk = Vec::new();
+    for hours_ago in (25..=48).rev() {
+        disk.push(drive_window("nvme0n1", hours_ago, TB / 6, None));
+    }
+    for hours_ago in (1..=24).rev().filter(|hours| *hours != 5) {
+        disk.push(drive_window("nvme0n1", hours_ago, TB / 4, None));
+    }
+    disk.push(drive_window("nvme1n1", 1, 50 * TB, None));
+    let history = History {
+        disk,
+        drive_read: Some(super::DriveRead {
+            bytes: 23 * TB / 4,
+            watched: 23 * HOUR,
+        }),
+        ..whole(&[])
+    };
+    let found = insights(&history, &drive_config(Some("77.2TB")), 14, NOW);
+    let endurance = found.disk.as_ref().unwrap().endurance.clone().unwrap();
+    assert_eq!(endurance.rated, 600 * TB, "decimal, as SMART counts");
+    let written = endurance.written.unwrap();
+    assert_eq!(written.total(), 77_200_000_000_000 + 23 * TB / 4);
+    assert_eq!((written.watched, written.since), (23 * 3600, 24 * 3600));
+    assert_eq!(
+        endurance.day.unwrap().per_day(),
+        6 * TB,
+        "over the hours read, not the day"
+    );
+    let week = 24 * (TB / 6) + 23 * (TB / 4);
+    assert_eq!(
+        endurance.week.unwrap().per_day(),
+        week * 24 / 47,
+        "nvme1n1 left out"
+    );
+    let left = 600 * TB - written.total();
+    assert_eq!(
+        endurance.days_left(api::RateSpan::Week),
+        Some(left / (week * 24 / 47))
+    );
+    assert_eq!(
+        endurance.days_left(api::RateSpan::Day),
+        Some(left / (6 * TB))
+    );
+    assert_eq!(
+        endurance.lines(),
+        [
+            "nvme0n1 is rated to write 600TB (decimal terabytes, as drive makers and SMART count; runnerd's other \
+             sizes are binary, 1T = 1.1TB)",
+            "It has written at least 83TB: 77.2TB its SMART log said on Jan 14 08:00 UTC, per [host.drive], and \
+             5.8TB runnerd read since, over 23h 00m of the 1d 0h since; what it wrote while runnerd did not read it \
+             is not counted",
+            "At the last 7 days' rate, 5TB a day over the 1d 23h runnerd read it: the 517TB left lasts 103 days",
+            "At the last 24 hours' rate, 6TB a day over the 23h 00m runnerd read it: the 517TB left lasts 86 days",
+        ]
+    );
+    // Under the default 180 days: a warning, which attention and notifications carry.
+    let warning = found
+        .insights
+        .iter()
+        .find(|insight| matches!(insight.kind, InsightKind::DriveWear { .. }))
+        .expect("a drive-wear insight");
+    assert_eq!(warning.severity, Severity::Warning);
+    assert_eq!(warning.key, "drive-wear:nvme0n1");
+    assert_eq!(
+        warning.sentence,
+        "nvme0n1 reaches its rated 600TB written (decimal terabytes, as SMART counts) in 103 days at the last 7 \
+         days' rate of 5TB a day"
+    );
+    // Without a SMART count: the rates, and no days left or warning.
+    let unknown = insights(&history, &drive_config(None), 14, NOW);
+    let endurance = unknown.disk.unwrap().endurance.unwrap();
+    assert_eq!(endurance.days_left(api::RateSpan::Week), None);
+    assert!(!endurance.warns(), "no count, no warning");
+    assert!(
+        endurance.lines()[1].starts_with("What it has written is unknown"),
+        "{:?}",
+        endurance.lines()
+    );
+    // Past its rating: a warning that says so.
+    let past = insights(&history, &drive_config(Some("600.5TB")), 14, NOW);
+    let warning = past
+        .insights
+        .iter()
+        .find(|insight| matches!(insight.kind, InsightKind::DriveWear { .. }))
+        .expect("a drive-wear insight past the rating");
+    assert!(
+        warning.sentence.contains("has written its rated 600TB"),
+        "{}",
+        warning.sentence
+    );
+    // No [host.drive]: nothing.
+    let none = insights(&history, &config(), 14, NOW);
+    assert_eq!(none.disk.unwrap().endurance, None);
+    assert!(
+        !none
+            .insights
+            .iter()
+            .any(|insight| matches!(insight.kind, InsightKind::DriveWear { .. })),
+        "no rating, no warning"
+    );
 }
 
 #[test]

@@ -4,8 +4,8 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, DiskWrites, HostHazard, Insight, InsightKind, Insights, LabelledFigure, ProfileQueue,
-    RepositoryWaits, RunLink, ShareOwner, Tone, View, WriteTop,
+    Digest, DiskWrites, Endurance, HostHazard, Insight, InsightKind, Insights, LabelledFigure,
+    ProfileQueue, RepositoryWaits, RunLink, ShareOwner, Tone, View, WriteTop,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -146,6 +146,17 @@ fn disk_writes(disk: &DiskWrites) -> Markup {
                     }
                 }
             }
+            @if let Some(endurance) = &disk.endurance {
+                div class=(format!("endurance {}", super::tone_class(endurance.tone()))) {
+                    h3 { (Endurance::TITLE) }
+                    (figure_list("headline disk-figures", &endurance.figures()))
+                    ul.host-days {
+                        @for line in endurance.lines() {
+                            li { (line) }
+                        }
+                    }
+                }
+            }
             div.write-tops {
                 (ranked(DiskWrites::WORKFLOWS_TITLE, &disk.workflows))
                 (ranked(DiskWrites::TOP_JOBS_TITLE, &disk.top_jobs))
@@ -190,6 +201,11 @@ fn owner_class(owner: ShareOwner) -> &'static str {
         ShareOwner::Jobs => "owner-jobs",
         ShareOwner::Slice => "owner-slice",
         ShareOwner::Daemon => "owner-daemon",
+        ShareOwner::Docker => "owner-docker",
+        ShareOwner::Containerd => "owner-containerd",
+        ShareOwner::System => "owner-system",
+        ShareOwner::User => "owner-user",
+        ShareOwner::Kernel => "owner-kernel",
         ShareOwner::Unknown => "owner-unknown",
     }
 }

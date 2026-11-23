@@ -236,7 +236,7 @@ fn sections(insights: &api::Insights, width: usize, theme: Theme) -> Vec<Vec<Lin
 const DISK_FIGURES_FROM: usize = 40;
 
 /// The disk writes as figures: what the jobs and the drive wrote, dim under them what the figures leave out, the
-/// drive's shares as one bar with its key, and the
+/// drive's shares as one bar with its key, its endurance's figures over its lines, and the
 /// workflows and jobs that wrote most as ranked bars with core's note.
 fn disk_figures(disk: &api::DiskWrites, width: usize, theme: Theme) -> Vec<Line<'static>> {
     let mut lines = figure_rows(disk.figures().iter().map(Into::into), width, theme);
@@ -250,6 +250,25 @@ fn disk_figures(disk: &api::DiskWrites, width: usize, theme: Theme) -> Vec<Line<
         lines.push(Line::from(""));
         lines.push(Line::raw(api::DiskWrites::SHARES_TITLE));
         lines.extend(shares(&drive.shares.parts(), width, theme));
+    }
+    if let Some(endurance) = &disk.endurance {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            api::Endurance::TITLE,
+            theme.tone(endurance.tone().into()),
+        ));
+        lines.extend(figure_rows(
+            endurance.figures().iter().map(Into::into),
+            width,
+            theme,
+        ));
+        lines.extend(
+            endurance
+                .lines()
+                .iter()
+                .flat_map(|line| wrap(line, width))
+                .map(|line| Line::styled(line, theme.dim())),
+        );
     }
     for (title, tops) in [
         (api::DiskWrites::WORKFLOWS_TITLE, &disk.workflows),
@@ -297,6 +316,11 @@ fn owner_mark(owner: api::ShareOwner, theme: Theme) -> (&'static str, Style) {
         api::ShareOwner::Jobs => ("█", theme.profile(Some(0))),
         api::ShareOwner::Slice => ("▓", theme.profile(Some(2))),
         api::ShareOwner::Daemon => ("▒", theme.profile(Some(3))),
+        api::ShareOwner::Docker => ("▞", theme.profile(Some(1))),
+        api::ShareOwner::Containerd => ("▚", theme.profile(Some(5))),
+        api::ShareOwner::System => ("▄", theme.profile(Some(4))),
+        api::ShareOwner::User => ("▀", theme.profile(Some(4))),
+        api::ShareOwner::Kernel => ("▙", theme.dim()),
         api::ShareOwner::Unknown => ("░", theme.dim()),
     }
 }

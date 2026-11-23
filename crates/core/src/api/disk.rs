@@ -94,6 +94,9 @@ pub struct DiskWrites {
     /// The drive's figures; `None` when the daemon read none in the window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive: Option<DriveWrites>,
+    /// How long `[host.drive]`'s rating lasts (ADR 0157); `None` without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endurance: Option<super::Endurance>,
 }
 
 /// What the jobs that ended in a window wrote, each its runner container's [`DiskWritten`].
@@ -169,6 +172,58 @@ pub struct DriveShares {
     /// What the daemon itself wrote then, to any disk; `None` where it could not read its own counters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<u64>,
+    /// Who else wrote then, by cgroup; `None` when the stretch was not split, as windows stored before runnerd split
+    /// them (ADR 0157). With it, runnerd's share is its cgroup's [`DriveOwners::runnerd`], not `daemon`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owners: Option<DriveOwners>,
+}
+
+/// What each writer runnerd tells apart by cgroup sent the disks under Docker's root (ADR 0157), from `io.stat`: the
+/// root cgroup's line counts every write to them, and each child's what its processes sent, so the root's less its
+/// children's is what no cgroup sent, the kernel's own threads and the file system's writes on no one's account. Bytes,
+/// as the disks were sent them, after compression; the runner slice's are [`DriveShares::slice`], apart from these.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriveOwners {
+    /// runnerd's own cgroup, its `systemd` unit's; `None` when it could not be told apart: unread, the root, or one
+    /// that holds another writer here or sits in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runnerd: Option<u64>,
+    /// The host's Docker daemon, `system.slice/docker.service`; `None` without that cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<u64>,
+    /// containerd, `system.slice/containerd.service`; `None` without that cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containerd: Option<u64>,
+    /// Every other cgroup outside `user.slice`: system services, `init.scope`, mounts.
+    pub system: u64,
+    /// `user.slice` less runnerd: the desktop and the programs users run.
+    pub user: u64,
+    /// The root cgroup's less its children's: what no cgroup sent.
+    pub kernel: u64,
+    /// The write requests of that, for their average size.
+    pub kernel_ios: u64,
+}
+
+impl DriveOwners {
+    /// Both added together; a figure either lacks is absent.
+    #[must_use]
+    pub fn plus(self, other: DriveOwners) -> DriveOwners {
+        let both = |a: Option<u64>, b: Option<u64>| Some(a?.saturating_add(b?));
+        DriveOwners {
+            runnerd: both(self.runnerd, other.runnerd),
+            docker: both(self.docker, other.docker),
+            containerd: both(self.containerd, other.containerd),
+            system: self.system.saturating_add(other.system),
+            user: self.user.saturating_add(other.user),
+            kernel: self.kernel.saturating_add(other.kernel),
+            kernel_ios: self.kernel_ios.saturating_add(other.kernel_ios),
+        }
+    }
+
+    /// The average size of a write no cgroup sent, in bytes; `None` without one.
+    pub fn kernel_write(&self) -> Option<u64> {
+        self.kernel.checked_div(self.kernel_ios)
+    }
 }
 
 /// btrfs's transaction commits over the stretches the daemon read them.
@@ -290,8 +345,8 @@ impl DriveWrites {
     }
 
     /// Them in lines: what the drive wrote and its daily rate; what the figures count when Docker's root is in a
-    /// file on it; whose it was, runner jobs', the rest of the runner slice's, runnerd's own and the share no one in
-    /// runnerd owns, unless it wrote nothing over the shares; and btrfs's commits a second.
+    /// file on it; whose it was ([`DriveShares::parts`]), unless it wrote nothing over the shares, with what the
+    /// writes no cgroup sent likely are; and btrfs's commits a second.
     pub fn lines(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "{} wrote {} over the {} runnerd read it: {} a day at this rate",
@@ -303,6 +358,7 @@ impl DriveWrites {
         lines.extend(self.store_note());
         if !self.shares.is_empty() {
             lines.push(self.shares.line(self.watched));
+            lines.extend(self.metadata_note());
         }
         if let Some(commits) = self.commits {
             lines.push(format!(
@@ -318,6 +374,21 @@ impl DriveWrites {
     /// What its bytes are called among the figures: `nvme0n1 wrote`.
     fn label(&self) -> String {
         format!("{} wrote", self.device)
+    }
+
+    /// What the writes no cgroup sent likely are, on btrfs, when they average its default node size, 16K, to within
+    /// a sixteenth: its tree blocks, which it writes through an inode of the root cgroup whoever forced the commit.
+    /// An inference from their size, said as one.
+    fn metadata_note(&self) -> Option<String> {
+        const NODE: u64 = 16 << 10;
+        let size = self.shares.owners?.kernel_write()?;
+        (self.commits.is_some() && size.abs_diff(NODE) <= NODE / 16).then(|| {
+            format!(
+                "What no cgroup wrote averaged {} a write, btrfs's node size: likely file-system metadata, which btrfs \
+                 writes on no one's account (inferred from the size, not measured)",
+                ByteSize(size)
+            )
+        })
     }
 
     /// What the figures count when Docker's root is a file system in a file on the drive.
@@ -351,18 +422,34 @@ pub enum ShareOwner {
     Slice,
     /// runnerd itself.
     Daemon,
+    /// The host's Docker daemon, which creates and removes the runners' containers.
+    Docker,
+    /// containerd.
+    Containerd,
+    /// Other system services.
+    System,
+    /// Other user programs.
+    User,
+    /// What no cgroup sent: the kernel's own threads and the file system's writes on no one's account.
+    Kernel,
     /// No owner runnerd knows.
     Unknown,
 }
 
 impl ShareOwner {
-    /// Its name, lower case: `runner jobs`, `the rest of the runner slice`, `runnerd itself`, `no owner runnerd
-    /// knows`.
+    /// Its name, lower case: `runner jobs`, `the rest of the runner slice`, `runnerd itself`, `the host's Docker
+    /// daemon`, `containerd`, `other system services`, `other user programs`, `no cgroup (the kernel)`, `no owner
+    /// runnerd knows`.
     pub fn label(self) -> &'static str {
         match self {
             ShareOwner::Jobs => "runner jobs",
             ShareOwner::Slice => "the rest of the runner slice",
             ShareOwner::Daemon => "runnerd itself",
+            ShareOwner::Docker => "the host's Docker daemon",
+            ShareOwner::Containerd => "containerd",
+            ShareOwner::System => "other system services",
+            ShareOwner::User => "other user programs",
+            ShareOwner::Kernel => "no cgroup (the kernel)",
             ShareOwner::Unknown => "no owner runnerd knows",
         }
     }
@@ -387,8 +474,10 @@ impl DriveShares {
     }
 
     /// Whose the bytes were, in the order the line says them: runner jobs', the rest of the runner slice's when its
-    /// `io.stat` was read, runnerd's own when read, and the rest, no owner runnerd knows. Their bytes add up to the
-    /// whole; jobs that ended in the stretch may count what they wrote before it, so no share passes the whole.
+    /// `io.stat` was read, runnerd's own when read; split by cgroup, the host's Docker daemon's and containerd's when
+    /// their cgroups were there, other system services', other user programs' and no cgroup's; and the rest, no owner
+    /// runnerd knows, which a split stretch shows only when some is left. Their bytes add up to the whole; jobs that
+    /// ended in the stretch may count what they wrote before it, so no share passes the whole.
     pub fn parts(&self) -> Vec<DriveShare> {
         let whole = self.written;
         let share = |owner, bytes| DriveShare {
@@ -398,7 +487,7 @@ impl DriveShares {
         };
         let counted = self.jobs.min(whole);
         let mut parts = vec![share(ShareOwner::Jobs, counted)];
-        let owned = match self.slice {
+        let mut owned = match self.slice {
             Some(slice) => {
                 let slice = slice.clamp(counted, whole);
                 parts.push(share(ShareOwner::Slice, slice - counted));
@@ -406,14 +495,31 @@ impl DriveShares {
             }
             None => counted,
         };
-        let daemon = self.daemon.map(|daemon| daemon.min(whole - owned));
-        if let Some(daemon) = daemon {
-            parts.push(share(ShareOwner::Daemon, daemon));
+        let daemon = match self.owners {
+            Some(owners) => owners.runnerd,
+            None => self.daemon,
+        };
+        let split = self.owners.map(|owners| {
+            [
+                (ShareOwner::Docker, owners.docker),
+                (ShareOwner::Containerd, owners.containerd),
+                (ShareOwner::System, Some(owners.system)),
+                (ShareOwner::User, Some(owners.user)),
+                (ShareOwner::Kernel, Some(owners.kernel)),
+            ]
+        });
+        for (owner, bytes) in
+            std::iter::once((ShareOwner::Daemon, daemon)).chain(split.into_iter().flatten())
+        {
+            if let Some(bytes) = bytes {
+                let bytes = bytes.min(whole - owned);
+                owned += bytes;
+                parts.push(share(owner, bytes));
+            }
         }
-        parts.push(share(
-            ShareOwner::Unknown,
-            whole - owned - daemon.unwrap_or(0),
-        ));
+        if self.owners.is_none() || whole > owned {
+            parts.push(share(ShareOwner::Unknown, whole - owned));
+        }
         largest_remainder(&mut parts, whole);
         parts
     }
@@ -430,10 +536,19 @@ impl DriveShares {
             .parts()
             .iter()
             .map(|part| {
-                let note = if part.owner == ShareOwner::Slice {
-                    " (seeds, the mirror, runners before and after their jobs, write-back after a container ended)"
-                } else {
-                    ""
+                let note = match part.owner {
+                    ShareOwner::Slice => {
+                        " (seeds, the mirror, runners before and after their jobs, write-back after a container \
+                         ended)"
+                            .to_owned()
+                    }
+                    ShareOwner::Kernel => self
+                        .owners
+                        .and_then(|owners| owners.kernel_write())
+                        .map(|size| format!(" ({} a write)", ByteSize(size)))
+                        .unwrap_or_default(),
+                    ShareOwner::Unknown if self.owners.is_none() => format!(" ({})", Self::NOT_SPLIT),
+                    _ => String::new(),
                 };
                 format!("{} {}%{note}", part.owner.label(), part.percent)
             })
@@ -446,17 +561,35 @@ impl DriveShares {
         sentence_case(&line)
     }
 
+    /// What the shares leave out, when there are shares to show: the shorter stretch they cover than the `watched`
+    /// seconds the drive was read, the runner slice unread, and the stretch not split by cgroup.
+    fn notes(&self, watched: u64) -> Vec<String> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        self.stretch_note(watched)
+            .into_iter()
+            .chain(self.slice.is_none().then(|| Self::SLICE_UNREAD.to_owned()))
+            .chain(self.owners.is_none().then(|| Self::NOT_SPLIT.to_owned()))
+            .collect()
+    }
+
     /// What the shares say when the runner slice was not read.
     const SLICE_UNREAD: &'static str = "the runner slice's share unread";
 
-    /// `over the 1h 00m runnerd read the runner slice`, when that is shorter than the `watched` seconds the drive was
-    /// read.
+    /// What the share no owner runnerd knows says when the stretch was not split by cgroup.
+    const NOT_SPLIT: &'static str = "not split by cgroup in these windows";
+
+    /// `over the 1h 00m runnerd split the writes by cgroup`, or `read the runner slice` for a stretch not split, when
+    /// that is shorter than the `watched` seconds the drive was read.
     fn stretch_note(&self, watched: u64) -> Option<String> {
         (self.watched < watched).then(|| {
-            format!(
-                "over the {} runnerd read the runner slice",
-                duration(self.watched)
-            )
+            let what = if self.owners.is_some() {
+                "split the writes by cgroup"
+            } else {
+                "read the runner slice"
+            };
+            format!("over the {} runnerd {what}", duration(self.watched))
         })
     }
 }
@@ -472,7 +605,8 @@ fn sentence_case(line: &str) -> String {
 /// A part of the disk-writes section, under its title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteSection {
-    /// `Jobs`, `Drive`, [`DiskWrites::WORKFLOWS_TITLE`], [`DiskWrites::TOP_JOBS_TITLE`].
+    /// `Jobs`, `Drive`, [`Endurance::TITLE`](super::Endurance::TITLE), [`DiskWrites::WORKFLOWS_TITLE`],
+    /// [`DiskWrites::TOP_JOBS_TITLE`].
     pub title: &'static str,
     /// Its lines, in order.
     pub lines: Vec<String>,
@@ -512,14 +646,10 @@ impl DiskWrites {
                     .map(|note| format!("{}: {note}", drive.label())),
             );
             caveats.extend(
-                (!drive.shares.is_empty())
-                    .then(|| drive.shares.stretch_note(drive.watched))
-                    .flatten()
+                drive
+                    .shares
+                    .notes(drive.watched)
                     .into_iter()
-                    .chain(
-                        (!drive.shares.is_empty() && drive.shares.slice.is_none())
-                            .then(|| DriveShares::SLICE_UNREAD.to_owned()),
-                    )
                     .map(|note| format!("{}: {note}", Self::SHARES_TITLE)),
             );
         }
@@ -558,8 +688,8 @@ impl DiskWrites {
         figures
     }
 
-    /// Its parts in order, each with what it says, none empty: the jobs' figures, the drive's, and the workflows and
-    /// the jobs that wrote most.
+    /// Its parts in order, each with what it says, none empty: the jobs' figures, the drive's, its endurance, and the
+    /// workflows and the jobs that wrote most.
     pub fn sections(&self) -> Vec<WriteSection> {
         let mut sections = Vec::new();
         if self.jobs.measured > 0 {
@@ -572,6 +702,12 @@ impl DiskWrites {
             sections.push(WriteSection {
                 title: "Drive",
                 lines: drive.lines(),
+            });
+        }
+        if let Some(endurance) = &self.endurance {
+            sections.push(WriteSection {
+                title: super::Endurance::TITLE,
+                lines: endurance.lines(),
             });
         }
         for (title, top) in [
@@ -625,6 +761,7 @@ mod tests {
             jobs: 150 * G,
             slice: Some(200 * G),
             daemon: Some(6 * G),
+            owners: None,
         };
         let drive = DriveWrites {
             device: "nvme0n1".to_owned(),
@@ -642,7 +779,8 @@ mod tests {
             [
                 "nvme0n1 wrote 600G over the 6h 00m runnerd read it: 2.34T a day at this rate",
                 "Runner jobs 25%; the rest of the runner slice 8% (seeds, the mirror, runners before and after \
-                 their jobs, write-back after a container ended); runnerd itself 1%; no owner runnerd knows 66%",
+                 their jobs, write-back after a container ended); runnerd itself 1%; no owner runnerd knows 66% \
+                 (not split by cgroup in these windows)",
                 "btrfs committed 2.0 times a second",
             ]
         );
@@ -659,7 +797,8 @@ mod tests {
         assert_eq!(
             over.lines()[1],
             "Runner jobs 100%; the rest of the runner slice 0% (seeds, the mirror, runners before and after their \
-             jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0%"
+             jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0% (not split by cgroup in \
+             these windows)"
         );
         assert_eq!(over.lines().len(), 2, "no commits line off btrfs");
         let in_a_file = DriveWrites {
@@ -680,6 +819,7 @@ mod tests {
                 jobs: 50 * G,
                 slice: Some(60 * G),
                 daemon: None,
+                owners: None,
             },
             ..drive
         };
@@ -687,7 +827,112 @@ mod tests {
             part.lines()[1],
             "Over the 1h 00m runnerd read the runner slice: runner jobs 50%; the rest of the runner slice 10% (seeds, \
              the mirror, runners before and after their jobs, write-back after a container ended); no owner runnerd \
-             knows 40%"
+             knows 40% (not split by cgroup in these windows)"
+        );
+    }
+
+    /// Split by cgroup, the share runnerd knew no owner of names the host's Docker daemon, the other services and
+    /// programs, and the kernel, and runnerd's own is its cgroup's, never also `/proc/self/io`'s: counting both would
+    /// count it twice. On btrfs, 16K writes no cgroup sent read as likely metadata, said as an inference.
+    #[test]
+    fn split_shares_name_each_writer_and_infer_metadata_from_16k_writes_on_btrfs() {
+        const K: u64 = 1 << 10;
+        let owners = DriveOwners {
+            runnerd: Some(G),
+            docker: Some(52 * G),
+            containerd: Some(5 * G),
+            system: 9 * G,
+            user: 2 * G,
+            kernel: 320 * G,
+            kernel_ios: 320 * G / (16 * K),
+        };
+        let shares = DriveShares {
+            watched: 6 * 3600,
+            written: 574 * G,
+            jobs: 140 * G,
+            slice: Some(183 * G),
+            // Logical bytes from /proc/self/io: not what the split uses.
+            daemon: Some(30 * G),
+            owners: Some(owners),
+        };
+        let parts = shares.parts();
+        assert_eq!(
+            parts
+                .iter()
+                .map(|part| (part.owner, part.bytes))
+                .collect::<Vec<_>>(),
+            [
+                (ShareOwner::Jobs, 140 * G),
+                (ShareOwner::Slice, 43 * G),
+                (ShareOwner::Daemon, G),
+                (ShareOwner::Docker, 52 * G),
+                (ShareOwner::Containerd, 5 * G),
+                (ShareOwner::System, 9 * G),
+                (ShareOwner::User, 2 * G),
+                (ShareOwner::Kernel, 320 * G),
+                (ShareOwner::Unknown, 2 * G),
+            ]
+        );
+        assert_eq!(parts.iter().map(|part| part.percent).sum::<u64>(), 100);
+        let drive = DriveWrites {
+            device: "nvme0n1".to_owned(),
+            watched: 6 * 3600,
+            written: 574 * G,
+            shares,
+            commits: Some(Commits {
+                count: 43_200,
+                watched: 6 * 3600,
+            }),
+            store: None,
+        };
+        assert_eq!(
+            drive.lines()[1..3],
+            [
+                "Runner jobs 24%; the rest of the runner slice 8% (seeds, the mirror, runners before and after their \
+                 jobs, write-back after a container ended); runnerd itself 0%; the host's Docker daemon 9%; \
+                 containerd 1%; other system services 2%; other user programs 0%; no cgroup (the kernel) 56% (16K a \
+                 write); no owner runnerd knows 0%",
+                "What no cgroup wrote averaged 16K a write, btrfs's node size: likely file-system metadata, which \
+                 btrfs writes on no one's account (inferred from the size, not measured)",
+            ]
+        );
+        // Off btrfs the size says nothing of metadata; nor do larger writes on it.
+        let ext4 = DriveWrites {
+            commits: None,
+            ..drive.clone()
+        };
+        assert!(
+            !ext4.lines().iter().any(|line| line.contains("metadata")),
+            "no inference off btrfs: {:?}",
+            ext4.lines()
+        );
+        let large = DriveWrites {
+            shares: DriveShares {
+                owners: Some(DriveOwners {
+                    kernel_ios: 320 * G / (128 * K),
+                    ..owners
+                }),
+                ..shares
+            },
+            ..drive
+        };
+        assert!(
+            !large.lines().iter().any(|line| line.contains("metadata")),
+            "no inference from 128K writes: {:?}",
+            large.lines()
+        );
+        // Split to the byte, nothing is left for no owner: its share is not drawn.
+        let whole = DriveShares {
+            written: 572 * G,
+            ..shares
+        };
+        assert!(
+            whole
+                .parts()
+                .iter()
+                .all(|part| part.owner != ShareOwner::Unknown),
+            "{:?}",
+            whole.parts()
         );
     }
 
@@ -702,6 +947,7 @@ mod tests {
             jobs: 150 * G,
             slice: Some(90 * G),
             daemon: Some(G),
+            owners: None,
         };
         let parts = shares.parts();
         assert_eq!(
@@ -714,7 +960,8 @@ mod tests {
         assert_eq!(
             shares.line(3600),
             "Runner jobs 100%; the rest of the runner slice 0% (seeds, the mirror, runners before and after their \
-             jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0%"
+             jobs, write-back after a container ended); runnerd itself 0%; no owner runnerd knows 0% (not split by cgroup in \
+             these windows)"
         );
     }
 
@@ -730,6 +977,7 @@ mod tests {
             jobs: 5,
             slice: Some(10),
             daemon: Some(5),
+            owners: None,
         };
         assert_eq!(
             percents(halves),
@@ -742,6 +990,7 @@ mod tests {
             jobs: 1,
             slice: Some(2),
             daemon: Some(1),
+            owners: None,
         };
         assert_eq!(percents(thirds), [34, 33, 33, 0]);
         let none = DriveShares {
@@ -750,6 +999,7 @@ mod tests {
             jobs: 0,
             slice: None,
             daemon: None,
+            owners: None,
         };
         assert_eq!(percents(none), [0, 0]);
     }
@@ -767,6 +1017,7 @@ mod tests {
         assert_eq!(top.note(), "1 job, 410M a job");
         assert_eq!(top.line(), "halyard/ledger CI: 410M over 1 job, 410M a job");
         let disk = DiskWrites {
+            endurance: None,
             jobs: JobWrites {
                 measured: 31,
                 partial: 0,
@@ -787,6 +1038,7 @@ mod tests {
                     jobs: 12 * G,
                     slice: None,
                     daemon: None,
+                    owners: None,
                 },
                 commits: Some(Commits {
                     count: 112_320,
@@ -832,8 +1084,10 @@ mod tests {
             jobs: 50 * G,
             slice: None,
             daemon: None,
+            owners: None,
         };
         let disk = DiskWrites {
+            endurance: None,
             jobs: JobWrites {
                 measured: 529,
                 partial: 12,
@@ -863,6 +1117,7 @@ mod tests {
                  file system under it",
                 "Who wrote to the drive: over the 1h 00m runnerd read the runner slice",
                 "Who wrote to the drive: the runner slice's share unread",
+                "Who wrote to the drive: not split by cgroup in these windows",
             ]
         );
         // The sentences say the same, in the same words.
@@ -895,6 +1150,7 @@ mod tests {
                 store: None,
                 shares: DriveShares {
                     slice: Some(60 * G),
+                    owners: Some(DriveOwners::default()),
                     ..shares
                 },
                 ..drive
@@ -914,6 +1170,7 @@ mod tests {
             jobs: 0,
             slice: None,
             daemon: None,
+            owners: None,
         };
         assert!(quiet.is_empty(), "nothing to draw");
         assert!(
@@ -938,6 +1195,7 @@ mod tests {
             "no shares line of zeros"
         );
         let disk = DiskWrites {
+            endurance: None,
             jobs: JobWrites::default(),
             workflows: Vec::new(),
             top_jobs: Vec::new(),

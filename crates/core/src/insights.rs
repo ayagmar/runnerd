@@ -231,6 +231,18 @@ pub struct History {
     pub readings: Vec<HostReading>,
     /// The windows of what the disks under Docker's root wrote, oldest first (ADR 0143).
     pub disk: Vec<crate::observe::disk::Window>,
+    /// What `[host.drive]`'s disk wrote since its SMART count, as far as runnerd read it (ADR 0157); `None` when the
+    /// config gives no count, or it was not read.
+    pub drive_read: Option<DriveRead>,
+}
+
+/// What runnerd read a disk write over its windows in a stretch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DriveRead {
+    /// Bytes.
+    pub bytes: u64,
+    /// The ms the windows span.
+    pub watched: u64,
 }
 
 /// A job as insights tell jobs apart: repository, workflow and name.
@@ -278,6 +290,12 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
     found.extend(host::low(&host_days));
     let waits = waits(history, now);
     found.extend(waits.iter().filter_map(waits_insight));
+    let endurance = config
+        .host
+        .drive
+        .as_ref()
+        .map(|drive| disk::endurance(drive, &history.disk, history.drive_read, now));
+    found.extend(endurance.as_ref().and_then(disk::endurance_insight));
     found.sort_by(|a, b| {
         (a.severity, &a.repository, &a.workflow, &a.job, &a.key).cmp(&(
             b.severity,
@@ -293,7 +311,10 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         insights: found,
         waits,
         host: host_days,
-        disk: disk::writes(&window, &history.disk, since, now),
+        disk: disk::writes(&window, &history.disk, since, now).map(|writes| api::DiskWrites {
+            endurance,
+            ..writes
+        }),
         queue: queue::split(&window, history.kept_since),
     }
 }

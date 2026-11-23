@@ -179,7 +179,8 @@ CREATE TABLE samples (
 -- from its first reading to its last, in ms; the disks' names; the loop devices Docker's root is on when it is a
 -- file system in a file on those disks, NULL otherwise; the bytes the disks wrote; of those, the runner slice's, to
 -- the loop devices when there are any; what the daemon itself wrote, to any disk; btrfs commits. NULL where a reading
--- lacked the figure. Pruned with job records.
+-- lacked the figure; who else wrote, by cgroup, as the JSON of `api::DriveOwners` (ADR 0157), NULL where a reading
+-- lacked it or before runnerd split them. Pruned with job records.
 CREATE TABLE disk_windows (
     start INTEGER PRIMARY KEY NOT NULL,
     end_at INTEGER NOT NULL,
@@ -188,7 +189,8 @@ CREATE TABLE disk_windows (
     drive INTEGER,
     slice INTEGER,
     daemon INTEGER,
-    commits INTEGER
+    commits INTEGER,
+    owners TEXT
 ) WITHOUT ROWID;
 
 CREATE TABLE host_samples (

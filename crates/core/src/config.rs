@@ -91,6 +91,53 @@ pub struct Host {
     /// One Sysbox profile to probe after its runners exit (ADR 0155). Absent by default; ignored under unsafe-dind.
     #[serde(default)]
     pub sysbox_probe_profile: Option<String>,
+    /// The drive under Docker's root as its maker rates it (ADR 0157): absent, insights show no endurance.
+    #[serde(default)]
+    pub drive: Option<Drive>,
+}
+
+/// `[host.drive]`: what the drive under Docker's root is rated to write, and what its SMART log last said it had
+/// written, for insights to say how long the rating lasts at the rate runnerd reads (ADR 0157). runnerd cannot read
+/// SMART unprivileged, and sysfs does not say, so the count is the owner's, from `smartctl`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Drive {
+    /// The disk, as runnerd names those under Docker's root: `nvme3n1`. Only its windows count.
+    pub device: String,
+    /// What its maker rates it to write, its TBW: `600TB`.
+    pub endurance: DriveBytes,
+    /// What its SMART log said it had written, and when; absent, insights show its rate and no days left.
+    #[serde(default)]
+    pub written: Option<DriveWritten>,
+    /// Days left at the last 7 days' rate under which an insight warns. Default 180.
+    #[serde(default = "default_warn_days")]
+    pub warn_days: u32,
+}
+
+/// A drive's written total as its SMART log said it at a time: `{ bytes = "77.2TB", at = "2026-11-23T12:00:00Z" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriveWritten {
+    /// `Data Units Written`, which `smartctl` also prints in TB: `77.2TB`.
+    pub bytes: DriveBytes,
+    /// When it was read, in seconds since the Unix epoch; written as a UTC RFC 3339 time, `2026-11-23T12:00:00Z`.
+    #[serde(deserialize_with = "utc_seconds")]
+    pub at: u64,
+}
+
+fn default_warn_days() -> u32 {
+    180
+}
+
+fn utc_seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    crate::time::parse_ms(&text)
+        .map(|ms| ms / 1000)
+        .ok_or_else(|| {
+            de::Error::custom(format!(
+                "invalid time {text:?}, expected UTC RFC 3339, such as \"2026-11-23T12:00:00Z\""
+            ))
+        })
 }
 
 /// Whether a profile's image answers its runner's sync calls without syncing, as doctor reads it.
@@ -2176,6 +2223,77 @@ impl ByteSize {
         } else {
             format!("{:.0}{unit}", value.round())
         }
+    }
+}
+
+/// A size in the decimal units drive makers rate and SMART counts in: `600TB` is 600 × 10¹² bytes. [`ByteSize`]'s
+/// `T` is 2⁴⁰ bytes, 10% more, so a size written `600T` is refused rather than read as either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DriveBytes(pub u64);
+
+const DECIMAL_UNITS: [(&str, u64); 5] = [
+    ("PB", 1_000_000_000_000_000),
+    ("TB", 1_000_000_000_000),
+    ("GB", 1_000_000_000),
+    ("MB", 1_000_000),
+    ("KB", 1_000),
+];
+
+impl FromStr for DriveBytes {
+    type Err = String;
+
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a drive's sizes are far below 2^52 bytes, and the result is checked against u64's range first"
+    )]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || {
+            format!(
+                "invalid drive size {s:?}, expected a number and a decimal unit as drive makers write them (KB, MB, \
+                 GB, TB or PB), such as \"600TB\""
+            )
+        };
+        let upper = s.to_ascii_uppercase();
+        let (unit, factor) = DECIMAL_UNITS
+            .iter()
+            .find(|(unit, _)| upper.ends_with(unit))
+            .ok_or_else(invalid)?;
+        let number = &s[..s.len() - unit.len()];
+        if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return Err(invalid());
+        }
+        let number: f64 = number.parse().map_err(|_| invalid())?;
+        let bytes = (number * *factor as f64).round();
+        if bytes >= u64::MAX as f64 {
+            return Err(format!("drive size {s:?} is too large"));
+        }
+        Ok(DriveBytes(bytes as u64))
+    }
+}
+
+impl fmt::Display for DriveBytes {
+    /// In the largest decimal unit it reaches, to a tenth: `77.2TB`, `600TB`, `4.6TB`.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "shown with one decimal, far coarser than f64's precision"
+    )]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some((unit, factor)) = DECIMAL_UNITS.iter().find(|(_, factor)| self.0 >= *factor)
+        else {
+            return write!(f, "{}B", self.0);
+        };
+        let number = format!("{:.1}", self.0 as f64 / *factor as f64);
+        write!(f, "{}{unit}", number.trim_end_matches(".0"))
+    }
+}
+
+impl<'de> Deserialize<'de> for DriveBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
     }
 }
 

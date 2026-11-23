@@ -1,7 +1,8 @@
 //! What the disk under Docker's root writes: which block devices hold that root (`Disks::resolve`, from
 //! `/proc/self/mountinfo` and sysfs), the bytes a cgroup wrote to them (`io.stat`), and over windows of
 //! `WINDOW` the bytes the drive wrote (`/sys/class/block/<disk>/stat`), the bytes the runners' slice wrote and the
-//! btrfs commits of the file system (`/sys/fs/btrfs/<uuid>/commit_stats`); and the free disk Docker has
+//! btrfs commits of the file system (`/sys/fs/btrfs/<uuid>/commit_stats`), and who else wrote to them by cgroup
+//! (`Owners`, ADR 0157); and the free disk Docker has
 //! (`free_space`), down through a loop device's backing file. A figure the host does not give, as on
 //! cgroup v1, a kernel without the io controller, a file system other than btrfs or an unreadable sysfs, is absent,
 //! never 0. Reads files only; it writes nothing to the host and decides nothing.
@@ -15,12 +16,20 @@
 //! what it wrote to that file system. The loop's own writes to its backing file reach the drive charged to the
 //! cgroup only some of the time, sometimes to none, so that line is never counted. The drive's bytes and commits
 //! follow the backing file (`/sys/block/loopN/loop/backing_file`) to the disk and file system under it.
+//!
+//! Who wrote: the root cgroup's `io.stat` counts every write to a disk, each child's recursively what its processes
+//! and its dead children sent, so the root's less its children's is what no cgroup sent: the kernel's own threads, and
+//! btrfs's tree blocks, which it writes through an inode of the root cgroup whoever forced the commit. Writers runnerd
+//! names, the runner slice, the host's Docker daemon, containerd and runnerd's own cgroup, come off the top-level
+//! cgroup they sit in, `user.slice` or another; what is left of those is other user programs and other system
+//! services.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::metrics::Paths;
+use crate::api::DriveOwners;
 
 /// How long a stored window of the drive's figures spans at most. A daemon's stop stores the window it is in.
 pub const WINDOW: Duration = Duration::from_mins(10);
@@ -158,16 +167,108 @@ impl Disks {
                 io.lines()
                     .find_map(|line| line.strip_prefix("write_bytes:")?.trim().parse().ok())
             });
+        let slice_written = self.written(slice);
         Reading {
             at,
             drive,
-            slice: self.written(slice).map(|written| written.bytes),
+            owners: self.owners(paths, slice, slice_written),
+            slice: slice_written.map(|written| written.bytes),
             daemon,
             commits,
             device: self.name(),
             store: self.store(),
         }
     }
+
+    /// What each writer had sent the disks so far, by cgroup (`DriveOwners`), the runner slice's `written` taken off
+    /// its top-level cgroup's; `None` without the root's `io.stat` or a top-level cgroup's, as without the io
+    /// controller. A writer's own figures are read before the top-level ones and those before the root's, so a
+    /// counter that rose meanwhile leaves the root at least its children: no difference goes below 0.
+    fn owners(&self, paths: &Paths, slice: &Path, written: Option<Written>) -> Option<DriveOwners> {
+        let root = &paths.cgroup;
+        let own = std::fs::read_to_string(paths.proc.join("self/cgroup"))
+            .ok()
+            .and_then(|cgroup| own_cgroup(&cgroup));
+        let mut placed: Vec<PathBuf> = Vec::new();
+        let mut place = |relative: Option<PathBuf>| {
+            let relative = relative.filter(|relative| {
+                relative.components().count() > 0
+                    && !placed
+                        .iter()
+                        .any(|other| other.starts_with(relative) || relative.starts_with(other))
+            })?;
+            placed.push(relative.clone());
+            Some(relative)
+        };
+        let slice = place(slice.strip_prefix(root).ok().map(Path::to_path_buf));
+        let docker = place(Some(PathBuf::from("system.slice/docker.service")));
+        let containerd = place(Some(PathBuf::from("system.slice/containerd.service")));
+        let runnerd = place(own);
+        let read = |relative: &Option<PathBuf>| {
+            relative
+                .as_ref()
+                .and_then(|relative| Some((relative.clone(), self.written(&root.join(relative))?)))
+        };
+        let slice = slice.zip(written);
+        let (docker, containerd, runnerd) = (read(&docker), read(&containerd), read(&runnerd));
+        let mut user = 0u64;
+        let mut system = 0u64;
+        let mut children = Written::default();
+        for entry in std::fs::read_dir(root).ok()?.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let path = entry.path();
+            let written = match self.written(&path) {
+                Some(written) => written,
+                // Removed since it was listed: its bytes are the root's now, as what no cgroup sent.
+                None if !path.exists() => continue,
+                None => return None,
+            };
+            children.bytes = children.bytes.saturating_add(written.bytes);
+            children.ios = children.ios.saturating_add(written.ios);
+            if entry.file_name() == USER_SLICE {
+                user = user.saturating_add(written.bytes);
+            } else {
+                system = system.saturating_add(written.bytes);
+            }
+        }
+        let root = self.written(root)?;
+        for (relative, written) in [&slice, &docker, &containerd, &runnerd]
+            .into_iter()
+            .flatten()
+        {
+            let bucket = if relative.starts_with(USER_SLICE) {
+                &mut user
+            } else {
+                &mut system
+            };
+            *bucket = bucket.saturating_sub(written.bytes);
+        }
+        let bytes =
+            |owner: &Option<(PathBuf, Written)>| owner.as_ref().map(|(_, written)| written.bytes);
+        Some(DriveOwners {
+            runnerd: bytes(&runnerd),
+            docker: bytes(&docker),
+            containerd: bytes(&containerd),
+            system,
+            user,
+            kernel: root.bytes.saturating_sub(children.bytes),
+            kernel_ios: root.ios.saturating_sub(children.ios),
+        })
+    }
+}
+
+/// The top-level cgroup of users' sessions and services.
+const USER_SLICE: &str = "user.slice";
+
+/// The cgroup v2 path `/proc/self/cgroup` gives, `0::/user.slice/.../runnerd.service`, below the cgroup root:
+/// `user.slice/.../runnerd.service`. `None` on cgroup v1, which has no `0::` line.
+fn own_cgroup(cgroup: &str) -> Option<PathBuf> {
+    cgroup.lines().find_map(|line| {
+        let path = line.strip_prefix("0::")?.trim_end();
+        Some(PathBuf::from(path.trim_start_matches('/')))
+    })
 }
 
 /// What a cgroup has written to the disks so far.
@@ -375,6 +476,7 @@ fn btrfs_uuid(paths: &Paths, source: &str) -> Option<String> {
 pub struct Reading {
     at: u64,
     drive: Option<u64>,
+    owners: Option<DriveOwners>,
     slice: Option<u64>,
     daemon: Option<u64>,
     commits: Option<u64>,
@@ -401,6 +503,9 @@ pub struct Window {
     pub daemon: Option<u64>,
     /// btrfs transaction commits; `None` on another file system or when a reading lacked them.
     pub commits: Option<u64>,
+    /// Who else wrote to the disks, by cgroup (ADR 0157); `None` when a reading lacked it, and in a window stored
+    /// before runnerd read it: not split.
+    pub owners: Option<DriveOwners>,
     /// The loop devices Docker's root is on when it is a file system in a file on `device`: `loop0`. The runner
     /// slice's figure is then what it wrote to that file system.
     pub store: Option<String>,
@@ -415,6 +520,7 @@ struct Open {
     slice: Option<u64>,
     daemon: Option<u64>,
     commits: Option<u64>,
+    owners: Option<DriveOwners>,
 }
 
 impl Open {
@@ -425,6 +531,12 @@ impl Open {
             slice: Some(0),
             daemon: Some(0),
             commits: reading.commits.map(|_| 0),
+            owners: reading.owners.map(|_| DriveOwners {
+                runnerd: Some(0),
+                docker: Some(0),
+                containerd: Some(0),
+                ..DriveOwners::default()
+            }),
             last: reading,
         }
     }
@@ -440,6 +552,23 @@ impl Open {
         self.slice = rose(self.slice, self.last.slice, reading.slice);
         self.daemon = rose(self.daemon, self.last.daemon, reading.daemon);
         self.commits = rose(self.commits, self.last.commits, reading.commits);
+        self.owners =
+            self.owners
+                .zip(self.last.owners.zip(reading.owners))
+                .map(|(sum, (before, now))| {
+                    let rose = |before: u64, now: u64| now.saturating_sub(before);
+                    let rose_some =
+                        |before: Option<u64>, now: Option<u64>| Some(now?.saturating_sub(before?));
+                    sum.plus(DriveOwners {
+                        runnerd: rose_some(before.runnerd, now.runnerd),
+                        docker: rose_some(before.docker, now.docker),
+                        containerd: rose_some(before.containerd, now.containerd),
+                        system: rose(before.system, now.system),
+                        user: rose(before.user, now.user),
+                        kernel: rose(before.kernel, now.kernel),
+                        kernel_ios: rose(before.kernel_ios, now.kernel_ios),
+                    })
+                });
         self.last = reading;
     }
 
@@ -453,6 +582,7 @@ impl Open {
             slice: self.slice,
             daemon: self.daemon,
             commits: self.commits,
+            owners: self.owners,
         }
     }
 }

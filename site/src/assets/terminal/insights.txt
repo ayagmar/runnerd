@@ -18,8 +18,14 @@ disk writes:
     1412 jobs wrote 402G: median 120M, p90 780M a job; 9 partial, counted as far as read; 6G more waited to be written back as their containers ended
   Drive:
     nvme0n1 wrote 1.28T over the 13d 20h runnerd read it: 94.7G a day at this rate
-    Runner jobs 30%; the rest of the runner slice 5% (seeds, the mirror, runners before and after their jobs, write-back after a container ended); runnerd itself 1%; no owner runnerd knows 64%
+    Runner jobs 30%; the rest of the runner slice 6% (seeds, the mirror, runners before and after their jobs, write-back after a container ended); runnerd itself 0%; the host's Docker daemon 9%; containerd 1%; other system services 1%; other user programs 1%; no cgroup (the kernel) 52% (16K a write); no owner runnerd knows 0%
+    What no cgroup wrote averaged 16K a write, btrfs's node size: likely file-system metadata, which btrfs writes on no one's account (inferred from the size, not measured)
     btrfs committed 2.6 times a second
+  Drive endurance:
+    nvme0n1 is rated to write 600TB (decimal terabytes, as drive makers and SMART count; runnerd's other sizes are binary, 1T = 1.1TB)
+    It has written at least 43.5TB: 41.3TB its SMART log said on Nov 21 11:14 UTC, per [host.drive], and 2.1TB runnerd read since, over 1d 23h of the 2d 0h since; what it wrote while runnerd did not read it is not counted
+    At the last 7 days' rate, 1.1TB a day over the 6d 20h runnerd read it: the 556.5TB left lasts 500 days
+    At the last 24 hours' rate, 1.2TB a day over the 1d 0h runnerd read it: the 556.5TB left lasts 459 days
   Workflows that wrote most:
     halyard/ledger CI: 214G over 820 jobs, 267.24M a job
     halyard/storefront CI: 131G over 540 jobs, 248.41M a job

@@ -271,23 +271,38 @@ pub(super) async fn insight_runs(
     days: u32,
     now: u64,
 ) -> Result<(History, Config), String> {
-    let runs = insight_runs_of(&state.handle.store, days, now)
-        .await
-        .map_err(|store_error| store_error.to_string())?;
     let text = state.config.lock().await.text.clone();
     let config = Config::parse(&text).map_err(|parse_error| parse_error.to_string())?;
+    let runs = insight_runs_of(&state.handle.store, &config, days, now)
+        .await
+        .map_err(|store_error| store_error.to_string())?;
     Ok((runs, config))
 }
 
-/// The jobs insights of `days` ending at `now` (ms) read.
+/// The jobs insights of `days` ending at `now` (ms) read, with what `config`'s `[host.drive]` wrote since its SMART
+/// count.
 pub(super) async fn insight_runs_of(
     store: &Store,
+    config: &Config,
     days: u32,
     now: u64,
 ) -> Result<History, StoreError> {
     const DAY: u64 = 24 * 3600 * 1000;
     let back = u64::from(days.max(14)) + 1;
-    store.insights(now.saturating_sub(back * DAY)).await
+    let mut history = store.insights(now.saturating_sub(back * DAY)).await?;
+    if let Some((drive, written)) = config
+        .host
+        .drive
+        .as_ref()
+        .and_then(|drive| Some((drive, drive.written?)))
+    {
+        history.drive_read = Some(
+            store
+                .drive_read_since(&drive.device, written.at.saturating_mul(1000))
+                .await?,
+        );
+    }
+    Ok(history)
 }
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {
