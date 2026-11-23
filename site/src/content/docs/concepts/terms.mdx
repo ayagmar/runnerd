@@ -35,7 +35,7 @@ error: slots × memory over all profiles plus the mirror is 32.5G, the slice run
 A warm runner is registered before GitHub queues the job and takes it within a second or two, where a job that finds no runner waits for a new one to start ([how long](../../guides/waiting/#how-long-it-waited)).
 
 - Each pool keeps [`warm`](../../reference/configuration/#repositories) runners (1 by default) while its repository is active: one of its jobs was waiting, taken or finished in the last 10 minutes. Otherwise they go after 5 idle minutes.
-- When a job is seen, the other jobs of its run get runners too: per pool, the median number that workflow's runs had there over 14 days, a run with none there counting as 0, less those seen. A pool needs 3 runs with jobs there first, and one that most runs skip gets none.
+- When a job is seen, the other jobs of its run get runners too: per pool, the median number that workflow's runs had there over 14 days, a run with none there counting as 0, less those seen. Only jobs this machine ran or still waits on count: one another machine took, or none ran, teaches nothing. A pool needs 3 runs with jobs there first, and one that most runs skip gets none.
 - Warm runners start last, once every queued job that fits has a runner, and reserve their profile's `memory` (and `cpus` under CPU admission). A queued job of another repository takes their room. After a job in slot 1, the profile measures what slot 1 changed without stopping anything, at most every 10 minutes. Only a reseed due by that measure (slot 1 reached [`reseed_at`](../../reference/configuration-more/#caches)) or asked for removes them, once its other runners are idle.
 
 ## Record
