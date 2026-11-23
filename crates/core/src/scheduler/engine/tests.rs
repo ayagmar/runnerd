@@ -1014,8 +1014,8 @@ struct DockerState {
     lacking_filter: BTreeSet<String>,
     /// Runner images that cannot keep the slot's own pnpm store, as those before it cannot.
     lacking_slot_pnpm_store: BTreeSet<String>,
-    /// Whether Docker fails to say what a runner image does, as when an inspect times out.
-    failing_image_inspects: bool,
+    /// Runner images Docker fails to say anything about, as when an inspect times out.
+    unanswered_images: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -1843,7 +1843,7 @@ impl DockerApi for FakeDocker {
     async fn runner_image(&self, image: &str) -> Result<docker::RunnerImage, docker::Error> {
         self.outage().await?;
         let state = self.0.lock().unwrap();
-        if state.failing_image_inspects {
+        if state.unanswered_images.contains(image) {
             return Err(docker::Error::IOError {
                 err: std::io::Error::from(std::io::ErrorKind::TimedOut),
             });

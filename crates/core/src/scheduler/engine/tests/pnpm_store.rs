@@ -93,7 +93,12 @@ async fn a_runner_whose_image_docker_cannot_tell_about_waits_and_the_slots_store
         FakeDocker::default(),
         TestDir::new("pnpm-store-inspect"),
     );
-    docker.0.lock().unwrap().failing_image_inspects = true;
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .unanswered_images
+        .insert("runnerd-runner:app".to_owned());
     let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
     engine.recover().await.unwrap();
     {
@@ -107,7 +112,7 @@ async fn a_runner_whose_image_docker_cannot_tell_about_waits_and_the_slots_store
         "no runner starts while Docker cannot say what its image does"
     );
 
-    docker.0.lock().unwrap().failing_image_inspects = false;
+    docker.0.lock().unwrap().unanswered_images.clear();
     engine.tick(Shutdown::No).await;
     let state = docker.0.lock().unwrap();
     let env = state
@@ -126,7 +131,12 @@ async fn a_runner_whose_image_docker_cannot_tell_about_waits_and_the_slots_store
 #[tokio::test]
 async fn a_runner_of_the_shared_store_starts_though_docker_cannot_tell_about_its_image() {
     let docker = FakeDocker::default();
-    docker.0.lock().unwrap().failing_image_inspects = true;
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .unanswered_images
+        .insert("runnerd-runner:app".to_owned());
     let config = CONFIG.replace(
         "pnpm = { max_size = \"5G\" }",
         "pnpm = { max_size = \"5G\", store = \"shared\" }",
