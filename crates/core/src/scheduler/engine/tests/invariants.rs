@@ -2655,7 +2655,7 @@ impl Case {
                 ran.runner_name = Some(runner.clone());
                 ran.steps = Vec::new();
                 // At `at`, not at `details`'s fixed times: the predictor reads only the runs of the last weeks.
-                let rfc3339 = super::priority::rfc3339;
+                let rfc3339 = priority::rfc3339;
                 ran.created_at = Some(rfc3339(at));
                 ran.started_at = Some(rfc3339(at + 1000));
                 ran.completed_at = Some(rfc3339(at + 59_000));
