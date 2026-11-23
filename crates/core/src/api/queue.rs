@@ -32,6 +32,8 @@ pub enum WaitCause {
     Preparing,
     /// Its repository was paused (`Waiting::Paused`).
     Paused,
+    /// The host ran on its battery (`Waiting::OnBattery`).
+    Battery,
     /// Runners of its repository failed, so none started for a while (`Waiting::Backoff`).
     Backoff,
     /// No pool served its labels (`Waiting::NoPool`).
@@ -43,7 +45,7 @@ pub enum WaitCause {
 
 impl WaitCause {
     /// Every cause, in the order a split lists them when two took as long.
-    pub const ALL: [WaitCause; 12] = [
+    pub const ALL: [WaitCause; 13] = [
         WaitCause::Barrier,
         WaitCause::Start,
         WaitCause::Slot,
@@ -53,13 +55,14 @@ impl WaitCause {
         WaitCause::Booting,
         WaitCause::Preparing,
         WaitCause::Paused,
+        WaitCause::Battery,
         WaitCause::Backoff,
         WaitCause::NoPool,
         WaitCause::Other,
     ];
 
     /// Its name as one word, the history's key and the API's: `barrier`, `start`, `slot`, `budget`, `host`, `cpu`,
-    /// `booting`, `preparing`, `paused`, `backoff`, `no-pool` or `other`.
+    /// `booting`, `preparing`, `paused`, `battery`, `backoff`, `no-pool` or `other`.
     pub fn word(self) -> &'static str {
         match self {
             WaitCause::Barrier => "barrier",
@@ -71,6 +74,7 @@ impl WaitCause {
             WaitCause::Booting => "booting",
             WaitCause::Preparing => "preparing",
             WaitCause::Paused => "paused",
+            WaitCause::Battery => "battery",
             WaitCause::Backoff => "backoff",
             WaitCause::NoPool => "no-pool",
             WaitCause::Other => "other",
@@ -97,6 +101,7 @@ impl WaitCause {
             WaitCause::Booting => "Runner starting",
             WaitCause::Preparing => "Snapshot, image or cleanup",
             WaitCause::Paused => "Repository paused",
+            WaitCause::Battery => "Host on battery",
             WaitCause::Backoff => "Runners failing",
             WaitCause::NoPool => "No profile serves it",
             WaitCause::Other => "Another reason",
@@ -119,6 +124,7 @@ impl Waiting {
                 WaitCause::Preparing
             }
             Waiting::Paused => WaitCause::Paused,
+            Waiting::OnBattery => WaitCause::Battery,
             Waiting::Backoff { .. } => WaitCause::Backoff,
             Waiting::NoPool { .. } => WaitCause::NoPool,
             Waiting::Unknown => WaitCause::Other,

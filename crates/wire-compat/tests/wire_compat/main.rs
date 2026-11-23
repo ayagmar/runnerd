@@ -79,6 +79,12 @@ const ACCEPTED: &[Accepted] = &[
         item: "insight-kind/drive-wear",
         adr: "0157",
     },
+    // An older client says the job waits for a reason it does not know yet, as for any reason it does not know.
+    Accepted {
+        reader: Reader::Previous,
+        item: "waiting/on-battery",
+        adr: "0161",
+    },
 ];
 
 /// A document's items as JSON, by label.

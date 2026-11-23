@@ -77,6 +77,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         reserved: None,
         host_waited: 0,
         slot_waited: 0,
+        held: 0,
         unseen: 0,
         cpu_periods: None,
         cpu_throttled: None,
@@ -1529,7 +1530,7 @@ fn through_the_planner(jobs: &[Ran], known: &History) -> BTreeMap<Pool, Vec<u64>
                     name: pool.repository.clone(),
                     profile: pool.profile.clone(),
                     labels: vec![pool.profile.clone()],
-                    paused: false,
+                    paused: None,
                     held: None,
                     queued: matching
                         .map(|(id, _)| QueuedJob {

@@ -58,6 +58,7 @@ fn status() -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        on_battery: false,
         action_archives: None,
         grype_database: None,
         machine: None,
@@ -639,7 +640,7 @@ fn job_action(
             },
             superseded: None,
             confirm: Some(token),
-            paused: false,
+            held: None,
             siblings: vec![sibling],
             more: false,
         });

@@ -32,6 +32,7 @@ fn status() -> Status {
         shutting_down: false,
         stopping: None,
         github_limited_until: None,
+        on_battery: false,
         action_archives: None,
         grype_database: None,
         machine: None,

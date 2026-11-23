@@ -26,7 +26,7 @@ async fn busy_and_idle_ticked(
 }
 
 /// The busy-and-idle fixture of `stop`, on `CONFIG` with three slots.
-fn stop_fixture(
+pub(super) fn stop_fixture(
     github: &FakeGithub,
     docker: &FakeDocker,
     dir: &TestDir,

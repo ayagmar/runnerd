@@ -640,6 +640,7 @@ impl Fixtures {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            on_battery: false,
             action_archives: Some(action_archives),
             grype_database: Some(grype_database),
             machine: Some(runnerd_core::api::Machine {
@@ -1595,7 +1596,7 @@ fn job_action(fake: &Fake, id: u64, action: JobAction, query: &ActionQuery) -> R
             },
             superseded,
             confirm: Some(token),
-            paused,
+            held: paused.then_some(runnerd_core::api::Held::Paused),
             siblings,
             more,
         });

@@ -30,9 +30,9 @@ use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Plan, Pool, Preparing,
-    Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef, StartFor,
-    StopReason, plan,
+    Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Pause, Plan, Pool,
+    Preparing, Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef,
+    StartFor, StopReason, plan,
 };
 use crate::store::Store;
 use crate::time;
@@ -369,6 +369,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         pace.lap(Phase::Following, self.passes_in_tick);
         self.look_for_sleep();
+        self.look_at_power();
         let (plan, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => {
@@ -540,6 +541,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             return 0;
         }
+        // The host may have been unplugged since the last tick's read.
+        self.look_at_power();
         // The jobs captures named since: their runners are busy, and their jobs no longer queued.
         self.take_found();
         // What waiting runners reserve for the jobs listed now, as a tick raises it before its plan: a pass may run
@@ -682,11 +685,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Whether `repository` is listed at the active pace: not paused, and active by ADR 0107's rule, which counts a job
-    /// its listings show queued while they show it, or a runner of it holds a job, as one past `ACTIVE_AFTER` does.
-    /// Only the listings' pace reads this; warm runners go by ADR 0107's rule alone.
+    /// Whether `repository` is listed at the active pace: not paused, the host not on battery under `pause`
+    /// (ADR 0161), and active by ADR 0107's rule, which counts a job its listings show queued while they show it, or a
+    /// runner of it holds a job, as one past `ACTIVE_AFTER` does. Only the listings' pace reads this; warm runners go by
+    /// ADR 0107's rule alone.
     fn listing_active(&self, repository: &str) -> bool {
         !self.control.is_paused(repository)
+            && !self.on_battery()
             && (self.warm.active(repository, time::now_ms())
                 || self
                     .occupied()
@@ -829,7 +834,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     name: repository.name.clone(),
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
-                    paused: self.control.is_paused(&repository.name),
+                    // The owner's pause first: it outlasts the battery.
+                    paused: if self.control.is_paused(&repository.name) {
+                        Some(Pause::Repository)
+                    } else if self.on_battery() {
+                        Some(Pause::Battery)
+                    } else {
+                        None
+                    },
                     held: state.health(&repository.profile).and_then(PoolHealth::held),
                     queued: self.listed_demand(repository, &taken),
                     runner_memory: None,

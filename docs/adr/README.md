@@ -167,4 +167,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0158](0158-a-host-has-a-name-that-its-status-and-messages-carry.md) | A host has a name that its status and messages carry | Accepted |
 | [0159](0159-time-the-host-slept-is-downtime-not-waiting.md) | Time the host slept is downtime, not waiting | Accepted |
 | [0160](0160-runners-read-one-grype-database-runnerd-keeps-current.md) | Runners read one Grype database runnerd keeps current | Accepted |
+| [0161](0161-a-host-on-battery-starts-no-runners.md) | A host on battery starts no runners | Accepted |
 | [0163](0163-a-job-that-ran-elsewhere-says-which-machine-ran-it.md) | A job that ran elsewhere says which machine ran it | Accepted |
