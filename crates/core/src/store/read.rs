@@ -63,9 +63,6 @@ macro_rules! slept {
     };
 }
 
-/// How long an overflow host left the job `j` to the other machines, in ms, from its wait causes (ADR 0162).
-const OVERFLOW_WAITED: &str = "coalesce(json_extract(j.wait_causes, '$.overflow'), 0)";
-
 /// [`slept!`] for a query built at run time.
 pub(super) const SLEPT: &str = slept!();
 
@@ -1148,10 +1145,29 @@ pub(super) fn kept_since(db: &Connection) -> rusqlite::Result<u64> {
     db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))
 }
 
+/// [`sizing::Wait::held`] in SQL, in ms, for the job `j`: its `battery` wait cause, 0 where it has none or its causes
+/// are not JSON (`stored_causes`).
+macro_rules! held {
+    () => {
+        "coalesce(CASE WHEN json_valid(j.wait_causes) THEN json_extract(j.wait_causes, '$.battery') END, 0)"
+    };
+}
+
+/// How long an overflow host left the job `j` to the other machines, in ms: its `overflow` wait cause (ADR 0162), 0
+/// where it has none or its causes are not JSON (`stored_causes`).
+macro_rules! overflow_waited {
+    () => {
+        "coalesce(CASE WHEN json_valid(j.wait_causes) THEN json_extract(j.wait_causes, '$.overflow') END, 0)"
+    };
+}
+
 /// [`sizing::Wait::counted`] in SQL, in ms, for the job `j` with the history's `jobs_since` as `?1`; 0 for a job that
 /// did not start.
-const COUNTED_WAIT: &str =
-    "max(coalesce(j.started_at, j.queued_at) - max(j.queued_at, ?1) - j.unseen, 0)";
+const COUNTED_WAIT: &str = concat!(
+    "max(coalesce(j.started_at, j.queued_at) - max(j.queued_at, ?1) - j.unseen - ",
+    held!(),
+    ", 0)"
+);
 
 /// What `Store::activity` reads. Jobs another runner ran are left out: their wait is not for runnerd.
 pub(super) fn activity(db: &Connection, since: u64, now: u64) -> rusqlite::Result<api::Activity> {
@@ -1159,14 +1175,19 @@ pub(super) fn activity(db: &Connection, since: u64, now: u64) -> rusqlite::Resul
     let kept_since = kept_since(db)?;
     let started = db
         .prepare_cached(
-            "SELECT queued_at, started_at, unseen FROM jobs \
-             WHERE started_at >= ?1 AND started_at <= ?2 AND state != 'elsewhere' ORDER BY started_at",
+            concat!(
+                "SELECT j.queued_at, j.started_at, j.unseen, ",
+                held!(),
+                " FROM jobs j WHERE j.started_at >= ?1 AND j.started_at <= ?2 AND j.state != 'elsewhere' \
+                 ORDER BY j.started_at"
+            ),
         )?
         .query_map(params![ms(since), ms(now)], |row| {
             let wait = sizing::Wait {
                 queued_at: row.get(0)?,
                 started_at: row.get(1)?,
                 unseen: row.get(2)?,
+                held: row.get(3)?,
             };
             Ok(api::Started {
                 at: secs(wait.started_at),
@@ -1271,7 +1292,7 @@ pub(super) fn docker_stores(
     .collect()
 }
 
-/// One row of `sizing`'s queries of finished jobs.
+/// A finished job of `read::sizing`'s queries, with its runner.
 fn ran(row: &Row<'_>) -> rusqlite::Result<sizing::Ran> {
     Ok(sizing::Ran {
         repository: row.get(0)?,
@@ -1306,38 +1327,49 @@ fn ran(row: &Row<'_>) -> rusqlite::Result<sizing::Ran> {
         cpu_throttled: row.get(25)?,
         slot_waited: row.get(26)?,
         run_attempt: row.get(27)?,
-        overflow_waited: row.get(28)?,
+        held: row.get(28)?,
+        overflow_waited: row.get(29)?,
     })
 }
 
 /// The finished jobs queued at or after `since` (ms) with their peaks, and the runners that held a slot after it.
 pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::History> {
     let jobs = db
-        .prepare_cached(&format!(
-            "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, j.memory_peak, \
-             coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
-             coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
-             j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
-             j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, r.local_ooms, j.run_id, j.branch, \
-             j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen, j.cpu_periods, \
-             j.cpu_throttled, j.slot_waited, j.run_attempt, {OVERFLOW_WAITED} FROM jobs j \
-             JOIN runners r ON r.name = j.runner \
-             WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
-             AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id"
-        ))?
+        .prepare_cached(
+            concat!(
+                "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, j.memory_peak, \
+                 coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
+                 coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
+                 j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
+                 j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, r.local_ooms, j.run_id, j.branch, \
+                 j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen, j.cpu_periods, \
+                 j.cpu_throttled, j.slot_waited, j.run_attempt, ",
+                held!(),
+                ", ",
+                overflow_waited!(),
+                " FROM jobs j JOIN runners r ON r.name = j.runner \
+                 WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
+                 AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id"
+            ),
+        )?
         .query_map([since], ran)?
         .collect::<rusqlite::Result<_>>()?;
     let cancelled = db
-        .prepare_cached(&format!(
-            "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, coalesce(j.memory_peak, 0), \
-             coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
-             coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
-             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, \
-             r.local_ooms, j.run_id, j.branch, 0, j.unseen, j.cpu_periods, j.cpu_throttled, j.slot_waited, \
-             j.run_attempt, {OVERFLOW_WAITED} FROM jobs j \
-             JOIN runners r ON r.name = j.runner \
-             WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id"
-        ))?
+        .prepare_cached(
+            concat!(
+                "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, coalesce(j.memory_peak, 0), \
+                 coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
+                 coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
+                 r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, \
+                 r.local_ooms, j.run_id, j.branch, 0, j.unseen, j.cpu_periods, j.cpu_throttled, j.slot_waited, \
+                 j.run_attempt, ",
+                held!(),
+                ", ",
+                overflow_waited!(),
+                " FROM jobs j JOIN runners r ON r.name = j.runner \
+                 WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id"
+            ),
+        )?
         .query_map([since], ran)?
         .collect::<rusqlite::Result<_>>()?;
     let runners = db

@@ -78,6 +78,8 @@ pub struct Ran {
     pub host_waited: u64,
     /// How much of its wait passed while no runnerd ran, in ms.
     pub unseen: u64,
+    /// How much of its wait the host on battery held it, in ms (`Wait::held`).
+    pub held: u64,
     /// How long of its wait an overflow host left it to the other machines, in ms (`api::WaitCause::Overflow`, ADR
     /// 0162): a wait the host chose, which no slot would have saved. 0 on a primary.
     pub overflow_waited: u64,
@@ -104,6 +106,9 @@ pub struct Wait {
     pub started_at: u64,
     /// How much of it passed while no runnerd ran, in ms.
     pub unseen: u64,
+    /// How much of it the host on battery held it, in ms (`api::WaitCause::Battery`, ADR 0161): a wait the owner chose
+    /// by unplugging, not one for a runner.
+    pub held: u64,
 }
 
 impl Wait {
@@ -112,6 +117,7 @@ impl Wait {
         self.started_at
             .saturating_sub(self.queued_at.max(kept_since))
             .saturating_sub(self.unseen)
+            .saturating_sub(self.held)
     }
 }
 
@@ -214,6 +220,7 @@ impl Ran {
             queued_at: self.queued_at,
             started_at: self.started_at?,
             unseen: self.unseen,
+            held: self.held,
         })
     }
 

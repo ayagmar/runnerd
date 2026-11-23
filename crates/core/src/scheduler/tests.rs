@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Budget, Caps, Decision, Demand, Hold, IDLE_TIMEOUT, PRIORITY_AFTER, Plan, Pool, Preparing,
-    Profile, Repository, RunnerSlot, Scarce, Slot, SlotRef, StartFor, StopReason, Wait, Waits,
-    plan,
+    Budget, Caps, Decision, Demand, Hold, IDLE_TIMEOUT, PRIORITY_AFTER, Pause, Plan, Pool,
+    Preparing, Profile, Repository, RunnerSlot, Scarce, Slot, SlotRef, StartFor, StopReason, Wait,
+    Waits, plan,
 };
 use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
@@ -37,7 +37,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
             "linux".to_owned(),
             profile.to_owned(),
         ],
-        paused: false,
+        paused: None,
         held: None,
         queued,
         runner_memory: None,
@@ -288,7 +288,7 @@ fn an_idle_runner_stops_only_after_its_timeout_with_nothing_queued() {
 fn paused_held_and_reseeding_start_nothing() {
     let queued = || vec![job(1, &["app"])];
     let mut paused = repository("o/a", "app", queued());
-    paused.paused = true;
+    paused.paused = Some(Pause::Repository);
     let mut held = repository("o/a", "app", queued());
     held.held = Some(Hold {
         until: now() + Duration::from_secs(1),
@@ -459,7 +459,7 @@ fn each_job_left_queued_says_why_it_waits() {
     let later = now() + Duration::from_secs(60);
     let repositories = [
         Repository {
-            paused: true,
+            paused: Some(Pause::Repository),
             ..repository("o/paused", "app", vec![job(1, &["app"])])
         },
         Repository {
@@ -723,7 +723,7 @@ fn younger_jobs_wait_behind_one_starved_of_cpu() {
 #[test]
 fn the_idle_runner_of_a_paused_repository_stops_though_its_jobs_stay_queued() {
     let repositories = [Repository {
-        paused: true,
+        paused: Some(Pause::Repository),
         ..repository("o/a", "app", vec![job(1, &["app"])])
     }];
     let plan = plan(
@@ -1056,7 +1056,7 @@ fn a_profile_due_a_reseed_stops_its_warm_runners_at_once_and_starts_none() {
 fn a_paused_repository_keeps_no_warm_runner() {
     let plan = plan(
         &[Repository {
-            paused: true,
+            paused: Some(Pause::Repository),
             ..warm("o/a", "app", 1)
         }],
         &profiles(vec![idle_runner("o/a", now() - IDLE_TIMEOUT), Slot::Free]),

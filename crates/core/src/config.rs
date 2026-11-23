@@ -107,6 +107,11 @@ pub struct Host {
     /// ignores it.
     #[serde(default = "default_overflow_after", deserialize_with = "duration")]
     pub overflow_after: Duration,
+    /// What runnerd does while the host runs on its battery (ADR 0161): by default `pause`, which starts no runner and
+    /// stops idle and warm ones, while busy ones finish. A host with no system battery is never on battery. A reload
+    /// applies it at the next tick.
+    #[serde(default)]
+    pub on_battery: OnBattery,
 }
 
 /// `role` under `[host]`: whether this machine serves its repositories first or only as a backup to another (ADR
@@ -125,6 +130,17 @@ pub enum Role {
 
 fn default_overflow_after() -> Duration {
     Duration::from_secs(45)
+}
+
+/// `on_battery` under `[host]`: what runnerd does while the host runs on its battery (ADR 0161).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnBattery {
+    /// Runners start as on mains power.
+    Run,
+    /// The default: no runner starts, and idle and warm runners stop; busy ones finish their jobs.
+    #[default]
+    Pause,
 }
 
 /// `[host.drive]`: what the drive under Docker's root is rated to write, and what its SMART log last said it had

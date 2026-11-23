@@ -248,7 +248,7 @@ pub struct ActionPreview {
     /// What GitHub does, which is more than one job.
     pub scope: String,
     /// What else holds now: why an earlier confirmation was not taken, the run could not be read, it completed, the
-    /// job is of an earlier attempt, the repository is paused. Often none.
+    /// job is of an earlier attempt, the repository is paused or the host on battery. Often none.
     #[serde(default)]
     pub notes: Vec<String>,
     /// Other jobs of the run the history has, newest attempt first, at most [`SIBLINGS_MAX`], their names, workflows
@@ -300,6 +300,15 @@ pub enum Superseded {
     Unverified,
 }
 
+/// What holds back every new runner of a job's repository, as a preview says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// The owner paused the repository.
+    Paused,
+    /// The host is on battery and `[host] on_battery = "pause"` (ADR 0161).
+    OnBattery,
+}
+
 /// The facts of an [`ActionPreview`]: what the route found for the job.
 #[derive(Debug, Clone)]
 pub struct PreviewFacts {
@@ -313,8 +322,8 @@ pub struct PreviewFacts {
     pub superseded: Option<Superseded>,
     /// The confirmation issued with this preview; `None` when the run was not read.
     pub confirm: Option<String>,
-    /// Whether the repository is paused.
-    pub paused: bool,
+    /// What holds back every new runner of the repository, if anything.
+    pub held: Option<Held>,
     /// The other jobs of the run the history has, newest attempt first, at most [`SIBLINGS_MAX`].
     pub siblings: Vec<JobSummary>,
     /// Whether the history has more of them than `siblings`.
@@ -330,7 +339,7 @@ impl ActionPreview {
             run,
             superseded,
             confirm,
-            paused,
+            held,
             siblings,
             more,
         } = facts;
@@ -377,12 +386,18 @@ impl ActionPreview {
                 ));
             }
         }
-        if paused && rerun {
-            notes.push(format!(
+        match held.filter(|_| rerun) {
+            Some(Held::Paused) => notes.push(format!(
                 "{} is paused: runnerd starts none of the new attempt's jobs until it is resumed; other runners \
                  may take them.",
                 target.repository
-            ));
+            )),
+            Some(Held::OnBattery) => notes.push(
+                "The host is on battery: runnerd starts none of the new attempt's jobs until it is plugged in; other \
+                 runners may take them."
+                    .to_owned(),
+            ),
+            None => {}
         }
         let siblings_note = match (siblings.len(), more) {
             (0, _) => {

@@ -68,6 +68,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         reserved: None,
         host_waited: 0,
         slot_waited: 0,
+        held: 0,
         overflow_waited: 0,
         unseen: 0,
         cpu_periods: None,
@@ -554,6 +555,7 @@ fn capped_builds(count: u64, peak: u64, wait_secs: u64) -> Vec<Ran> {
         .map(|_| Ran {
             memory_cap: Some(5632 * M),
             slot_waited: wait_secs * 1000,
+            held: 0,
             ..job("halyard/storefront", "build", "node", peak, wait_secs)
         })
         .collect()
@@ -1050,6 +1052,7 @@ mod auto {
                 .into_iter()
                 .map(|build| Ran {
                     slot_waited: 0,
+                    held: 0,
                     ..build
                 })
                 .collect(),
@@ -1218,6 +1221,24 @@ mod auto {
         assert_eq!(
             slots_of(&due(&config, &waited, 40 * G, &BTreeMap::new()), "node"),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn under_caps_jobs_the_host_on_battery_held_get_no_slot_for_it() {
+        // Catches M1 of review 1 of #344: the same waits as above, all of them time a laptop on battery held the jobs,
+        // which no slot would have saved.
+        let config = on(CONFIG, "");
+        let mut held = builds(10, 5632 * M, 6 * G, 300);
+        for run in &mut held {
+            run.held = 300 * 1000;
+        }
+        assert_eq!(
+            slots_of(
+                &due(&config, &history(held), 40 * G, &BTreeMap::new()),
+                "node"
+            ),
+            None
         );
     }
 

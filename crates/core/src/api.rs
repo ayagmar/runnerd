@@ -73,7 +73,7 @@ mod units;
 
 pub use actions::{
     ActionAnswer, ActionOutcome, ActionPreview, ActionQuery, ActionRefusal, ActionResult,
-    ActionTarget, CONFIRM_SECS, JOB_ACTIONS_CHECK, JobAction, JobActions, PreviewFacts,
+    ActionTarget, CONFIRM_SECS, Held, JOB_ACTIONS_CHECK, JobAction, JobActions, PreviewFacts,
     RerunRefused, RunSeen, SIBLINGS_MAX, Superseded, UnknownCause, actions_in_flight,
     actions_no_run, actions_not_configured, actions_off,
 };
@@ -188,6 +188,10 @@ pub struct Status {
     /// [`Status::github_line`] says it. Absent while it is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_limited_until: Option<u64>,
+    /// Whether the host runs on its battery and `[host] on_battery = "pause"` holds every start (ADR 0161):
+    /// [`Status::battery_line`] says it. Absent while it does not, and from a daemon before 0.1.6.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_battery: bool,
     /// The memory budget and what runners use of it.
     pub budget: Budget,
     /// Every configured profile with its slots.
@@ -847,6 +851,9 @@ pub enum Waiting {
         /// mounts them. Empty while it has not tried, or Docker failed.
         volumes: Vec<String>,
     },
+    /// The host runs on its battery and `[host] on_battery` is `pause`, so no runner starts until it is on mains power
+    /// again (ADR 0161).
+    OnBattery,
     /// This host is an overflow host (ADR 0162): it leaves the job to the other machines until `until` (seconds since
     /// the Unix epoch), `[host] overflow_after` after GitHub queued it, and until GitHub listed it twice here with
     /// the runners listed between the two.
@@ -863,7 +870,8 @@ pub enum Waiting {
 /// What a [`Waiting`] reason waits on, which clients draw it by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
-    /// Something the owner can act on: a pause, runners that failed to take a job, or labels no pool serves.
+    /// Something the owner can act on: a pause, the host on battery, runners that failed to take a job, or labels no
+    /// pool serves.
     Act,
     /// Something that clears by itself shortly: a runner starting, a reseed, an image pull, an older job's start.
     Soon,
@@ -884,7 +892,10 @@ impl Waiting {
     /// What it waits on.
     pub fn kind(&self) -> WaitKind {
         match self {
-            Waiting::Paused | Waiting::Backoff { .. } | Waiting::NoPool { .. } => WaitKind::Act,
+            Waiting::Paused
+            | Waiting::Backoff { .. }
+            | Waiting::NoPool { .. }
+            | Waiting::OnBattery => WaitKind::Act,
             Waiting::Torn { volumes } if !volumes.is_empty() => WaitKind::Act,
             Waiting::Unknown => WaitKind::Other,
             Waiting::Torn { .. }
@@ -916,6 +927,9 @@ impl Waiting {
         };
         match self {
             Waiting::Paused => format!("{} is paused", job.repository),
+            Waiting::OnBattery => {
+                "The host is on battery; runners start once it is plugged in".to_owned()
+            }
             Waiting::Unknown => "Waits for a reason this client does not know yet".to_owned(),
             Waiting::NoPool { labels } if labels.is_empty() => {
                 "It asks for no labels, so no profile serves it".to_owned()
@@ -1102,6 +1116,13 @@ impl Status {
             (None, true) => Some("shutting down"),
             (None, false) => None,
         }
+    }
+
+    /// Why no runner starts while the host is on battery, as every client says it; `None` while
+    /// it is not.
+    pub fn battery_line(&self) -> Option<&'static str> {
+        self.on_battery
+            .then_some("On battery: no runner starts until the host is plugged in")
     }
 
     /// Why no runner starts while GitHub's rate limit is used up, as every client says it; `None` while it is not.

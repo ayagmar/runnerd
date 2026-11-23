@@ -49,6 +49,7 @@ pub(crate) fn status() -> Status {
         shutting_down: true,
         stopping: Some(Stopping::LeavesJobs),
         github_limited_until: Some(1_790_000_000),
+        on_battery: true,
         action_archives: Some(action_archives()),
         budget: budget(),
         profiles: vec![profile_status()],
@@ -278,6 +279,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
         Waiting::Torn {
             volumes: vec!["runnerd-jvm-slot-2".to_owned()],
         },
+        Waiting::OnBattery,
         Waiting::Overflow {
             until: 1_761_400_045,
         },
@@ -298,6 +300,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
             | Waiting::BehindStart { .. }
             | Waiting::NoPool { .. }
             | Waiting::Torn { .. }
+            | Waiting::OnBattery
             | Waiting::Overflow { .. }
             // What a client reads a later daemon's reason as; no daemon sends it, so it has no sample.
             | Waiting::Unknown => {}
@@ -1526,6 +1529,7 @@ pub(crate) fn wait_cause() -> Vec<WaitCause> {
         WaitCause::Booting,
         WaitCause::Preparing,
         WaitCause::Paused,
+        WaitCause::Battery,
         WaitCause::Backoff,
         WaitCause::NoPool,
         WaitCause::Overflow,
@@ -1542,6 +1546,7 @@ pub(crate) fn wait_cause() -> Vec<WaitCause> {
             | WaitCause::Booting
             | WaitCause::Preparing
             | WaitCause::Paused
+            | WaitCause::Battery
             | WaitCause::Backoff
             | WaitCause::NoPool
             | WaitCause::Overflow

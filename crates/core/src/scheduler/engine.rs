@@ -13,6 +13,7 @@
 //! API's commands), `stop` (how far the daemon's stop has got), `sleep` and `wake` (whether the host slept, and what a wake undoes and holds back), `overflow` (which queued jobs an overflow host leaves to the other machines for now) and `status` (what it publishes).
 
 mod admission;
+mod battery;
 mod build_cache;
 mod caches;
 mod claims;
@@ -488,6 +489,8 @@ pub struct Engine<G = Github, D = Docker> {
     clock: Clock,
     /// Whether the host slept, and what holds the engine back since it woke (ADR 0159).
     sleep: sleep::Sleep,
+    /// What powers the host, as the last tick read it (ADR 0161).
+    battery: battery::Battery,
     /// What an overflow host saw of the queued jobs and the runners listings, which says the jobs it leaves to the
     /// other machines for now (ADR 0162).
     overflow: overflow::Overflow,
@@ -675,6 +678,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             shutting_down: false,
             stopping: None,
             github_limited_until: None,
+            on_battery: false,
             budget: api::Budget {
                 slice: config.host.slice.clone(),
                 memory_max,
@@ -694,6 +698,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut engine = Engine {
             clock: Clock::default(),
             sleep: sleep::Sleep::default(),
+            battery: battery::Battery::default(),
             overflow: overflow::Overflow::default(),
             isolation: isolation::backend(config.host.isolation),
             // An earlier run may have left the mirror up, so the first idle tick stops it.
