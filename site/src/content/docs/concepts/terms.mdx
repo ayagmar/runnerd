@@ -59,6 +59,6 @@ runnerd records every job its runners may run in SQLite; [`[history]`](../../ref
 
 A job's wait runs from queued to started; the part that passed while runnerd was not running is kept as `unseen` and left out of the waits [sizing](../../guides/sizing/#how-a-wait-is-counted) reads.
 
-A job that leaves GitHub's queue without one of this machine's runners is recorded as `elsewhere` (the dashboard's "Not run here"), as `cancelled in queue` when its run was cancelled first, or as its conclusion, such as `skipped`. No wait, median or cost counts it. A finished job goes after `history.jobs`.
+A job that leaves GitHub's queue without one of this machine's runners is recorded as run elsewhere (the dashboard's "Not run here"). It reads `ran on <host>` when another machine's runnerd ran it, `ran on <runner>` for any other runner GitHub names, `cancelled in queue` when its run was cancelled first, its conclusion, such as `skipped`, or else `elsewhere`. No wait, median or cost counts it. A finished job goes after `history.jobs`.
 
 A failed job reads `runner fault` when Sysbox, not its code, failed it; [Why did this job fail?](../../guides/logs/#everything-else-on-its-page) says how runnerd tells, and runnerd can [re-run its run](../../guides/cancel-rerun/#runner-faults).

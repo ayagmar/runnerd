@@ -85,7 +85,10 @@ CREATE TABLE jobs (
     -- wake GitHub may still fail a job for it. A job that ended between the two failed for the sleep. Set on each job
     -- running when the daemon saw the host wake; NULL for every other job, and in rows from before schema 30.
     slept_from INTEGER,
-    slept_ended_by INTEGER
+    slept_ended_by INTEGER,
+    -- For a job that ran elsewhere: the name of the runner GitHub says ran it, as another machine's runnerd or anything
+    -- else named it (ADR 0163). NULL for every other job, for one no runner took, and in rows from before schema 32.
+    elsewhere_runner TEXT
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

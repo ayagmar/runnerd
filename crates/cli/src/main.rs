@@ -1601,6 +1601,7 @@ mod tests {
                 log: LogSummary::default(),
                 runner_fault: false,
                 slept: false,
+                elsewhere_runner: None,
                 failure_cause: None,
                 rerun_at: None,
                 probe: None,
