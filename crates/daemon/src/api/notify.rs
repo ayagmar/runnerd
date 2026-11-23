@@ -872,6 +872,10 @@ fn insight_title(insight: &Insight) -> String {
     if matches!(insight.kind, runnerd_core::api::InsightKind::HostLow { .. }) {
         return "The host ran low on memory on a host credit".to_owned();
     }
+    // About a profile's slots, not about the repository of its last job.
+    if let runnerd_core::api::InsightKind::StoreOverflow { profile, .. } = &insight.kind {
+        return format!("{profile}'s slots outgrow their Docker share");
+    }
     let subject = match &insight.job {
         Some(job) => format!(
             "{}: {}",
@@ -890,6 +894,7 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
         runnerd_core::api::InsightKind::HostHeld { .. } => "waits for the host's memory",
         runnerd_core::api::InsightKind::HostLow { .. } => "ran the host low on memory",
+        runnerd_core::api::InsightKind::StoreOverflow { .. } => "outgrows its Docker share",
         runnerd_core::api::InsightKind::Unknown => "has an insight",
     };
     format!("{subject} {what}")

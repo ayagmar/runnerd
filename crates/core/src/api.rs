@@ -96,10 +96,10 @@ pub use disk::{
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use figure::LabelledFigure;
 pub use insights::{
-    AutoNote, CauseWait, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS, INSIGHT_DAYS_MAX,
-    Insight, InsightFigure, InsightKind, Insights, InsightsHeading, InsightsQuery, LongWait,
-    Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Priority, ProfileQueue,
-    RepositoryWaits, RunLink, Severity, WaitFigure, WaitSpread, WeekWaits,
+    AutoNote, CauseWait, DOCKER_SLOT_MAX, Delivery, Digest, HostHazard, HostSpan, INSIGHT_DAYS,
+    INSIGHT_DAYS_MAX, Insight, InsightFigure, InsightKind, Insights, InsightsHeading,
+    InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Priority,
+    ProfileQueue, RepositoryWaits, RunLink, Severity, WaitFigure, WaitSpread, WeekWaits,
 };
 #[cfg(feature = "host")]
 pub(crate) use jobs::SAMPLE_GAP_INTERVALS;

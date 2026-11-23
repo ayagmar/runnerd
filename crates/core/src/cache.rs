@@ -17,6 +17,7 @@ use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found};
 use crate::isolation::Isolation;
 
 pub mod mirror;
+pub mod shares;
 
 /// The prefix of the names of what the daemon makes in Docker (`Names`).
 pub const PREFIX: &str = "runnerd";
@@ -382,17 +383,15 @@ pub fn docker_disk(
     free.saturating_add(held) / DOCKER_DISK_SHARE
 }
 
-/// One slot's share of `disk` among `slots`, in whole GiB as `image/layers.sh` takes it: at least 1, at most
-/// `DOCKER_SLOT_MAX_GIB`.
+/// One slot's equal share of `disk` among `slots`, in whole GiB as `image/layers.sh` takes it: at least 1, at most
+/// 20, the image's own default. What a profile's slots get follows what their stores hold (`shares::slot_shares`);
+/// this is what each would get if every slot got the same.
 pub fn docker_budget_gib(disk: u64, slots: u64) -> u64 {
-    ((disk / slots.max(1)) >> 30).clamp(1, DOCKER_SLOT_MAX_GIB)
+    ((disk / slots.max(1)) >> 30).clamp(1, shares::SLOT_MAX_GIB)
 }
 
 /// The slots' Docker Engines together keep at most one part in this of Docker's disk not otherwise used.
 const DOCKER_DISK_SHARE: u64 = 4;
-
-/// The most one slot's Docker Engine keeps, in GiB: the image's own default, for a daemon that sets none.
-const DOCKER_SLOT_MAX_GIB: u64 = 20;
 
 /// What `empty_volumes` came to.
 #[derive(Debug, Default)]
@@ -971,6 +970,39 @@ mod tests {
             after >= before + 300_000 && after < before + 400_000,
             "the tools and android layers count: {before} then {after}"
         );
+    }
+
+    // Catches: a prune filter of `until=-…s` or of nothing, which Docker refuses or reads as no limit, when the slot
+    // never ran a job, its file is damaged, or its clock went back.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a test: a file it cannot write fails it"
+    )]
+    fn the_layers_kept_as_recent_reach_back_to_the_slots_last_job_and_an_hour_more() {
+        let dir = TestDir::new("recent-use");
+        let file = dir.0.join("last-job");
+        let recent = || -> u64 {
+            with_layers("LAST_JOB_FILE=$1; recent_use", &[&file])
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(recent(), 3600, "no job ran on the slot yet");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(&file, format!("{}\n", now - 600)).unwrap();
+        let after = recent();
+        assert!(
+            (4200..4210).contains(&after),
+            "600 s ago and an hour: {after}"
+        );
+        for damaged in ["soon\n", "", &format!("{}\n", now + 600)] {
+            std::fs::write(&file, damaged).unwrap();
+            assert_eq!(recent(), 3600, "{damaged:?} reads as no last job");
+        }
     }
 
     #[test]

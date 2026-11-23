@@ -115,6 +115,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
          claimed_at INTEGER NOT NULL, PRIMARY KEY (repository, run_id, attempt)) WITHOUT ROWID;",
     ),
     (28, "ALTER TABLE runners ADD COLUMN probe TEXT;"),
+    (
+        29,
+        "ALTER TABLE runners ADD COLUMN docker_held INTEGER;\n\
+         ALTER TABLE runners ADD COLUMN docker_share INTEGER;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -341,6 +346,10 @@ enum Write {
     RunnerProbe {
         runner: String,
         probe: api::RunnerProbe,
+    },
+    RunnerDockerStore {
+        runner: String,
+        report: crate::cache::shares::StoreReport,
     },
     RunnerStoppedFor {
         runner: String,
@@ -817,6 +826,15 @@ impl Store {
         });
     }
 
+    /// Records what its job's cleanup found the runner's slot's Docker store holding (ADR 0156), as its container's
+    /// log says.
+    pub fn runner_docker_store(&self, runner: &str, report: crate::cache::shares::StoreReport) {
+        self.send(Write::RunnerDockerStore {
+            runner: runner.to_owned(),
+            report,
+        });
+    }
+
     /// Records when a forced pause that cancelled a runner's run removes it if it still runs, in ms since the epoch,
     /// so a restart keeps that deadline.
     pub fn runner_cancel_by(&self, runner: &str, at: u64) {
@@ -1259,6 +1277,15 @@ impl Store {
     /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
     pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
         self.read(move |db| read::sizing(db, since)).await
+    }
+
+    /// What the slots' Docker stores held after the jobs of runners started at or after `since` (ms), newest first
+    /// (ADR 0156), for `cache::shares::needs`.
+    pub async fn docker_stores(
+        &self,
+        since: u64,
+    ) -> Result<Vec<crate::cache::shares::StoreUse>, StoreError> {
+        self.read(move |db| read::docker_stores(db, since)).await
     }
 
     /// What pricing at GitHub's rates reads: the completed and lost jobs dated at or after `since` (ms), each
