@@ -71,6 +71,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         disk: None,
         seen_at: Some(finished - seconds * 1000 - 15_000),
         unseen_unlisted: 0,
+        docker_store: None,
         causes: Some(BTreeMap::new()),
     }
 }
@@ -1796,4 +1797,90 @@ fn shares_of_a_wait_under_a_second_come_from_its_milliseconds() {
         .map(|figure| figure.of)
         .collect();
     assert_eq!(shares, [Some("50%".to_owned()), Some("50%".to_owned())]);
+}
+
+/// `count` runs of `app`, newest last, one an hour, whose store held `held` against a 3 GiB share; `None` for an image
+/// that reported nothing.
+fn stored(count: u64, held: impl Fn(u64) -> Option<u64>) -> Vec<Run> {
+    (0..count)
+        .map(|n| Run {
+            docker_store: held(n)
+                .map(|held| crate::cache::shares::StoreReport { held, share_gib: 3 }),
+            ..test_run(n, 1 + count - n, 60)
+        })
+        .collect()
+}
+
+fn store_insights(runs: &[Run]) -> Vec<api::Insight> {
+    insights(&whole(runs), &config(), api::INSIGHT_DAYS, NOW)
+        .insights
+        .into_iter()
+        .filter(|insight| matches!(insight.kind, InsightKind::StoreOverflow { .. }))
+        .collect()
+}
+
+// Catches: an insight that never fires on a profile thrashing its store, or one that speaks for a share long since
+// raised, from overflows before the last 20 reports.
+#[test]
+fn a_profile_whose_store_outgrew_its_share_after_most_recent_jobs_is_told() {
+    // 18 of the last 20 held 4 GiB of a 3 GiB share.
+    let runs = stored(20, |n| Some(if n % 10 == 0 { 2 * G } else { 4 * G }));
+    let found = store_insights(&runs);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let insight = &found[0];
+    assert_eq!(insight.severity, Severity::Notice);
+    assert_eq!(
+        insight.kind,
+        InsightKind::StoreOverflow {
+            profile: "app".to_owned(),
+            overflowed: 18,
+            total: 20,
+            held: 4 * G,
+            share: 3 * G,
+        }
+    );
+    assert_eq!(
+        insight.sentence,
+        "app: the slots' Docker stores held more than their share after 18 of the last 20 jobs, 4G (p90) against \
+         3G, so each such job's images and build layers went and the next one pulled and built them again; more \
+         free space on Docker's disk raises every share."
+    );
+    assert_eq!(insight.runs.len(), 5, "the newest overflowing runs link it");
+    assert_eq!(insight.runs[0].job, runs[19].id, "the newest first");
+
+    // Once the share follows them, the stores fit: older overflows do not keep it alive.
+    let mut fixed = stored(40, |n| Some(if n < 20 { 4 * G } else { 2 * G }));
+    for run in &mut fixed[20..] {
+        run.docker_store = Some(crate::cache::shares::StoreReport {
+            held: 4 * G,
+            share_gib: 5,
+        });
+    }
+    assert!(
+        store_insights(&fixed).is_empty(),
+        "the last 20 fit their 5G"
+    );
+}
+
+// Catches: an insight from a handful of jobs, or from images before the report, read as fitting or overflowing.
+#[test]
+fn few_reports_or_a_store_that_fits_most_of_the_time_is_no_insight() {
+    assert!(
+        store_insights(&stored(9, |_| Some(4 * G))).is_empty(),
+        "9 reports"
+    );
+    assert_eq!(
+        store_insights(&stored(30, |n| (n % 3 == 0).then_some(4 * G))).len(),
+        1,
+        "10 reports among 30 runs, all over, make one"
+    );
+    assert_eq!(
+        store_insights(&stored(20, |n| Some(if n % 2 == 0 { 4 * G } else { G }))).len(),
+        1,
+        "half of them is enough"
+    );
+    assert!(
+        store_insights(&stored(20, |n| Some(if n % 3 == 0 { 4 * G } else { G }))).is_empty(),
+        "7 of 20 is not"
+    );
 }

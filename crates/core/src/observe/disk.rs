@@ -221,34 +221,34 @@ impl Disks {
 /// What a cgroup and its descendants have sent `devices` so far, from its `io.stat`; `None` without one, or with a
 /// figure that is no number.
 fn written_on(devices: &[Device], cgroup: &Path) -> Option<Written> {
-        let stat = std::fs::read_to_string(cgroup.join("io.stat")).ok()?;
-        let mut written = Written::default();
-        for line in stat.lines() {
-            let mut fields = line.split_whitespace();
-            let Some((major, minor)) = fields.next().and_then(|device| device.split_once(':'))
-            else {
+    let stat = std::fs::read_to_string(cgroup.join("io.stat")).ok()?;
+    let mut written = Written::default();
+    for line in stat.lines() {
+        let mut fields = line.split_whitespace();
+        let Some((major, minor)) = fields.next().and_then(|device| device.split_once(':')) else {
+            continue;
+        };
+        if !devices
+            .iter()
+            .any(|device| major.parse() == Ok(device.major) && minor.parse() == Ok(device.minor))
+        {
+            continue;
+        }
+        for field in fields {
+            let Some((key, value)) = field.split_once('=') else {
                 continue;
             };
-            if !devices.iter().any(|device| {
-                major.parse() == Ok(device.major) && minor.parse() == Ok(device.minor)
-            }) {
-                continue;
-            }
-            for field in fields {
-                let Some((key, value)) = field.split_once('=') else {
-                    continue;
-                };
-                let Ok(value) = value.parse::<u64>() else {
-                    return None;
-                };
-                match key {
-                    "wbytes" => written.bytes = written.bytes.saturating_add(value),
-                    "wios" => written.ios = written.ios.saturating_add(value),
-                    _ => {}
-                }
+            let Ok(value) = value.parse::<u64>() else {
+                return None;
+            };
+            match key {
+                "wbytes" => written.bytes = written.bytes.saturating_add(value),
+                "wios" => written.ios = written.ios.saturating_add(value),
+                _ => {}
             }
         }
-        Some(written)
+    }
+    Some(written)
 }
 
 /// What a writer runnerd names had sent the drive so far, and where its cgroup is below the root.

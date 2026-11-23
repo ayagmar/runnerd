@@ -1,6 +1,6 @@
 # 0054. The slots' Docker stores share a quarter of the disk
 
-Status: **Accepted** (2026-10-24), amended by [0089](0089-a-slots-cache-mounts-go-last.md), [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md), [0141](0141-runners-answer-sync-calls-without-syncing.md);
+Status: **Accepted** (2026-10-24), amended by [0089](0089-a-slots-cache-mounts-go-last.md), [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md), [0141](0141-runners-answer-sync-calls-without-syncing.md), [0156](0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md) (each profile's slots get a share by what their stores hold);
 amended 2026-11-15 for a Docker root in a file. Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md), [0041](0041-snapshot-and-mirror-limits.md).
 
 ## Context

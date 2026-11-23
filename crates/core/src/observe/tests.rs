@@ -1468,7 +1468,11 @@ fn a_restarted_service_or_a_gone_cgroup_moves_no_bytes_between_owners() {
     windows.add(disks.read(&paths, &slice, 0));
     // Docker restarted: its cgroup is new, at 10K; system.slice kept its 300K and wrote 300K more.
     cgroups(&paths, 2, 1600);
-    io_stat_of(&paths.cgroup.join("system.slice/docker.service"), 10 * K, 10);
+    io_stat_of(
+        &paths.cgroup.join("system.slice/docker.service"),
+        10 * K,
+        10,
+    );
     let owners = windows
         .add(disks.read(&paths, &slice, 600_000))
         .unwrap()
@@ -1505,7 +1509,11 @@ fn on_a_root_in_a_file_the_split_reads_the_physical_drive() {
     let lo = paths.sys.join("devices/virtual/block/loop0");
     std::fs::create_dir_all(lo.join("loop")).unwrap();
     std::fs::write(lo.join("dev"), "7:0\n").unwrap();
-    std::fs::write(lo.join("loop/backing_file"), "/var/lib/runnerd/docker.img\n").unwrap();
+    std::fs::write(
+        lo.join("loop/backing_file"),
+        "/var/lib/runnerd/docker.img\n",
+    )
+    .unwrap();
     std::os::unix::fs::symlink(&lo, paths.sys.join("class/block/loop0")).unwrap();
     std::os::unix::fs::symlink(&lo, paths.sys.join("dev/block/7:0")).unwrap();
     let mountinfo = paths.proc.join("self/mountinfo");
@@ -1521,7 +1529,10 @@ fn on_a_root_in_a_file_the_split_reads_the_physical_drive() {
         let stat = std::fs::read_to_string(&path).unwrap();
         std::fs::write(
             &path,
-            format!("{stat}7:0 rbytes=0 wbytes={} rios=0 wios=1 dbytes=0 dios=0\n", 999 * K * step),
+            format!(
+                "{stat}7:0 rbytes=0 wbytes={} rios=0 wios=1 dbytes=0 dios=0\n",
+                999 * K * step
+            ),
         )
         .unwrap();
     };
@@ -1536,5 +1547,9 @@ fn on_a_root_in_a_file_the_split_reads_the_physical_drive() {
     assert_eq!(owners.docker, Some(120 * K));
     assert_eq!(owners.runnerd, Some(20 * K), "runnerd writes the drive");
     assert_eq!(owners.user, 60 * K);
-    assert_eq!(owners.kernel_write(), Some(16 * K), "btrfs's writes on the drive");
+    assert_eq!(
+        owners.kernel_write(),
+        Some(16 * K),
+        "btrfs's writes on the drive"
+    );
 }

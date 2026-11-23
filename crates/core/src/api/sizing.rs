@@ -503,7 +503,7 @@ impl Sizing {
                  too"
             } else if self.auto {
                 &format!(
-                    "auto sizing adds as many as waited at once, up to max_slots and while each slot keeps {} of \
+                    "auto sizing adds as many as waited at once, up to max_slots and while each slot keeps on average {} of \
                      Docker's disk",
                     ByteSize(SLOT_DISK)
                 )

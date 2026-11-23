@@ -852,8 +852,9 @@ fn insight_title(insight: &Insight) -> String {
     if matches!(insight.kind, runnerd_core::api::InsightKind::HostLow { .. }) {
         return "The host ran low on memory on a host credit".to_owned();
     }
-    if let runnerd_core::api::InsightKind::DriveWear { device, .. } = &insight.kind {
-        return format!("{device} nears its rated writes");
+    // About a profile's slots, not about the repository of its last job.
+    if let runnerd_core::api::InsightKind::StoreOverflow { profile, .. } = &insight.kind {
+        return format!("{profile}'s slots outgrow their Docker share");
     }
     let subject = match &insight.job {
         Some(job) => format!(
@@ -863,7 +864,7 @@ fn insight_title(insight: &Insight) -> String {
         ),
         None => insight.repository.clone(),
     };
-    let what = match insight.kind {
+    let what = match &insight.kind {
         runnerd_core::api::InsightKind::Slower { .. } => "got slower",
         runnerd_core::api::InsightKind::Flaky { .. } => "is flaky",
         runnerd_core::api::InsightKind::NearCap { .. } => "nears its memory cap",
@@ -873,7 +874,15 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
         runnerd_core::api::InsightKind::HostHeld { .. } => "waits for the host's memory",
         runnerd_core::api::InsightKind::HostLow { .. } => "ran the host low on memory",
-        runnerd_core::api::InsightKind::DriveWear { .. } => "nears its rated writes",
+        runnerd_core::api::InsightKind::StoreOverflow { .. } => "outgrows its Docker share",
+        // About the drive, which no repository owns.
+        runnerd_core::api::InsightKind::DriveWear { device, left, .. } => {
+            return if *left == Some(0) {
+                format!("{device} passed its rated writes")
+            } else {
+                format!("{device} nears its rated writes")
+            };
+        }
         runnerd_core::api::InsightKind::Unknown => "has an insight",
     };
     format!("{subject} {what}")

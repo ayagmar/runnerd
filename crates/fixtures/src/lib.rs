@@ -698,7 +698,7 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
         refused_slots: vec![api::SizingRefused {
             profile: "node".to_owned(),
             reason: "14 jobs since its last change waited 240s for a slot (p95) while memory and CPU had room, 5 at \
-                     once at most; at 3 slots, beside the other profiles' 6, each slot would keep 1G of Docker's \
+                     once at most; at 3 slots, beside the other profiles' 6, each slot would keep on average 1G of Docker's \
                      disk, down from 2G, under the 2G auto sizing leaves each slot"
                 .to_owned(),
         }],
@@ -852,6 +852,27 @@ fn host_low(at: u64) -> api::Insight {
             lowest,
         },
         runs: Vec::new(),
+    }
+}
+
+/// jvm's image builds outgrowing their slots' Docker share (ADR 0156), worded as core words it.
+fn store_overflow(run: api::RunLink) -> api::Insight {
+    let held = 4 * GIB + 205 * MIB;
+    api::Insight {
+        key: "store-overflow:jvm".to_owned(),
+        severity: api::Severity::Notice,
+        repository: LEDGER.to_owned(),
+        workflow: None,
+        job: None,
+        sentence: api::Insight::store_overflow_sentence("jvm", 18, 20, held, 3 * GIB),
+        kind: api::InsightKind::StoreOverflow {
+            profile: "jvm".to_owned(),
+            overflowed: 18,
+            total: 20,
+            held,
+            share: 3 * GIB,
+        },
+        runs: vec![run],
     }
 }
 
@@ -1015,6 +1036,7 @@ pub fn insights(at: u64) -> api::Insights {
                     set: None,
                 },
             ),
+            store_overflow(link(TIMED_OUT, 3600)),
         ],
         waits: Vec::new(),
         disk: Some(disk_writes()),

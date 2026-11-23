@@ -422,6 +422,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.measured.read_predictor(predictor, SystemTime::now());
     }
 
+    /// Reads what each profile's slots' Docker stores held after their jobs from the history, once an hour and at the
+    /// first tick, for the shares the runners it starts get (ADR 0156).
+    pub(super) async fn refresh_shares(&mut self) {
+        let now = tokio::time::Instant::now();
+        if !self.shares.due(now) {
+            return;
+        }
+        let since = time::now_ms().saturating_sub(super::shares::WINDOW_MS);
+        let uses = match self.store.docker_stores(since).await {
+            Ok(uses) => Some(uses),
+            Err(error) => {
+                warn!(
+                    "cannot read what the slots' Docker stores held, so their shares stay: {error}"
+                );
+                None
+            }
+        };
+        self.shares.read(uses.as_deref(), now);
+    }
+
     /// Sets what each repository's next runner reserves, and says what the plan admits by. `free` is the budget
     /// the running containers leave.
     pub(super) fn admitting(

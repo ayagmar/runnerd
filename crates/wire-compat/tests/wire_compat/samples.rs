@@ -1337,6 +1337,7 @@ fn insights_of_every_kind() -> Vec<Insight> {
                 kind,
                 InsightKind::HostHeld { .. }
                     | InsightKind::HostLow { .. }
+                    | InsightKind::StoreOverflow { .. }
                     | InsightKind::DriveWear { .. }
             )
         })
@@ -1401,6 +1402,13 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             seconds: 94,
             lowest: 3 << 30,
         },
+        InsightKind::StoreOverflow {
+            profile: "jvm".to_owned(),
+            overflowed: 18,
+            total: 20,
+            held: 4 << 30,
+            share: 3 << 30,
+        },
         InsightKind::DriveWear {
             device: "nvme0n1".to_owned(),
             rated: 600_000_000_000_000,
@@ -1419,6 +1427,7 @@ pub(crate) fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::CpuHeld { .. }
             | InsightKind::HostHeld { .. }
             | InsightKind::HostLow { .. }
+            | InsightKind::StoreOverflow { .. }
             | InsightKind::DriveWear { .. }
             // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
             | InsightKind::Unknown => {}

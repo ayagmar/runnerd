@@ -13,6 +13,10 @@ pub use shown::InsightFigure;
 pub use shown::InsightsHeading;
 pub use shown::WaitFigure;
 
+/// The most one slot's Docker store keeps, in bytes, whatever its profile's share (ADR 0054, ADR 0156): the runner
+/// image's own default, for a daemon that sets none.
+pub const DOCKER_SLOT_MAX: u64 = 20 << 30;
+
 /// The window `GET /v1/insights` reads by default, in days.
 pub const INSIGHT_DAYS: u32 = 14;
 
@@ -261,6 +265,21 @@ pub enum InsightKind {
         seconds: u64,
         /// The least `MemAvailable` read while one stood, in bytes.
         lowest: u64,
+    },
+    /// A profile's slots' Docker stores held more than their share after half or more of its last jobs that
+    /// reported, so their cleanup removed images and build layers that the next job pulled and built again (ADR 0156).
+    /// Absent from a daemon before 0.1.6, which an older client reads as `Unknown`.
+    StoreOverflow {
+        /// The profile.
+        profile: String,
+        /// Jobs after which its store held more than its share.
+        overflowed: u32,
+        /// The profile's last jobs whose store reported.
+        total: u32,
+        /// The 90th percentile of what those stores held after their jobs, in bytes.
+        held: u64,
+        /// The share the last of them had, in bytes.
+        share: u64,
     },
     /// The drive under Docker's root has written its rating, or reaches it within `[host.drive]`'s `warn_days` at the
     /// last 7 days' rate (ADR 0157).
