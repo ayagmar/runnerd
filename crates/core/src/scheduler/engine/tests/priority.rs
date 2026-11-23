@@ -940,27 +940,6 @@ fn named(id: u64, name: &str) -> QueuedJob {
     }
 }
 
-/// `ms` since the epoch as GitHub writes a time.
-fn rfc3339(ms: u64) -> String {
-    let (days, secs) = (ms / 86_400_000, ms / 1000 % 86_400);
-    // Days to a civil date, from Howard Hinnant's `civil_from_days`.
-    let shifted = days + 719_468;
-    let era = shifted / 146_097;
-    let of_era = shifted % 146_097;
-    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
-    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * of_year + 2) / 153;
-    let day = of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    let (hour, minute, second) = (secs / 3600, secs / 60 % 60, secs % 60);
-    format!("{year}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
 impl Fixture {
     /// `count` successful runs of o/small's `name` in the history, from ID `first`, each keeping its runner `minutes`.
     async fn ran(&self, name: &str, first: u64, count: u64, minutes: u64) {
@@ -1017,7 +996,7 @@ impl Fixture {
                 status: "completed".to_owned(),
                 conclusion: Some("success".to_owned()),
                 started_at: None,
-                completed_at: Some(rfc3339(at + minutes * 60_000)),
+                completed_at: Some(crate::time::rfc3339(at + minutes * 60_000)),
                 runner_name: Some(runner.clone()),
                 steps: Vec::new(),
             });

@@ -154,6 +154,8 @@ pub use storage::{
     RecordState, actions_cache_place, records_check, records_near_full,
 };
 pub use tone::{Tone, Toned};
+#[cfg(test)]
+pub(crate) use units::civil_from_days;
 pub(crate) use units::days_from_civil;
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 
