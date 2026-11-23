@@ -145,7 +145,7 @@ mod tests {
             (longest_host.as_str(), "ran on hhhhhhhhhhhhhhhhhhhh"),
             ("GitHub Actions 12", "ran on GitHub Actions 12"),
             ("exactly-twenty-chars", "ran on exactly-twenty-chars"),
-            ("twenty-one-characters", "ran on twenty-one-characte…"),
+            ("runner-of-twenty-one1", "ran on runner-of-twenty-on…"),
             ("GitHub Actions 1000001234", "ran on GitHub Actions 1000…"),
             (
                 "arc-prod-eu-west-1-linux-x64-runners-7b8c9d-k9x2p",
