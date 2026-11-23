@@ -229,14 +229,18 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut
             theme.wait().add_modifier(Modifier::BOLD),
         )),
     }
-    // GitHub's rate limit goes first when the tabs do not fit beside it.
-    if let Some(limited) = app.live.status.github_line() {
-        let limited = Span::styled(format!("{limited}  "), theme.wait());
+    // GitHub's rate limit and the battery's hold go first when the tabs do not fit beside them.
+    let holds = [
+        app.live.status.github_line(),
+        app.live.status.battery_line(),
+    ];
+    for hold in holds.into_iter().flatten() {
+        let hold = Span::styled(format!("{hold}  "), theme.wait());
         let least = " runnerd ".width()
             + Line::from(tabs_of(app, TabNames::Open)).width()
             + job.as_ref().map_or(0, Span::width);
-        if least + limited.width() + Line::from(right.clone()).width() <= usize::from(area.width) {
-            right.insert(usize::from(attention.is_some()) * 2, limited);
+        if least + hold.width() + Line::from(right.clone()).width() <= usize::from(area.width) {
+            right.insert(usize::from(attention.is_some()) * 2, hold);
         }
     }
     let right = Line::from(right);

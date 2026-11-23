@@ -100,6 +100,22 @@ pub struct Host {
     /// The drive under Docker's root as its maker rates it (ADR 0157): absent, insights show no endurance.
     #[serde(default)]
     pub drive: Option<Drive>,
+    /// What runnerd does while the host runs on its battery (ADR 0161): by default `pause`, which starts no runner and
+    /// stops idle and warm ones, while busy ones finish. A host with no system battery is never on battery. A reload
+    /// applies it at the next tick.
+    #[serde(default)]
+    pub on_battery: OnBattery,
+}
+
+/// `on_battery` under `[host]`: what runnerd does while the host runs on its battery (ADR 0161).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnBattery {
+    /// Runners start as on mains power.
+    Run,
+    /// The default: no runner starts, and idle and warm runners stop; busy ones finish their jobs.
+    #[default]
+    Pause,
 }
 
 /// `[host.drive]`: what the drive under Docker's root is rated to write, and what its SMART log last said it had

@@ -62,8 +62,9 @@ pub struct Repository {
     pub profile: String,
     /// The labels its runners register with.
     pub labels: Vec<String>,
-    /// Paused repositories get no new runners; their running jobs finish.
-    pub paused: bool,
+    /// What holds back every new runner of it, if anything: its idle and warm runners stop, and its running jobs
+    /// finish.
+    pub paused: Option<Pause>,
     /// No runner starts for this repository before then, after its runners failed.
     pub held: Option<Hold>,
     /// The repository's queued jobs at the last poll, those of its other pools too.
@@ -89,6 +90,33 @@ impl Repository {
         Pool {
             repository: self.name.clone(),
             profile: self.profile.clone(),
+        }
+    }
+}
+
+/// What holds back every new runner of a repository, while its running jobs finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pause {
+    /// The owner paused it, or every repository.
+    Repository,
+    /// The host runs on its battery, and `[host] on_battery` is `pause` (ADR 0161).
+    Battery,
+}
+
+impl Pause {
+    /// Why its jobs wait.
+    fn waiting(self) -> Waiting {
+        match self {
+            Pause::Repository => Waiting::Paused,
+            Pause::Battery => Waiting::OnBattery,
+        }
+    }
+
+    /// Why its idle runners stop.
+    fn stop_reason(self) -> StopReason {
+        match self {
+            Pause::Repository => StopReason::Paused,
+            Pause::Battery => StopReason::OnBattery,
         }
     }
 }
@@ -230,6 +258,8 @@ pub enum StopReason {
     Upkeep,
     /// Its repository is paused.
     Paused,
+    /// The host runs on its battery (ADR 0161).
+    OnBattery,
     /// Its slot is past a lowered slot count.
     Closed,
     /// A reload changed its pool or profile, or a newer image or container spec replaces it.
@@ -252,6 +282,7 @@ impl StopReason {
             StopReason::Room => "room",
             StopReason::Upkeep => "upkeep",
             StopReason::Paused => "paused",
+            StopReason::OnBattery => "on_battery",
             StopReason::Closed => "closed",
             StopReason::Changed => "changed",
             StopReason::OverBudget => "over_budget",
@@ -268,6 +299,7 @@ impl StopReason {
             StopReason::Room => "a queued job takes its room",
             StopReason::Upkeep => "its profile's upkeep waits for it",
             StopReason::Paused => "its repository is paused",
+            StopReason::OnBattery => "the host is on battery",
             StopReason::Closed => "its slot closed",
             StopReason::Changed => "the config or runnerd changed its runners",
             StopReason::OverBudget => "raised for a heavier job, it does not fit the budget",
@@ -1311,10 +1343,10 @@ fn sort_out(
     let mut matching = oldest_first(repository);
     let profile = profiles.get(&repository.profile);
     let mut warm = repository.warm;
-    if repository.paused {
+    if let Some(pause) = repository.paused {
         decided
             .waiting
-            .extend(matching.iter().map(|job| (job.id, Waiting::Paused)));
+            .extend(matching.iter().map(|job| (job.id, pause.waiting())));
         // None is left for its idle runners, which stop at once.
         matching.clear();
         warm = 0;
@@ -1322,7 +1354,7 @@ fn sort_out(
     // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first. Nor does a
     // paused repository's: GitHub would give it a job queued before the pause.
     let upkeep_due = profile.is_some_and(|profile| profile.upkeep_due);
-    let stop_now = upkeep_due || repository.paused;
+    let stop_now = upkeep_due || repository.paused.is_some();
     if upkeep_due {
         warm = 0;
     }
@@ -1373,8 +1405,8 @@ fn sort_out(
         .decisions
         .extend(stops.into_iter().map(|slot| Decision::Stop {
             slot,
-            reason: if repository.paused {
-                StopReason::Paused
+            reason: if let Some(pause) = repository.paused {
+                pause.stop_reason()
             } else if upkeep_due {
                 StopReason::Upkeep
             } else {

@@ -1070,6 +1070,23 @@ async fn a_job_the_history_learns_of_after_the_preview_keeps_its_confirmation() 
     );
 }
 
+// Catches L3 of review 1 of #344: a re-run's preview on a host on battery that does not say its jobs will wait.
+#[tokio::test]
+async fn a_rerun_preview_on_a_host_on_battery_says_its_jobs_wait_for_mains_power() {
+    let setup = setup(Reply::Status(201)).await;
+    setup.control.set_on_battery(true);
+    let Asked::Preview(shown) = setup.actions.ask(12, JobAction::Rerun, None).await.unwrap() else {
+        panic!("no preview");
+    };
+    assert!(
+        shown.notes.iter().any(|note| note
+            == "The host is on battery: runnerd starts none of the new attempt's jobs until it is plugged in; other \
+                runners may take them."),
+        "{:?}",
+        shown.notes
+    );
+}
+
 #[tokio::test]
 async fn a_paused_repository_a_running_run_and_an_older_attempts_job_are_said_in_the_preview() {
     let setup = setup(Reply::Status(201)).await;

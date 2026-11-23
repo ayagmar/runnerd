@@ -78,6 +78,8 @@ pub struct Ran {
     pub host_waited: u64,
     /// How much of its wait passed while no runnerd ran, in ms.
     pub unseen: u64,
+    /// How much of its wait the host on battery held it, in ms (`Wait::held`).
+    pub held: u64,
     /// The periods of its CPU quota it had work in (`api::JobMetrics::cpu_periods`); `None` where the kernel kept no
     /// figure, as in runs from before schema 17.
     pub cpu_periods: Option<u64>,
@@ -101,6 +103,9 @@ pub struct Wait {
     pub started_at: u64,
     /// How much of it passed while no runnerd ran, in ms.
     pub unseen: u64,
+    /// How much of it the host on battery held it, in ms (`api::WaitCause::Battery`, ADR 0161): a wait the owner chose
+    /// by unplugging, not one for a runner.
+    pub held: u64,
 }
 
 impl Wait {
@@ -109,6 +114,7 @@ impl Wait {
         self.started_at
             .saturating_sub(self.queued_at.max(kept_since))
             .saturating_sub(self.unseen)
+            .saturating_sub(self.held)
     }
 }
 
@@ -211,6 +217,7 @@ impl Ran {
             queued_at: self.queued_at,
             started_at: self.started_at?,
             unseen: self.unseen,
+            held: self.held,
         })
     }
 
