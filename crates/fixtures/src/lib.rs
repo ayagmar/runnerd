@@ -1809,6 +1809,20 @@ pub fn torn() -> Daemon {
     daemon
 }
 
+/// The fixtures on an overflow host (ADR 0162): every queued job a pool serves is left to the primary, the first for
+/// 30 s more, the others past their time and waiting for GitHub to list them again.
+pub fn overflow() -> Daemon {
+    let mut daemon = daemon();
+    let mut until = NOW + 30;
+    for queued in &mut daemon.status.queued {
+        if !queued.waiting.as_ref().is_some_and(Waiting::cannot_start) {
+            queued.waiting = Some(Waiting::Overflow { until });
+            until = NOW - 5;
+        }
+    }
+    daemon
+}
+
 /// `GET /v1/attention` at revision 1 of the instance `fixtures` for `daemon`, `doctor` and the insights at [`NOW`]:
 /// core's items (`api::attention_items`). For the fixtures: the doctor's failure, the token or the listings, labels no
 /// pool serves, the long wait for the host's memory, the warning insights and the rate limit.

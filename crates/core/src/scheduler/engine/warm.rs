@@ -181,8 +181,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Notes the queued jobs of the last listing that the repositories' runners may run.
+    /// Notes the queued jobs of the last listing that the repositories' runners may run. An overflow host notes none:
+    /// a job listed there is most likely another machine's, and only those it took or ran make its repositories
+    /// active (ADR 0162).
     pub(super) fn note_queued(&mut self) {
+        if self.config.host.is_overflow() {
+            return;
+        }
         let mut seen = Vec::new();
         for repository in &self.config.repositories {
             let Some(state) = self.repositories.listed(&repository.name) else {
@@ -226,7 +231,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let configured = self.warm.learned().map_or(0, |learned| {
             warm::target(
-                repository.warm,
+                self.config.warm(repository),
                 learned.active(&repository.name, time::now_ms()),
                 0,
             )
@@ -276,7 +281,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|repository| {
                 let pool = Pool::from(repository);
                 let wanted = warm::target(
-                    repository.warm,
+                    self.config.warm(repository),
                     learned.active(&repository.name, now),
                     self.warm.runs.remaining(&pool, learned, now),
                 );

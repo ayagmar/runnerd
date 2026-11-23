@@ -67,6 +67,15 @@ const TICK_EVERY: Duration = Duration::from_secs(5);
 /// The config's `poll_interval`: the default. A `Tick` comes this long after the last, every repository due.
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+/// `[host] overflow_after`'s default, in ms.
+const OVERFLOW_AFTER: u64 = 45_000;
+
+/// How another machine's runnerd runners are named: its own ID and host name.
+const PEER_PREFIX: &str = "runnerd-0123abcd-desk-";
+
+/// The IDs of another machine's runners start past this, beyond any this machine's get.
+const PEER_IDS: u64 = 500_000;
+
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
 pub(super) struct Rng(pub(super) u64);
 
@@ -114,6 +123,8 @@ struct Shape {
     record_failures: bool,
     /// Whether the engine has a build cache, which it is given at its start.
     build_cache: bool,
+    /// `[host] role = "overflow"` (ADR 0162).
+    overflow: bool,
 }
 
 /// A pool as the config has it.
@@ -136,6 +147,7 @@ impl Shape {
         mirror: false,
         record_failures: false,
         build_cache: false,
+        overflow: false,
     };
 
     fn pools(&self) -> Vec<PoolShape> {
@@ -178,6 +190,9 @@ impl Shape {
         }
         if !self.pooled_count {
             host.push_str("pooled_count = false\n");
+        }
+        if self.overflow {
+            host.push_str("role = \"overflow\"\n");
         }
         let mut config = format!(
             r#"
@@ -300,6 +315,8 @@ enum Change {
     HeavyMemory,
     Mirror,
     RecordFailures,
+    /// The host turns overflow, or primary again (ADR 0162).
+    Role,
 }
 
 /// One thing that happens. Indexes pick among the candidates there are then, modulo their number.
@@ -471,6 +488,9 @@ enum Step {
     },
     /// Docker takes 200 ms more to start the next runner container, much more than the others of its batch.
     SlowStart,
+    /// Another machine's runnerd runner takes a queued job: GitHub no longer lists it queued, and lists that runner
+    /// busy on its repository (ADR 0162).
+    PeerTakes(usize),
     /// The sampler stops while the next runner container starts: the slice's sample turns stale with starts in flight.
     SliceSampleStallsDuringStart,
     /// The daemon goes in the middle of a batch: one start's container runs, Docker's answer not given; the next
@@ -595,6 +615,9 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             126 => Step::ClockJumps {
                 minutes: [5, 180][rng.index() % 2],
             },
+            // Draw nothing more, so the seeds' other steps stay as they were.
+            94 => Step::PeerTakes(0),
+            124 => Step::Reload(Change::Role),
             _ => Step::Tick,
         })
         .collect()
@@ -829,6 +852,8 @@ struct Seen {
     stalls_during_start: usize,
     /// Daemons gone with one start's container made and the next start's registration made.
     aborts_mid_batch: usize,
+    /// Ticks or passes of an overflow host that started a runner (ADR 0162).
+    overflow_starts: usize,
 }
 
 impl Seen {
@@ -859,6 +884,7 @@ impl Seen {
         self.stalls_during_start += case.stalls_during_start;
         self.aborts_mid_batch += case.aborts_mid_batch;
         self.growth_counts += case.growth_counts;
+        self.overflow_starts += case.overflow_starts;
     }
 
     /// The states no generated case reached, so nothing checks them.
@@ -902,6 +928,7 @@ impl Seen {
             ("a slow start beside others", self.slow_starts),
             ("a slice sample stale mid-batch", self.stalls_during_start),
             ("a daemon gone mid-batch", self.aborts_mid_batch),
+            ("a start on an overflow host", self.overflow_starts),
         ]
         .into_iter()
         .filter_map(|(state, count)| (count == 0).then_some(state))
@@ -1309,6 +1336,7 @@ impl Case {
                     }
                 }
             }
+            Step::PeerTakes(pick) => self.peer_takes(pick),
             Step::Lose(pick) => self.lose(pick),
             Step::Removing(pick) => self.removing(pick),
             Step::StartFails => self.docker.0.lock().unwrap().fail_starts += 1,
@@ -1546,6 +1574,33 @@ impl Case {
         );
     }
 
+    /// Another machine's runnerd runner takes queued job `pick`, and GitHub says it ran there.
+    fn peer_takes(&mut self, pick: usize) {
+        let queued = self.queued();
+        let Some(id) = pick_from(&queued, pick).copied() else {
+            return;
+        };
+        let repository = self.jobs[&id].repository;
+        let name = format!("{PEER_PREFIX}heavy-1-{id}");
+        let mut github = self.github.0.lock().unwrap();
+        github.queued.retain(|job| job.id != id);
+        github.runners.push(runner(PEER_IDS + id, &name, true));
+        github
+            .registered_on
+            .insert(PEER_IDS + id, repository.to_owned());
+        let mut ran = details(id, "completed", Some("success"));
+        ran.runner_name = Some(name);
+        github.jobs.insert(id, ran);
+        let job = self.jobs.get_mut(&id).unwrap();
+        job.phase = Phase::Done { ran: None };
+        if job.listed {
+            self.cancelled_since_listed
+                .entry(job.repository)
+                .or_default()
+                .insert(id);
+        }
+    }
+
     fn stop_during_start(&mut self, docker_gone: bool, after: u32, at: StopAt) {
         let (control, asked, launches, github) = (
             self.handle.control.clone(),
@@ -1747,7 +1802,9 @@ impl Case {
             .runners
             .iter()
             .filter(|runner| {
-                !self.orphans.contains(&runner.id) && !containers.contains(&runner.name)
+                !self.orphans.contains(&runner.id)
+                    && !containers.contains(&runner.name)
+                    && !runner.name.starts_with(PEER_PREFIX)
             })
             .map(|runner| runner.name.clone())
             .collect();
@@ -2464,6 +2521,7 @@ impl Case {
             Change::HeavyMemory => shape.heavy_memory = if shape.heavy_memory == 4 { 2 } else { 4 },
             Change::Mirror => shape.mirror = !shape.mirror,
             Change::RecordFailures => shape.record_failures = !shape.record_failures,
+            Change::Role => shape.overflow = !shape.overflow,
         }
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.engine
@@ -2612,6 +2670,14 @@ impl Case {
         self.host = Some(reading);
         for occupant in self.engine.occupants_mut() {
             occupant.started_at -= IDLE_TIMEOUT;
+        }
+        // An overflow host's jobs are past `overflow_after` (ADR 0162). Its clock is stopped, as on every shape, so the
+        // time GitHub queued them goes back instead.
+        if self.shape.overflow {
+            let by = u64::try_from(IDLE_TIMEOUT.as_millis()).unwrap();
+            for job in &mut self.github.0.lock().unwrap().queued {
+                job.created_at = job.created_at.saturating_sub(by);
+            }
         }
         for watch in &mut self.exits {
             if watch.exit == Exit::AtOnce {
@@ -2804,6 +2870,7 @@ impl Case {
         self.note_slow_start(starts.len());
         let mut started: BTreeSet<String> = starts.iter().cloned().collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
+        self.an_overflow_host_starts_only_for_jobs_left_long_enough(&after, &started)?;
         self.nothing_registers_before_a_sample_after_a_sleep()?;
         let seeds = self
             .engine
@@ -3006,6 +3073,7 @@ impl Case {
         self.note_slow_start(order.len());
         let starts: BTreeSet<String> = order.iter().cloned().collect();
         self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
+        self.an_overflow_host_starts_only_for_jobs_left_long_enough(&after, &starts)?;
         self.no_slot_is_left_starting()?;
         self.runner_names_are_unique()?;
         self.no_build_cache_left_open_without_a_runner()?;
@@ -3113,6 +3181,68 @@ impl Case {
                     "no_pass_starts_a_second_runner_for_a_job",
                     format!(
                         "{repository} in {profile}: {waiting} runners wait for {wanted} jobs queued or cancelled"
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// ADR 0162: a tick or a pass of an overflow host that starts runners in a pool leaves it no more runners waiting for
+    /// a job than its queued jobs GitHub queued `overflow_after` ago or more, and those its listing showed that left
+    /// the queue since: it starts none for a job it still leaves to the other machines, nor a warm one.
+    fn an_overflow_host_starts_only_for_jobs_left_long_enough(
+        &mut self,
+        status: &api::Status,
+        started: &BTreeSet<String>,
+    ) -> Result<(), Violation> {
+        if !self.shape.overflow {
+            return Ok(());
+        }
+        let now = self.clock.now_ms();
+        let aged: BTreeSet<u64> = self
+            .github
+            .0
+            .lock()
+            .unwrap()
+            .queued
+            .iter()
+            .filter(|job| job.created_at + OVERFLOW_AFTER <= now)
+            .map(|job| job.id)
+            .collect();
+        let idle: BTreeSet<String> = self.idle_containers().into_iter().map(|c| c.id).collect();
+        let pools: BTreeSet<(String, String)> = runners_of(status)
+            .filter(|(_, runner)| started.contains(&runner.name))
+            .map(|(profile, runner)| (runner.repository.clone(), profile.to_owned()))
+            .collect();
+        self.seen.overflow_starts += usize::from(!pools.is_empty());
+        for (repository, profile) in pools {
+            let waiting = runners_of(status)
+                .filter(|(in_profile, runner)| {
+                    *in_profile == profile
+                        && runner.repository == repository
+                        && idle.contains(&runner.container)
+                })
+                .count();
+            let left_long_enough = self
+                .queued()
+                .into_iter()
+                .filter(|id| aged.contains(id))
+                .chain(self.cancelled_since_listed.values().flatten().copied())
+                .chain(self.listed_after_runner.iter().copied())
+                .filter(|id| {
+                    let job = &self.jobs[id];
+                    job.repository == repository
+                        && self.shape.serves(job.repository, &job.labels) == Some(profile.as_str())
+                })
+                .count();
+            if waiting > left_long_enough {
+                return violation(
+                    self,
+                    "an_overflow_host_starts_only_for_jobs_left_long_enough",
+                    format!(
+                        "{repository} in {profile}: {waiting} runners wait for {left_long_enough} jobs queued \
+                         {OVERFLOW_AFTER} ms ago or more"
                     ),
                 );
             }
@@ -3799,12 +3929,9 @@ impl Case {
         }
         // What GitHub lists of this machine that no slot holds goes when its job does.
         let orphans = std::mem::take(&mut self.orphans);
-        self.github
-            .0
-            .lock()
-            .unwrap()
-            .runners
-            .retain(|runner| !orphans.contains(&runner.id));
+        self.github.0.lock().unwrap().runners.retain(|runner| {
+            !orphans.contains(&runner.id) && !runner.name.starts_with(PEER_PREFIX)
+        });
         for _ in 0..6 {
             self.elapse();
             self.tick().await?;
@@ -4155,6 +4282,15 @@ fn steps_of(seed: u64) -> Vec<Step> {
         // Two ticks, for what the scenario left to end.
         steps.splice(0..0, batch.iter().copied().chain([Step::Tick, Step::Tick]));
     }
+    if seed % 16 == 12 {
+        steps.splice(
+            0..0,
+            AN_OVERFLOW_HOST
+                .iter()
+                .copied()
+                .chain([Step::Tick, Step::Tick]),
+        );
+    }
     if seed % 4 == 3 {
         steps.splice(
             0..0,
@@ -4454,6 +4590,24 @@ const A_LISTING_BESIDE_A_NEWLY_BUSY_RUNNER: [Step; 13] = [
 ];
 
 const A_BUSY_ORPHAN: [Step; 2] = [Step::BusyOrphan, Step::Tick];
+
+/// ADR 0162: the host turns overflow. A job queued now waits two ticks, gets a runner once it is old enough, and
+/// another machine takes the next one; then the host is a primary again.
+const AN_OVERFLOW_HOST: [Step; 13] = [
+    Step::Reload(Change::Role),
+    HEAVY,
+    Step::Tick,
+    Step::Tick,
+    Step::Elapse,
+    Step::Tick,
+    Step::Assign(0),
+    HEAVY,
+    Step::Tick,
+    Step::PeerTakes(0),
+    Step::Tick,
+    Step::Finish(0),
+    Step::Reload(Change::Role),
+];
 
 /// After the first seed's tick: a trim that starts while a reseed runs may measure a snapshot the reseed replaces, so it
 /// marks none.

@@ -68,6 +68,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         reserved: None,
         host_waited: 0,
         slot_waited: 0,
+        overflow_waited: 0,
         unseen: 0,
         cpu_periods: None,
         cpu_throttled: None,
@@ -556,6 +557,25 @@ fn capped_builds(count: u64, peak: u64, wait_secs: u64) -> Vec<Ran> {
             ..job("halyard/storefront", "build", "node", peak, wait_secs)
         })
         .collect()
+}
+
+#[test]
+fn the_time_an_overflow_host_left_a_job_to_the_primary_is_no_wait_sizing_reads() {
+    // Catches finding M4: an overflow host reading the 45 s it chose to leave each job to the primary as waits, which
+    // under caps ask for slots. These waited 5 minutes, 4 of them left to the primary.
+    let builds = capped_builds(10, 4500 * M, 300)
+        .into_iter()
+        .map(|build| Ran {
+            overflow_waited: 240_000,
+            ..build
+        })
+        .collect();
+    let sizing = sizing(&History {
+        jobs: builds,
+        ..History::default()
+    });
+    let node = profile(&sizing, "node");
+    assert_eq!((node.wait.p50, node.wait.p95), (60, 60));
 }
 
 #[test]

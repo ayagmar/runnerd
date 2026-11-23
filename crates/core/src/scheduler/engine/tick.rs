@@ -818,6 +818,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn plan(&self) -> (Plan, Admitting) {
         let taken = self.taken();
         let warm = self.warm_targets();
+        let idle_after = crate::scheduler::idle_after(self.config.host.role);
+        let mut left = BTreeMap::new();
         let mut repositories: Vec<Repository> = self
             .config
             .repositories
@@ -831,7 +833,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     labels: repository.labels.clone(),
                     paused: self.control.is_paused(&repository.name),
                     held: state.health(&repository.profile).and_then(PoolHealth::held),
-                    queued: self.listed_demand(repository, &taken),
+                    queued: self.left_to_others(
+                        &repository.name,
+                        self.listed_demand(repository, &taken),
+                        &mut left,
+                    ),
                     runner_memory: None,
                     runner_cpu: None,
                     waits: state
@@ -840,6 +846,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .unwrap_or_default(),
                     usual: None,
                     warm: warm.get(&Pool::from(repository)).copied().unwrap_or(0),
+                    idle_after,
                 })
             })
             .collect();
@@ -860,6 +867,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.plan_budget(&admitting),
             SystemTime::now(),
         );
+        plan.waiting.extend(left);
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now,
         // or its runners start with other labels, image or limits, which a job queued since may need. Also those an
         // earlier release started, whose container spec this one may have changed.
@@ -891,6 +899,35 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let stops = self.slept_stops(&plan.decisions);
         plan.decisions.extend(stops);
         (plan, admitting)
+    }
+
+    /// `queued`, of `repository`, without the jobs an overflow host leaves to the other machines for now (ADR 0162),
+    /// each of which `left` says waits for that. A primary leaves none. The jobs no pool of the repository serves stay,
+    /// to wait for a pool.
+    fn left_to_others(
+        &self,
+        repository: &str,
+        mut queued: Vec<QueuedJob>,
+        left: &mut BTreeMap<u64, crate::api::Waiting>,
+    ) -> Vec<QueuedJob> {
+        if !self.config.host.is_overflow() {
+            return queued;
+        }
+        let now = self.clock.now_ms();
+        let after = self.config.host.overflow_after;
+        queued.retain(|job| {
+            let served = self.config.repositories.iter().any(|pool| {
+                pool.name == repository && crate::scheduler::matches(job, &pool.labels)
+            });
+            match self.overflow.holds(job, now, after) {
+                Some(until) if served => {
+                    left.insert(job.id, crate::api::Waiting::Overflow { until });
+                    false
+                }
+                _ => true,
+            }
+        });
+        queued
     }
 
     /// Notes that a runner of `repository`'s pool in `profile` may have taken one of its listed jobs without the
@@ -1417,6 +1454,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             if listed {
                 self.listed_after_wake(began);
+                self.overflow.queued_listed(
+                    &repository,
+                    &queued,
+                    listing.listing,
+                    self.clock.now_ms(),
+                );
                 self.claims
                     .listing_answered(&repository, listing, floor, &queued);
                 for occupant in self
@@ -1455,6 +1498,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (repository, answer) in listings {
             if answer.is_err() {
                 self.owe_runners_listing(&repository);
+                self.overflow.runners_unknown(&repository);
+            } else {
+                self.overflow.runners_listed(&repository, listing.listing);
             }
             // Whether this machine still has a runner registered on it.
             let mut left = false;
@@ -1527,6 +1573,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let listed = |name: &str| repositories.is_known(name);
         self.registrations.forget_unlisted(listed);
         self.claims.forget_unlisted(listed);
+        self.overflow.forget_unlisted(listed);
     }
 
     /// Warns of a runners listing that failed, and stops draining its repository once GitHub says it is gone, as when

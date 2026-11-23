@@ -45,6 +45,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
         waits: Waits::default(),
         usual: None,
         warm: 0,
+        idle_after: IDLE_TIMEOUT,
     }
 }
 

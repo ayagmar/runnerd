@@ -78,6 +78,9 @@ pub struct Ran {
     pub host_waited: u64,
     /// How much of its wait passed while no runnerd ran, in ms.
     pub unseen: u64,
+    /// How long of its wait an overflow host left it to the other machines, in ms (`api::WaitCause::Overflow`, ADR
+    /// 0162): a wait the host chose, which no slot would have saved. 0 on a primary.
+    pub overflow_waited: u64,
     /// The periods of its CPU quota it had work in (`api::JobMetrics::cpu_periods`); `None` where the kernel kept no
     /// figure, as in runs from before schema 17.
     pub cpu_periods: Option<u64>,
@@ -765,13 +768,18 @@ impl Sized {
     }
 }
 
-/// The [waits](Wait) of the jobs that started, in seconds, less what they waited for the host's memory.
+/// The [waits](Wait) of the jobs that started, in seconds, less what they waited for the host's memory and what an
+/// overflow host left them to the other machines.
 fn waits(jobs: &[&Ran], kept_since: u64) -> Spread {
     spread(
         jobs.iter()
             .filter_map(|job| {
-                job.wait()
-                    .map(|wait| wait.counted(kept_since).saturating_sub(job.host_waited) / 1000)
+                job.wait().map(|wait| {
+                    wait.counted(kept_since)
+                        .saturating_sub(job.host_waited)
+                        .saturating_sub(job.overflow_waited)
+                        / 1000
+                })
             })
             .collect(),
     )

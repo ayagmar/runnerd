@@ -36,6 +36,9 @@ pub enum WaitCause {
     Backoff,
     /// No pool served its labels (`Waiting::NoPool`).
     NoPool,
+    /// It was left to the other machines, on an overflow host (`Waiting::Overflow`, ADR 0162): a wait the host chose,
+    /// which sizing does not read.
+    Overflow,
     /// A reason this build does not know: a `Waiting` from a newer daemon, or a cause a later runnerd stored.
     #[serde(other)]
     Other,
@@ -43,7 +46,7 @@ pub enum WaitCause {
 
 impl WaitCause {
     /// Every cause, in the order a split lists them when two took as long.
-    pub const ALL: [WaitCause; 12] = [
+    pub const ALL: [WaitCause; 13] = [
         WaitCause::Barrier,
         WaitCause::Start,
         WaitCause::Slot,
@@ -55,11 +58,12 @@ impl WaitCause {
         WaitCause::Paused,
         WaitCause::Backoff,
         WaitCause::NoPool,
+        WaitCause::Overflow,
         WaitCause::Other,
     ];
 
     /// Its name as one word, the history's key and the API's: `barrier`, `start`, `slot`, `budget`, `host`, `cpu`,
-    /// `booting`, `preparing`, `paused`, `backoff`, `no-pool` or `other`.
+    /// `booting`, `preparing`, `paused`, `backoff`, `no-pool`, `overflow` or `other`.
     pub fn word(self) -> &'static str {
         match self {
             WaitCause::Barrier => "barrier",
@@ -73,6 +77,7 @@ impl WaitCause {
             WaitCause::Paused => "paused",
             WaitCause::Backoff => "backoff",
             WaitCause::NoPool => "no-pool",
+            WaitCause::Overflow => "overflow",
             WaitCause::Other => "other",
         }
     }
@@ -99,6 +104,7 @@ impl WaitCause {
             WaitCause::Paused => "Repository paused",
             WaitCause::Backoff => "Runners failing",
             WaitCause::NoPool => "No profile serves it",
+            WaitCause::Overflow => "Left to the primary machine",
             WaitCause::Other => "Another reason",
         }
     }
@@ -121,6 +127,7 @@ impl Waiting {
             Waiting::Paused => WaitCause::Paused,
             Waiting::Backoff { .. } => WaitCause::Backoff,
             Waiting::NoPool { .. } => WaitCause::NoPool,
+            Waiting::Overflow { .. } => WaitCause::Overflow,
             Waiting::Unknown => WaitCause::Other,
         }
     }

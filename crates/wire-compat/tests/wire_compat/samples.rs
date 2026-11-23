@@ -278,6 +278,9 @@ pub(crate) fn waiting() -> Vec<Waiting> {
         Waiting::Torn {
             volumes: vec!["runnerd-jvm-slot-2".to_owned()],
         },
+        Waiting::Overflow {
+            until: 1_761_400_045,
+        },
     ];
     for waiting in &every {
         match waiting {
@@ -295,6 +298,7 @@ pub(crate) fn waiting() -> Vec<Waiting> {
             | Waiting::BehindStart { .. }
             | Waiting::NoPool { .. }
             | Waiting::Torn { .. }
+            | Waiting::Overflow { .. }
             // What a client reads a later daemon's reason as; no daemon sends it, so it has no sample.
             | Waiting::Unknown => {}
         }
@@ -1523,6 +1527,7 @@ pub(crate) fn wait_cause() -> Vec<WaitCause> {
         WaitCause::Paused,
         WaitCause::Backoff,
         WaitCause::NoPool,
+        WaitCause::Overflow,
         WaitCause::Other,
     ];
     for cause in &every {
@@ -1538,6 +1543,7 @@ pub(crate) fn wait_cause() -> Vec<WaitCause> {
             | WaitCause::Paused
             | WaitCause::Backoff
             | WaitCause::NoPool
+            | WaitCause::Overflow
             | WaitCause::Other => {}
         }
     }
