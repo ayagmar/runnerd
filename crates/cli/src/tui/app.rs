@@ -1949,8 +1949,11 @@ impl App {
             (Value::Range(range), _) => history.range = *range,
             (Value::Order(order), _) => history.order = *order,
             (Value::Machine(target), _) => {
-                let name = target.as_deref().unwrap_or(api::THIS_MACHINE);
-                self.flash(format!("reading {name}…"), api::Tone::Quiet);
+                // The machine read now is not read again: the loop only gives up a switch under way.
+                if *target != self.chosen {
+                    let name = target.as_deref().unwrap_or(api::THIS_MACHINE);
+                    self.flash(format!("reading {name}…"), api::Tone::Quiet);
+                }
                 return vec![Effect::Switch(target.clone())];
             }
             (

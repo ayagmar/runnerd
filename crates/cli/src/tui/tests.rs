@@ -3697,6 +3697,23 @@ fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_c
         vec![Effect::Switch(Some("skiff".to_owned()))]
     );
     assert_eq!(app.overlay, Overlay::None, "the list closes");
+    assert!(
+        app.flash
+            .as_ref()
+            .is_some_and(|flash| flash.text == "reading skiff…"),
+        "a switch under way says so: {:?}",
+        app.flash
+    );
+
+    // Enter on the machine read now, the cursor's first place, closes the list and reads nothing.
+    app.flash = None;
+    app.update(key(KeyCode::Char('m')));
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::Switch(None)]);
+    assert_eq!(app.flash, None, "nothing is being read, so nothing says so");
 }
 
 /// Catches: a TUI reading another machine with nothing on screen to say which.
