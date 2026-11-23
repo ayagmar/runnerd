@@ -59,8 +59,8 @@ struct Idle {
 impl Overflow {
     /// A listing of `repository`'s queued jobs, the engine's `listing`, answered with `jobs` at `now` (ms), with
     /// `after` the host's `overflow_after`: those it shows are seen in it, and those it no longer shows are forgotten.
-    /// Those it then may take are this host's for good, since the engine plans its starts next. Says whether it
-    /// showed a job not seen here before, which waits for the next runners listing.
+    /// Those it then may take are this host's for good, since the engine plans its starts next. Says whether a job of
+    /// `repository` is still held, which waits for a runners listing in the same probe as its queued listing.
     pub(super) fn queued_listed(
         &mut self,
         repository: &str,
@@ -72,7 +72,6 @@ impl Overflow {
         self.seen.retain(|id, sighting| {
             sighting.repository != repository || jobs.iter().any(|job| job.id == *id)
         });
-        let mut new = false;
         for job in jobs {
             self.seen
                 .entry(job.id)
@@ -80,20 +79,19 @@ impl Overflow {
                     sighting.last = sighting.last.max(listing);
                     sighting.job = job.clone();
                 })
-                .or_insert_with(|| {
-                    new = true;
-                    Sighting {
-                        repository: repository.to_owned(),
-                        job: job.clone(),
-                        first_at: now,
-                        first: listing,
-                        last: listing,
-                        released: false,
-                    }
+                .or_insert_with(|| Sighting {
+                    repository: repository.to_owned(),
+                    job: job.clone(),
+                    first_at: now,
+                    first: listing,
+                    last: listing,
+                    released: false,
                 });
         }
         self.release(repository, now, after);
-        new
+        self.seen
+            .values()
+            .any(|sighting| sighting.repository == repository && !sighting.released)
     }
 
     /// `repository`'s runners listing of the engine's `listing` answered, showing `idle` online and idle of the other
@@ -141,9 +139,9 @@ impl Overflow {
     /// Until when, in seconds since the epoch, an overflow host leaves `job` to the other machines at `now` (ms), with
     /// `after` its `[host] overflow_after`; `None` once it may start a runner for it. It may once GitHub queued it
     /// `after` ago, or, where GitHub did not say when, this host first saw it `after` ago; it was listed twice here,
-    /// the second time after a runners listing of its repository that began after the first; and that runners
-    /// listing shows no other machine's runner idle with labels that match it that the one before did not. A runner
-    /// still idle a listing later is not getting it from GitHub. Until then it is held, and past the first condition
+    /// the second time with a runners listing of its repository in the same probe; and that runners listing shows no
+    /// other machine's runner idle with labels that match it that the one before did not. A runner still idle a
+    /// listing later is not getting it from GitHub. Until then it is held, and past the first condition
     /// `until` is in the past. Once it may, it may for as long as it is listed.
     pub(super) fn holds(&self, job: &QueuedJob, now: u64, after: Duration) -> Option<u64> {
         let Some(sighting) = self.seen.get(&job.id) else {
@@ -168,7 +166,7 @@ impl Overflow {
             .get(&sighting.repository)
             .is_some_and(|runners| {
                 sighting.first < runners.listing
-                    && runners.listing <= sighting.last
+                    && runners.listing == sighting.last
                     && !runners.idle.values().any(|idle| {
                         idle.since == runners.listing
                             && crate::scheduler::matches(&sighting.job, &idle.labels)

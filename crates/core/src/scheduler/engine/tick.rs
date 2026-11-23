@@ -1454,15 +1454,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             if listed {
                 self.listed_after_wake(began);
-                let first_seen = self.overflow.queued_listed(
+                let holds = self.overflow.queued_listed(
                     &repository,
                     &queued,
                     listing.listing,
                     self.clock.now_ms(),
                     self.config.host.overflow_after,
                 );
-                // A job first seen here waits for a runners listing after this one: the next probe makes it.
-                if first_seen && self.config.host.is_overflow() {
+                // A held job waits for a runners listing in the same probe as a queued one: the next probe makes it.
+                if holds && self.config.host.is_overflow() {
                     self.owe_runners_listing(&repository);
                 }
                 self.claims

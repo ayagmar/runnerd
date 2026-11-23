@@ -420,3 +420,47 @@ async fn a_job_once_released_stays_released_when_a_runners_listing_fails() {
         waiting(&handle)
     );
 }
+
+// Catches the re-check's finding 1: the runners listing that gates a new job is the one of its second probe, so a
+// runner the full primary registers before the fourth probe, which lists only queued jobs, is not seen and this host
+// starts a second runner beside it.
+#[tokio::test]
+async fn a_held_job_is_released_only_on_a_runners_listing_of_the_same_probe() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("overflow-same-probe"),
+    );
+    let (mut engine, _handle, clock) = overflow(&github, &docker, &dir).await;
+    let interval = Duration::from_secs(15);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.runners = vec![peer(800, true), peer(801, true)];
+        state.queued = vec![queued_at(1, clock.now_ms() + 10_000)];
+    }
+    let probe = async |engine: &mut Engine<FakeGithub, FakeDocker>| {
+        clock.advance(interval);
+        engine.age_listings(interval);
+        engine
+            .tick_listing(Shutdown::No, crate::scheduler::engine::tick::Scope::Due)
+            .await;
+    };
+    for _ in 0..3 {
+        probe(&mut engine).await;
+    }
+    assert_eq!(registrations(&github), 0, "35 s old");
+    // The primary frees a slot and registers a runner, which GitHub has not yet given the job.
+    github.0.lock().unwrap().runners.push(peer(802, false));
+    probe(&mut engine).await;
+    assert_eq!(
+        registrations(&github),
+        0,
+        "50 s old, and the primary's runner for it is idle"
+    );
+    probe(&mut engine).await;
+    assert_eq!(
+        registrations(&github),
+        1,
+        "the same runner idle a probe later is not getting it"
+    );
+}
