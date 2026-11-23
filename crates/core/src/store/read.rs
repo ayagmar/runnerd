@@ -1490,16 +1490,18 @@ fn stored_causes(text: &str) -> BTreeMap<api::WaitCause, u64> {
     causes
 }
 
-/// What `device` wrote in the windows that read it and started at or after `since` (ms), and the ms they span.
+/// What `device` wrote in the windows that read it, started at or after `since` and ended by `until` (ms), and the
+/// ms they span.
 pub(super) fn drive_read_since(
     db: &Connection,
     device: &str,
     since: u64,
+    until: u64,
 ) -> rusqlite::Result<crate::insights::DriveRead> {
     db.query_row(
         "SELECT coalesce(sum(drive), 0), coalesce(sum(end_at - start), 0) FROM disk_windows \
-         WHERE device = ?1 AND start >= ?2 AND drive IS NOT NULL",
-        params![device, since],
+         WHERE device = ?1 AND start >= ?2 AND end_at <= ?3 AND drive IS NOT NULL",
+        params![device, since, until],
         |row| {
             Ok(crate::insights::DriveRead {
                 bytes: row.get(0)?,

@@ -1334,15 +1334,17 @@ impl Store {
         self.read(read::latest_cache_sizes).await
     }
 
-    /// What runnerd read `device` write in the windows that started at or after `since` (ms), and the time they span
+    /// What runnerd read `device` write in the windows that started at or after `since` and ended by `until` (ms),
+    /// and the time they span
     /// (ADR 0157): what `[host.drive]`'s SMART count is added to.
     pub async fn drive_read_since(
         &self,
         device: &str,
         since: u64,
+        until: u64,
     ) -> Result<crate::insights::DriveRead, StoreError> {
         let device = device.to_owned();
-        self.read(move |db| read::drive_read_since(db, &device, since))
+        self.read(move |db| read::drive_read_since(db, &device, since, until))
             .await
     }
 

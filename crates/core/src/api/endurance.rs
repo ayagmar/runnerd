@@ -123,7 +123,7 @@ impl Endurance {
     /// a rate, or at a rate of nothing a day.
     pub fn days_left(&self, span: RateSpan) -> Option<u64> {
         let per_day = self.rate(span)?.per_day();
-        self.left()?.checked_div(per_day)
+        self.left().filter(|left| *left > 0)?.checked_div(per_day)
     }
 
     /// Whether it warns: it has written its rating, or the week's rate reaches it within `warn_days`.

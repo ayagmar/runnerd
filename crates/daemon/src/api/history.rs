@@ -298,7 +298,7 @@ pub(super) async fn insight_runs_of(
     {
         history.drive_read = Some(
             store
-                .drive_read_since(&drive.device, written.at.saturating_mul(1000))
+                .drive_read_since(&drive.device, written.at.saturating_mul(1000), now)
                 .await?,
         );
     }

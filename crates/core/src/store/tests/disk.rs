@@ -398,7 +398,10 @@ async fn a_window_keeps_its_split_by_cgroup_and_an_older_one_reads_as_not_split(
         read.iter().map(|window| window.owners).collect::<Vec<_>>(),
         [Some(owners), None, None, Some(owners)]
     );
-    let since = store.drive_read_since("nvme0n1", 1_600_000).await.unwrap();
+    let since = store
+        .drive_read_since("nvme0n1", 1_600_000, 3_400_000)
+        .await
+        .unwrap();
     assert_eq!(
         since,
         crate::insights::DriveRead {
@@ -407,8 +410,17 @@ async fn a_window_keeps_its_split_by_cgroup_and_an_older_one_reads_as_not_split(
         },
         "the windows of nvme0n1 from the count on"
     );
+    // A window that closed after the insights' end is not read yet: it read more than the time since.
     assert_eq!(
-        store.drive_read_since("sda", 0).await.unwrap(),
+        store
+            .drive_read_since("nvme0n1", 1_600_000, 2_799_999)
+            .await
+            .unwrap()
+            .watched,
+        600_000
+    );
+    assert_eq!(
+        store.drive_read_since("sda", 0, 3_400_000).await.unwrap(),
         crate::insights::DriveRead::default(),
         "a disk runnerd never read wrote nothing it counted"
     );

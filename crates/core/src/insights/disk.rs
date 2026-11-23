@@ -138,7 +138,8 @@ fn drive(
             watched: seconds(shared),
             written: sum(shared, |window| window.drive)?,
             jobs,
-            slice: sum(&read_slice, |window| window.slice).filter(|_| !read_slice.is_empty()),
+            // Over the same windows as the others: the slice's of a longer stretch would fill the whole.
+            slice: sum(shared, |window| window.slice),
             daemon: sum(shared, |window| window.daemon),
             owners: (!split.is_empty())
                 .then(|| {
@@ -200,16 +201,31 @@ pub(super) fn endurance(
     Endurance {
         device: drive.device.clone(),
         rated: drive.endurance.0,
-        written: drive.written.map(|written| {
-            let read = read.unwrap_or_default();
-            WrittenSince {
-                counted: written.bytes.0,
-                at: written.at,
-                read: read.bytes,
-                watched: read.watched / 1000,
-                since: (now / 1000).saturating_sub(written.at),
-            }
-        }),
+        // A count taken after `now`, as the digest's look 24 hours back may find, did not exist then.
+        written: drive
+            .written
+            .filter(|written| written.at <= now / 1000)
+            .map(|written| {
+                // `read` runs to when it was read; at an earlier `now` the windows that end after it are not counted yet.
+                let mut read = read.unwrap_or_default();
+                for window in windows.iter().filter(|window| {
+                    window.device == drive.device
+                        && window.start >= written.at.saturating_mul(1000)
+                        && window.end > now
+                }) {
+                    read.bytes = read.bytes.saturating_sub(window.drive.unwrap_or(0));
+                    read.watched = read
+                        .watched
+                        .saturating_sub(window.end.saturating_sub(window.start));
+                }
+                WrittenSince {
+                    counted: written.bytes.0,
+                    at: written.at,
+                    read: read.bytes,
+                    watched: read.watched / 1000,
+                    since: (now / 1000).saturating_sub(written.at),
+                }
+            }),
         week: rate(7 * DAY),
         day: rate(DAY),
         warn_days: drive.warn_days,

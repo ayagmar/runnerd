@@ -1255,6 +1255,11 @@ pub enum ConfigError {
          set allow_unsafe = true under [host] to use it anyway"
     )]
     UnsafeNotAllowed,
+    /// `[host.drive]` names no disk.
+    #[error(
+        "host.drive.device is empty; set it to the disk under Docker's root, such as \"nvme0n1\""
+    )]
+    DriveDevice,
     /// A limit is 0.
     #[error("{field} is 0; set it above 0")]
     ZeroLimit {
@@ -1681,12 +1686,27 @@ impl Config {
                 self.records.max_total.0 == 0,
                 "records.max_total".to_owned(),
             ),
+            (
+                self.host
+                    .drive
+                    .as_ref()
+                    .is_some_and(|drive| drive.endurance.0 == 0),
+                "host.drive.endurance".to_owned(),
+            ),
         ];
         if let Some((_, field)) = zero_limits
             .chain(mirror_zero_limits)
             .find(|(zero, _)| *zero)
         {
             return Err(ConfigError::ZeroLimit { field });
+        }
+        if self
+            .host
+            .drive
+            .as_ref()
+            .is_some_and(|drive| drive.device.trim().is_empty())
+        {
+            return Err(ConfigError::DriveDevice);
         }
         self.check_sizing_bounds()?;
         self.caches.build.validate()?;

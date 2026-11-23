@@ -1884,3 +1884,134 @@ fn few_reports_or_a_store_that_fits_most_of_the_time_is_no_insight() {
         "7 of 20 is not"
     );
 }
+
+/// After an upgrade from 0.1.5 the old windows read the slice and the new ones are split too: the slice's figure
+/// over all of them filled the split stretch's whole and left every cgroup's share at 0%.
+#[test]
+fn the_slice_s_share_is_over_the_same_split_windows_as_the_others() {
+    let owners = api::DriveOwners {
+        system: G,
+        kernel: 5 * G,
+        ..api::DriveOwners::default()
+    };
+    let history = History {
+        disk: vec![
+            drive_window("nvme0n1", 3, 8 * G, None),
+            drive_window("nvme0n1", 2, 8 * G, Some(owners)),
+            drive_window("nvme0n1", 1, 8 * G, Some(owners)),
+        ],
+        ..whole(&[])
+    };
+    let shares = insights(&history, &config(), 14, NOW)
+        .disk
+        .unwrap()
+        .drive
+        .unwrap()
+        .shares;
+    assert_eq!(
+        shares.slice,
+        Some(4 * G),
+        "the slice's of the split windows only"
+    );
+    let kernel = shares
+        .parts()
+        .into_iter()
+        .find(|part| part.owner == api::ShareOwner::Kernel)
+        .map(|part| part.bytes);
+    assert_eq!(kernel, Some(10 * G));
+}
+
+/// The rating's section and its warning show together: a quiet day with no jobs and no windows dropped the section
+/// while the warning stood, and a drive past its rating claimed 0 days left beside "has written its rating".
+#[test]
+fn a_drive_past_its_rating_shows_its_endurance_on_a_quiet_day_and_claims_no_days() {
+    let mut disk = Vec::new();
+    for hours_ago in 30..=40 {
+        disk.push(drive_window("nvme0n1", hours_ago, TB / 4, None));
+    }
+    let history = History {
+        disk,
+        drive_read: Some(super::DriveRead::default()),
+        ..whole(&[])
+    };
+    let found = insights(&history, &drive_config(Some("601TB")), 1, NOW);
+    let disk = found
+        .disk
+        .expect("the endurance shows without the day's writes");
+    assert_eq!(disk.drive, None);
+    let endurance = disk.endurance.unwrap();
+    assert_eq!(endurance.left(), Some(0));
+    assert!(endurance.week.is_some(), "a rate from before the day");
+    assert_eq!(endurance.days_left(api::RateSpan::Week), None);
+    let wear = found
+        .insights
+        .iter()
+        .find(|insight| insight.key == "drive-wear:nvme0n1")
+        .unwrap();
+    assert!(
+        matches!(
+            wear.kind,
+            InsightKind::DriveWear {
+                days: None,
+                left: Some(0),
+                ..
+            }
+        ),
+        "past its rating: no days"
+    );
+    assert_eq!(
+        wear.figure().map(|figure| figure.label),
+        Some("rated writes, written".to_owned())
+    );
+}
+
+/// The digest looks 24 hours back to tell which insights are new. Reading today's writes and a count given today at
+/// that earlier time said the drive already warned then, so a drive that crossed its rating today was never new.
+#[test]
+fn a_drive_that_crossed_its_rating_today_is_new_in_the_digest() {
+    let wear = |history: &History, config: &Config| {
+        digest(history, config, NOW)
+            .new
+            .iter()
+            .any(|insight| insight.key == "drive-wear:nvme0n1")
+    };
+    // Counted 599TB two days ago; 2TB written in the last 24 hours, nothing read before.
+    let mut config = drive_config(Some("599TB"));
+    config
+        .host
+        .drive
+        .as_mut()
+        .unwrap()
+        .written
+        .as_mut()
+        .unwrap()
+        .at = (NOW - 48 * HOUR) / 1000;
+    let history = History {
+        disk: vec![
+            drive_window("nvme0n1", 3, TB, None),
+            drive_window("nvme0n1", 2, TB, None),
+        ],
+        drive_read: Some(super::DriveRead {
+            bytes: 2 * TB,
+            watched: 2 * HOUR,
+        }),
+        ..whole(&[])
+    };
+    assert!(wear(&history, &config), "crossed today: new");
+    // Counted past the rating two hours ago, the first count runnerd has.
+    let mut config = drive_config(Some("601TB"));
+    config
+        .host
+        .drive
+        .as_mut()
+        .unwrap()
+        .written
+        .as_mut()
+        .unwrap()
+        .at = (NOW - 2 * HOUR) / 1000;
+    let history = History {
+        drive_read: Some(super::DriveRead::default()),
+        ..whole(&[])
+    };
+    assert!(wear(&history, &config), "given today: new");
+}

@@ -1595,4 +1595,20 @@ fn a_drive_s_sizes_are_decimal_and_a_binary_unit_is_refused() {
         assert!(error.contains(says), "{refused}: {error}");
     }
     assert_eq!(Config::parse(MINIMAL).unwrap().host.drive, None);
+    // A rating of nothing warned at once, and a blank device matched no disk and named none in the sentence.
+    let mut config = with("endurance = \"600TB\"").unwrap();
+    config.host.drive.as_mut().unwrap().endurance = crate::config::DriveBytes(0);
+    assert!(
+        matches!(config.validate(None), Err(crate::config::ConfigError::ZeroLimit { field }) if field == "host.drive.endurance"),
+        "a 0 rating is refused"
+    );
+    let mut blank = with("endurance = \"600TB\"").unwrap();
+    blank.host.drive.as_mut().unwrap().device = " ".to_owned();
+    assert!(
+        matches!(
+            blank.validate(None),
+            Err(crate::config::ConfigError::DriveDevice)
+        ),
+        "a blank device is refused"
+    );
 }

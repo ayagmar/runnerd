@@ -83,7 +83,7 @@ impl DiskWritten {
 
 /// The disk-writes section of [`Insights`](super::Insights): what the jobs that ended in the window wrote, the
 /// workflows and jobs that wrote most, and what the drive wrote while the daemon read it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskWrites {
     /// The jobs' figures together.
     pub jobs: JobWrites,
@@ -182,8 +182,8 @@ pub struct DriveShares {
 /// root cgroup's line counts every write to them, and each child's what its processes sent, so the root's less its
 /// children's is what no cgroup sent, the kernel's own threads and the file system's writes on no one's account. Bytes,
 /// as the physical disks were sent them, after compression; the runner slice's are [`DriveShares::slice`], apart from
-/// these. When Docker's root is a file system in a file, a loop device writes it to the drive, partly on no cgroup's
-/// account: `kernel` then holds that part, which the shares leave out as the slice's (`DriveShares::parts`).
+/// these. When Docker's root is a file system in a file, the loop device's writes to its backing file reach the drive
+/// on the account of the cgroup that wrote the file system only some of the time; `kernel` holds the rest.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriveOwners {
     /// runnerd's own cgroup, its `systemd` unit's; `None` when it could not be told apart: unread, the root, or one
@@ -656,6 +656,7 @@ impl DiskWrites {
                     .shares
                     .notes(drive.watched)
                     .into_iter()
+                    .chain(drive.metadata_note())
                     .map(|note| format!("{}: {note}", Self::SHARES_TITLE)),
             );
         }
@@ -902,16 +903,23 @@ mod tests {
                  btrfs writes on no one's account (inferred from the size, not measured)",
             ]
         );
+        // The terminal draws the figures and caveats without the sentences: the inference is among the caveats too.
+        let caveats = DiskWrites {
+            drive: Some(drive.clone()),
+            ..DiskWrites::default()
+        }
+        .caveats();
+        let inference = format!("{}: {}", DiskWrites::SHARES_TITLE, drive.lines()[2]);
+        assert!(
+            caveats.contains(&inference),
+            "16K among the caveats: {caveats:?}"
+        );
         // Off btrfs the size says nothing of metadata; nor do larger writes on it.
         let ext4 = DriveWrites {
             commits: None,
             ..drive.clone()
         };
-        assert!(
-            !ext4.lines().iter().any(|line| line.contains("metadata")),
-            "no inference off btrfs: {:?}",
-            ext4.lines()
-        );
+        assert_eq!(ext4.metadata_note(), None, "no inference off btrfs");
         let large = DriveWrites {
             shares: DriveShares {
                 owners: Some(DriveOwners {
@@ -922,11 +930,7 @@ mod tests {
             },
             ..drive
         };
-        assert!(
-            !large.lines().iter().any(|line| line.contains("metadata")),
-            "no inference from 128K writes: {:?}",
-            large.lines()
-        );
+        assert_eq!(large.metadata_note(), None, "no inference from 128K writes");
         // Split to the byte, nothing is left for no owner: its share is not drawn.
         let whole = DriveShares {
             written: 572 * G,

@@ -317,10 +317,18 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         insights: found,
         waits,
         host: host_days,
-        disk: disk::writes(&window, &history.disk, since, now).map(|writes| api::DiskWrites {
-            endurance,
-            ..writes
-        }),
+        // The endurance shows whenever the config rates the drive, a quiet window without jobs or windows too.
+        disk: match (disk::writes(&window, &history.disk, since, now), endurance) {
+            (Some(writes), endurance) => Some(api::DiskWrites {
+                endurance,
+                ..writes
+            }),
+            (None, Some(endurance)) => Some(api::DiskWrites {
+                endurance: Some(endurance),
+                ..api::DiskWrites::default()
+            }),
+            (None, None) => None,
+        },
         queue: queue::split(&window, history.kept_since),
     }
 }
