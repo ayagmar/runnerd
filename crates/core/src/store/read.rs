@@ -1153,6 +1153,14 @@ macro_rules! held {
     };
 }
 
+/// How long an overflow host left the job `j` to the other machines, in ms: its `overflow` wait cause (ADR 0162), 0
+/// where it has none or its causes are not JSON (`stored_causes`).
+macro_rules! overflow_waited {
+    () => {
+        "coalesce(CASE WHEN json_valid(j.wait_causes) THEN json_extract(j.wait_causes, '$.overflow') END, 0)"
+    };
+}
+
 /// [`sizing::Wait::counted`] in SQL, in ms, for the job `j` with the history's `jobs_since` as `?1`; 0 for a job that
 /// did not start.
 const COUNTED_WAIT: &str = concat!(
@@ -1320,6 +1328,7 @@ fn ran(row: &Row<'_>) -> rusqlite::Result<sizing::Ran> {
         slot_waited: row.get(26)?,
         run_attempt: row.get(27)?,
         held: row.get(28)?,
+        overflow_waited: row.get(29)?,
     })
 }
 
@@ -1336,6 +1345,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
                  j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen, j.cpu_periods, \
                  j.cpu_throttled, j.slot_waited, j.run_attempt, ",
                 held!(),
+                ", ",
+                overflow_waited!(),
                 " FROM jobs j JOIN runners r ON r.name = j.runner \
                  WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
                  AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id"
@@ -1353,6 +1364,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
                  r.local_ooms, j.run_id, j.branch, 0, j.unseen, j.cpu_periods, j.cpu_throttled, j.slot_waited, \
                  j.run_attempt, ",
                 held!(),
+                ", ",
+                overflow_waited!(),
                 " FROM jobs j JOIN runners r ON r.name = j.runner \
                  WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id"
             ),

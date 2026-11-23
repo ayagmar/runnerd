@@ -406,7 +406,7 @@ fn warm_runners(config: &Config, profile: &str, slots: u32) -> u32 {
         .repositories
         .iter()
         .filter(|repository| repository.profile == profile)
-        .map(|repository| repository.warm)
+        .map(|repository| config.warm(repository))
         .sum::<u32>()
         .min(slots)
 }

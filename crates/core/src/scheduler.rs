@@ -24,6 +24,18 @@ pub use waits::{Wait, Waits};
 /// GitHub's assignment.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How long an overflow host's idle runner waits for a job before it is surplus (ADR 0162): GitHub hands a job to any
+/// online idle runner, so one left on the overflow host takes the next job before the primary starts one for it.
+pub const OVERFLOW_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long an idle runner of a host in `role` waits for a job before it is surplus.
+pub fn idle_after(role: crate::config::Role) -> Duration {
+    match role {
+        crate::config::Role::Primary => IDLE_TIMEOUT,
+        crate::config::Role::Overflow => OVERFLOW_IDLE_TIMEOUT,
+    }
+}
+
 /// A repository's runners held back after they failed.
 #[derive(Debug, Clone, Copy)]
 pub struct Hold {
@@ -82,6 +94,8 @@ pub struct Repository {
     pub usual: Option<Duration>,
     /// How many idle runners it keeps beyond its queued jobs, for jobs not queued yet (`warm::target`).
     pub warm: usize,
+    /// How long one of its idle runners waits for a job before it is surplus (`idle_after`).
+    pub idle_after: Duration,
 }
 
 impl Repository {
@@ -250,7 +264,7 @@ pub struct Demand {
 /// Why an idle runner is removed: what its removal log line and the history say (ADR 0092).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// It waited `IDLE_TIMEOUT`, and neither a queued job nor its repository's warm runners want it.
+    /// It waited its repository's `idle_after`, and neither a queued job nor its repository's warm runners want it.
     Expired,
     /// A queued job of another pool takes its room.
     Room,
@@ -505,7 +519,7 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// (`Repository::runner_cpu`, by default the slot's `cpus`) fits `budget.cpu` (`None`: no budget). A job that does
 /// not fit takes the room of warm runners of other repositories, which stop. A pool whose job had a slot but not
 /// memory or CPU is held once for each (`Plan::held`). An idle runner stops once no queued job is left for it,
-/// it is not one of its repository's `warm` runners, and it waited `IDLE_TIMEOUT`. The first such job that waited
+/// it is not one of its repository's `warm` runners, and it waited its repository's `idle_after`. The first such job that waited
 /// long enough, and that draining the running jobs would make room for, puts up the plan's one barrier
 /// (`priority::Barrier`): no younger job starts until a runner of its pool does, unless it fits and `Backfill` lets it
 /// pass by its run time (ADR 0097) or as a short job of another profile (ADR 0151). Last, while no job waits for room, each repository short of its `warm`
@@ -1351,7 +1365,7 @@ fn sort_out(
         matching.clear();
         warm = 0;
     }
-    // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first. Nor does a
+    // Upkeep waits for its profile's runners: none is kept, and none waits out `idle_after` first. Nor does a
     // paused repository's: GitHub would give it a job queued before the pause.
     let upkeep_due = profile.is_some_and(|profile| profile.upkeep_due);
     let stop_now = upkeep_due || repository.paused.is_some();
@@ -1386,7 +1400,7 @@ fn sort_out(
             stop_now
                 || now
                     .duration_since(runner.started_at)
-                    .is_ok_and(|waited| waited >= IDLE_TIMEOUT)
+                    .is_ok_and(|waited| waited >= repository.idle_after)
         })
         .take(surplus.saturating_sub(warm))
         .map(|(slot, _)| slot.clone())
