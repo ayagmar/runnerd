@@ -870,6 +870,17 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
             );
         }
     }
+    if let Some(grype) = &caches.grype {
+        let _ = writeln!(out, "grype database");
+        let _ = writeln!(out, "  {}", grype.line(now));
+        if let Some(failure) = &grype.failure {
+            let _ = writeln!(
+                out,
+                "  {}",
+                paint.paint(grype.tone().into(), &failure.line())
+            );
+        }
+    }
     out
 }
 

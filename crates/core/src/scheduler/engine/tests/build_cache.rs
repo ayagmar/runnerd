@@ -41,6 +41,7 @@ pub(super) fn engine_with_cache(
             },
             build_cache: Some(cache.clone()),
             action_archives: None,
+            grype_database: None,
             unsynced: dir.0.join("unsynced"),
             durability: Durability::new(|| {}, |_| false),
         },
