@@ -518,9 +518,9 @@ fn opposing_demands_share_one_barrier_the_older_ones() {
 #[test]
 fn a_starved_pool_that_may_not_start_erects_no_barrier() {
     for (paused, held) in [
-        (true, None),
+        (Some(Pause::Repository), None),
         (
-            false,
+            None,
             Some(Hold {
                 until: now() + LONG_AGO,
                 cause: HoldCause::Start,

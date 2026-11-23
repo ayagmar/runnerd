@@ -1054,6 +1054,9 @@ pub(crate) fn health(overview: &Overview) -> Markup {
             @if overview.attention.is_none() && let Some(limited) = overview.status.github_line() {
                 p.notice.tone-warn { (limited) }
             }
+            @if let Some(battery) = overview.status.battery_line() {
+                p.notice.tone-warn { (battery) }
+            }
         }
     }
 }

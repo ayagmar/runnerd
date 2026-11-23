@@ -553,6 +553,7 @@ async fn a_sleep_of_the_host_is_downtime_for_the_waits_through_it_and_marks_the_
             queued_at: summary.timeline.queued_at * SECOND,
             started_at: summary.timeline.started_at.unwrap() * SECOND,
             unseen: summary.timeline.unseen * SECOND,
+            held: 0,
         }
         .counted(0)
             / SECOND
@@ -670,4 +671,69 @@ async fn a_restart_after_a_wake_does_not_count_the_sleep_again() {
         HOUR / SECOND + 10,
         "the sleep and the 10 s no daemon ran, each once"
     );
+}
+
+// Catches M1 of review 1 of #344 where the history counts waits in SQL: an hour a laptop on battery held a job read as
+// an hour of waiting on the dashboard and in the stats, and causes that are not JSON failing the read.
+#[tokio::test]
+async fn time_the_host_on_battery_held_a_job_is_left_out_of_the_waits_the_history_counts() {
+    use crate::api::WaitCause;
+    let dir = TestDir::new("store-battery");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let store = Store::open_at(&path, start).unwrap();
+    keep_since(&path, start);
+    for id in 1..=3 {
+        store.queued(
+            "o/r",
+            &QueuedJob {
+                created_at: start,
+                ..queued(id)
+            },
+            start,
+        );
+    }
+    store.causes_waited(vec![
+        crate::store::CauseWait {
+            job: 1,
+            cause: WaitCause::Battery,
+            ms: HOUR,
+        },
+        crate::store::CauseWait {
+            job: 1,
+            cause: WaitCause::Slot,
+            ms: 20 * SECOND,
+        },
+    ]);
+    store.flush().await;
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE jobs SET state = 'completed', conclusion = 'success', started_at = {held}, \
+             finished_at = {held} + 60000 WHERE id = 1;
+             UPDATE jobs SET state = 'completed', conclusion = 'success', started_at = {quick}, \
+             finished_at = {quick} + 60000 WHERE id IN (2, 3);
+             UPDATE jobs SET wait_causes = 'not json' WHERE id = 3;",
+            held = start + HOUR + 20 * SECOND,
+            quick = start + 20 * SECOND,
+        ))
+        .unwrap();
+    let now = (start + 2 * HOUR) / SECOND;
+    let activity = store.activity(0, now).await.unwrap();
+    let counted: Vec<u64> = activity.started.iter().map(|job| job.waited).collect();
+    assert_eq!(counted, [20, 20, 20], "the dashboard's waits");
+    let stats = store
+        .stats(
+            StatsQuery {
+                repository: None,
+                since: Some(0),
+                until: None,
+                bucket: Bucket::Day,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    let queued: u64 = stats.rows.iter().map(|row| row.queue_seconds).sum();
+    assert_eq!(queued, 60, "the stats' summed waits");
 }
