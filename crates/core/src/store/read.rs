@@ -1543,13 +1543,15 @@ pub(super) fn held_jobs(
     Ok(found)
 }
 
+/// The jobs queued since `since` that warm runners learn from: not those another machine took or none ran, which
+/// would teach this host bursts it never runs.
 pub(super) fn warm(
     db: &Connection,
     since: u64,
 ) -> rusqlite::Result<Vec<crate::scheduler::warm::Seen>> {
     db.prepare_cached(
         "SELECT repository, workflow, run_id, run_attempt, queued_at, labels, finished_at, started_at FROM jobs \
-         WHERE queued_at >= ?1 ORDER BY id",
+         WHERE queued_at >= ?1 AND state != 'elsewhere' ORDER BY id",
     )?
     .query_map([since], |row| {
         let labels: String = row.get(5)?;
