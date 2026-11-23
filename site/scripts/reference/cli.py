@@ -24,7 +24,7 @@ PAGES = [
      "runnerctl", ["status", "jobs", "job", "logs", "watch", "tui", "insights", "caches", "config", "doctor", "web"]),
     ("runnerctl-actions", "runnerctl actions",
      "The `runnerctl` commands that change something, and their options, as `--help` prints them.", "runnerctl",
-     ["pause", "resume", "cancel", "rerun", "reseed", "shell", "records", "sizing", "notify"]),
+     ["pause", "resume", "cancel", "rerun", "reseed", "shell", "records", "sizing", "notify", "machine"]),
 ]
 
 

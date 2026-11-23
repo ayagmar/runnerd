@@ -101,7 +101,30 @@ Send every target a test message, or only the one named, and say what each did
 
 - `--target <TARGET>`: Only the target with this name
 
+## `runnerctl machine`
+
+Add, list or forget the other machines runnerctl reaches over SSH with --machine
+
+### `runnerctl machine add --ssh <TARGET> <NAME>`
+
+Add a machine to reach over SSH: reads its daemon's status once, through ssh with BatchMode, and keeps its SSH target, the daemon's socket there and its machine id. Refused when its machine id is this machine's or another added machine's
+
+- `<NAME>`: What --machine calls it: lower-case letters and digits
+- `--ssh <TARGET>`: What ssh connects to, such as skiff, me@skiff.example.ts.net or a Host of ~/.ssh/config
+- `--remote-socket <PATH>`: The daemon's socket on that machine [default: its user's $XDG_RUNTIME_DIR/runnerd.sock, asked over ssh]
+
+### `runnerctl machine list`
+
+List the added machines
+
+### `runnerctl machine rm <NAME>`
+
+Forget a machine
+
+- `<NAME>`
+
 ## Every command
 
 - `--socket <SOCKET>`: The daemon's API socket [default: `$XDG_RUNTIME_DIR/runnerd.sock`]
+- `--machine <NAME>`: Ask the daemon of this machine, as `runnerctl machine add` named it, over SSH instead
 - `--json`: Print the API's JSON instead of text: the response type unchanged, one event per line for `watch`

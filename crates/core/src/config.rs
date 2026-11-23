@@ -15,6 +15,7 @@ use serde::{Deserialize, Deserializer, de};
 use crate::api;
 
 mod budget;
+pub mod machines;
 
 pub use budget::{BudgetBlock, CheckBudget, Remainder, Verdict};
 

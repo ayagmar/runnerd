@@ -19,6 +19,7 @@ use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
 
 mod human;
+mod machines;
 mod output;
 #[cfg(test)]
 mod testing;
@@ -36,6 +37,9 @@ struct Cli {
     /// The daemon's API socket [default: `$XDG_RUNTIME_DIR/runnerd.sock`].
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
+    /// Ask the daemon of this machine, as `runnerctl machine add` named it, over SSH instead.
+    #[arg(long, global = true, value_name = "NAME", conflicts_with = "socket")]
+    machine: Option<String>,
     /// Print the API's JSON instead of text: the response type unchanged, one event per line for `watch`.
     #[arg(long, global = true)]
     json: bool,
@@ -220,7 +224,14 @@ enum Command {
     /// Check that the host can run runners. Runs `runnerd doctor` here when the daemon is not running.
     Doctor,
     /// Open the web dashboard with a one-time login link, and print one for each of `[web] origins`.
+    ///
+    /// With --machine, only --qr and --sign-out-all: the login link is a file on that machine.
     Web(WebArgs),
+    /// Add, list or forget the other machines runnerctl reaches over SSH with --machine.
+    Machine {
+        #[command(subcommand)]
+        command: machines::MachineCommand,
+    },
 }
 
 /// `runnerctl web`'s flags.
@@ -353,9 +364,6 @@ fn main() -> ExitCode {
             code
         }
     };
-    let Some(socket) = cli.socket.clone().or_else(default_socket) else {
-        return fail(&"XDG_RUNTIME_DIR is not set; pass --socket");
-    };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -363,10 +371,47 @@ fn main() -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => return fail(&error),
     };
-    match runtime.block_on(run(&Client::new(socket), cli.json, cli.command)) {
+    match runtime.block_on(start(cli)) {
         Ok(code) => code,
         Err(error) => fail(&error),
     }
+}
+
+/// Opens the client `--machine` or `--socket` names and runs the command with it; `machine` needs none.
+async fn start(cli: Cli) -> Result<ExitCode, Error> {
+    let Cli {
+        socket,
+        machine,
+        json,
+        command,
+    } = cli;
+    let socket = socket.or_else(default_socket);
+    if let Command::Machine { command } = command {
+        if machine.is_some() {
+            return Err(Error::Local(
+                "--machine names the machine other commands ask; `runnerctl machine` edits the list on this one"
+                    .to_owned(),
+            ));
+        }
+        let local = socket.map(Client::new);
+        return machines::run(
+            command,
+            json,
+            &machines::file()?,
+            local.as_ref(),
+            std::sync::Arc::new(runnerd_core::client::OpenSsh),
+            &machines::private_base(),
+        )
+        .await;
+    }
+    let client =
+        match machine {
+            Some(name) => machines::client(&machines::file()?, &name).await?,
+            None => Client::new(socket.ok_or_else(|| {
+                Error::Local("XDG_RUNTIME_DIR is not set; pass --socket".to_owned())
+            })?),
+        };
+    run(&client, json, command).await
 }
 
 /// `$XDG_RUNTIME_DIR/runnerd.sock`, where `runnerd serve` listens by default.
@@ -580,6 +625,8 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
         Command::Web(args) => return web(client, &args).await,
+        // `start` runs it without a client.
+        Command::Machine { .. } => {}
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1121,7 +1168,7 @@ async fn config(client: &Client, json: bool, command: ConfigCommand) -> Result<E
 async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
     let doctor: Doctor = match client.get("/v1/doctor").await {
         Ok(doctor) => doctor,
-        Err(ClientError::NotRunning(_)) if !json => {
+        Err(ClientError::NotRunning(_)) if !json && client.machine().is_none() => {
             output::line("runnerd is not running; running `runnerd doctor` here");
             let status = std::process::Command::new("runnerd")
                 .arg("doctor")
@@ -1265,6 +1312,13 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
         }
         return Ok(ExitCode::SUCCESS);
     }
+    if let Some(machine) = client.machine() {
+        return Err(Error::Local(format!(
+            "the login link is a file on {name}, which runnerctl does not read over SSH; `runnerctl --machine \
+             {name} web --qr` prints a fresh link to scan, or run `runnerctl web` on {name}",
+            name = machine.name
+        )));
+    }
     let file = client.socket().with_extension("web");
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
@@ -1402,7 +1456,10 @@ async fn logs(
 fn is_outage(error: &ClientError) -> bool {
     matches!(
         error,
-        ClientError::NotRunning(_) | ClientError::Transport(_) | ClientError::Timeout(_)
+        ClientError::NotRunning(_)
+            | ClientError::Unreachable { .. }
+            | ClientError::Transport(_)
+            | ClientError::Timeout(_)
     )
 }
 
