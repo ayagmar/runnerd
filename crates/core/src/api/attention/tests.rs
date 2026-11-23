@@ -17,6 +17,7 @@ fn status() -> Status {
         stopping: None,
         github_limited_until: None,
         action_archives: None,
+        machine: None,
         budget: Budget::default(),
         profiles: Vec::new(),
         repositories: ["halyard/ledger", "halyard/storefront"]

@@ -387,6 +387,7 @@ async fn serve_for(
         replaced: state.config_revision.subscribe(),
         stopping: state.stopping.clone(),
         setup: config.notify,
+        machine: state.handle.status.borrow().machine.clone(),
     }));
     let app = router(state).into_make_service_with_connect_info::<Peer>();
     axum::serve(listener, app)

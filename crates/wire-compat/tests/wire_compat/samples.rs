@@ -36,7 +36,7 @@ use runnerd_core::api::{
     StyledLine, Subject, Swap, Timeline, TimelineBar, TimelineQuery, Tone, Unavailable, Usd, View,
     WaitSpread, Waiting, WeekWaits,
 };
-use runnerd_core::api::{CauseWait, ProfileQueue, WaitCause};
+use runnerd_core::api::{CauseWait, Machine, ProfileQueue, WaitCause};
 use runnerd_core::api::{
     Commits, DiskWrites, DiskWritten, DriveShares, DriveWrites, JobWrites, Measure, WriteTop,
 };
@@ -53,6 +53,14 @@ pub(crate) fn status() -> Status {
         profiles: vec![profile_status()],
         repositories: vec![repository_status()],
         queued: vec![queued_job()],
+        machine: Some(machine()),
+    }
+}
+
+pub(crate) fn machine() -> Machine {
+    Machine {
+        id: "4f2a91c0".to_owned(),
+        name: "tern".to_owned(),
     }
 }
 
@@ -60,6 +68,7 @@ pub(crate) fn status() -> Status {
 /// budget, a growth count resting with no brake, a queued job without a pool or a reason.
 pub(crate) fn status_empty() -> Status {
     let mut status = status();
+    status.machine = None;
     status.action_archives = Some(ActionArchives {
         entries: 0,
         bytes: 0,
@@ -1684,6 +1693,7 @@ pub(crate) fn notification() -> Notification {
         runners: vec![runner_failure()],
         insights: insights_of_every_kind(),
         digest: Some(digest()),
+        machine: Some(machine()),
     }
 }
 
@@ -1695,6 +1705,7 @@ pub(crate) fn notification_empty() -> Notification {
         runners: Vec::new(),
         insights: Vec::new(),
         digest: None,
+        machine: None,
         ..notification()
     }
 }

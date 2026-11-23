@@ -22,6 +22,8 @@ Reload or restart runnerd, then `runnerctl notify test` sends every target a tes
 | `insights` | a new warning insight, told again only after runnerd saw it gone for a day; `host-held` once in each 6-hour window, `host-low` once a day | on |
 | `digest` | daily at `digest_at` (default `09:00`): the day's jobs, new insights, longest waits, the host's memory while CI ran | off |
 
+Each title ends with the machine that sent it, such as `halyard/api: CI / test failed on tern`: `[host] name`, else the host name. A webhook's JSON also carries `machine`, its name and the 8-hex id its runner names start with.
+
 A burst is one message: runnerd waits 10 seconds after the first event and sends to a target at most once a minute, so twenty failures arrive as one. A failed delivery is retried with backoff, 5 seconds to 10 minutes.
 
 A target's URL and header values are secrets: logs, errors and `runnerctl notify test` never show them, and the config editor, `runnerctl config show` and `GET /v1/config` show `"<secret>"`. Change them in `runnerd.toml` itself.

@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use maud::{Markup, html};
+use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Activity, ActivityQuery, Attention, AttentionItem, Feature, Fix, HealthKind, HeldKind,
     HeldPart, HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary, JobTitle,
@@ -197,7 +198,7 @@ pub(crate) fn regions(overview: &Overview) -> [(&'static str, Markup, Parts); 8]
 }
 
 /// The whole page.
-pub(crate) fn render(overview: &Overview) -> Markup {
+pub(crate) fn render(overview: &Overview, machine: Option<&Machine>) -> Markup {
     let regions = regions(overview);
     let live = Live {
         url: "/live/overview",
@@ -239,6 +240,7 @@ pub(crate) fn render(overview: &Overview) -> Markup {
     };
     page(
         View::Overview.title(),
+        machine,
         Some(Page::Overview),
         Some(&live),
         &main,
