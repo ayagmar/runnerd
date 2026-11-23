@@ -352,6 +352,22 @@ pub struct Runner {
     pub status: String,
     /// Whether it runs a job.
     pub busy: bool,
+    /// Its labels' names, which GitHub lists as objects with a `name`; none where an answer left them out.
+    #[serde(default, deserialize_with = "label_names")]
+    pub labels: Vec<String>,
+}
+
+/// GitHub's `labels` of a runner, `[{ "id": 1, "name": "self-hosted", "type": "read-only" }]`, as their names.
+fn label_names<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    /// One label as GitHub lists it.
+    #[derive(Deserialize)]
+    struct Label {
+        name: String,
+    }
+    Ok(Vec::<Label>::deserialize(deserializer)?
+        .into_iter()
+        .map(|label| label.name)
+        .collect())
 }
 
 /// What deleting a runner did.

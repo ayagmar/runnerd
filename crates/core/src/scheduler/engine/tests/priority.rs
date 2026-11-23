@@ -1312,6 +1312,7 @@ async fn under_caps_a_history_changes_no_reservation() {
         cpu_throttled: None,
         slot_waited: 0,
         held: 0,
+        overflow_waited: 0,
     };
     let mut predictor = Predictor::new(&fixture.engine.config.sizing);
     for _ in 0..20 {

@@ -723,6 +723,7 @@ fn as_sized(runs: &[Run], average: u64) -> Vec<crate::sizing::Ran> {
             host_waited: 0,
             slot_waited: 0,
             held: 0,
+            overflow_waited: 0,
             unseen: 0,
             cpu_periods: run.cpu_periods,
             cpu_throttled: run.cpu_throttled,
