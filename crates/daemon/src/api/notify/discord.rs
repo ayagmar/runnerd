@@ -1,7 +1,7 @@
 //! `kind = "discord"`: posts Discord's execute-webhook JSON, one embed with the title, the message and the link,
 //! coloured by event, that pings no one. Knows nothing of other kinds.
 
-use runnerd_core::api::{Notification, NotifyEvent};
+use runnerd_core::api::{Machine, Notification, NotifyEvent};
 use runnerd_core::config::Secret;
 use serde_json::json;
 
@@ -33,7 +33,7 @@ impl Sender for Discord {
             NotifyEvent::Test => 0x0057_F287,
         };
         let mut embed = json!({
-            "title": shorten(&notification.title, TITLE),
+            "title": title(notification),
             "color": color,
         });
         if !notification.message.is_empty() {
@@ -51,6 +51,19 @@ impl Sender for Discord {
             url: self.url.expose().to_owned(),
             body: serde_json::to_vec(&body).map_err(|encode| encode.to_string())?,
         })
+    }
+}
+
+/// The notification's title within `TITLE`, still ending with the machine that sent it: the embed says it nowhere
+/// else.
+fn title(notification: &Notification) -> String {
+    let suffix = Machine::notification_suffix(notification.machine.as_ref());
+    let room = TITLE.saturating_sub(suffix.chars().count());
+    match notification.title.strip_suffix(&suffix) {
+        Some(before) if !suffix.is_empty() && room > 1 => {
+            format!("{}{suffix}", shorten(before, room))
+        }
+        _ => shorten(&notification.title, TITLE),
     }
 }
 

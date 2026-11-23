@@ -27,9 +27,12 @@ test of whose runner a registration is. Three things still made two machines har
   a person can compare the ids of two machines. Absent from an older daemon.
 - **Messages and pages name the machine.** Every `[notify]` message's title ends with `on <name>`
   (`Machine::notification_title`), and a webhook's JSON carries `machine`. Every dashboard page's title reads
-  `<page> · runnerd on <name>` (`Machine::page_title`); the dashboard reads the machine from the status once.
+  `<page> · runnerd on <name>` (`Machine::page_title`); a machine with an empty name is not named. The dashboard
+  reads the machine from the status once, after the page itself loaded, and remembers a daemon that names none. A
+  Discord embed cut to its 256-character title keeps the ` on <name>` ending.
 - **Read once at start.** The engine's identity is fixed when the daemon starts. A reload that changes `[host] name`
-  renames nothing until the next start; until then the status, messages and runner names keep the old name.
+  renames nothing until the next start, and answers with the warning `host.name takes effect when runnerd restarts`;
+  until then the status, messages and runner names keep the old name.
 
 ## Consequences
 

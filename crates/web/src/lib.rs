@@ -57,20 +57,44 @@ pub(crate) struct App {
     /// Set when the dashboard stops, so live pages end.
     stopping: watch::Receiver<bool>,
     /// The machine the daemon runs on, which page titles name: read from its status once, as the daemon reads its
-    /// name once at start.
-    machine: Arc<tokio::sync::OnceCell<Machine>>,
+    /// name once at start. `None` inside is a daemon whose status names none, as 0.1.5's.
+    machine: Arc<tokio::sync::OnceCell<Option<Machine>>>,
 }
 
 impl App {
-    /// The machine the daemon runs on; `None` while its status does not answer or does not say.
-    async fn machine(&self) -> Option<&Machine> {
+    /// The machine the daemon runs on, from `seen` when the page already read the status, else from a read of its
+    /// own the first time. `None` while the daemon does not say, or did not answer: a later page asks again.
+    async fn machine(&self, seen: Option<&Status>) -> Option<&Machine> {
+        if let Some(status) = seen {
+            // Taken by another page first: the same daemon, so the same machine.
+            let _ = self.machine.set(status.machine.clone());
+        }
         self.machine
             .get_or_try_init(|| async {
-                let status: Status = self.daemon.get("/v1/status").await.map_err(|_| ())?;
-                status.machine.ok_or(())
+                let status: Status = self.daemon.get("/v1/status").await?;
+                Ok::<_, ClientError>(status.machine)
             })
             .await
             .ok()
+            .and_then(Option::as_ref)
+    }
+
+    /// A page loaded from the daemon and rendered with the machine its title names, or the daemon's error as one.
+    /// The machine is read only once the page loaded, so a daemon that does not answer costs one wait, not two.
+    async fn page<V>(
+        &self,
+        loaded: Result<V, ClientError>,
+        status: impl FnOnce(&V) -> Option<&Status>,
+        render: impl FnOnce(&V, Option<&Machine>) -> Markup,
+    ) -> Response {
+        let rendered = match loaded {
+            Ok(view) => {
+                let machine = self.machine(status(&view)).await;
+                Ok(render(&view, machine))
+            }
+            Err(error) => Err(error),
+        };
+        page(rendered)
     }
 }
 
@@ -263,74 +287,74 @@ fn page(rendered: Result<Markup, ClientError>) -> Response {
 }
 
 async fn overview(State(app): State<App>) -> Response {
-    let machine = app.machine().await;
-    page(
-        Overview::load(&app.daemon, now())
-            .await
-            .map(|overview| views::overview::render(&overview, machine)),
+    app.page(
+        Overview::load(&app.daemon, now()).await,
+        |view| Some(&view.status),
+        views::overview::render,
     )
+    .await
 }
 
 async fn history(
     State(app): State<App>,
     filter: Result<Query<Filter>, QueryRejection>,
 ) -> Response {
-    let machine = app.machine().await;
     let filter = lenient(filter);
-    page(
-        History::load(&app.daemon, filter, now())
-            .await
-            .map(|history| views::history::render(&history, machine)),
+    app.page(
+        History::load(&app.daemon, filter, now()).await,
+        |view| Some(&view.status),
+        views::history::render,
     )
+    .await
 }
 
 async fn records(State(app): State<App>) -> Response {
-    let machine = app.machine().await;
-    page(
-        RecordsView::load(&app.daemon, now())
-            .await
-            .map(|records| views::records::render(&records, machine)),
+    app.page(
+        RecordsView::load(&app.daemon, now()).await,
+        |view| Some(&view.status),
+        views::records::render,
     )
+    .await
 }
 
 async fn caches(State(app): State<App>) -> Response {
-    let machine = app.machine().await;
-    page(
-        CachesView::load(&app.daemon, now())
-            .await
-            .map(|caches| views::caches::render(&caches, machine)),
+    app.page(
+        CachesView::load(&app.daemon, now()).await,
+        |view| Some(&view.status),
+        views::caches::render,
     )
+    .await
 }
 
 async fn sizing(State(app): State<App>) -> Response {
-    let machine = app.machine().await;
-    page(
-        SizingView::load(&app.daemon, now())
-            .await
-            .map(|sizing| views::sizing::render(&sizing, machine)),
+    app.page(
+        SizingView::load(&app.daemon, now()).await,
+        |_view| None,
+        views::sizing::render,
     )
+    .await
 }
 
 async fn insights(State(app): State<App>) -> Response {
-    let machine = app.machine().await;
-    page(
-        InsightsView::load(&app.daemon, now())
-            .await
-            .map(|insights| views::insights::render(&insights, machine)),
+    app.page(
+        InsightsView::load(&app.daemon, now()).await,
+        |_view| None,
+        views::insights::render,
     )
+    .await
 }
 
 async fn config(
     State(app): State<App>,
     query: Result<Query<ConfigQuery>, QueryRejection>,
 ) -> Response {
-    let machine = app.machine().await;
     let query = lenient(query);
-    page(
-        ConfigView::load(&app.daemon, query, now())
-            .await
-            .map(|config| views::config::render(&config, &app.proxies, machine)),
+    app.page(
+        ConfigView::load(&app.daemon, query, now()).await,
+        |_view| None,
+        |view, machine| views::config::render(view, &app.proxies, machine),
     )
+    .await
 }
 
 /// `GET /config/doctor`: the doctor's region, which the config page asks for once it shows. A daemon that fails or
@@ -350,12 +374,12 @@ async fn job(
         return not_found();
     };
     let query = lenient(query);
-    let machine = app.machine().await;
-    page(
-        JobView::load(&app.daemon, id, now(), &query)
-            .await
-            .map(|job| views::job::render(&job, machine)),
+    app.page(
+        JobView::load(&app.daemon, id, now(), &query).await,
+        |_view| None,
+        views::job::render,
     )
+    .await
 }
 
 /// `GET /jobs/{id}/log`: the whole stored log as text.

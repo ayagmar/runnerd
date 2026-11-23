@@ -58,6 +58,7 @@ mod figure;
 mod insights;
 mod jobs;
 mod labels;
+mod machine;
 mod queue;
 mod records;
 mod results;
@@ -129,6 +130,7 @@ pub use jobs::{
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
+pub use machine::Machine;
 pub use queue::{HostWait, WaitCause};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
@@ -205,34 +207,6 @@ pub struct Status {
     /// The machine the daemon runs on (ADR 0158); absent from a daemon before 0.1.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<Machine>,
-}
-
-/// A machine runnerd runs on, as its runner names carry it (ADR 0158).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Machine {
-    /// 8 hex digits from its machine ID, the part of a runner name that says whose runner it is: two machines whose
-    /// runners share it take each other's runners for their own.
-    pub id: String,
-    /// `[host] name`, or its host name: lower-case letters and digits.
-    pub name: String,
-}
-
-impl Machine {
-    /// A notification's title, saying which machine sent it: `o/app: build failed on tern`.
-    pub fn notification_title(machine: Option<&Machine>, title: &str) -> String {
-        match machine {
-            Some(machine) => format!("{title} on {}", machine.name),
-            None => title.to_owned(),
-        }
-    }
-
-    /// A dashboard page's title, saying which machine it shows: `History · runnerd on tern`.
-    pub fn page_title(machine: Option<&Machine>, title: &str) -> String {
-        match machine {
-            Some(machine) => format!("{title} · runnerd on {}", machine.name),
-            None => format!("{title} · runnerd"),
-        }
-    }
 }
 
 /// The memory budget runners and the mirror share, in bytes.

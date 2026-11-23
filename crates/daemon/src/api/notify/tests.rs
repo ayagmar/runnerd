@@ -22,8 +22,8 @@ use runnerd_core::store::Store;
 use tokio::sync::{Mutex, watch};
 
 use super::{
-    ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, parse_offset,
-    run, send_due, start, test_message,
+    ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, from,
+    parse_offset, run, send_due, start, test_message,
 };
 use crate::testdir::Dir;
 
@@ -860,6 +860,39 @@ async fn a_long_message_is_cut_to_discords_limits_and_a_429_is_not_delivered() {
     );
     assert!(title.chars().count() + description.chars().count() <= 6000);
     assert_eq!(body["allowed_mentions"], serde_json::json!({ "parse": [] }));
+}
+
+#[tokio::test]
+async fn a_long_discord_title_keeps_the_machine_that_sent_it() {
+    // Catches the cut taking " on tern" off a long matrix job's title, the only place the embed names the machine.
+    let endpoint = Endpoint::start().await;
+    let config = Config::parse(&discord(&format!(
+        "http://{}/api/webhooks/123/abc",
+        endpoint.address
+    )))
+    .unwrap();
+    let http = client(SETUP.timing.timeout).unwrap();
+    let tern = Machine {
+        id: "4f2a91c0".to_owned(),
+        name: "tern".to_owned(),
+    };
+    let long = from(
+        Some(&tern),
+        Notification {
+            title: format!("halyard/api: CI / test ({}) failed", "é".repeat(300)),
+            ..test_message("chat")
+        },
+    );
+
+    deliver(&http, &config.notify.targets[0], &long)
+        .await
+        .unwrap();
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&endpoint.received.lock().unwrap()[0].2).unwrap();
+    let title = body["embeds"][0]["title"].as_str().unwrap();
+    assert_eq!(title.chars().count(), 256);
+    assert!(title.ends_with("é… on tern"), "{title}");
 }
 
 #[tokio::test]
