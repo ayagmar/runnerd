@@ -48,6 +48,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.store.downtime(from, until);
         self.note_slept(from);
         self.governor.slept();
+        self.overflow.slept();
         for (_, state) in self.repositories.iter_listed_mut() {
             state.forget_waits(|_| false);
             state.listing_mut().slept();

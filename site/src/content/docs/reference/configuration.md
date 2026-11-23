@@ -51,6 +51,8 @@ A key marked required must be set. Sizes take `K`, `M`, `G` or `T`, durations a 
 | Key | Default | |
 |---|---|---|
 | `name` | the host name's letters and digits | what runner names, `runnerctl status --json`, notifications and the dashboard's titles call this machine: 1 to 20 lower-case letters and digits. Read at start; a reload does not rename the host and warns until runnerd restarts. Upgrade every machine that serves the same repositories, so their runner names all read the same way |
+| `role` | `"primary"` | `"overflow"` makes this machine a backup to another that serves the same labels: it starts a runner only for a job queued `overflow_after` ago that it listed twice, keeps no warm runners and stops an idle one after 2 minutes ([A second machine](../../guides/second-machine/)) |
+| `overflow_after` | `"45s"` | on an overflow host, how long after GitHub queued a job it is left to the other machines |
 | `slice` | required | the systemd slice runners run in; its `MemoryMax` is the [budget](../../concepts/terms/#slice-and-budget) |
 | `isolation` | required | `"sysbox"`, or `"unsafe-dind"` with `allow_unsafe = true` ([Isolation](../../security/#isolation)) |
 | `allow_unsafe` | `false` | lets `isolation = "unsafe-dind"` pass the check |

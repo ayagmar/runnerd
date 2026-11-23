@@ -91,6 +91,7 @@ export default defineConfig({
             'guides/insights',
             'guides/notifications',
             'guides/remote-dashboard',
+            'guides/second-machine',
           ],
         },
         {

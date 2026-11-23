@@ -955,5 +955,6 @@ fn parity_pool(name: &str, profile: &str, label: &str, first: u64) -> Repository
         waits: Waits::default(),
         usual: None,
         warm: 0,
+        idle_after: scheduler::IDLE_TIMEOUT,
     }
 }

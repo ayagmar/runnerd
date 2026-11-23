@@ -1157,6 +1157,12 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
         memory("r1", 1_000_300, 3 << 30),
         memory("r2", 1_000_300, 2 << 30),
     ]);
+    // An overflow host left job 1 to the primary for 45 s (ADR 0162).
+    store.causes_waited(vec![crate::store::CauseWait {
+        job: 1,
+        cause: api::WaitCause::Overflow,
+        ms: 45_000,
+    }]);
     store.lost(1, 1_000_400);
     store.details(crate::github::JobDetails {
         id: 2,
@@ -1184,6 +1190,7 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
         .map(|job| (job.name.as_str(), job.memory_peak, job.memory_cap))
         .collect();
     assert_eq!(peaks, [("job 1", 3 << 30, Some(4 << 30))]);
+    assert_eq!(history.jobs[0].overflow_waited, 45_000);
     assert_eq!(history.runners.len(), 2, "both runners held a slot");
     assert_eq!(
         history.left_out,
