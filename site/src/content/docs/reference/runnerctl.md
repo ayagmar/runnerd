@@ -92,7 +92,9 @@ Check that the host can run runners. Runs `runnerd doctor` here when the daemon 
 
 ## `runnerctl web`
 
-Open the web dashboard with a one-time login link, and print one for each of `[web] origins`
+Open the web dashboard with a one-time login link, and print one for each of `[web] origins`.
+
+With --machine, only --qr and --sign-out-all: the login link is a file on that machine.
 
 - `--no-open`: Print the links instead of opening one. Over SSH they are printed anyway: a browser opened there would be the remote machine's, and spend the link where nobody sits
 - `--base <ORIGIN>`: The address of a proxy in front of the dashboard to log in through instead, such as `https://host.example.ts.net:8443`, over `[web] open`. `[web] origins` need not be named here
@@ -103,4 +105,5 @@ Open the web dashboard with a one-time login link, and print one for each of `[w
 ## Every command
 
 - `--socket <SOCKET>`: The daemon's API socket [default: `$XDG_RUNTIME_DIR/runnerd.sock`]
+- `--machine <NAME>`: Ask the daemon of this machine, as `runnerctl machine add` named it, over SSH instead
 - `--json`: Print the API's JSON instead of text: the response type unchanged, one event per line for `watch`
