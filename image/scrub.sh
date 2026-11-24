@@ -37,7 +37,9 @@ find "$root/tmp" "$root/var/tmp" -xdev -mindepth 1 "${since[@]}" -prune -print0 
 
 rm -rf "$root/run/runnerd" "$home/_work/_temp"
 # The token actions/checkout puts in a repository's config, if the job ended before its post step took it out.
-find "$home/_work" -path "$home/_work/_*" -prune -o -name node_modules -prune -o -path '*/.git/objects' -prune -o \
+# Not in the slot's pnpm store, which holds no repository (docs/adr/0167).
+find "$home/_work" -path "$home/_work/_*" -prune -o -path "$home/_work/.pnpm-store" -prune -o \
+    -name node_modules -prune -o -path '*/.git/objects' -prune -o \
     -type f \( -path '*/.git/config' -o -path '*/.git/modules/*/config' \) -print0 2> /dev/null \
     | xargs -0 -r sed -i '/extraheader/d'
 rm -f "$marker"

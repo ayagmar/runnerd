@@ -55,6 +55,62 @@ LAST_JOB_FILE=/state/.runnerd-last-job
 # `held=<bytes> share=<GiB>`.
 STORE_REPORT_FILE=/run/runnerd-docker-store
 
+# The runner's workspace, and the slot's own on its volume, which the entrypoint binds over it when runnerd asks for
+# the slot's own pnpm store (RUNNERD_PNPM_SLOT_STORE, docs/adr/0167). The store is in the workspace, at the root of
+# the mount, where pnpm would put it itself: one mount, so pnpm links its packages into node_modules, not copies them.
+WORK=/home/runner/_work
+SLOT_WORK=/state/work
+SLOT_PNPM_STORE=.pnpm-store
+
+# Empties the slot's workspace $1 of what a job left in it, but for the pnpm store and the entry named $2, if any:
+# when the job ends (entrypoint.sh), keeping `_tool`, where the tool cache's layer is still mounted, and again before
+# the next one, for a container killed before its end.
+empty_slot_work() {
+    local keep=(! -name "$SLOT_PNPM_STORE")
+    [ -z "${2:-}" ] || keep+=(! -name "$2")
+    find "$1" -mindepth 1 -maxdepth 1 "${keep[@]}" -exec rm -rf --one-file-system {} +
+}
+
+# Empties the slot's workspace $1 of what its last job left (empty_slot_work), and removes its pnpm store whole when
+# it takes more than $2 bytes, or when it is not a directory.
+clear_slot_work() {
+    local store=$1/$SLOT_PNPM_STORE
+    mkdir -p "$1"
+    empty_slot_work "$1"
+    if [ -L "$store" ] || { [ -e "$store" ] && [ ! -d "$store" ]; }; then
+        rm -f "$store"
+    elif [ "$(size_bytes "$store")" -gt "$2" ]; then
+        echo "runnerd: the slot's pnpm store outgrew its limit of $2 bytes: it starts over" >&2
+        rm -rf "$store"
+    fi
+}
+
+# Binds the slot's workspace, emptied by clear_slot_work with the store's limit $1, over the runner's, and points
+# pnpm at the store in it. Call before mount_layers, which mounts the tool cache inside it, and before start_docker,
+# whose engine mounts it into a `container:` job. When the image holds anything in the runner's workspace but an
+# empty tool cache, which the bind would hide, or the bind fails, the job works in the container's own workspace and
+# pnpm keeps the slot's store all the same, copying packages out of it as from a shared one: never a store on the
+# container's disk, which every job would fill again. Returns 1 then, having said why.
+mount_slot_work() {
+    local held why=
+    clear_slot_work "$SLOT_WORK" "$1"
+    install -d -o runner -g runner "$SLOT_WORK" "$SLOT_WORK/_tool"
+    held=$(cd "$WORK" && find . -mindepth 1 ! -path ./_tool -print -quit)
+    if [ -n "$held" ]; then
+        why="the image holds $WORK/${held#./}"
+    elif ! mount --bind "$SLOT_WORK" "$WORK"; then
+        why="the slot's workspace could not be bound"
+    fi
+    if [ -n "$why" ]; then
+        install -d -o runner -g runner "$SLOT_WORK/$SLOT_PNPM_STORE"
+        rmdir "$SLOT_WORK/_tool" 2> /dev/null || true
+        echo "runnerd: $why: the job's workspace stays in the container, and pnpm copies from the slot's store" >&2
+        export pnpm_config_store_dir=$SLOT_WORK/$SLOT_PNPM_STORE
+        return 1
+    fi
+    export pnpm_config_store_dir=$WORK/$SLOT_PNPM_STORE
+}
+
 # Disk a directory takes in bytes, as size_gb counts it, not its files' apparent size; 0 when it does not exist.
 size_bytes() {
     local size

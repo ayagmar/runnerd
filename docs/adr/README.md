@@ -171,3 +171,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0162](0162-an-overflow-host-starts-a-runner-only-for-a-job-no-other-host-took-in-time.md) | An overflow host starts a runner only for a job no other host took in time | Accepted |
 | [0163](0163-a-job-that-ran-elsewhere-says-which-machine-ran-it.md) | A job that ran elsewhere says which machine ran it | Accepted |
 | [0164](0164-runnerctl-reaches-another-machine-over-an-ssh-forward.md) | runnerctl reaches another machine over an SSH forward | Accepted |
+| [0167](0167-a-slot-keeps-its-own-pnpm-store-beside-the-jobs-workspace.md) | A slot keeps its own pnpm store beside the job's workspace | Accepted |

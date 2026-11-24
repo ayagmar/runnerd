@@ -480,7 +480,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
     }
 
-    /// A runner container's environment: whether its image skips the runner's sync calls, as `skips` says, its
+    /// A runner container's environment: whether its image skips the runner's sync calls, as `skips` says, the
+    /// slot's own pnpm store when `pnpm` is one, its
     /// slot's share of what the slots' Docker Engines may keep, by what its profile's stores held after their jobs
     /// (ADR 0156), which its image's job cleanup holds it to, once the
     /// caches' check has measured Docker's disk, where the action archives are while runners mount them, Grype's
@@ -489,6 +490,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         &self,
         profile: &str,
         skips: bool,
+        pnpm: cache::PnpmStore,
         archives: Option<&crate::archives::RunnerArchives>,
         grype: Option<&crate::grype::RunnerGrype>,
     ) -> Vec<String> {
@@ -506,6 +508,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         skip_syncs
             .into_iter()
             .chain(budget)
+            .chain(pnpm.env())
             .chain(archives)
             .chain(
                 grype
