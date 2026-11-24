@@ -873,7 +873,7 @@ fn age(entries: &Path, entry: &str, ago: std::time::Duration) -> std::time::Syst
 }
 
 #[tokio::test]
-async fn a_hit_writes_an_entrys_file_time_at_most_hourly_and_a_restart_still_orders_by_it() {
+async fn a_hit_writes_the_file_time_of_an_entry_at_most_hourly_and_a_restart_still_orders_by_it() {
     use std::time::Duration;
     let dir = TestDir::new("touch");
     let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
@@ -888,17 +888,17 @@ async fn a_hit_writes_an_entrys_file_time_at_most_hourly_and_a_restart_still_ord
     let stale = age(
         &entries.join("entries"),
         "o/app/gradle/stale",
-        Duration::from_secs(3 * 3600),
+        Duration::from_hours(3),
     );
     let recent = age(
         &entries.join("entries"),
         "o/app/gradle/recent",
-        Duration::from_secs(600),
+        Duration::from_mins(10),
     );
     age(
         &entries.join("entries"),
         "o/app/gradle/unused",
-        Duration::from_secs(2 * 3600),
+        Duration::from_hours(2),
     );
     let second = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
     let app = second.attach("app", "o/app", ActionsCache::Off).unwrap();
