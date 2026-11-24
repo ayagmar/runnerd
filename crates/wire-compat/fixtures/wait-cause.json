@@ -1,0 +1,14 @@
+{
+  "backoff": "backoff",
+  "barrier": "barrier",
+  "booting": "booting",
+  "budget": "budget",
+  "cpu": "cpu",
+  "host": "host",
+  "no-pool": "no-pool",
+  "other": "other",
+  "paused": "paused",
+  "preparing": "preparing",
+  "slot": "slot",
+  "start": "start"
+}

@@ -1,4 +1,5 @@
 {
+  "action-archives": "action-archives",
   "cannot-start": "cannot-start",
   "doctor": "doctor",
   "doctor-unavailable": "doctor-unavailable",
@@ -6,5 +7,6 @@
   "github-listing": "github-listing",
   "host-memory": "host-memory",
   "insight": "insight",
-  "rate-limited": "rate-limited"
+  "rate-limited": "rate-limited",
+  "rerun-refused": "rerun-refused"
 }

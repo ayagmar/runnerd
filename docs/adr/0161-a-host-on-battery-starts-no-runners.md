@@ -46,7 +46,8 @@ its own. A battery held at a charge limit says `Not charging` while the laptop i
 ## Consequences
 
 - 0.1.4 and 0.1.5 clients read `on-battery` as `Waiting::Unknown` and say the job waits for a reason they do not
-  know yet; a downgraded daemon reads a stored `battery` wait as `other`.
+  know yet. A 0.1.5 client reads the `battery` wait cause in insights' queue as `other`, and a downgraded daemon
+  reads a stored `battery` wait the same way (accepted in the wire check).
 - 0.1.5 clients do not show the status's hold; they still show each queued job's reason as one they do not know.
 - Time a repository was paused still counts as waiting, as before: a pause is the owner's act and rare, and its
   time is not recorded apart from other waits in older rows.

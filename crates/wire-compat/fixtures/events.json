@@ -112,6 +112,7 @@
     "job": {
       "branch": "main",
       "conclusion": "success",
+      "failure_cause": "action-archive",
       "id": 42,
       "labels": [
         "self-hosted"
@@ -150,8 +151,10 @@
         "sock_throttled": 2
       },
       "name": "build",
+      "probe": "mount",
       "record_mark": "kept",
       "repository": "tidewater/halyard",
+      "rerun_at": 1763000000,
       "run_attempt": 1,
       "run_id": 900,
       "runner": {
@@ -183,6 +186,7 @@
     "job": {
       "branch": "main",
       "conclusion": "success",
+      "failure_cause": "action-archive",
       "id": 42,
       "labels": [
         "self-hosted"
@@ -221,8 +225,10 @@
         "sock_throttled": 2
       },
       "name": "build",
+      "probe": "mount",
       "record_mark": "kept",
       "repository": "tidewater/halyard",
+      "rerun_at": 1763000000,
       "run_attempt": 1,
       "run_id": 900,
       "runner": {
@@ -267,6 +273,7 @@
     "job": {
       "branch": "main",
       "conclusion": "success",
+      "failure_cause": "action-archive",
       "id": 42,
       "labels": [
         "self-hosted"
@@ -305,8 +312,10 @@
         "sock_throttled": 2
       },
       "name": "build",
+      "probe": "mount",
       "record_mark": "kept",
       "repository": "tidewater/halyard",
+      "rerun_at": 1763000000,
       "run_attempt": 1,
       "run_id": 900,
       "runner": {
@@ -443,7 +452,15 @@
           "queued_jobs": 1
         }
       ],
-      "queued_jobs": 1
+      "queue": "unlisted",
+      "queued_jobs": 1,
+      "rerun_refused": {
+        "message": "GitHub refused to re-run the failed jobs of run 4182 (403).",
+        "refusal": "forbidden",
+        "run": 4182,
+        "since": 1761399000,
+        "status": 403
+      }
     },
     "type": "repository.changed"
   },

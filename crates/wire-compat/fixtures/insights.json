@@ -230,6 +230,67 @@
         "workflow": "ci"
       }
     ],
+    "queue": [
+      {
+        "before_listed_ms": 840000,
+        "causes": [
+          {
+            "cause": "barrier",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "start",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "slot",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "budget",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "host",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "cpu",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "booting",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "preparing",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "paused",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "backoff",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "no-pool",
+            "waited_ms": 60000
+          },
+          {
+            "cause": "other",
+            "waited_ms": 60000
+          }
+        ],
+        "estimated": 2,
+        "jobs": 42,
+        "profile": "jvm",
+        "uncovered_ms": 5500000,
+        "unrecorded": 3,
+        "waited_ms": 45100000
+      }
+    ],
     "since": 1760800000,
     "until": 1761400000,
     "waits": [
