@@ -817,6 +817,7 @@ impl Fixtures {
             logs,
             logged: runnerd_fixtures::logged_jobs()
                 .into_iter()
+                .chain([runnerd_fixtures::long_logged_job()])
                 .map(|logged| (logged.job.summary.id, logged))
                 .collect(),
             host,

@@ -8,7 +8,8 @@
 // keyboard and finger, as jobs leave it; and the live badge says "Retrying" while a dropped read is tried again,
 // keeping the page and its focus, "Offline" then "Live" when the stream's body breaks and the next request answers,
 // "Signed out" with Reload and no further request when it answers 401, and "Finished" on a finished job's page; on a
-// phone, each fits the screen.
+// phone, each fits the screen; and a link to a line before a long log's last 5000 (the failure's, a search hit's)
+// opens the window around it with its folds open and the line marked in view, and the way back returns to the end.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -722,6 +723,76 @@ try {
       await live.context.close();
     }
     stopDemo(cutting);
+  }
+
+  // A long log's early lines: the failure's link and a search hit before the last 5000 lines open the window around
+  // them, their folds open and the line marked in view; the way back returns to the log's end, nothing marked.
+  {
+    const long = 9408;
+    const lineState = (page, id) =>
+      page.evaluate((id) => {
+        const line = document.getElementById(id);
+        if (!line) return { there: false };
+        const folds = [];
+        for (let fold = line.closest('details'); fold; fold = fold.parentElement?.closest('details')) folds.push(fold.open);
+        const box = line.getBoundingClientRect();
+        return {
+          there: true,
+          marked: line.getAttribute('aria-current') === 'true' || line.matches(':target'),
+          folds: folds.length,
+          open: folds.every(Boolean),
+          seen: line.checkVisibility() && box.bottom > 0 && box.top < innerHeight,
+          window: !!document.querySelector('.log-window')?.checkVisibility(),
+        };
+      }, id);
+    for (const size of [sizes[0], sizes[1]]) {
+      const { context, page } = await signedIn(size);
+      await page.goto(new URL(`/jobs/${long}`, login).href);
+      const link = page.locator('#failure a', { hasText: 'The step in the log' });
+      const href = await link.getAttribute('href');
+      const target = /#(L\d+)$/.exec(href ?? '')?.[1];
+      check(
+        !!target && (await page.locator(`#${target}`).count()) === 0,
+        `${size.name}: the failed step's line ${target} is before the lines the log's end shows`,
+      );
+      await Promise.all([page.waitForURL(/line=/), link.click()]);
+      await page.waitForSelector(`#${target}`);
+      await page.waitForTimeout(200);
+      const failed = await lineState(page, target);
+      check(
+        failed.there && failed.marked && failed.open && failed.seen && failed.window,
+        `${size.name}: the failure's link opens its step's window, ${target} marked in view (${JSON.stringify(failed)})`,
+      );
+
+      await page.goto(new URL(`/jobs/${long}?q=balances`, login).href);
+      const hit = page.locator('.log-results li.hit a.ln').first();
+      const hitId = `L${(await hit.textContent()).trim()}`;
+      await Promise.all([page.waitForURL(/line=/), hit.click()]);
+      await page.waitForSelector(`#${hitId}`);
+      await page.waitForTimeout(200);
+      const found = await lineState(page, hitId);
+      check(
+        found.there && found.marked && found.open && found.folds === 3 && found.seen,
+        `${size.name}: a search hit two groups deep opens its step and both groups, ${hitId} marked in view (${JSON.stringify(found)})`,
+      );
+
+      await Promise.all([page.waitForURL((url) => !url.search), page.locator('.log-end').first().click()]);
+      await page.waitForSelector('#log-view');
+      const back = await page.evaluate((hitId) => {
+        const lines = [...document.querySelectorAll('#log-view li[id^="L"]')];
+        return {
+          early: !!document.getElementById(hitId),
+          window: !!document.querySelector('.log-window'),
+          marked: document.querySelectorAll('#log-view [aria-current="true"]').length,
+          last: lines.at(-1)?.id,
+        };
+      }, hitId);
+      check(
+        !back.early && !back.window && back.marked === 0 && back.last === 'L6012',
+        `${size.name}: back to the log's end shows its last lines, nothing marked (${JSON.stringify(back)})`,
+      );
+      await context.close();
+    }
   }
 } finally {
   // From the spawn on, so a browser that fails to start, or a demo that never signs in, leaves no demo running.

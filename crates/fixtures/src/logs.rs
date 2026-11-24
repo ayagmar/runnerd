@@ -29,6 +29,13 @@ pub const LOG_MISSING: u64 = 9406;
 /// A failed job whose failing step, the one before it and every step after it share one second, as GitHub stores a
 /// quick failure followed by skipped steps; its runner has job hooks.
 pub const LOG_SAME_SECOND: u64 = 9407;
+/// A failed job whose failure, in nested groups, comes early and whose cleanup prints more lines after it than a
+/// client outlines of a log's end: [`long_logged_job`].
+pub const LOG_LONG: u64 = 9408;
+/// The 0-based line of [`LOG_LONG`] a search for `balances` finds, two groups deep.
+pub const LOG_LONG_HIT: u64 = 5;
+/// The cleanup lines [`LOG_LONG`] prints after its failure.
+const LONG_CLEANUP: u64 = 6000;
 
 /// When the logs' jobs started: 2026-10-22T13:53:00Z, ten minutes before [`NOW`].
 const START: u64 = NOW - 607;
@@ -209,6 +216,54 @@ fn same_second_log() -> Vec<String> {
         at(20, 4, "runnerd: this job received 0 MiB"),
         at(20, 8, "Cleaning up orphan processes"),
     ]
+}
+
+/// The steps of [`LOG_LONG`]: its tests fail early and a cache's cleanup runs long after them.
+fn long_steps() -> Vec<Step> {
+    vec![
+        step(1, "Set up job", Some((0, 2)), "success"),
+        step(2, "Run ./gradlew test", Some((2, 20)), "failure"),
+        step(3, "Post Run actions/cache@v4", Some((21, 50)), "success"),
+        step(4, "Complete job", Some((51, 52)), "success"),
+    ]
+}
+
+fn long_log() -> Vec<String> {
+    let mut lines = vec![
+        at(0, 1, "Current runner version: '2.330.0'"),
+        at(2, 1, "##[group]Run ./gradlew test"),
+        at(2, 1, "##[endgroup]"),
+        at(3, 0, "##[group]Module ledger-core"),
+        at(3, 1, "##[group]Test results"),
+        at(10, 0, "LedgerTest > balances() \u{1b}[31mFAILED\u{1b}[0m"),
+        at(10, 1, "expected: 0 but was: 1"),
+        at(11, 0, "##[endgroup]"),
+        at(11, 0, "##[endgroup]"),
+        at(19, 9, "##[error]Process completed with exit code 1."),
+        at(21, 0, "Post job cleanup."),
+    ];
+    lines
+        .extend((1..=LONG_CLEANUP).map(|entry| at(30, 0, &format!("Removed cache entry {entry}"))));
+    lines.push(at(51, 0, "Cleaning up orphan processes"));
+    lines
+}
+
+/// [`LOG_LONG`]: a failed job whose failure and a search hit come more lines before its end than a client outlines
+/// there, so a link to them must read the lines around them.
+pub fn long_logged_job() -> LoggedJob {
+    let lines = long_log();
+    let mut job = logged_job(
+        LOG_LONG,
+        JobState::Completed,
+        Some("failure"),
+        lines.len() as u64,
+    );
+    job.steps = long_steps();
+    LoggedJob {
+        outline: LogOutline::of(&job, &lines),
+        job,
+        lines,
+    }
 }
 
 /// A record kept of a failed job.
@@ -463,5 +518,31 @@ mod tests {
             2,
             "{open:?}"
         );
+    }
+
+    #[test]
+    fn the_long_log_fails_early_and_ends_more_than_five_thousand_lines_later() {
+        let long = long_logged_job();
+        let failure = long.outline.failure.clone().unwrap();
+        assert_eq!(failure.step, Some(2));
+        assert_eq!(failure.exit_code, Some(1));
+        let failed = long.outline.step_lines(2).unwrap();
+        assert!(
+            long.outline.lines - failed.to > 5000,
+            "the failed step ends {failed:?}, more than 5000 lines before the end"
+        );
+        assert!(
+            (failed.from..failed.to).contains(&LOG_LONG_HIT),
+            "the hit is the failed step's"
+        );
+        let around: Vec<u32> = long
+            .outline
+            .groups
+            .iter()
+            .filter(|group| group.start < LOG_LONG_HIT && group.end > Some(LOG_LONG_HIT))
+            .map(|group| group.depth)
+            .collect();
+        assert_eq!(around, [0, 1], "the hit is two groups deep");
+        assert!(long.lines[usize::try_from(LOG_LONG_HIT).unwrap()].contains("balances"));
     }
 }
