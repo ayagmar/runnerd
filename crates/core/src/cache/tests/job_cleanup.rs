@@ -1,5 +1,5 @@
-//! `image/job-cleanup.sh` and the clean-exit marker in `image/layers.sh` (ADR 0169), run by bash over a temporary
-//! root, with stand-ins for `docker` and `curl` that log their calls and answer from files. Never the host's Docker.
+//! `image/job-cleanup.sh` (ADR 0170), run by bash over a temporary root, with stand-ins for `docker` and `curl` that
+//! log their calls and answer from files, and `du` counted. Never the host's Docker.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,12 +26,15 @@ exit 0
 "#;
 
 const CURL: &str = r#"#!/bin/sh
+echo "$*" >> "$FAKE/curl"
 [ ! -e "$FAKE/down" ] && cat "$FAKE/df" 2> /dev/null || exit 7
 "#;
 
-/// Counts the walks of the store, then runs the real `du`.
+/// Counts the walks of the store, then runs the real `du`, or fails as on an unreadable store while `du-fails` is
+/// there.
 const DU: &str = r#"#!/bin/sh
 echo >> "$FAKE/du"
+[ ! -e "$FAKE/du-fails" ] || exit 1
 PATH=${PATH#*:} exec du "$@"
 "#;
 
@@ -119,18 +122,6 @@ impl Root {
             .map(str::to_owned)
             .collect()
     }
-
-    /// Whether `layers.sh`'s function `check` succeeds.
-    fn holds(&self, check: &str) -> bool {
-        let layers = at(&self.dir.0, "lib/layers.sh");
-        self.bash(&format!(". \"$1\"; {check}"), &[&layers])
-            .status
-            .success()
-    }
-
-    fn marker(&self) -> Option<String> {
-        std::fs::read_to_string(self.path("state/.runnerd-cleaned")).ok()
-    }
 }
 
 fn at(root: &Path, path: &str) -> String {
@@ -147,61 +138,6 @@ fn df(records: &[String]) -> String {
 }
 
 const GIB: u64 = 1 << 30;
-
-// Catches: a cleanup whose Engine did not answer marking the slot clean, so the next container skips the cleanup that
-// would remove the last job's containers; a finished one not marking it, so every container cleans up twice.
-#[test]
-fn a_cleanup_that_ends_marks_the_slot_clean_with_its_budget_and_one_the_engine_failed_does_not() {
-    let root = Root::new("cleanup-marker");
-    root.engine("df", Some(&df(&[])));
-    root.clean_up();
-    assert_eq!(root.marker().as_deref(), Some("20\n"));
-
-    std::fs::remove_file(root.path("state/.runnerd-cleaned")).unwrap();
-    root.engine("down", Some(""));
-    root.clean_up();
-    assert_eq!(
-        root.marker(),
-        None,
-        "a cleanup the Engine failed leaves no marker"
-    );
-}
-
-// Catches: the next container skipping its cleanup after an unclean stop, after a marker a job forged with something
-// else than a budget, or when its budget is lower than the one the store was kept within.
-#[test]
-fn the_next_container_skips_its_cleanup_only_after_a_clean_end_within_a_budget_no_larger() {
-    let root = Root::new("cleanup-skip");
-    assert!(!root.holds("cleaned_up"), "no marker: an unclean end");
-    std::fs::write(root.path("state/.runnerd-cleaned"), "20\n").unwrap();
-    assert!(root.holds("cleaned_up"), "the same budget");
-    std::fs::write(root.path("run/runnerd-docker-budget-gb"), "30").unwrap();
-    assert!(root.holds("cleaned_up"), "a larger budget");
-    std::fs::write(root.path("run/runnerd-docker-budget-gb"), "10").unwrap();
-    assert!(!root.holds("cleaned_up"), "a lower budget cleans up first");
-    std::fs::write(root.path("run/runnerd-docker-budget-gb"), "20").unwrap();
-    for forged in ["", "x", "-1", "20 30"] {
-        std::fs::write(root.path("state/.runnerd-cleaned"), forged).unwrap();
-        assert!(!root.holds("cleaned_up"), "{forged:?} is no budget");
-    }
-}
-
-// Catches: a container or volume that a job's background process made after its cleanup, or that a killed container
-// of an older image left under a marker it never removes, reaching the slot's next job, which would skip its
-// cleanup; an Engine that does not answer read as holding nothing.
-#[test]
-fn the_next_container_finds_the_store_clean_only_while_the_engine_holds_no_container_or_volume() {
-    let root = Root::new("cleanup-left");
-    assert!(root.holds("store_clean"), "nothing held");
-    root.engine("containers", Some("4f2a\n"));
-    assert!(!root.holds("store_clean"), "a container left");
-    root.engine("containers", None);
-    root.engine("volumes", Some("pgdata\n"));
-    assert!(!root.holds("store_clean"), "a volume left");
-    root.engine("volumes", None);
-    root.engine("down", Some(""));
-    assert!(!root.holds("store_clean"), "an Engine that does not answer");
-}
 
 // Catches: a prune skipped while the cache holds what it removes, as build contexts or a cache over half the budget;
 // prunes skipped when the Engine does not list its cache; every prune run, and the store walked twice, for a job that
@@ -257,4 +193,55 @@ fn the_build_cache_is_pruned_of_what_it_holds_and_of_everything_when_the_engine_
     assert_eq!(prunes[0], "--filter type=source.local");
     assert_eq!(prunes[1], "--filter type=source.git.checkout");
     assert!(prunes[2].starts_with(half), "{prunes:?}");
+}
+
+// Catches: a store the cleanup could not measure reported as holding 0 bytes, which would shrink the profile's
+// Docker share; a report an earlier run of the job's left standing for this one.
+#[test]
+fn a_store_the_cleanup_cannot_measure_is_reported_unmeasured() {
+    let root = Root::new("cleanup-unmeasured");
+    std::fs::write(root.path("run/runnerd-since"), "").unwrap();
+    root.engine("df", Some(&df(&[])));
+    root.clean_up();
+    assert!(
+        root.path("run/runnerd-docker-store").exists(),
+        "a measured store is reported"
+    );
+    root.engine("du-fails", Some(""));
+    root.clean_up();
+    assert!(
+        !root.path("run/runnerd-docker-store").exists(),
+        "no report, which the entrypoint prints as unmeasured"
+    );
+}
+
+// Catches: old layers a prune would remove left because images share every layer record while unshared cache mounts
+// take the cache over half the budget; an answer without a list, or with records missing their sizes, read as an
+// empty cache; a stalled Engine holding the cleanup up with no deadline.
+#[test]
+fn shared_records_still_name_what_to_prune_and_an_answer_that_lists_nothing_prunes_everything() {
+    let root = Root::new("cleanup-shared");
+    let half = "--filter type=regular --filter until=";
+    root.engine(
+        "df",
+        Some(&df(&[
+            record("regular", GIB, true),
+            record("exec.cachemount", 11 * GIB, false),
+        ])),
+    );
+    let prunes = Root::prunes(&root.clean_up());
+    assert_eq!(prunes.len(), 1, "{prunes:?}");
+    assert!(prunes[0].starts_with(half), "{prunes:?}");
+    let asked = std::fs::read_to_string(root.path("fake/curl")).unwrap();
+    assert!(asked.contains("--max-time"), "{asked}");
+
+    for answer in [
+        "{}".to_owned(),
+        r#"{"BuildCache":null}"#.to_owned(),
+        r#"{"BuildCache":[{"Type":"regular","Size":"1G"}]}"#.to_owned(),
+        "not json".to_owned(),
+    ] {
+        root.engine("df", Some(&answer));
+        assert_eq!(Root::prunes(&root.clean_up()).len(), 3, "{answer}");
+    }
 }
