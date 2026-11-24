@@ -63,19 +63,11 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
         batches(
             db,
             // `announced` and `announced_profiles` keep each repository's and profile's latest: what a restarted
-            // daemon compares its config with to announce a removal (`read::announced`).
+            // daemon compares its config with to announce a removal (`read::announced`). A deleted event's host
+            // reading goes with it, by `host_readings`' foreign key, in the same transaction.
             "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE at < ?1 \
              AND id NOT IN (SELECT event FROM announced) \
              AND id NOT IN (SELECT event FROM announced_profiles) LIMIT ?2)",
-            before(history.events),
-        ),
-    );
-    logged(
-        "prune host readings",
-        batches(
-            db,
-            "DELETE FROM host_readings WHERE event IN \
-             (SELECT event FROM host_readings WHERE at < ?1 LIMIT ?2)",
             before(history.events),
         ),
     );
@@ -164,12 +156,9 @@ fn logs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
 }
 
 fn delete_logs(db: &Db<'_>, jobs: &[u64]) -> rusqlite::Result<()> {
-    let mut delete = db.prepare(
-        "DELETE FROM log_lines WHERE job = ?1 AND line IN \
-         (SELECT line FROM log_lines WHERE job = ?1 LIMIT ?2)",
-    )?;
     for job in jobs {
-        batched(db, || delete.execute(params![job, BATCH]))?;
+        // A few MiB of text at most per delete, however long the lines.
+        batched(db, || super::logs::delete_some_rows(db, *job))?;
         // After the lines, so an outline never describes lines that are all gone yet reads as kept; at most a few
         // thousand rows.
         if !db.stopped() {

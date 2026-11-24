@@ -59,7 +59,7 @@ async fn a_history_at_15_reads_read_only_as_it_is_and_opens_at_16_with_its_rows_
     assert_eq!(activity.wait_p95(), Some(30), "an old row keeps its wait");
 }
 
-/// Each table's columns and each index, as SQLite describes them.
+/// Each table's columns and foreign keys and each index, as SQLite describes them.
 fn described(db: &Connection) -> Vec<String> {
     let mut tables: Vec<String> = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -91,6 +91,24 @@ fn described(db: &Connection) -> Vec<String> {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         described.extend(columns);
+        let keys = db
+            .prepare(
+                "SELECT \"from\", \"table\", \"to\", on_delete FROM pragma_foreign_key_list(?1) ORDER BY id, seq",
+            )
+            .unwrap()
+            .query_map([&table], |row| {
+                Ok(format!(
+                    "{table}: {} references {}({:?}) on delete {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        described.extend(keys);
     }
     let indexes = db
         .prepare("SELECT tbl_name, name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name")

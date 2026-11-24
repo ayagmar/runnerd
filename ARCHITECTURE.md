@@ -521,10 +521,12 @@ always returns, so the daemon closes and flushes the history.
   ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
 - A job's log lines are rows of `log_lines` while its record may grow; pruning packs a final job's lines into
   deflated `log_packs` and deletes the rows. A job with packs is read from them alone and takes no more lines, and
-  every read of a job's lines goes through `store::logs` in one snapshot. Reads that run every few minutes find events
+  every read of a job's lines goes through `store::logs` in one snapshot. Packing is bounded in bytes per job and per
+  pack; a log past them, or with a row that is not UTF-8 text, stays in rows, and a pack that inflates past its bound
+  or names other lines than its row reads as an error, never as lines. Reads that run every few minutes find events
   of one type through `events_by_type`, by the expression `store::event_type!` names, and insights read the host's
-  memory from `host_readings`, which the writer keeps beside each `budget.changed` event; none of them reads every
-  event, which a test checks with `EXPLAIN QUERY PLAN`
+  memory from `host_readings`, which the writer keeps beside each `budget.changed` event and a foreign key deletes
+  with it; none of them reads every event, which a test checks with `EXPLAIN QUERY PLAN`
   ([ADR 0171](docs/adr/0171-the-history-packs-final-logs-and-reads-events-by-type.md)).
 - A wait for a slot is `sizing::Wait::counted`: from queued, or the history's start, to started, less what of it
   passed while no runnerd ran (`jobs.unseen`, which `Store::open` measures from the history's last sign of life,

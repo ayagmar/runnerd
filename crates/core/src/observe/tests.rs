@@ -1911,3 +1911,49 @@ fn a_capture_script_that_cannot_open_its_pipe_sleeps_quietly_between_passes() {
     let stderr = std::fs::read_to_string(bin.join("stderr")).unwrap();
     assert_eq!(stderr, "", "nothing on stderr");
 }
+
+#[test]
+fn docker_s_root_through_a_link_is_read_where_the_link_leads_and_an_unknown_device_is_not_read_as_none()
+ {
+    // Catches a root read twice, `statfs` through the link and the mounts by its name: a link into a loop-mounted
+    // ext4 read as on the host's own file system; and a mount whose device is not found read as no loop device.
+    use super::storage::{Backing, DockerRoot};
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    disk_host(&paths, "btrfs");
+    let real = dir.0.join("real/docker");
+    std::fs::create_dir_all(&real).unwrap();
+    let real = std::fs::canonicalize(&real).unwrap();
+    let link = dir.0.join("docker");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    loop_device(
+        &paths,
+        0,
+        "/var/lib/runnerd/docker.img",
+        real.to_str().unwrap(),
+    );
+    let through_link = DockerRoot::read(&paths, &link);
+    assert_eq!(through_link.path, link, "worded as Docker names it");
+    assert_eq!(through_link.backing, Backing::Loops("loop0".to_owned()));
+
+    // A mount on a device sysfs does not show.
+    let other = std::fs::canonicalize(dir.0.join("real"))
+        .unwrap()
+        .join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let mountinfo = paths.proc.join("self/mountinfo");
+    let mut mounts = std::fs::read_to_string(&mountinfo).unwrap();
+    mounts.push_str("70 40 7:9 / ");
+    mounts.push_str(other.to_str().unwrap());
+    mounts.push_str(" rw - ext4 /dev/loop9 rw\n");
+    std::fs::write(&mountinfo, mounts).unwrap();
+    assert_eq!(
+        DockerRoot::read(&paths, &other).backing,
+        Backing::Unresolved
+    );
+    let gone = DockerRoot::read(&paths, &dir.0.join("absent"));
+    assert!(
+        gone.file_system.is_err(),
+        "a root that is not there is unread"
+    );
+}

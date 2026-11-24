@@ -37,18 +37,22 @@ macro_rules! event_type {
 /// The host's memory as each `budget.changed` event of `events` that has it read it, as `host_readings` keeps it:
 /// the event's ID and time, `MemTotal`, `MemAvailable`, `SwapFree`, what the host's limit took off the plain count,
 /// and whether a runner ran, as the budget counted more than the mirror, the seeds and the shells. A query appends
-/// conditions to its `WHERE`.
+/// conditions to its `WHERE`, on `events`' columns. A body that is not JSON reads as no reading, and a seed or a
+/// shell that is not an object as none, so a damaged row can fail neither the migration nor the writer.
 macro_rules! host_reading {
     () => {
         "INSERT INTO host_readings (event, at, total, available, swap_free, credit, running) \
-         SELECT id, at, json_extract(body, '$.budget.host.memory.total'), \
-         json_extract(body, '$.budget.host.memory.available'), json_extract(body, '$.budget.host.memory.swap.free'), \
-         coalesce(json_extract(body, '$.budget.host.credit.bytes'), 0), \
-         json_extract(body, '$.budget.memory_in_use') > json_extract(body, '$.budget.mirror_memory') \
-         + (SELECT coalesce(sum(json_extract(value, '$.memory')), 0) FROM json_each(body, '$.budget.seed_memory')) \
-         + (SELECT coalesce(sum(json_extract(value, '$.memory')), 0) FROM json_each(body, '$.budget.shell_memory')) \
-         FROM events WHERE body LIKE '{\"type\":\"budget.changed\"%' \
-         AND json_extract(body, '$.budget.host.memory.total') IS NOT NULL"
+         SELECT id, at, json_extract(budget, '$.host.memory.total'), json_extract(budget, '$.host.memory.available'), \
+         json_extract(budget, '$.host.memory.swap.free'), coalesce(json_extract(budget, '$.host.credit.bytes'), 0), \
+         json_extract(budget, '$.memory_in_use') > json_extract(budget, '$.mirror_memory') \
+         + (SELECT coalesce(sum(CASE WHEN type = 'object' THEN json_extract(value, '$.memory') END), 0) \
+         FROM json_each(budget, '$.seed_memory')) \
+         + (SELECT coalesce(sum(CASE WHEN type = 'object' THEN json_extract(value, '$.memory') END), 0) \
+         FROM json_each(budget, '$.shell_memory')) \
+         FROM (SELECT id, at, CASE WHEN json_valid(body) AND json_type(body, '$.budget') = 'object' \
+         THEN json_extract(body, '$.budget') END AS budget FROM events \
+         WHERE body LIKE '{\"type\":\"budget.changed\"%') \
+         WHERE json_extract(budget, '$.host.memory.total') IS NOT NULL"
     };
 }
 
@@ -158,7 +162,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         33,
         concat!(
-            "CREATE TABLE host_readings (event INTEGER PRIMARY KEY, at INTEGER NOT NULL, total INTEGER NOT NULL, \
+            "CREATE TABLE host_readings (event INTEGER PRIMARY KEY REFERENCES events (id) ON DELETE CASCADE, \
+             at INTEGER NOT NULL, total INTEGER NOT NULL, \
              available INTEGER, swap_free INTEGER, credit INTEGER NOT NULL, running INTEGER);\n\
              CREATE INDEX host_readings_by_at ON host_readings (at);\n",
             host_reading!(),

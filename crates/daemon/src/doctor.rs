@@ -17,7 +17,6 @@ use runnerd_core::command;
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::isolation::modules_check;
-use runnerd_core::observe::disk::Disks;
 use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::observe::storage;
 use runnerd_core::record;
@@ -278,7 +277,7 @@ impl DockerReads {
             .as_ref()
             .ok()
             .filter(|docker| !docker.root.is_empty())
-            .map(|docker| read_docker_root(Path::new(&docker.root)));
+            .map(|docker| storage::DockerRoot::read(&Paths::default(), Path::new(&docker.root)));
         DockerReads {
             docker,
             images,
@@ -295,15 +294,6 @@ fn history_path(config: Option<&Config>) -> PathBuf {
         .and_then(|config| config.history.database.clone())
         .or_else(crate::default_database)
         .unwrap_or_else(|| PathBuf::from("runnerd.db"))
-}
-
-/// The file system of Docker's root, `root`, and the loop devices it is on when it is a file system in a file.
-fn read_docker_root(root: &Path) -> storage::DockerRoot {
-    storage::DockerRoot {
-        path: root.to_owned(),
-        file_system: storage::FileSystem::of(root).map_err(|error| error.to_string()),
-        loops: Disks::resolve(&Paths::default(), root).and_then(|disks| disks.store()),
-    }
 }
 
 /// How many repositories `Host::read` reads at once: each read is a `gh` process and a request to GitHub.
@@ -806,8 +796,8 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     checks.push(host.history.check());
     checks.push(match (&host.docker_root, docker) {
         (Some(root), _) => root.check(),
-        (None, None) => skip("Docker storage", "needs Docker"),
-        (None, Some(_)) => skip("Docker storage", "Docker does not say where its root is"),
+        (None, None) => storage::DockerRoot::skipped(storage::RootSkipped::NoDocker),
+        (None, Some(_)) => storage::DockerRoot::skipped(storage::RootSkipped::Unnamed),
     });
     checks.push(gh_check(&host.gh));
     checks.push(job_actions_check(&host.gh, config));

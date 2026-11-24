@@ -122,7 +122,7 @@ fn ready_host(os_release: &str) -> Host {
         docker_root: Some(storage::DockerRoot {
             path: "/var/lib/docker".into(),
             file_system: Ok(storage::FileSystem::Ext4),
-            loops: None,
+            backing: storage::Backing::Device,
         }),
     }
 }

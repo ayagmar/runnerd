@@ -1,14 +1,17 @@
 //! What file systems hold the job history's database and Docker's root, and how they write (ADR 0171): whether btrfs
 //! copies the database on write, which fragments a file SQLite rewrites a page at a time and multiplies what reaches
 //! the drive, and whether Docker's root is btrfs, another file system, or one in a file on a loop device. It words
-//! the doctor's checks of both, which every client shows as they are. Reads `statfs` and inode flags; the one change
-//! it makes is turning copy-on-write off for a directory or an empty file the store has just created.
+//! the doctor's checks of both, skipped or not, which every client shows as they are. Reads `statfs`, inode flags and,
+//! through `disk`, the mounts and devices under Docker's root once its links are resolved; the one change it makes is
+//! turning copy-on-write off for a directory or an empty file the store has just created.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::IFlags;
 
+use super::disk::Disks;
+use super::metrics::Paths;
 use crate::api::{Check, CheckStatus};
 use crate::config::ByteSize;
 
@@ -209,31 +212,40 @@ impl History {
 
 /// How to replace the database at `path` with a copy btrfs does not copy on write: a file takes the flag only while
 /// empty, so the copy is made in its directory once that has the flag. `VACUUM INTO` copies what the `-wal` holds
-/// too, and leaves out the pages pruning freed.
+/// too, and leaves out the pages pruning freed. Each step runs only if the one before succeeded, in a subshell with
+/// umask 077: the copy goes into a new empty owner-only file `mktemp` makes, which `VACUUM INTO` takes and a stale
+/// copy never is; it replaces the database only once SQLite finds it whole and its mode is 600, and the database it
+/// replaces, with its `-wal`, is kept beside it as `.cow` until its owner removes it.
 fn nocow_fix(path: &Path) -> String {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let copy = {
-        let mut copy = path.as_os_str().to_owned();
-        copy.push(".nocow");
-        PathBuf::from(copy)
-    };
-    let (db, copy_word, dir) = (
-        shell_word(&path.display().to_string()),
-        shell_word(&copy.display().to_string()),
-        shell_word(&dir.display().to_string()),
+    let dir = shell_word(
+        &path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .display()
+            .to_string(),
     );
-    let copy_text = copy.display().to_string();
-    let sql = if shell_word(&copy_text) == copy_text {
-        format!("\"VACUUM INTO '{copy_text}'\"")
-    } else {
-        shell_word(&format!("VACUUM INTO '{}'", copy_text.replace('\'', "''")))
-    };
+    let name = path
+        .file_name()
+        .map_or_else(|| "runnerd.db".into(), |name| name.to_string_lossy());
+    let (db, wal, shm, cow, cow_wal) = (
+        shell_word(&name),
+        shell_word(&format!("{name}-wal")),
+        shell_word(&format!("{name}-shm")),
+        shell_word(&format!("{name}.cow")),
+        shell_word(&format!("{name}.cow-wal")),
+    );
     format!(
-        "with runnerd stopped (runnerd stop, then wait for systemctl --user is-active runnerd to say inactive):\n\
-         chattr +C {dir}\n\
-         sqlite3 {db} {sql}\n\
-         rm -f {db}-wal {db}-shm && mv {copy_word} {db}\n\
-         systemctl --user start runnerd"
+        "with runnerd stopped (runnerd stop, then wait for systemctl --user is-active runnerd to say inactive), in \
+         one shell:\n\
+         (umask 077 && cd {dir} && test ! -e {cow} && chattr +C . &&\n\
+         copy=$(mktemp runnerd-nocow.XXXXXX) &&\n\
+         sqlite3 {db} \"VACUUM INTO '$copy'\" &&\n\
+         test \"$(sqlite3 \"$copy\" 'PRAGMA integrity_check')\" = ok &&\n\
+         test \"$(stat -c %a \"$copy\")\" = 600 &&\n\
+         mv {db} {cow} && {{ test ! -e {wal} || mv {wal} {cow_wal}; }} && rm -f {shm} &&\n\
+         mv \"$copy\" {db}) &&\n\
+         systemctl --user start runnerd\n\
+         then, once runnerd runs as before, remove {cow} in {dir}"
     )
 }
 
@@ -252,33 +264,89 @@ fn shell_word(word: &str) -> String {
 /// Docker's root directory as the doctor finds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerRoot {
-    /// Docker's root, such as `/var/lib/docker`.
+    /// Docker's root as Docker names it, such as `/var/lib/docker`.
     pub path: PathBuf,
-    /// Its file system, or why it cannot be read.
+    /// The file system that holds it, or why it cannot be read.
     pub file_system: Result<FileSystem, String>,
-    /// The loop devices it is on, joined by `+`, when it is a file system in a file (`disk::Disks::store`).
-    pub loops: Option<String>,
+    /// What that file system is on.
+    pub backing: Backing,
+}
+
+/// What the file system that holds Docker's root is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backing {
+    /// A device: a disk or a partition.
+    Device,
+    /// A file, on these loop devices, joined by `+` (`disk::Disks::store`).
+    Loops(String),
+    /// It cannot be read: its mount, a device or a loop device's backing file is not found.
+    Unresolved,
+}
+
+/// Why the doctor has no Docker root to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSkipped {
+    /// Docker did not answer.
+    NoDocker,
+    /// Docker answered without naming its root.
+    Unnamed,
 }
 
 impl DockerRoot {
+    /// Docker's root, `root`, resolved once, links and all, so its file system and its mount are read of the same
+    /// directory: `paths`' `mountinfo` names mount points without links.
+    pub fn read(paths: &Paths, root: &Path) -> DockerRoot {
+        let resolved = match std::fs::canonicalize(root) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return DockerRoot {
+                    path: root.to_owned(),
+                    file_system: Err(error.to_string()),
+                    backing: Backing::Unresolved,
+                };
+            }
+        };
+        DockerRoot {
+            path: root.to_owned(),
+            file_system: FileSystem::of(&resolved).map_err(|error| error.to_string()),
+            backing: match Disks::resolve(paths, &resolved) {
+                None => Backing::Unresolved,
+                Some(disks) => disks.store().map_or(Backing::Device, Backing::Loops),
+            },
+        }
+    }
+
+    /// The check when there is no root to read, skipped for `why`.
+    pub fn skipped(why: RootSkipped) -> Check {
+        check(
+            DOCKER_STORAGE,
+            CheckStatus::Skip,
+            match why {
+                RootSkipped::NoDocker => "needs Docker",
+                RootSkipped::Unnamed => "Docker does not say where its root is",
+            }
+            .to_owned(),
+            None,
+        )
+    }
+
     /// The doctor's check of it: which file system takes Docker's writes, and what writes less than btrfs.
     pub fn check(&self) -> Check {
-        const NAME: &str = "Docker storage";
         let path = self.path.display();
         let file_system = match &self.file_system {
             Ok(file_system) => *file_system,
             Err(why) => {
                 return check(
-                    NAME,
+                    DOCKER_STORAGE,
                     CheckStatus::Info,
                     format!("cannot read the file system of {path}: {why}"),
                     None,
                 );
             }
         };
-        if let Some(loops) = &self.loops {
+        if let Backing::Loops(loops) = &self.backing {
             return check(
-                NAME,
+                DOCKER_STORAGE,
                 CheckStatus::Pass,
                 format!(
                     "{path} is {} in a file on {loops}: keep that file without copy-on-write if it is on btrfs \
@@ -290,7 +358,7 @@ impl DockerRoot {
         }
         match file_system {
             FileSystem::Btrfs => check(
-                NAME,
+                DOCKER_STORAGE,
                 CheckStatus::Info,
                 format!(
                     "{path} is on btrfs: the layers, volumes and caches runners write are copied on write and their \
@@ -301,14 +369,23 @@ impl DockerRoot {
                      system in a file made without copy-on-write (chattr +C), mounted there while Docker is stopped"
                 )),
             ),
-            FileSystem::Ext4 | FileSystem::Xfs => check(
-                NAME,
+            FileSystem::Ext4 | FileSystem::Xfs if self.backing == Backing::Device => check(
+                DOCKER_STORAGE,
                 CheckStatus::Pass,
                 format!("{path} is on {}", file_system.name()),
                 None,
             ),
+            FileSystem::Ext4 | FileSystem::Xfs => check(
+                DOCKER_STORAGE,
+                CheckStatus::Info,
+                format!(
+                    "{path} is on {}; whether it is in a file on a loop device cannot be read",
+                    file_system.name()
+                ),
+                None,
+            ),
             FileSystem::Tmpfs | FileSystem::Zfs | FileSystem::Other(_) => check(
-                NAME,
+                DOCKER_STORAGE,
                 CheckStatus::Info,
                 format!("{path} is on {}", file_system.name()),
                 None,
@@ -316,6 +393,9 @@ impl DockerRoot {
         }
     }
 }
+
+/// The name of the check of Docker's root.
+const DOCKER_STORAGE: &str = "Docker storage";
 
 fn check(name: &str, status: CheckStatus, detail: String, fix: Option<String>) -> Check {
     Check {
@@ -330,7 +410,7 @@ fn check(name: &str, status: CheckStatus, detail: String, fix: Option<String>) -
 mod tests {
     use std::path::PathBuf;
 
-    use super::{DockerRoot, FileSystem, History, HistoryFound, no_cow};
+    use super::{Backing, DockerRoot, FileSystem, History, HistoryFound, RootSkipped, no_cow};
     use crate::api::CheckStatus;
     use crate::testdir::TestDir;
 
@@ -360,13 +440,18 @@ mod tests {
         assert_eq!(
             cow.fix.as_deref(),
             Some(
-                "with runnerd stopped (runnerd stop, then wait for systemctl --user is-active runnerd to say inactive):\n\
-                 chattr +C /home/me/.local/state/runnerd\n\
-                 sqlite3 /home/me/.local/state/runnerd/runnerd.db \
-                 \"VACUUM INTO '/home/me/.local/state/runnerd/runnerd.db.nocow'\"\n\
-                 rm -f /home/me/.local/state/runnerd/runnerd.db-wal /home/me/.local/state/runnerd/runnerd.db-shm \
-                 && mv /home/me/.local/state/runnerd/runnerd.db.nocow /home/me/.local/state/runnerd/runnerd.db\n\
-                 systemctl --user start runnerd"
+                "with runnerd stopped (runnerd stop, then wait for systemctl --user is-active runnerd to say \
+                 inactive), in one shell:\n\
+                 (umask 077 && cd /home/me/.local/state/runnerd && test ! -e runnerd.db.cow && chattr +C . &&\n\
+                 copy=$(mktemp runnerd-nocow.XXXXXX) &&\n\
+                 sqlite3 runnerd.db \"VACUUM INTO '$copy'\" &&\n\
+                 test \"$(sqlite3 \"$copy\" 'PRAGMA integrity_check')\" = ok &&\n\
+                 test \"$(stat -c %a \"$copy\")\" = 600 &&\n\
+                 mv runnerd.db runnerd.db.cow && { test ! -e runnerd.db-wal || mv runnerd.db-wal runnerd.db.cow-wal; } \
+                 && rm -f runnerd.db-shm &&\n\
+                 mv \"$copy\" runnerd.db) &&\n\
+                 systemctl --user start runnerd\n\
+                 then, once runnerd runs as before, remove runnerd.db.cow in /home/me/.local/state/runnerd"
             )
         );
         let nocow = history(HistoryFound::Present {
@@ -413,6 +498,117 @@ mod tests {
         );
     }
 
+    /// What following `fix` did in `dir`, with `sqlite3`, `chattr` and `systemctl` stubbed: `sqlite3` copies the
+    /// database for `VACUUM INTO`, refusing a destination that is not empty as SQLite does, or fails when `fail`.
+    /// Whether it started runnerd.
+    fn follow(fix: &str, dir: &std::path::Path, fail: bool) -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let sqlite3 = format!(
+            "#!/bin/sh\n\
+             case \"$2\" in\n\
+             \"VACUUM INTO '\"*) dest=${{2#\"VACUUM INTO '\"}}; dest=${{dest%\"'\"}}\n\
+             if [ -s \"$dest\" ] || {fail}; then exit 1; fi; cat \"$1\" > \"$dest\";;\n\
+             'PRAGMA integrity_check') echo ok;;\n\
+             esac\n"
+        );
+        for (name, body) in [
+            ("sqlite3", sqlite3.as_str()),
+            ("chattr", "#!/bin/sh\n"),
+            ("systemctl", "#!/bin/sh\ntouch \"$STARTED\"\n"),
+        ] {
+            std::fs::write(bin.join(name), body).unwrap();
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let script: Vec<&str> = fix
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.starts_with("then,"))
+            .collect();
+        let started = dir.join("started");
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("umask 022\n{}", script.join("\n")))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("STARTED", &started)
+            .status()
+            .unwrap();
+        started.exists()
+    }
+
+    #[test]
+    fn the_history_fix_installs_only_a_fresh_owner_only_copy_and_keeps_the_original() {
+        // Catches a fix that installs a stale copy a past attempt left after `VACUUM INTO` refused to overwrite it, a
+        // copy readable by others under umask 022, and an original removed before the copy is checked.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TestDir::new("storage");
+        let state = dir.0.join("state dir");
+        std::fs::create_dir_all(&state).unwrap();
+        let db = state.join("runnerd.db");
+        let fix = history(HistoryFound::Present {
+            bytes: 1,
+            file_system: FileSystem::Btrfs,
+            copied: Some(true),
+        });
+        let fix = History {
+            path: db.clone(),
+            ..fix
+        }
+        .check()
+        .fix
+        .unwrap();
+        let reset = || {
+            for entry in std::fs::read_dir(&state).unwrap() {
+                std::fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+            std::fs::write(&db, "current").unwrap();
+            std::fs::write(state.join("runnerd.db-wal"), "wal").unwrap();
+            // What earlier attempts left: a full copy, under the old name and a name mktemp could give.
+            std::fs::write(state.join("runnerd.db.nocow"), "stale").unwrap();
+            std::fs::write(state.join("runnerd-nocow.AAAAAA"), "stale").unwrap();
+        };
+        let read = |name: &str| std::fs::read_to_string(state.join(name)).ok();
+
+        reset();
+        assert!(
+            !follow(&fix, &dir.0, true),
+            "a failed vacuum starts nothing"
+        );
+        assert_eq!(read("runnerd.db").as_deref(), Some("current"));
+        assert_eq!(read("runnerd.db-wal").as_deref(), Some("wal"));
+        assert_eq!(read("runnerd.db.cow"), None);
+
+        reset();
+        assert!(follow(&fix, &dir.0, false), "a checked copy starts runnerd");
+        assert_eq!(
+            read("runnerd.db").as_deref(),
+            Some("current"),
+            "the fresh copy, not a stale one"
+        );
+        let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "owner only under umask 022");
+        assert_eq!(
+            read("runnerd.db.cow").as_deref(),
+            Some("current"),
+            "the original is kept"
+        );
+        assert_eq!(
+            read("runnerd.db.cow-wal").as_deref(),
+            Some("wal"),
+            "with its -wal"
+        );
+        assert_eq!(read("runnerd.db-wal"), None);
+        std::fs::remove_file(dir.0.join("started")).unwrap();
+
+        // Again, with the original of the first still kept: nothing is replaced.
+        std::fs::write(&db, "newer").unwrap();
+        assert!(!follow(&fix, &dir.0, false), "a kept original stops it");
+        assert_eq!(read("runnerd.db").as_deref(), Some("newer"));
+        assert_eq!(read("runnerd.db.cow").as_deref(), Some("current"));
+    }
+
     #[test]
     fn docker_storage_tells_btrfs_from_ext4_and_xfs_and_a_file_on_a_loop_device() {
         // Catches a loop-backed ext4 root read as btrfs's, or btrfs advice shown for a root that writes no more.
@@ -420,7 +616,7 @@ mod tests {
             DockerRoot {
                 path: PathBuf::from("/var/lib/docker"),
                 file_system,
-                loops: loops.map(str::to_owned),
+                backing: loops.map_or(Backing::Device, |loops| Backing::Loops(loops.to_owned())),
             }
             .check()
         };
@@ -459,6 +655,38 @@ mod tests {
         );
         let unread = root(Err("permission denied".to_owned()), None);
         assert_eq!(unread.status, CheckStatus::Info);
+        // A mount whose device or backing file is not found is not read as a device of its own.
+        let unresolved = DockerRoot {
+            path: PathBuf::from("/var/lib/docker"),
+            file_system: Ok(FileSystem::Ext4),
+            backing: Backing::Unresolved,
+        }
+        .check();
+        assert_eq!(
+            (unresolved.status, unresolved.detail.as_str()),
+            (
+                CheckStatus::Info,
+                "/var/lib/docker is on ext4; whether it is in a file on a loop device cannot be read"
+            )
+        );
+        assert_eq!(
+            [RootSkipped::NoDocker, RootSkipped::Unnamed].map(|why| {
+                let check = DockerRoot::skipped(why);
+                (check.name, check.status, check.detail)
+            }),
+            [
+                (
+                    "Docker storage".to_owned(),
+                    CheckStatus::Skip,
+                    "needs Docker".to_owned()
+                ),
+                (
+                    "Docker storage".to_owned(),
+                    CheckStatus::Skip,
+                    "Docker does not say where its root is".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]

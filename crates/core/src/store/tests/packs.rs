@@ -214,7 +214,11 @@ async fn a_log_that_grows_while_its_packs_are_made_keeps_its_rows_until_the_next
     finish(&store, 1, "success");
     store.flush().await;
     let pruner = Connection::open(&path).unwrap();
-    let made = logs::make(&pruner, 1).unwrap().unwrap();
+    let made = logs::make(&pruner, 1, &|| false).unwrap();
+    assert!(
+        matches!(made, logs::Made::Packs { .. }),
+        "a final log packs"
+    );
     store.log(1, vec![at(12, "late")], POSITION, u64::MAX).await;
     store.flush().await;
     assert!(
@@ -232,7 +236,206 @@ async fn a_log_that_grows_while_its_packs_are_made_keeps_its_rows_until_the_next
     );
     // Made again once the job is packed, there is nothing to make.
     assert!(
-        logs::make(&pruner, 1).unwrap().is_none(),
+        matches!(
+            logs::make(&pruner, 1, &|| false).unwrap(),
+            logs::Made::Packed
+        ),
         "a packed job is not packed twice"
     );
+}
+
+/// Job 1 with `log()`, final and packed by a prune; its store and path.
+async fn packed_job(dir: &TestDir) -> (Store, std::path::PathBuf) {
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    running(&store, 1);
+    store.log(1, log(), POSITION, u64::MAX).await;
+    finish(&store, 1, "failure");
+    store.flush().await;
+    store.prune(PACK, &History::default()).await.unwrap();
+    assert_eq!(rows(&path, 1), (0, 1), "the log is packed");
+    (store, path)
+}
+
+/// Layout 1's bytes for `lines`, each its skip past the line before, its declared length and its bytes, deflated.
+fn pack_data(lines: &[(u64, u64, &[u8])]) -> Vec<u8> {
+    use std::io::Write as _;
+    fn varint(out: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
+            value >>= 7;
+        }
+        out.push(u8::try_from(value).unwrap());
+    }
+    let mut raw = vec![1];
+    for (skip, length, text) in lines {
+        varint(&mut raw, *skip);
+        varint(&mut raw, *length);
+        raw.extend_from_slice(text);
+    }
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&raw).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[tokio::test]
+async fn a_damaged_pack_is_an_error_through_every_read_of_its_log_never_lines() {
+    // Catches a pack read past its bounds through the API: data that inflates to 64 MiB, which a one-line read or the
+    // outline's check would hold whole, a line number past SQLite's that a page's `line + 1` overflows, and lines
+    // other than those its row names, which a page asked from a line would skip or repeat.
+    let dir = TestDir::new("packs");
+    let (store, path) = packed_job(&dir).await;
+    let mut bomb = vec![1, 0];
+    bomb.extend(std::iter::repeat_n(0, 64 << 20));
+    let bomb = {
+        use std::io::Write as _;
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bomb).unwrap();
+        encoder.finish().unwrap()
+    };
+    let past = u64::try_from(i64::MAX).unwrap() + 1;
+    let damaged: [(&str, u64, u64, Vec<u8>); 4] = [
+        ("inflates to 64 MiB", 0, 0, bomb),
+        ("a line past i64", past, past, pack_data(&[(past, 1, b"x")])),
+        (
+            "a first line past its row's",
+            0,
+            1,
+            pack_data(&[(1, 1, b"a"), (0, 1, b"b")]),
+        ),
+        (
+            "other lines than its row's",
+            0,
+            30,
+            pack_data(&[(0, 1, b"a"), (0, 1, b"b")]),
+        ),
+    ];
+    let db = Connection::open(&path).unwrap();
+    for (what, first, last, data) in damaged {
+        db.execute(
+            "UPDATE log_packs SET first_line = ?1, last_line = ?2, data = ?3 WHERE job = 1",
+            rusqlite::params![first.min(i64::MAX as u64), last.min(i64::MAX as u64), data],
+        )
+        .unwrap();
+        assert!(store.log_lines(1, 0, 1).await.is_err(), "{what}: lines");
+        assert!(
+            store.styled_lines(1, 0, 1).await.is_err(),
+            "{what}: styled lines"
+        );
+        let search = Search::new(&LogSearchQuery {
+            q: "a".to_owned(),
+            ..LogSearchQuery::default()
+        })
+        .unwrap();
+        assert!(store.search_log(1, search).await.is_err(), "{what}: search");
+        assert!(store.log_outline(1).await.is_err(), "{what}: outline");
+        let read = LineRead {
+            from: 0,
+            limit: 1,
+            prefix: 10,
+            bytes: 10,
+        };
+        assert!(
+            read::lines_from(&db, 1, read).is_err(),
+            "{what}: a cut read"
+        );
+        assert!(read::log_text(&db, 1).is_err(), "{what}: the plain text");
+    }
+}
+
+#[tokio::test]
+async fn a_log_with_a_row_that_is_not_utf8_text_stays_in_rows_and_reads_as_before() {
+    // Catches a pack of a damaged legacy row: the plain text read of its rows fails, and of its pack would hand over
+    // the bytes replaced, silently.
+    let dir = TestDir::new("packs");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    for id in 1..=3 {
+        running(&store, id);
+        store.log(id, log(), POSITION, u64::MAX).await;
+        finish(&store, id, "success");
+    }
+    store.flush().await;
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "UPDATE log_lines SET text = CAST(x'c3a9ff' AS TEXT) WHERE job = 1 AND line = 2; \
+         UPDATE log_lines SET text = x'c3a9' WHERE job = 2 AND line = 2; \
+         UPDATE log_lines SET text = '\u{e9}t\u{e9} \u{1f600}' WHERE job = 3 AND line = 2;",
+    )
+    .unwrap();
+    let before: Vec<_> = (1..=3)
+        .map(|id| read::log_text(&db, id).map_err(|error| error.to_string()))
+        .collect();
+    assert!(
+        before[0].is_err() && before[1].is_err(),
+        "a strict read refuses the damaged rows: {before:?}"
+    );
+    store.prune(PACK, &History::default()).await.unwrap();
+    assert_eq!(
+        rows(&path, 1),
+        (log().len() as u64, 0),
+        "invalid UTF-8 stays"
+    );
+    assert_eq!(rows(&path, 2), (log().len() as u64, 0), "a blob stays");
+    assert_eq!(rows(&path, 3), (0, 1), "valid Unicode packs");
+    let after: Vec<_> = (1..=3)
+        .map(|id| read::log_text(&db, id).map_err(|error| error.to_string()))
+        .collect();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn a_log_too_long_for_one_prune_stays_in_rows_and_a_stopped_prune_stores_nothing() {
+    // Catches unbounded work under one snapshot and one write: a log past 16 MiB, or with a line no pack holds, would
+    // be read, deflated and stored whole while the writer waits, and a stop would wait for it.
+    let dir = TestDir::new("packs");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    running(&store, 1);
+    let chunk = "x".repeat(450 << 10);
+    store.log(1, vec![chunk; 40], POSITION, u64::MAX).await;
+    finish(&store, 1, "success");
+    running(&store, 2);
+    store
+        .log(2, vec!["y".repeat(3 << 20)], POSITION, u64::MAX)
+        .await;
+    finish(&store, 2, "success");
+    running(&store, 3);
+    store.log(3, long_log(), POSITION, u64::MAX).await;
+    finish(&store, 3, "success");
+    store.flush().await;
+    let pruner = Connection::open(&path).unwrap();
+    for id in [1, 2] {
+        assert!(
+            matches!(
+                logs::make(&pruner, id, &|| false).unwrap(),
+                logs::Made::Unpackable(_)
+            ),
+            "job {id} is not packed"
+        );
+    }
+    let stopped = logs::make(&pruner, 3, &|| true).unwrap();
+    assert!(
+        matches!(stopped, logs::Made::Stopped),
+        "a stop is seen while a long log is deflated"
+    );
+    assert!(
+        !logs::store(&pruner, 3, &stopped).unwrap(),
+        "a stopped make stores nothing"
+    );
+    assert_eq!(rows(&path, 3).1, 0);
+    store.prune(PACK, &History::default()).await.unwrap();
+    assert_eq!(rows(&path, 1), (40, 0), "a log past 16 MiB stays in rows");
+    assert_eq!(rows(&path, 2), (1, 0), "a line past a pack stays in rows");
+    assert_eq!(rows(&path, 3).0, 0, "the rest packs");
+    assert_eq!(store.log_lines(1, 39, 5).await.unwrap().len(), 1);
+    // Past `[history] logs`, rows go a few MiB at a time.
+    store
+        .prune(FINAL + 31 * DAY_MS, &History::default())
+        .await
+        .unwrap();
+    assert_eq!(rows(&path, 1), (0, 0));
+    assert_eq!(rows(&path, 2), (0, 0));
 }

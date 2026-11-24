@@ -279,9 +279,9 @@ CREATE INDEX events_by_type ON events ((CASE WHEN json_valid(body) THEN json_ext
 -- The host's memory as each `budget.changed` event that had it read it (`store::host_reading!`), kept by the writer
 -- in the transaction that stores the event, so insights read these and not the events' bodies (ADR 0171): `MemTotal`,
 -- `MemAvailable`, `SwapFree` (NULL without swap), what the host's limit took off the plain count, and whether a
--- runner ran. Pruned with the events.
+-- runner ran. Deleted with its event, in the same statement, by the foreign key.
 CREATE TABLE host_readings (
-    event INTEGER PRIMARY KEY,
+    event INTEGER PRIMARY KEY REFERENCES events (id) ON DELETE CASCADE,
     at INTEGER NOT NULL,
     total INTEGER NOT NULL,
     available INTEGER,

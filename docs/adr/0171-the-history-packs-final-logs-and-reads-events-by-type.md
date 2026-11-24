@@ -32,14 +32,24 @@ time, so on btrfs every checkpoint fragments the file further and writes more th
   migration). `read::PROFILE_CHANGES` and `read::RESEEDS` use the same expression, so SQLite searches the index.
 - **Host readings are kept beside their events.** The writer stores each `budget.changed` event's reading of the host's
   memory in `host_readings`, in the transaction that stores the event, with the SQL the insights used to run over the
-  events (`store::host_reading!`); the migration fills it from the events already stored. Insights read
-  `host_readings`. Pruning deletes readings with the events, by the same cutoff.
+  events (`store::host_reading!`); the migration fills it from the events already stored. A body that is not JSON,
+  or a budget, seed or shell that is not an object, gives no reading, so a damaged event fails neither. Insights read
+  `host_readings`. Each reading's foreign key deletes it with its event, in the statement that deletes the event, so
+  the two never disagree.
 - **A final job's log is packed.** A job's lines stay rows of `log_lines` while its record may grow, so a running
   log is stored and streamed as before. Once its record has been final for 10 minutes, each prune packs it: it reads
   the rows and deflates them outside a write, then, in one short transaction, stores them as `log_packs` unless the
-  job's count of lines moved meanwhile, then deletes the rows a batch at a time with a pause after each. A pack holds
-  up to 1024 lines or 256 KiB of text; its data is a layout byte, then each line's number as the gap from the line
-  before, its length and its bytes, deflated at level 6 by a pure Rust encoder.
+  job's count of lines moved meanwhile, then deletes the rows at most 2000 or 4 MiB at a time, with a pause after
+  each. It asks whether the prune was stopped after each pack's worth of lines and before it stores them. A pack holds
+  up to 1024 lines, takes no more once it holds 256 KiB of text, and inflates to 1 MiB at most; its data is a layout
+  byte, then each line's number as the gap from the line before, its length and its bytes, deflated at level 6 by a
+  pure Rust encoder.
+- **Packing is bounded.** A job whose log is past 16 MiB, has a line no pack holds, or has a row that is not UTF-8
+  text stays in rows, read as before: one prune never reads more than 16 MiB in one snapshot or stores more in one
+  transaction, and a strict read of a damaged row still fails rather than replacing its bytes.
+- **A pack is checked as it is read.** It inflates through a bound of 1 MiB and at most 1024 lines; data past either,
+  a varint past 64 bits, a number past SQLite's signed range, or first and last lines other than its row's is an
+  error, never lines, so no read holds more than its bound and no line number overflows a page's `line + 1`.
 - **One rule for every read.** `store::logs` owns every read of a job's lines: a job with packs reads from them alone,
   one without from its rows, in one snapshot of the database. The writer stores no line for a packed job. So a crash
   between the packs and the last delete leaves rows no read sees, which the next prune deletes.
@@ -47,10 +57,13 @@ time, so on btrfs every checkpoint fragments the file further and writes more th
   `FS_NOCOW_FL` on it if it is on btrfs (through `rustix`'s `ioctl_setflags`, without `unsafe`), and on a new empty
   database too: a file takes the flag only while empty, and files made in the directory inherit it. It is best effort.
 - **The doctor reports both stores.** `history storage` reports the database's size and file system, and warns while
-  btrfs copies it on write, with a fix that makes a copy without copy-on-write (`chattr +C` on the directory, then
-  `VACUUM INTO`, with runnerd stopped). `Docker storage` says whether Docker's root is btrfs, ext4 or XFS, or a file
-  system in a file on a loop device, and for btrfs what would write less. `observe::storage` reads and words both;
-  clients show the checks as they are.
+  btrfs copies it on write, with a fix that makes a copy without copy-on-write, with runnerd stopped: under umask 077,
+  `chattr +C` on the directory, `VACUUM INTO` a new empty file `mktemp` makes, then, only if SQLite finds the copy
+  whole and its mode is 600, keep the database as `.cow` and move the copy in. No step runs after one that failed, so
+  a stale copy is never installed. `Docker storage` resolves Docker's root once, links and all, then says whether it
+  is btrfs, ext4 or XFS, or a file system in a file on a loop device, or that what it is on cannot be read, and for
+  btrfs what would write less. `observe::storage` reads and words both, and their skips; clients show the checks as
+  they are.
 
 ## Consequences
 
@@ -64,7 +77,11 @@ time, so on btrfs every checkpoint fragments the file further and writes more th
   The freed pages stay in the file until a `VACUUM`; SQLite reuses them for what it writes next, and the doctor's fix
   for a database btrfs copies on write leaves them out of the copy.
 - A finished log is written twice: once as rows, once as packs. Rows of a running job are as before.
-- Reading a page of a packed log inflates the packs it spans, at most 256 KiB of text each beyond its last line.
+- Reading a page of a packed log inflates the packs it spans, at most 1 MiB each.
+- A log past 16 MiB, rare, keeps its rows and their size. At the bound, 15.3 MiB of random text that deflates to
+  13.2 MB, a release build read and deflated it in 330 ms in its snapshot, stored its packs in a 15 ms transaction,
+  and deleted its rows in four deletes of at most 2 ms, on tmpfs: the writer waits for the write lock no longer than
+  that.
 - A history at 33 is not read by 0.1.5, which refuses a newer schema (ADR 0073) as it did 32.
 - A database made before this keeps copy-on-write until its owner makes the copy the doctor gives; runnerd does not
   move it.
