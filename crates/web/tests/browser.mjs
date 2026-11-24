@@ -788,7 +788,7 @@ try {
         };
       }, hitId);
       check(
-        !back.early && !back.window && back.marked === 0 && back.last === 'L6012',
+        !back.early && !back.window && back.marked === 0 && back.last === 'L6014',
         `${size.name}: back to the log's end shows its last lines, nothing marked (${JSON.stringify(back)})`,
       );
       await context.close();

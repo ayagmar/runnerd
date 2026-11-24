@@ -29,8 +29,8 @@ pub const LOG_MISSING: u64 = 9406;
 /// A failed job whose failing step, the one before it and every step after it share one second, as GitHub stores a
 /// quick failure followed by skipped steps; its runner has job hooks.
 pub const LOG_SAME_SECOND: u64 = 9407;
-/// A failed job whose failure, in nested groups, comes early and whose cleanup prints more lines after it than a
-/// client outlines of a log's end: [`long_logged_job`].
+/// A failed job whose failure, in nested groups, comes early and whose cleanup, one group, prints more lines after
+/// it than a client outlines of a log's end: [`long_logged_job`].
 pub const LOG_LONG: u64 = 9408;
 /// The 0-based line of [`LOG_LONG`] a search for `balances` finds, two groups deep.
 pub const LOG_LONG_HIT: u64 = 5;
@@ -241,9 +241,11 @@ fn long_log() -> Vec<String> {
         at(11, 0, "##[endgroup]"),
         at(19, 9, "##[error]Process completed with exit code 1."),
         at(21, 0, "Post job cleanup."),
+        at(22, 0, "##[group]Prune the cache"),
     ];
     lines
         .extend((1..=LONG_CLEANUP).map(|entry| at(30, 0, &format!("Removed cache entry {entry}"))));
+    lines.push(at(50, 0, "##[endgroup]"));
     lines.push(at(51, 0, "Cleaning up orphan processes"));
     lines
 }

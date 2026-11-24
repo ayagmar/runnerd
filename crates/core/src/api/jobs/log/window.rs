@@ -29,10 +29,12 @@ impl LogWindow {
     }
 
     /// What a client says of the lines it shows, `shown` of them read, of a log of `lines`: the tail's
-    /// [`LogOutline::tail_words`], or `lines 1 to 5000 of 9200, around line 15, not the log's end`.
+    /// [`LogOutline::tail_words`], or `lines 1 to 5000 of 9200, around line 15, not the log's end`. A window of no
+    /// lines says nothing: it is around nothing.
     pub fn words(&self, shown: usize, lines: u64) -> Option<String> {
         match *self {
             LogWindow::Tail(range) => LogOutline::tail_words(range.from, shown),
+            LogWindow::Around { .. } if shown == 0 => None,
             LogWindow::Around { line, range } => {
                 let last = range.from + shown as u64;
                 Some(format!(
@@ -79,16 +81,23 @@ impl LogOutline {
     }
 
     /// Why cited line `line` (0-based) is not among the lines read of this log: `line 9000 is past the log's end:
-    /// it has 6020 lines`, `line 15 was deleted after history.logs`.
+    /// it has 6020 lines`, `line 15 was deleted after history.logs`. A deleted log reads as deleted whatever the
+    /// line, and says when the line is past the lines it had.
     pub fn absent_words(&self, line: u64) -> String {
         let number = line + 1;
-        if line < self.lines {
-            return match self.evidence {
-                LogEvidence::Expired => format!("line {number} was deleted after history.logs"),
-                _ => format!("line {number} is not in the stored log"),
+        let has = Self::count_words(usize::try_from(self.lines).unwrap_or(usize::MAX));
+        if self.evidence == LogEvidence::Expired {
+            return if line < self.lines {
+                format!("line {number} was deleted after history.logs")
+            } else {
+                format!(
+                    "line {number} is past the log's end, and its {has} were deleted after history.logs"
+                )
             };
         }
-        let has = Self::count_words(usize::try_from(self.lines).unwrap_or(usize::MAX));
+        if line < self.lines {
+            return format!("line {number} is not in the stored log");
+        }
         match self.evidence {
             LogEvidence::Missing => format!("line {number} is not there: no log was captured"),
             LogEvidence::Truncated => {
@@ -103,9 +112,18 @@ impl LogOutline {
         }
     }
 
-    /// What a client says of cited line `line` (0-based) when the daemon is older than the outline and its lines,
-    /// so it cannot read around it: `line 15 is not opened here; the full log has it`.
+    /// What a client says of cited line `line` (0-based) when the daemon is older than the outline or its lines,
+    /// so it cannot read around the line, nor say whether the log has it: `line 15 cannot be opened here: this
+    /// runnerd does not read lines around one; the full log has what it kept`.
     pub fn unread_words(line: u64) -> String {
-        format!("line {} is not opened here; the full log has it", line + 1)
+        format!(
+            "line {} cannot be opened here: this runnerd does not read lines around one; the full log has what it kept",
+            line + 1
+        )
+    }
+
+    /// What a client says of a citation of line 0: `there is no line 0: lines count from 1`.
+    pub fn zero_line_words() -> &'static str {
+        "there is no line 0: lines count from 1"
     }
 }

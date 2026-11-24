@@ -1087,6 +1087,11 @@ fn a_window_says_it_is_not_the_logs_end_and_a_tail_says_what_it_leaves_out() {
         None,
         "a log shown whole says nothing"
     );
+    assert_eq!(
+        around.words(0, outline.lines),
+        None,
+        "a window that read nothing is around nothing, never an inverted range"
+    );
 }
 
 #[test]
@@ -1112,13 +1117,32 @@ fn a_cited_line_not_read_says_why_by_the_logs_evidence() {
         outline.absent_words(20),
         "line 21 was deleted after history.logs"
     );
+    // At the last line the log had, and past it: deleted either way, past its end said so.
+    assert_eq!(
+        outline.absent_words(999),
+        "line 1000 was deleted after history.logs"
+    );
+    for line in [1000, 5000] {
+        assert_eq!(
+            outline.absent_words(line),
+            format!(
+                "line {} is past the log's end, and its 1000 lines were deleted after history.logs",
+                line + 1
+            )
+        );
+    }
     let missing = LogOutline::of(&job(JobState::Completed, "failure", Vec::new()), &[]);
     assert_eq!(
         missing.absent_words(0),
         "line 1 is not there: no log was captured"
     );
+    let unread = LogOutline::unread_words(999_999);
+    assert!(
+        !unread.contains("has it") && unread.contains("cannot be opened"),
+        "an older daemon never says the log has a line it cannot see: {unread}"
+    );
     assert_eq!(
-        LogOutline::unread_words(14),
-        "line 15 is not opened here; the full log has it"
+        LogOutline::zero_line_words(),
+        "there is no line 0: lines count from 1"
     );
 }
