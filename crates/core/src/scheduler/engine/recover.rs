@@ -289,6 +289,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     max_memory: None,
                     max_slots: None,
                     priced_as: None,
+                    tmp_tmpfs: None,
                 });
         }
         self.repositories.found_running(&occupant.repository);

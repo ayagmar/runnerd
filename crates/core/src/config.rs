@@ -644,6 +644,9 @@ pub struct Profile {
     /// The GitHub-hosted runner its jobs are priced at (ADR 0072); `None` for the daemon's architecture's 2-core
     /// standard runner.
     pub priced_as: Option<api::Sku>,
+    /// Memory its runners' `/tmp` and `/var/tmp` may hold together as `tmpfs` (ADR 0169), out of `memory`; `None`,
+    /// the default, keeps both on the container's disk.
+    pub tmp_tmpfs: Option<ByteSize>,
 }
 
 /// The image a profile's runners run.
@@ -681,6 +684,7 @@ struct ProfileToml {
     max_memory: Option<ByteSize>,
     max_slots: Option<u32>,
     priced_as: Option<api::Sku>,
+    tmp_tmpfs: Option<ByteSize>,
 }
 
 impl TryFrom<ProfileToml> for Profile {
@@ -714,6 +718,7 @@ impl TryFrom<ProfileToml> for Profile {
             max_memory: profile.max_memory,
             max_slots: profile.max_slots,
             priced_as: profile.priced_as,
+            tmp_tmpfs: profile.tmp_tmpfs,
         })
     }
 }
@@ -1419,8 +1424,8 @@ pub enum ConfigError {
         /// The origin `open` names.
         open: Origin,
     },
-    /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, or its
-    /// `min_memory` is above its `max_memory`.
+    /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, its
+    /// `min_memory` is above its `max_memory`, or its `tmp_tmpfs` is not below its `memory` and `min_memory`.
     #[error("profiles.{profile}: {why}")]
     SizingBounds {
         /// The profile.
@@ -1707,6 +1712,11 @@ impl Config {
                 "memory is above its max_memory"
             } else if p.max_slots.is_some_and(|max| p.slots > max) {
                 "slots are above its max_slots"
+            } else if p.tmp_tmpfs.is_some_and(|tmpfs| {
+                tmpfs.0 >= memory || p.min_memory.is_some_and(|min| tmpfs.0 >= min.0)
+            }) {
+                // The tmpfs's pages count against the container's memory: one that could fill it leaves the job none.
+                "tmp_tmpfs is not below its memory and min_memory"
             } else {
                 continue;
             };
@@ -1818,6 +1828,10 @@ impl Config {
                 (p.cpus == 0, format!("profiles.{name}.cpus")),
                 (p.slots == 0, format!("profiles.{name}.slots")),
                 (p.max_slots == Some(0), format!("profiles.{name}.max_slots")),
+                (
+                    p.tmp_tmpfs == Some(ByteSize(0)),
+                    format!("profiles.{name}.tmp_tmpfs"),
+                ),
             ]
         });
         let mirror = &self.caches.mirror;

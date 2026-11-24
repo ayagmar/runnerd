@@ -1056,6 +1056,8 @@ struct DockerState {
     entrypoints: HashMap<String, Vec<String>>,
     /// The environment of each container started, by name.
     envs: HashMap<String, Vec<String>>,
+    /// The `tmp_tmpfs` bound of each container started, by name.
+    tmp_tmpfs: HashMap<String, Option<crate::config::ByteSize>>,
     /// What seed containers exit with, at once; `None`: they run for the whole test.
     seed_exit: Option<i64>,
     /// While true, the wait for a seed container that runs fails to connect, as when the Engine's API goes away.
@@ -1453,6 +1455,7 @@ impl DockerApi for FakeDocker {
             state.started_images.push(spec.image.clone());
             state.mounts.insert(spec.name.clone(), spec.mounts.clone());
             state.envs.insert(spec.name.clone(), spec.env.clone());
+            state.tmp_tmpfs.insert(spec.name.clone(), spec.tmp_tmpfs);
             if let Some(entrypoint) = &spec.entrypoint {
                 state
                     .entrypoints

@@ -19,6 +19,7 @@ fn host_config(isolation: Isolation) -> HostConfig {
         memory: "9G".parse().unwrap(),
         env: Vec::new(),
         mounts: Vec::new(),
+        tmp_tmpfs: None,
         network: None,
         labels: BTreeMap::new(),
         entrypoint: None,

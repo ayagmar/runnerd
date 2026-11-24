@@ -267,6 +267,41 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
     }
 }
 
+#[test]
+fn tmp_stays_on_disk_unless_a_profile_bounds_a_tmpfs_below_its_memory() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert_eq!(config.profiles["app"].tmp_tmpfs, None, "off by default");
+    let with = |lines: &str| {
+        Config::parse(&MINIMAL.replace("slots = 1", &format!("slots = 1\n{lines}")))
+            .unwrap()
+            .validate(Some(size("33G")))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    };
+    // app has 4G.
+    with("tmp_tmpfs = \"1G\"").unwrap();
+    let config =
+        Config::parse(&MINIMAL.replace("slots = 1", "slots = 1\ntmp_tmpfs = \"1G\"")).unwrap();
+    assert_eq!(config.profiles["app"].tmp_tmpfs, Some(size("1G")));
+    // A tmpfs as large as the memory it comes out of could leave the job none.
+    for refused in [
+        "tmp_tmpfs = \"4G\"",
+        "tmp_tmpfs = \"3G\"\nmin_memory = \"3G\"",
+    ] {
+        assert_eq!(
+            with(refused).unwrap_err(),
+            "profiles.app: tmp_tmpfs is not below its memory and min_memory",
+            "{refused}"
+        );
+    }
+    assert!(
+        with("tmp_tmpfs = \"0G\"")
+            .unwrap_err()
+            .contains("profiles.app.tmp_tmpfs"),
+        "0 would mount an unbounded tmpfs"
+    );
+}
+
 fn origins(list: &str) -> Result<Vec<String>, String> {
     Config::parse(&format!("{MINIMAL}\n[web]\norigins = [{list}]\n"))
         .map(|config| config.web.origins.iter().map(ToString::to_string).collect())

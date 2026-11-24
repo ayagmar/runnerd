@@ -771,6 +771,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 archives.as_ref(),
                 grype.as_ref(),
             ),
+            tmp_tmpfs: profile.tmp_tmpfs,
             network: Some(self.names.network()),
             // The generation of the Grype database it mounts, which is not removed while its container is there.
             labels: grype

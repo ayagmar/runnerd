@@ -22,6 +22,7 @@ fn spec() -> RunnerSpec {
         memory: "9G".parse().unwrap(),
         env: Vec::new(),
         mounts: Vec::new(),
+        tmp_tmpfs: None,
         network: None,
         labels: BTreeMap::new(),
         entrypoint: None,
@@ -36,6 +37,43 @@ fn the_jit_config_stays_out_of_debug_output_and_the_create_request() {
     let body = create_body(&spec, &Sysbox);
     assert!(!format!("{body:?}").contains(SECRET));
     assert!(!serde_json::to_string(&body).unwrap().contains(SECRET));
+}
+
+#[test]
+fn a_bounded_tmp_is_tmpfs_at_tmp_and_var_tmp_only_and_runs_programs() {
+    let off = create_body(&spec(), &Sysbox).host_config.unwrap();
+    assert_eq!(off.tmpfs, None, "no tmpfs unless the profile asks");
+
+    let spec = RunnerSpec {
+        tmp_tmpfs: Some("2G".parse().unwrap()),
+        ..spec()
+    };
+    let host_config = create_body(&spec, &Sysbox).host_config.unwrap();
+    let tmpfs = host_config.tmpfs.unwrap();
+    // Never _diag, read from a stopped runner, nor _work, which holds the tool cache's mount and a record.
+    let mut targets: Vec<&str> = tmpfs.keys().map(String::as_str).collect();
+    targets.sort_unstable();
+    assert_eq!(targets, ["/tmp", "/var/tmp"]);
+    assert_eq!(host_config.mounts, Some(Vec::new()), "no other mount added");
+    let size = |options: &str| -> u64 {
+        let options: Vec<&str> = options.split(',').collect();
+        // Docker mounts a tmpfs noexec unless told: jobs run what they build in /tmp.
+        assert!(options.contains(&"exec"), "{options:?}");
+        assert!(!options.contains(&"noexec"), "{options:?}");
+        assert!(options.contains(&"mode=1777"), "{options:?}");
+        options
+            .iter()
+            .find_map(|option| option.strip_prefix("size="))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(size(&tmpfs["/tmp"]), 3 << 29);
+    assert_eq!(size(&tmpfs["/var/tmp"]), 1 << 29);
+
+    // size=0 would be an unbounded tmpfs.
+    let tiny = super::tmp_tmpfs(crate::config::ByteSize(1));
+    assert!(tiny.values().all(|options| size(options) >= 1), "{tiny:?}");
 }
 
 #[test]
