@@ -607,6 +607,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Author::Owner => self.undone_raises(&config).await,
                     Author::AutoSizing => Vec::new(),
                 };
+                // A repository it removes drains, and a restart before its drain ends drains it again only if the
+                // history kept it: recorded, synced, before the file without it is written (ADR 0173).
+                let names = config
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.name.clone())
+                    .collect();
+                let draining = self.repositories.draining_after(&names);
+                let drains_change = draining != self.repositories.draining_names();
+                if drains_change && !self.store.draining(draining).await {
+                    // Back to what drains now, as the write may have committed and its answer been lost.
+                    drop(self.record_drains());
+                    let _ = reply.send(Err(ControlError::Failed(
+                        "cannot record the repositories it removes as draining in the job history"
+                            .to_owned(),
+                    )));
+                    return;
+                }
                 let answer = match commit.run().await {
                     Ok(warning) => {
                         for line in &undone {
@@ -615,7 +633,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.reload(*config, memory_max, cpus);
                         Ok(warning.into_iter().chain(undone).collect())
                     }
-                    Err(message) => Err(ControlError::Failed(message)),
+                    Err(message) => {
+                        // Not written: what drains is as it was.
+                        if drains_change {
+                            drop(self.record_drains());
+                        }
+                        Err(ControlError::Failed(message))
+                    }
                 };
                 let _ = reply.send(answer);
             }

@@ -229,6 +229,9 @@ pub struct Setup {
     pub announced: Announced,
     /// The repositories recorded paused (`Store::paused_repositories`): they stay paused from the first tick.
     pub paused: Vec<String>,
+    /// The repositories recorded draining (`Store::draining_repositories`): those the config no longer lists drain from
+    /// the first tick, as they did before the restart.
+    pub draining: Vec<String>,
     /// Where the cgroup and proc file systems are.
     pub paths: Paths,
     /// The shared build cache, unless the daemon could not open it.
@@ -657,6 +660,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             store,
             announced,
             paused,
+            draining,
             paths,
             build_cache,
             action_archives,
@@ -674,12 +678,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 (name.clone(), slots)
             })
             .collect();
-        let repositories = Repositories::new(
+        let mut repositories = Repositories::new(
             config
                 .repositories
                 .iter()
                 .map(|repository| repository.name.clone()),
         );
+        for name in &draining {
+            repositories.drain(name);
+        }
         let (control, commands) = Control::new(
             config
                 .repositories

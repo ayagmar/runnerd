@@ -1,5 +1,5 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
-//! from, cache sizes, the paused repositories and where the notifier got to. Owns the schema, the one writer and
+//! from, cache sizes, the paused and draining repositories and where the notifier got to. Owns the schema, the one writer and
 //! the event broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and
 //! pruning run on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about
 //! scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
@@ -459,6 +459,11 @@ enum Write {
     Paused {
         repositories: Vec<String>,
         /// Whether it committed.
+        done: oneshot::Sender<bool>,
+    },
+    Draining {
+        repositories: Vec<String>,
+        /// Whether it committed, synced to disk.
         done: oneshot::Sender<bool>,
     },
     Visibility {
@@ -1024,6 +1029,15 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
+    /// Records the repositories the engine drains, all of them, in place of the ones recorded before, synced to disk:
+    /// a restart drains them again, though the config no longer lists them and no runner of theirs runs (ADR 0173).
+    /// The write is sent at once, in order with every other; the future says whether it committed.
+    pub fn draining(&self, repositories: Vec<String>) -> impl Future<Output = bool> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::Draining { repositories, done });
+        async move { committed.await.unwrap_or(false) }
+    }
+
     /// The second to name a runner whose name starts with `prefix` for, `secs` or later, before GitHub or Docker
     /// knows the name: past every second the history knows was named, whatever the engine read at its start, so a
     /// restart never names a runner the same even when nothing else recorded one. The history keeps a lease a few
@@ -1292,6 +1306,12 @@ impl Store {
     /// The repositories recorded paused, for the engine to start with. Blocks on the database: for startup.
     pub fn paused_repositories(&self) -> Result<Vec<String>, StoreError> {
         Ok(read::paused(&lock(&self.reader))?)
+    }
+
+    /// The repositories recorded draining (`Store::draining`), for the engine to start with. Blocks on the database:
+    /// for startup.
+    pub fn draining_repositories(&self) -> Result<Vec<String>, StoreError> {
+        Ok(read::draining(&lock(&self.reader))?)
     }
 
     /// The slice's samples since `since` (seconds), oldest first, the ones not yet stored included.

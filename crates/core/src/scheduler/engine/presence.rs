@@ -79,7 +79,8 @@ impl Presence {
 /// The repositories the engine knows, by name, each listed or draining and never both.
 ///
 /// On a restart the listed ones come from the config with nothing of their state, and the draining ones are those the
-/// runners found still run for, starting their drain over. A reload lists what the new config has, with a repository
+/// history kept draining (`Store::draining`, which the engine rewrites whenever the draining ones change) and those the
+/// runners found still run for, the config listing neither, each starting its drain over (ADR 0173). A reload lists what the new config has, with a repository
 /// added back starting afresh, and drains what it lost, from the start. One listed before and after keeps its state,
 /// and one draining before and after keeps its drain.
 #[derive(Debug)]
@@ -166,11 +167,34 @@ impl Repositories {
         }
     }
 
-    /// Drains `name` for a running runner a restart found, unless the config lists it or it already drains.
-    pub(super) fn found_running(&mut self, name: &str) {
+    /// Drains `name`, for a running runner a restart found or a drain the history kept, unless the config lists it or
+    /// it already drains; says whether that began a drain.
+    pub(super) fn drain(&mut self, name: &str) -> bool {
+        match self.0.entry(name.to_owned()) {
+            std::collections::btree_map::Entry::Occupied(_) => false,
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Presence::draining());
+                true
+            }
+        }
+    }
+
+    /// The names that drain, for the history to keep.
+    pub(super) fn draining_names(&self) -> Vec<String> {
         self.0
-            .entry(name.to_owned())
-            .or_insert_with(Presence::draining);
+            .iter()
+            .filter(|(_, presence)| matches!(presence, Presence::Draining(_)))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// The names that would drain once a config listing `names` is taken in (`reload`).
+    pub(super) fn draining_after(&self, names: &BTreeSet<String>) -> Vec<String> {
+        self.0
+            .keys()
+            .filter(|name| !names.contains(*name))
+            .cloned()
+            .collect()
     }
 
     /// Takes in a runners listing of `name`, and says whether that ended its drain. Only a draining repository cares:

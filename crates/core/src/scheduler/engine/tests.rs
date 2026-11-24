@@ -2245,6 +2245,7 @@ fn engine_durable(
             cpus: None,
             announced: store.announced().unwrap(),
             paused: store.paused_repositories().unwrap(),
+            draining: store.draining_repositories().unwrap(),
             store,
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
@@ -5740,6 +5741,92 @@ fn o_s_listings(github: &FakeGithub) -> usize {
         .iter()
         .filter(|call| *call == "runners o/s")
         .count()
+}
+
+/// A reload removes `o/s` while GitHub's rate limit refuses every request, so a registration of this machine there,
+/// with no container, waits for the drain's listing. The daemon restarts before the limit lifts: the history kept the
+/// drain, so once the limit lifts the restarted engine lists `o/s` and deletes that registration.
+#[tokio::test]
+async fn a_drain_a_reload_began_survives_a_restart_and_deletes_what_the_limit_kept() {
+    const LEFT: u64 = 77;
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    {
+        let mut state = github.0.lock().unwrap();
+        let name = identity("ci", ID_A).runner_name("app", 2, 1);
+        state.runners.push(runner(LEFT, &name, false));
+        state.registered_on.insert(LEFT, "o/s".to_owned());
+        state.blocked_until = Some(std::time::SystemTime::now() + Duration::from_mins(30));
+    }
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(Config::parse(CONFIG).unwrap()),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(None)),
+            running: RunningSlots::Drain,
+            author: Author::Owner,
+            reply,
+        })
+        .await;
+    assert_eq!(answer.await.unwrap(), Ok(Vec::new()));
+    engine.tick(Shutdown::No).await;
+    drop(engine);
+
+    let (mut restarted, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    restarted.recover().await.unwrap();
+    github.unblock();
+    restarted.tick(Shutdown::No).await;
+
+    assert!(
+        github.calls().contains(&format!("delete {LEFT}")),
+        "the restarted engine lists o/s and deletes runner {LEFT}"
+    );
+    assert!(
+        github.0.lock().unwrap().runners.is_empty(),
+        "no registration of this machine is left on o/s"
+    );
+}
+
+/// A drain that ended is no longer kept: a restart after it lists only what the config has.
+#[tokio::test]
+async fn a_restart_after_a_drain_ended_drains_nothing() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(Config::parse(CONFIG).unwrap()),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(None)),
+            running: RunningSlots::Drain,
+            author: Author::Owner,
+            reply,
+        })
+        .await;
+    assert_eq!(answer.await.unwrap(), Ok(Vec::new()));
+    // Two clean listings end the drain.
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    drop(engine);
+    let before = o_s_listings(&github);
+
+    let (mut restarted, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    restarted.recover().await.unwrap();
+    restarted.tick(Shutdown::No).await;
+
+    assert_eq!(o_s_listings(&github), before, "o/s is not listed again");
 }
 
 #[tokio::test]

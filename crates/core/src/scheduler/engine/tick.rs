@@ -1594,8 +1594,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             self.registrations.listed(&repository, &listed);
-            self.repositories
-                .runners_listed(&repository, RunnersListing::Answered { left });
+            if self
+                .repositories
+                .runners_listed(&repository, RunnersListing::Answered { left })
+            {
+                drop(self.record_drains());
+            }
         }
     }
 
@@ -1609,6 +1613,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.overflow.forget_unlisted(listed);
     }
 
+    /// Has the history keep the repositories that drain now, in place of those it kept, so a restart drains them again
+    /// (ADR 0173). The future says whether it committed; a drain that ended needs no wait, as one restored drains on
+    /// until its listings end it again.
+    pub(super) fn record_drains(&self) -> impl Future<Output = bool> + use<G, D> {
+        self.store.draining(self.repositories.draining_names())
+    }
+
     /// Warns of a runners listing that failed, and stops draining its repository once GitHub says it is gone, as when
     /// the token lost it, or after `DRAIN_FAILING_FOR` of failed listings in a row: this machine's runners still
     /// registered there stay. A 403 waits for the clock, as a secondary rate limit can answer one.
@@ -1617,6 +1628,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             gone: error.is_gone(),
         };
         if self.repositories.runners_listed(repository, failed) {
+            drop(self.record_drains());
             warn!(
                 "{repository}: stops draining, so any of this machine's runners still registered there stay: \
                  cannot list its runners: {error}"
