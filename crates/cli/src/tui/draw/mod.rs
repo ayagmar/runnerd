@@ -206,7 +206,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) -> 
 }
 
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut Hits) {
-    let mut spans = vec![Span::styled(" runnerd ", bold())];
+    // Which machine it reads (ADR 0158, 0166): ` runnerd on tern `, by the name it was chosen by when its daemon names
+    // none.
+    let title = format!(
+        " runnerd{} ",
+        api::Machine::shown_suffix(app.live.status.machine.as_ref(), app.chosen.as_deref())
+    );
+    let title_width = title.width();
+    let mut spans = vec![Span::styled(title, bold())];
     let version = Span::styled(format!("{}  ", app.live.status.version), theme.dim());
     let job = app
         .job
@@ -236,7 +243,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut
     ];
     for hold in holds.into_iter().flatten() {
         let hold = Span::styled(format!("{hold}  "), theme.wait());
-        let least = " runnerd ".width()
+        let least = title_width
             + Line::from(tabs_of(app, TabNames::Open)).width()
             + job.as_ref().map_or(0, Span::width);
         if least + hold.width() + Line::from(right.clone()).width() <= usize::from(area.width) {
@@ -248,11 +255,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut
     // and only then do the tabs not open show their digit alone.
     let job_width = job.as_ref().map_or(0, Span::width);
     let fits = |tabs: &[Span<'static>], version_width: usize| {
-        " runnerd ".width()
-            + version_width
-            + Line::from(tabs.to_vec()).width()
-            + job_width
-            + right.width()
+        title_width + version_width + Line::from(tabs.to_vec()).width() + job_width + right.width()
             <= usize::from(area.width)
     };
     let (tabs, with_version) = [
@@ -269,7 +272,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, hits: &mut
     if with_version {
         spans.insert(1, version.clone());
     }
-    let mut x = area.x + length(" runnerd ".width());
+    let mut x = area.x + length(title_width);
     if with_version {
         x += length(version.width());
     }
@@ -590,7 +593,7 @@ fn help(frame: &mut Frame<'_>, area: Rect, page: usize, hits: &mut Hits) {
         ("tab", "overview: the next pane"),
         ("j k ↓ ↑", "move, or scroll the log; PgDn PgUp by ten"),
         ("enter esc", "open; back"),
-        ("!", "open or close what needs attention"),
+        ("! m", "what needs attention; every machine, to switch"),
         ("/ n N", "search; the next and the previous match"),
         ("f s t", "jobs: filter, sort, time range"),
         ("l x", "jobs: timeline; clear the filters"),
@@ -653,6 +656,7 @@ fn pick(frame: &mut Frame<'_>, area: Rect, picker: &Picker, theme: Theme, hits: 
         Pick::Workflow => column(api::Column::Workflow),
         Pick::Branch => column(api::Column::Branch),
         Pick::Record => column(api::Column::Record),
+        Pick::Machine => column(api::Column::Machine),
     };
     let choices = picker.choices();
     let label_width = choices
@@ -684,7 +688,7 @@ fn pick(frame: &mut Frame<'_>, area: Rect, picker: &Picker, theme: Theme, hits: 
                 let room = width.saturating_sub(label_width + 2);
                 Line::from(vec![
                     Span::raw(format!(" {:<label_width$}  ", choice.label)),
-                    Span::styled(fit(&choice.note, room), theme.dim()),
+                    Span::styled(fit(&choice.note, room), theme.of(choice.tone)),
                 ])
             };
             if at == picker.at() {

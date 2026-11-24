@@ -309,6 +309,62 @@ fn the_dashboard_opens_on_one_of_its_origins_or_the_config_is_refused() {
     web(r#"open = "https://forge.tail0b5e.ts.net:8443""#).unwrap_err();
 }
 
+/// Catches: a peer link that goes nowhere or to this dashboard itself, two links of one name, and a peer origin with a
+/// path or plain http to a remote host slipping past the check `[web] origins` gets.
+#[test]
+fn the_dashboard_links_to_peers_named_once_on_origins_that_are_not_its_own() {
+    let web = |lines: &str| {
+        Config::parse(&format!("{MINIMAL}\n[web]\n{lines}\n"))
+            .map_err(|error| error.to_string())?
+            .validate(Some(size("33G")))
+            .map_err(|error| error.to_string())
+    };
+    assert!(
+        Config::parse(MINIMAL).unwrap().web.peers.is_empty(),
+        "no peers by default"
+    );
+    let skiff = r#"{ name = "skiff", origin = "https://skiff.tail0b5e.ts.net" }"#;
+    web(&format!("peers = [{skiff}]")).unwrap();
+    let parsed = Config::parse(&format!("{MINIMAL}\n[web]\npeers = [{skiff}]\n")).unwrap();
+    assert_eq!(
+        parsed.web.peers[0].origin.to_string(),
+        "https://skiff.tail0b5e.ts.net"
+    );
+    for (lines, expected) in [
+        (
+            format!(
+                "peers = [{skiff}, {}]",
+                skiff.replace("skiff.tail", "dory.tail")
+            ),
+            "same name",
+        ),
+        (
+            format!(
+                "peers = [{skiff}, {}]",
+                skiff.replace("\"skiff\"", "\"dory\"")
+            ),
+            "skiff's origin too",
+        ),
+        (
+            format!("origins = [\"https://skiff.tail0b5e.ts.net\"]\npeers = [{skiff}]"),
+            "this dashboard's own address",
+        ),
+        (
+            r#"peers = [{ name = "Skiff-1", origin = "https://skiff.tail0b5e.ts.net" }]"#
+                .to_owned(),
+            "such as skiff1",
+        ),
+        (
+            r#"peers = [{ name = "skiff", origin = "https://skiff.tail0b5e.ts.net/x" }]"#
+                .to_owned(),
+            "path",
+        ),
+    ] {
+        let error = web(&lines).unwrap_err();
+        assert!(error.contains(expected), "{lines}: {error}");
+    }
+}
+
 /// Each input and what `new URL(input).origin` gives for it in Node 24, which follows the WHATWG URL standard as
 /// browsers do: the `Origin` header a page at that address sends.
 const BROWSER_ORIGINS: [(&str, &str); 11] = [
@@ -1427,7 +1483,7 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
     // count.
     assert_eq!(
         rows.len(),
-        46,
+        47,
         "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();

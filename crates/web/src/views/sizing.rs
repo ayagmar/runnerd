@@ -4,8 +4,8 @@
 //! What auto sizing changed is listed under each profile, with a link that opens the last change undone the same way;
 //! above them, whether it is on and, per profile, what its next look changes or until when a recent change holds it.
 
+use crate::views::Here;
 use maud::{Markup, html};
-use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
 };
@@ -33,7 +33,7 @@ impl SizingView {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &SizingView, machine: Option<&Machine>) -> Markup {
+pub(crate) fn render(view: &SizingView, here: Here<'_>) -> Markup {
     let sizing = &view.sizing;
     let jobs: u64 = sizing
         .profiles
@@ -52,7 +52,7 @@ pub(crate) fn render(view: &SizingView, machine: Option<&Machine>) -> Markup {
     };
     page(
         Section::Sizing.title(),
-        machine,
+        here,
         Some(Page::Sizing),
         None,
         &main,

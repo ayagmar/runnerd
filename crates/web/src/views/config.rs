@@ -7,12 +7,12 @@
 //! down, numbers its lines and marks the one a parse error is on; "Review changes" shows what the text changes in the
 //! file, line by line, before "Save and reload" writes it.
 
+use crate::views::Here;
 use std::fmt::Write as _;
 use std::time::Duration;
 
 use maud::{Markup, html};
 use qrcode::QrCode;
-use runnerd_core::api::Machine;
 use runnerd_core::api::{
     Check, ConfigCheck, ConfigFile, Doctor, DoctorQuery, FreePart, Resize, Section, Sizing, Tone,
 };
@@ -226,7 +226,7 @@ fn quoted(revision: &str) -> Option<String> {
 
 /// The whole page; `proxies` are `[web] origins`, where another device can be signed in. The doctor comes first, so
 /// a problem is read before the file; then the editor, the verdict on its text, and signing in a device.
-pub(crate) fn render(view: &ConfigView, proxies: &[String], machine: Option<&Machine>) -> Markup {
+pub(crate) fn render(view: &ConfigView, proxies: &[String], here: Here<'_>) -> Markup {
     let path = html! { p.muted.config-path { code { (view.file.path) } } };
     let lines = line_count(&view.text);
     let main = html! {
@@ -274,7 +274,7 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String], machine: Option<&Mac
     };
     page(
         Section::Config.title(),
-        machine,
+        here,
         Some(Page::Config),
         None,
         &main,
