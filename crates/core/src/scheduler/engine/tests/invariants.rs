@@ -4773,10 +4773,10 @@ async fn broken(steps: &[Step]) -> Option<(&'static str, String)> {
 /// Seed 1506 broke this under load. The restart's tick starts a heavy runner, whose container takes long to start and
 /// then fails, and a light one, whose registration GitHub refuses for its rate limit while the heavy one's container
 /// starts. The rate limit then refuses the delete of the heavy runner's registration too, which waits for a listing
-/// after the limit: the next restart forgets the limit, and its tick's listing deletes it. Under a paused clock the slow
+/// after the limit: once the limit lifts, the same engine's next due tick deletes it. Under a paused clock the slow
 /// start orders it so on any machine.
 #[tokio::test(start_paused = true)]
-async fn a_registration_whose_delete_the_rate_limit_refused_waits_for_a_listing_after_it() {
+async fn a_registration_whose_delete_the_rate_limit_refused_is_deleted_once_the_limit_lifts() {
     let steps = [
         HEAVY,
         LIGHT,
@@ -4790,9 +4790,50 @@ async fn a_registration_whose_delete_the_rate_limit_refused_waits_for_a_listing_
         },
         Step::RateLimitedDuringStart { after: 1 },
         Step::AbortMidBatch,
-        Step::AbortMidBatch,
     ];
-    assert_eq!(broken(&steps).await, None);
+    let mut case = Case::new();
+    case.recover().await.unwrap();
+    case.tick().await.unwrap();
+    for (index, step) in steps.into_iter().enumerate() {
+        case.step = index;
+        case.apply(step).await.unwrap();
+    }
+    let containers: BTreeSet<String> = case
+        .docker
+        .0
+        .lock()
+        .unwrap()
+        .containers
+        .iter()
+        .map(|container| container.name.clone())
+        .collect();
+    let refused: Vec<u64> = {
+        let github = case.github.0.lock().unwrap();
+        github
+            .runners
+            .iter()
+            .filter(|runner| {
+                github.refused_deletes.contains(&runner.id) && !containers.contains(&runner.name)
+            })
+            .map(|runner| runner.id)
+            .collect()
+    };
+    let [left] = refused[..] else {
+        panic!("one registration with no container stays, its delete refused: {refused:?}");
+    };
+
+    case.apply(Step::Elapse).await.unwrap();
+    case.apply(Step::Tick).await.unwrap();
+
+    let github = case.github.0.lock().unwrap();
+    assert!(
+        !github.runners.iter().any(|runner| runner.id == left),
+        "runner {left} is deleted by the first listing after the limit"
+    );
+    assert!(
+        github.calls.contains(&format!("delete {left}")),
+        "the same engine asks GitHub to delete runner {left}"
+    );
 }
 
 #[tokio::test]
