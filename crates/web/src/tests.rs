@@ -45,8 +45,16 @@ use runnerd_core::api::{
 
 use crate::views::{repository_id, slot_id};
 
+mod live;
 mod parity;
 mod queue;
+
+/// What a live stream sends with each render: the `shown` signal, which a keep-alive or a change of the feed alone
+/// never carries.
+const DELIVERED: &str = r#""shown":{"#;
+
+/// What a live stream sends once a render delivered the daemon's data: the feed, current.
+const CURRENT: &str = r#""state":"current""#;
 
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;
@@ -1673,6 +1681,7 @@ fn page_signals(page: &str) -> serde_json::Value {
     // The page writes a JavaScript object.
     let json = signals
         .replace("{shown: {at:", r#"{"shown": {"at":"#)
+        .replace(", fed:", r#", "fed":"#)
         .replace(", log:", r#", "log":"#)
         .replace('\'', "\"");
     serde_json::from_str(&json).unwrap()
@@ -1696,14 +1705,14 @@ async fn a_stream_opened_by_the_page_it_just_rendered_sends_none_of_its_regions_
     let mut stream = dashboard
         .stream(&cookie, &format!("/live/overview?{}", signals_of(&page)))
         .await;
-    let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    let first = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
     assert!(
         !first.contains("<section"),
         "the page has every region already: {first}"
     );
     // A page that names no regions gets them all.
     let mut fresh = dashboard.stream(&cookie, "/live/overview").await;
-    let first = read_until(&mut fresh, |text| text.contains("datastar-patch-signals")).await;
+    let first = read_until(&mut fresh, |text| text.contains(DELIVERED)).await;
     for id in [
         "health",
         "attention",
@@ -2162,7 +2171,7 @@ async fn a_job_stream_that_reconnects_with_the_pages_signals_sends_only_the_line
     let mut shown = ShownLog::of_page(&page);
     let signals = signals_of(&page);
     let mut first = dashboard.stream(&cookie, &format!("{url}?{signals}")).await;
-    let connected = read_until(&mut first, |text| text.contains("datastar-patch-signals")).await;
+    let connected = read_until(&mut first, |text| text.contains(DELIVERED)).await;
     assert!(
         !connected.contains(r#"id="log-lines""#),
         "the page has the tail already: {connected}"

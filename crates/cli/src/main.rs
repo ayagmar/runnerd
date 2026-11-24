@@ -1546,7 +1546,7 @@ async fn logs(
         };
         let mut lines = match client.logs(id, &query).await {
             Ok(lines) => lines,
-            Err(error) if follow && answered && is_outage(&error) => {
+            Err(error) if follow && answered && error.is_outage() => {
                 tokio::time::sleep(AGAIN).await;
                 continue;
             }
@@ -1570,7 +1570,7 @@ async fn logs(
         }
         let job: Job = match client.get(&format!("/v1/jobs/{id}")).await {
             Ok(job) => job,
-            Err(error) if is_outage(&error) => {
+            Err(error) if error.is_outage() => {
                 tokio::time::sleep(AGAIN).await;
                 continue;
             }
@@ -1585,17 +1585,6 @@ async fn logs(
             tokio::time::sleep(AGAIN).await;
         }
     }
-}
-
-/// Whether the daemon is away, as while it restarts, rather than refusing.
-fn is_outage(error: &ClientError) -> bool {
-    matches!(
-        error,
-        ClientError::NotRunning(_)
-            | ClientError::Unreachable { .. }
-            | ClientError::Transport(_)
-            | ClientError::Timeout(_)
-    )
 }
 
 async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), Error> {

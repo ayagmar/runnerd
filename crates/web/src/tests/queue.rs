@@ -6,7 +6,7 @@ use runnerd_core::api::{
     Waiting,
 };
 
-use super::{Dashboard, NOW, read_until};
+use super::{CURRENT, DELIVERED, Dashboard, NOW, read_until};
 
 /// The first of the made-up queued jobs, all of halyard/storefront.
 const FIRST: u64 = 130_000_000_000;
@@ -254,7 +254,7 @@ async fn a_job_that_leaves_the_queue_leaves_the_open_page_and_the_rest_stay() {
     dashboard.queue_of(4);
     let cookie = dashboard.sign_in().await;
     let mut stream = dashboard.stream(&cookie, "/live/queue").await;
-    let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    let first = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
     assert!(
         first.contains(&format!(r#"id="queued-{FIRST}""#)),
         "{first}"
@@ -340,11 +340,8 @@ async fn a_failed_read_of_which_jobs_have_a_page_is_tried_again_without_a_job_ev
     );
     let mut queue = dashboard.stream(&cookie, "/live/queue").await;
     let mut overview = dashboard.stream(&cookie, "/live/overview").await;
-    read_until(&mut queue, |text| text.contains("datastar-patch-signals")).await;
-    read_until(&mut overview, |text| {
-        text.contains("datastar-patch-signals")
-    })
-    .await;
+    read_until(&mut queue, |text| text.contains(DELIVERED)).await;
+    read_until(&mut overview, |text| text.contains(DELIVERED)).await;
     dashboard.fake.fixtures.lock().unwrap().queued_list_fails = false;
     // No job event: the queue's page reads again with its status, the overview with the status a sample brings.
     read_until(&mut queue, |text| text.contains(&local)).await;
@@ -367,7 +364,7 @@ async fn a_quiet_queue_page_still_follows_the_status() {
     dashboard.queue_of(3);
     let cookie = dashboard.sign_in().await;
     let mut stream = dashboard.stream(&cookie, "/live/queue").await;
-    read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    read_until(&mut stream, |text| text.contains(DELIVERED)).await;
     dashboard
         .fake
         .fixtures
@@ -392,7 +389,7 @@ async fn a_step_alone_does_not_read_again_which_jobs_have_a_page() {
     dashboard.queue_of(3);
     let cookie = dashboard.sign_in().await;
     let mut stream = dashboard.stream(&cookie, "/live/overview").await;
-    let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    let first = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
     let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
     assert!(first.contains(&local), "{first}");
     // A read now would fail and turn the row to GitHub's page.
@@ -408,7 +405,7 @@ async fn a_step_alone_does_not_read_again_which_jobs_have_a_page() {
             completed_at: None,
         },
     });
-    let after = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    let after = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
     assert!(
         !after.contains(r#"id="queue""#),
         "the queue is not read again or sent for a step: {after}"
@@ -441,7 +438,7 @@ async fn jobs_a_recovered_listing_brings_back_open_their_page_with_no_job_event(
         };
         let cookie = dashboard.sign_in().await;
         let mut stream = dashboard.stream(&cookie, path).await;
-        let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+        let first = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
         assert!(
             !first.contains("queued-"),
             "{path}: nothing listed: {first}"
@@ -463,4 +460,32 @@ async fn jobs_a_recovered_listing_brings_back_open_their_page_with_no_job_event(
         let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
         read_until(&mut stream, |text| text.contains(&local)).await;
     }
+}
+
+/// The bug it catches: one dropped read of which jobs have a page turned every row's link to GitHub's page, and the
+/// page still said it was live.
+#[tokio::test]
+async fn a_dropped_read_of_which_jobs_have_a_page_keeps_the_links_while_it_is_read_again() {
+    let dashboard = Dashboard::start().await;
+    dashboard.queue_of(3);
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/queue").await;
+    let first = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
+    assert!(first.contains(&local), "{first}");
+    dashboard.drop_reads("/v1/jobs", 1);
+    let started = dashboard.fake.fixtures.lock().unwrap().jobs[0]
+        .summary
+        .clone();
+    dashboard.announce(Event::JobStarted { job: started });
+    let recovery = read_until(&mut stream, |text| text.contains(CURRENT)).await;
+    assert_eq!(
+        super::live::states(&recovery),
+        ["retrying", "current"],
+        "{recovery}"
+    );
+    assert!(
+        !recovery.contains(r#"id="waiting""#),
+        "the rows keep their links: {recovery}"
+    );
 }

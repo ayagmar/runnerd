@@ -5,7 +5,10 @@
 // page, last, followed only while the reader is at its newest line, and holds the reader's line as lines above go;
 // "Jump to newest" moves nothing; reseeding a snapshot asks first; a chart card holds its labels at a laptop's
 // widths; and every queued job is a row of the queue's page, reached from the overview whenever it shows fewer, by
-// keyboard and finger, as jobs leave it.
+// keyboard and finger, as jobs leave it; and the live badge says "Retrying" while a dropped read is tried again,
+// keeping the page and its focus, "Offline" then "Live" when the stream's body breaks and the next request answers,
+// "Signed out" with Reload and no further request when it answers 401, and "Finished" on a finished job's page; on a
+// phone, each fits the screen.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -31,6 +34,22 @@ const fail = (what) => {
 };
 const pass = (what) => console.log(`ok   ${what}`);
 const check = (holds, what) => (holds ? pass(what) : fail(what));
+
+// Whether the page is no wider than `width`, the device's, with the live badge and its Reload link inside it. A phone's
+// layout viewport grows to what overflows, so the window's own width would not show it.
+const fits = (page, width) =>
+  page.evaluate((width) => {
+    const badge = document.querySelector('.connection')?.getBoundingClientRect();
+    const reload = document.querySelector('.connection .feed-reload');
+    const shown = reload?.checkVisibility() ? reload.getBoundingClientRect() : null;
+    return {
+      width,
+      scroll: document.documentElement.scrollWidth,
+      badge: Math.round(badge?.right ?? 0),
+      reload: !!shown && shown.left >= 0 && shown.right <= width,
+      fits: document.documentElement.scrollWidth <= width && (badge?.right ?? 0) <= width,
+    };
+  }, width);
 
 // The demos started, so each is stopped however the run ends.
 const demos = [];
@@ -584,6 +603,125 @@ try {
     );
     await phone.context.close();
     stopDemo(leaving);
+  }
+  // The live badge says what the stream says of the page's data: "Retrying" while a read is tried again, the page
+  // and its focus kept, and "Live" once it answers; a finished job's page says so, with no claim to connect again.
+  {
+    const dropping = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_DROP_EVERY: '5' });
+    const { context, page } = await signedIn(sizes[0], dropping.cookies);
+    await page.goto(new URL('/', dropping.login).href);
+    const feed = (state, timeout = 9000) =>
+      page
+        .waitForSelector(`.connection[data-feed="${state}"]`, { timeout })
+        .then(() => true, () => false);
+    check(await feed('current'), `${sizes[0].name}: the overview's badge is current once the stream delivers`);
+    // Outside the regions, which re-render with the data anyway: a recovery that reloaded the page would lose both.
+    const focused = page.locator('header nav a[href]').first();
+    await focused.focus();
+    await page.evaluate(() => {
+      window.notReloaded = true;
+    });
+    const retrying = await feed('retrying');
+    const during = await page.evaluate(() => ({
+      label: document.querySelector('.connection .feed-label').textContent,
+      since: document.querySelector('.connection .feed-since').checkVisibility()
+        ? document.querySelector('.connection .feed-since').textContent
+        : '',
+      regions: document.querySelectorAll('#main section[id]').length,
+    }));
+    check(
+      retrying && during.label === 'Retrying' && during.since.startsWith('as of ') && during.regions > 0,
+      `${sizes[0].name}: a dropped read shows "${during.label}" with the data's time (${during.since}), the page kept`,
+    );
+    const back = await feed('current');
+    const kept = await focused.evaluate((element) => element === document.activeElement && window.notReloaded === true);
+    const label = await page.locator('.connection .feed-label').textContent();
+    check(back && label === 'Live' && kept, `${sizes[0].name}: the read answers, the badge is ${label}, the page and its focus kept`);
+    await context.close();
+    // On a phone the retrying badge, its time and its reason fit the screen.
+    const narrow = await signedIn(sizes[1], dropping.cookies);
+    await narrow.page.goto(new URL('/', dropping.login).href);
+    const narrowRetrying = await narrow.page
+      .waitForSelector('.connection[data-feed="retrying"]', { timeout: 9000 })
+      .then(() => true, () => false);
+    const narrowFit = await fits(narrow.page, sizes[1].width);
+    check(
+      narrowRetrying && narrowFit.fits,
+      `${sizes[1].name}: the retrying badge fits the screen (${narrowFit.scroll}px of ${narrowFit.width}px, badge to ${narrowFit.badge}px)`,
+    );
+    await narrow.context.close();
+    stopDemo(dropping);
+
+    const finishing = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_FINISH_AFTER: '8' });
+    const job = await signedIn(sizes[0], finishing.cookies);
+    await job.page.goto(new URL('/', finishing.login).href);
+    const running = await job.page.locator('#slots a[href^="/jobs/"]').first().getAttribute('href');
+    await job.page.goto(new URL(running, finishing.login).href);
+    const live = await job.page
+      .waitForSelector('.connection[data-feed="current"]', { timeout: 9000 })
+      .then(() => true, () => false);
+    const done = await job.page
+      .waitForSelector('.connection[data-feed="finished"]', { timeout: 15000 })
+      .then(() => true, () => false);
+    const badge = await job.page.evaluate(() => ({
+      label: document.querySelector('.connection .feed-label').textContent,
+      title: document.querySelector('.connection').title,
+      reload: document.querySelector('.connection .feed-reload').checkVisibility(),
+    }));
+    check(
+      live && done && badge.label === 'Finished' && !/again/.test(badge.title) && !badge.reload,
+      `${sizes[0].name}: a job that finishes while its page is open says ${badge.label}, not that it retries ("${badge.title}")`,
+    );
+    await job.context.close();
+    stopDemo(finishing);
+
+    // A stream whose body breaks: the badge says Offline while Datastar waits, then Live on the next request. A 401 to
+    // that request, as after a sign-out between connections, is the end: Signed out with Reload, no further request.
+    const cutting = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_CUT_EVERY: '6' });
+    for (const size of [sizes[0], sizes[1]]) {
+      const live = await signedIn(size, cutting.cookies);
+      let requests = 0;
+      let refuse = false;
+      await live.page.route('**/live/overview**', (route) => {
+        requests += 1;
+        return refuse ? route.fulfill({ status: 401, body: 'sign in' }) : route.continue();
+      });
+      await live.page.goto(new URL('/', cutting.login).href);
+      const state = (feed, timeout = 9000) =>
+        live.page
+          .waitForSelector(`.connection[data-feed="${feed}"]`, { timeout })
+          .then(() => true, () => false);
+      const first = await state('current');
+      const offline = await state('offline');
+      const offlineFit = await fits(live.page, size.width);
+      const offlineLabel = await live.page.locator('.connection .feed-label').textContent();
+      const back = await state('current');
+      check(
+        first && offline && offlineLabel === 'Offline' && back && requests === 2,
+        `${size.name}: a broken stream shows ${offlineLabel} while it waits and Live on the next request (${requests} requests)`,
+      );
+      check(offlineFit.fits, `${size.name}: the offline badge fits the screen (${offlineFit.scroll}px of ${offlineFit.width}px)`);
+      refuse = true;
+      const signedOut = await state('signed-out', 12000);
+      const badge = await live.page.evaluate(() => ({
+        label: document.querySelector('.connection .feed-label').textContent,
+        title: document.querySelector('.connection').title,
+        reload: document.querySelector('.connection .feed-reload').checkVisibility(),
+      }));
+      const refusedFit = await fits(live.page, size.width);
+      const asked = requests;
+      await live.page.waitForTimeout(3000);
+      check(
+        signedOut && badge.label === 'Signed out' && badge.reload && !/connecting again/.test(badge.title) && requests === asked,
+        `${size.name}: a 401 shows ${badge.label} with Reload and no further request (${asked} then ${requests}; "${badge.title}")`,
+      );
+      check(
+        refusedFit.fits && refusedFit.reload,
+        `${size.name}: the signed-out badge and Reload fit the screen (${refusedFit.scroll}px of ${refusedFit.width}px)`,
+      );
+      await live.context.close();
+    }
+    stopDemo(cutting);
   }
 } finally {
   // From the spawn on, so a browser that fails to start, or a demo that never signs in, leaves no demo running.

@@ -12,6 +12,7 @@ use runnerd_core::config::Peer;
 
 use crate::assets;
 use crate::format;
+use crate::live::feed::{self, Feed};
 
 pub(crate) mod caches;
 pub(crate) mod config;
@@ -166,9 +167,11 @@ pub(crate) struct Live<'url> {
 }
 
 impl Live<'_> {
-    /// The `shown` signal as a Datastar expression.
+    /// The `shown` signal as a Datastar expression: `at`, which live charts follow and each render moves, and `fed`,
+    /// when the page's data is from, which only a render of the daemon's data moves (ADR 0177).
     fn signals(&self) -> String {
-        let mut signals = format!("{{shown: {{at: {}", self.at);
+        // The page's data is from its render.
+        let mut signals = format!("{{shown: {{at: {}, fed: {}", self.at, self.at);
         if let Some(log) = self.log {
             let _ = write!(signals, ", log: {log}");
         }
@@ -199,6 +202,27 @@ pub(crate) struct Here<'page> {
     pub(crate) machine: Option<&'page Machine>,
     /// `[web] peers`.
     pub(crate) peers: &'page [Peer],
+}
+
+/// The live page's badge: what the stream says of the page's data (`live::feed`, ADR 0177), and what its request
+/// does, which only the page knows; an ended feed is never "connecting again". The signals and the listener come
+/// before the init: they have to be there when the request starts.
+fn connection(live: &Live<'_>) -> Markup {
+    let feed = Feed::connecting(Some(live.at));
+    html! {
+        span.connection data-signals:_feed=(feed.json().to_string()) data-signals:_conn=(feed::CONNECTING)
+            data-computed:_badge=(feed::BADGE) data-on:datastar-fetch=(feed::ON_FETCH)
+            data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: {}}})", live.url, feed::MAX_WAIT.as_millis()))
+            data-class:online="$_badge.state == 'current'"
+            data-attr:data-feed="$_badge.state"
+            data-attr:title="$_badge.title" {
+            span.dot aria-hidden="true" {}
+            span.feed-label data-text="$_badge.label" { "Connecting" }
+            span.feed-since data-show="$_feed.since != '' && $_badge.state != 'current'"
+                data-text="$_feed.since" {}
+            a.feed-reload href="" data-show="$_badge.reload" { "Reload" }
+        }
+    }
 }
 
 /// A full page: the navigation, `main`, and, with `live`, the event stream that keeps its regions current.
@@ -259,16 +283,7 @@ pub(crate) fn page(
                         }
                     }
                     div.tools {
-                        @if let Some(live) = live {
-                            // The indicator before the init: it has to listen when the request starts.
-                            span.connection data-indicator:_live=""
-                                data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: 10000}})", live.url))
-                                data-class:online="$_live"
-                                data-attr:title="$_live ? 'Updates as it happens' : 'Not connected; retrying'" {
-                                span.dot aria-hidden="true" {}
-                                span data-text="$_live ? 'Live' : 'Offline'" { "Live" }
-                            }
-                        }
+                        @if let Some(live) = live { (connection(live)) }
                         button.tool type="button" data-open-palette aria-label="Commands" aria-keyshortcuts="Control+K" title="Commands (Ctrl K)" {
                             svg viewBox="0 0 20 20" aria-hidden="true" {
                                 circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2" {}

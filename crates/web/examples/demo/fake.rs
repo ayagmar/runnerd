@@ -104,6 +104,12 @@ pub struct Fixtures {
     pub older: bool,
     /// Fail a list of the history's queued jobs with a 500, as a history that cannot be read.
     pub queued_list_fails: bool,
+    /// How many of the next reads of each path, such as `/v1/status`, are cut off mid-body, as when the daemon goes
+    /// away while it answers.
+    pub drops: BTreeMap<String, u32>,
+    /// How many of the next requests of each path the daemon denies with 403, as it does a caller that is not the
+    /// user it runs as.
+    pub denials: BTreeMap<String, u32>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -837,6 +843,8 @@ impl Fixtures {
             action_answer: None,
             older: false,
             queued_list_fails: false,
+            drops: BTreeMap::new(),
+            denials: BTreeMap::new(),
         }
     }
 
@@ -922,6 +930,8 @@ impl Fixtures {
 pub struct Fake {
     pub fixtures: Arc<Mutex<Fixtures>>,
     pub events: broadcast::Sender<EventEnvelope>,
+    /// Each send ends every event stream open then, as a daemon whose connections drop.
+    pub cuts: broadcast::Sender<()>,
 }
 
 impl Fake {
@@ -929,7 +939,13 @@ impl Fake {
         Fake {
             fixtures: Arc::new(Mutex::new(fixtures)),
             events: broadcast::channel(256).0,
+            cuts: broadcast::channel(4).0,
         }
+    }
+
+    /// Ends every event stream open now.
+    pub fn cut_events(&self) {
+        let _ = self.cuts.send(());
     }
 }
 
@@ -2105,6 +2121,7 @@ fn router(fake: Fake) -> Router {
         .route("/v1/events", get(events))
         .fallback(|| async { no_such_endpoint() })
         .layer(axum::middleware::from_fn_with_state(fake.clone(), as_older))
+        .layer(axum::middleware::from_fn_with_state(fake.clone(), dropping))
         .with_state(fake)
 }
 
@@ -2114,21 +2131,29 @@ async fn events(
     Query(query): Query<EventQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = fake.events.subscribe();
-    let stream = stream::unfold((receiver, query), |(mut receiver, query)| async move {
-        loop {
-            match receiver.recv().await {
-                Ok(envelope) if !query.matches(&envelope.event) => {}
-                Ok(envelope) => {
-                    let event = SseEvent::default()
-                        .event(envelope.event.kind())
-                        .data(serde_json::to_string(&envelope).unwrap());
-                    return Some((Ok(event), (receiver, query)));
+    let cuts = fake.cuts.subscribe();
+    let stream = stream::unfold(
+        (receiver, cuts, query),
+        |(mut receiver, mut cuts, query)| async move {
+            loop {
+                let received = tokio::select! {
+                    received = receiver.recv() => received,
+                    _ = cuts.recv() => return None,
+                };
+                match received {
+                    Ok(envelope) if !query.matches(&envelope.event) => {}
+                    Ok(envelope) => {
+                        let event = SseEvent::default()
+                            .event(envelope.event.kind())
+                            .data(serde_json::to_string(&envelope).unwrap());
+                        return Some((Ok(event), (receiver, cuts, query)));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return None,
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return None,
             }
-        }
-    });
+        },
+    );
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -2166,6 +2191,47 @@ async fn as_older(
         return no_such_endpoint();
     }
     next.run(request).await
+}
+
+/// While [`Fixtures::denials`] counts a path's requests, each is denied with 403; while [`Fixtures::drops`] counts a
+/// path's reads, each is cut off after its first bytes.
+async fn dropping(
+    State(fake): State<Fake>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let denied = {
+        let mut fixtures = fake.fixtures.lock().unwrap();
+        match fixtures.denials.get_mut(request.uri().path()) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    };
+    if denied {
+        let message = "only the user runnerd runs as may use its socket".to_owned();
+        return (StatusCode::FORBIDDEN, Json(ErrorResponse { message })).into_response();
+    }
+    let dropped = {
+        let mut fixtures = fake.fixtures.lock().unwrap();
+        match fixtures.drops.get_mut(request.uri().path()) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !dropped {
+        return next.run(request).await;
+    }
+    let body = stream::iter([
+        Ok(axum::body::Bytes::from_static(b"{")),
+        Err(std::io::Error::other("the daemon went away")),
+    ]);
+    axum::body::Body::from_stream(body).into_response()
 }
 
 /// Serves the fake daemon on a new socket at `path` until the runtime stops.

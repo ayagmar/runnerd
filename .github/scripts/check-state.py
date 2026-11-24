@@ -59,6 +59,7 @@ ROOTS = (
     "crates/cli/src/tui/app.rs:App",
     "crates/cli/src/watch.rs:State",
     "crates/web/src/auth.rs:Credentials",
+    "crates/web/src/live/feed.rs:Feed",
     "crates/core/src/archives.rs:Archives",
     "crates/core/src/archives.rs:Link",
     "crates/core/src/grype.rs:Link",
