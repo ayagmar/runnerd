@@ -31,8 +31,9 @@ not which rule held them, so neither could be read off a replay.
   check that refused the job gets it: `MAX` or `HOST`. So `HOST` is the time the host's limit refused a job that no one
   of these rules held alone. It is not a measure of the plain margin, or of the room kept for the largest growths.
 - **A job's time counts once it starts.** Each job keeps its own guard times until it starts, then adds them to the
-  table, so the guards add up to the waits of the jobs that started (`WAIT H`). A job never started counts in neither.
-  `simulate --causal` prints the table, a row per count.
+  table, so the guards add up to the waits of the jobs that started (`Replay::waited`, `WAIT H`), both to the
+  millisecond. A job never started counts in neither. `simulate --causal` prints the table, a row per count; each cell
+  is rounded down to a tenth of a job-hour on its own, so the cells may add up to a little less than `WAIT H`.
 - **The page cache room stays.** It sets caps, not reservations: measured admission reserves a job's predicted peak
   plus the margin, rounded up to 256M (ADR 0055). Over 7 days of the owner's history, 76% of 12,392 `light` runs
   reserved 512M and 93% at most 768M, for a mean peak of 323M; `jvm-small` was the same (72% at 512M, 95% at most
@@ -53,8 +54,8 @@ not which rule held them, so neither could be read off a replay.
   young runners with the others waits longer too: more starts let the brake engage for longer (53 hours against 37 over
   7 days), and while it holds the count is the plain one.
 
-  The guard table for the daemon's count, over the 7 days to a later copy of the same history (773.7 job-hours of
-  waits, every job started): the host's refusals 530.7, `MemoryMax` 103.9, barriers 47.6, the larger margin alone
+  The guard table for the daemon's count, over the 7 days to a later copy of the same history (about 775 job-hours
+  of waits, every job started): the host's refusals 530.7, `MemoryMax` 103.9, barriers 47.6, the larger margin alone
   34.8, the young runners' room alone 29.6, slots 27.8, the ceiling alone 0.2; the CPU budget (the config's 1.5 times
   32 CPUs) and the high-water mark held none. Over 14 days: 973.4, of which the host 569.6 and the young runners' room
   alone 152.5. Taking runners of at most 1G out of that room moved the waits by +1.7% over 7 days and -1.1% over 14,

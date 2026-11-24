@@ -990,7 +990,7 @@ fn a_wait_only_the_larger_margin_causes_is_charged_to_it_not_to_the_host() {
 fn every_moment_a_job_waits_is_charged_to_exactly_one_guard() {
     // Eight runners, page from minute 12, and a seventh to tenth check beyond the six jvm slots: jobs wait for a slot,
     // for MemoryMax and for the young runners' room. However the waits fall, they add up to the guards' time, to the
-    // second each job's wait is rounded to.
+    // millisecond.
     let mut jobs = eight_and_a_page(30);
     jobs.extend((0..4).map(|i| in_run(check(NOW, 30), 40 + i, 1)));
     jobs.sort_by_key(|run| run.queued_at);
@@ -998,12 +998,12 @@ fn every_moment_a_job_waits_is_charged_to_exactly_one_guard() {
     let mut seen = BTreeSet::new();
     for growth in [None, Some(TOP3), Some(COVERED)] {
         let replay = replay_counted(&jobs, &trace, 15 * G, growth);
-        let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
         let guards: u64 = replay.guards.values().sum();
         seen.extend(replay.guards.keys().copied());
-        assert!(
-            (waits * 1000..waits * 1000 + 1000 * jobs.len() as u64).contains(&guards),
-            "{guards} ms by guard for {waits} s of waits under {growth:?}: {:?}",
+        assert!(replay.waited > 0, "jobs waited under {growth:?}");
+        assert_eq!(
+            guards, replay.waited,
+            "under {growth:?}: {:?}",
             replay.guards
         );
     }

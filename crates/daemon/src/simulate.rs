@@ -384,7 +384,12 @@ fn causal_guards(rows: &[Counting], replays: &[Replay]) -> String {
         }
         let _ = writeln!(out);
     }
-    let _ = writeln!(out, "\n{}", Guard::legend());
+    let _ = writeln!(
+        out,
+        "\n{} Each row adds up to its WAIT H above; each cell is rounded down to a tenth on its own, so the cells may add \
+         up to a little less.",
+        Guard::legend()
+    );
     out
 }
 
@@ -447,17 +452,18 @@ fn causal_intro(
 /// `replay` as a row of `causal`'s first table, its waits against those `recorded`.
 fn causal_line(name: &str, width: usize, replay: &Replay, recorded: &Recorded) -> String {
     let runs = runs_of(replay, None);
-    let waited = all_waits(replay);
+    // Unrounded, as the guard table adds it up.
+    let waited = replay.waited;
     format!(
         "{name:<width$} {:>9} {:>9} {:>10} {:>9} {:>9} {:>9} {:>7} {:>7}",
         duration(mean(&runs)),
         duration(runs.iter().copied().max().unwrap_or(0)),
         replay.never_started,
-        job_hours(1000 * waited),
+        job_hours(waited),
         job_hours(replay.host_waited),
         job_hours(replay.slice_waited),
         replay.backfilled.jobs,
-        against(waited, recorded.waited()),
+        against(waited / 1000, recorded.waited()),
     )
 }
 
@@ -486,15 +492,6 @@ fn against(replayed: u64, recorded: u64) -> String {
     }
     let percent = i128::from(replayed) * 100 / i128::from(recorded) - 100;
     format!("{percent:+}%")
-}
-
-/// What every job of `replay` waited, in seconds.
-fn all_waits(replay: &Replay) -> u64 {
-    replay
-        .pools
-        .values()
-        .flat_map(|pool| &pool.waits)
-        .sum::<u64>()
 }
 
 /// The runs with a job of each profile of `slots` in `replays`, mean / worst, a column a count.

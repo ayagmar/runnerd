@@ -210,9 +210,9 @@ pub fn simulate<'known>(
         cohorts: Vec::new(),
         growth: growth.filter(|_| trace.is_some() && policy == Policy::Measured),
         brake: growth::Growth::default(),
-        held_by: BTreeMap::new(),
-        pending: BTreeMap::new(),
+        held: BTreeMap::new(),
         guards: BTreeMap::new(),
+        waited: 0,
         relaxed: RefCell::new(None),
     };
     replayer.play(&queue)
@@ -392,6 +392,15 @@ enum Refused {
     HighWater(Short),
 }
 
+/// A job a pass left waiting: what held it then, and how long each guard has held it so far. Every pass holds again or
+/// starts each job still waiting, so the guard is always the last pass's.
+struct HeldJob {
+    /// The guard the last pass held it for.
+    guard: Guard,
+    /// How long each guard held it, in ms: it goes into `Replayer::guards` when the job starts.
+    waited: BTreeMap<Guard, u64>,
+}
+
 /// What a runner lacks to start, by the checks `Replayer::admits` makes in their order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lack {
@@ -476,13 +485,12 @@ struct Replayer<'run> {
     growth: Option<GrowthCount>,
     /// Its brake, by the jobs replayed; never engaged without `Brake::On`.
     brake: growth::Growth<u64>,
-    /// The guard that held each job the last pass left waiting, by the job.
-    held_by: BTreeMap<u64, Guard>,
-    /// How long each job not started yet has waited by each guard, in ms, by the job: it goes into `guards` when the job
-    /// starts.
-    pending: BTreeMap<u64, BTreeMap<Guard, u64>>,
+    /// Each job a pass left waiting and not started since, by the job.
+    held: BTreeMap<u64, HeldJob>,
     /// How long the jobs that started waited by each guard, added up, in ms.
     guards: BTreeMap<Guard, u64>,
+    /// How long the jobs that started waited, added up, in ms.
+    waited: u64,
     /// The counts this pass reads with one rule relaxed, to tell which guard held a job: read once a start, as `needs`.
     relaxed: RefCell<Option<Relaxed>>,
 }
@@ -588,13 +596,8 @@ impl<'run> Replayer<'run> {
     fn account(&mut self, now: u64) {
         let span = now.saturating_sub(self.moment);
         self.look(span);
-        for (job, guard) in &self.held_by {
-            *self
-                .pending
-                .entry(*job)
-                .or_default()
-                .entry(*guard)
-                .or_default() += span;
+        for job in self.held.values_mut() {
+            *job.waited.entry(job.guard).or_default() += span;
         }
         let taken = self.taken();
         self.charged += u128::from(taken) * u128::from(span);
@@ -930,7 +933,6 @@ impl<'run> Replayer<'run> {
         self.needs.borrow_mut().clear();
         self.held_for_slice = 0;
         self.held_for_host = 0;
-        self.held_by.clear();
         self.relaxed.replace(None);
         self.host_needs.clear();
         let listed = waiting.clone();
@@ -1013,7 +1015,13 @@ impl<'run> Replayer<'run> {
 
     /// Notes that this pass left `job` waiting for `guard`.
     fn note_held(&mut self, job: u64, guard: Guard) {
-        self.held_by.insert(job, guard);
+        self.held
+            .entry(job)
+            .and_modify(|held| held.guard = guard)
+            .or_insert_with(|| HeldJob {
+                guard,
+                waited: BTreeMap::new(),
+            });
     }
 
     /// The guard that held `queued`, whose runner lacks what `short` says, which `refused` refused, `listed` being what
@@ -1388,6 +1396,7 @@ impl<'run> Replayer<'run> {
             host_waited: self.host_waited,
             hazard: self.hazard,
             guards: self.guards,
+            waited: self.waited,
         }
     }
 
@@ -1671,7 +1680,8 @@ impl<'run> Replayer<'run> {
             .started_at
             .unwrap_or_default()
             .saturating_sub(run.runner_started_at.max(run.queued_at));
-        let waited = now.saturating_sub(queued.arrived) / 1000;
+        let waited_ms = now.saturating_sub(queued.arrived);
+        let waited = waited_ms / 1000;
         let span = self.runs.entry(run_key(run)).or_insert(RunSpan {
             first_arrival: queued.arrived,
             last_end: now,
@@ -1680,7 +1690,13 @@ impl<'run> Replayer<'run> {
         span.first_arrival = span.first_arrival.min(queued.arrived);
         span.profiles.insert(run.profile.clone());
         self.started.push(queued.job);
-        for (guard, waited) in self.pending.remove(&queued.job).unwrap_or_default() {
+        self.waited += waited_ms;
+        for (guard, waited) in self
+            .held
+            .remove(&queued.job)
+            .map(|held| held.waited)
+            .unwrap_or_default()
+        {
             *self.guards.entry(guard).or_default() += waited;
         }
         self.backfilled.jobs += u64::from(usual.is_some());

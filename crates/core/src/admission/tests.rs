@@ -890,24 +890,29 @@ fn a_replay_starts_a_starved_job_where_younger_jobs_would_take_all_the_room_befo
 }
 
 #[test]
-fn a_job_that_never_starts_is_charged_to_no_guard() {
-    // In an 8G slice the jvm job's 9G cap never fits, so it never starts; the second node job waits for the first.
-    // The guards count the node job's wait and none of the jvm job's, as the waits do.
+fn a_job_that_never_starts_is_charged_to_no_guard_and_the_guards_add_up_to_the_unrounded_waits() {
+    // In an 8G slice the jvm job's 9G cap never fits, so it never starts. The second node job arrives 1.5 s past a
+    // minute and waits for the first, which ends at minute 8: 418.5 s. The guards and the waits both count that, to the
+    // millisecond, and none of the jvm job's; the pool's wait is rounded down to the second.
+    let mut late = run("halyard/storefront", "site", "node", NOW + MINUTE, 8, G);
+    late.queued_at += 1500;
+    late.runner_started_at += 1500;
     let jobs = [
         run("halyard/ledger", "check", "jvm", NOW, 10, G),
         run("halyard/storefront", "site", "node", NOW, 8, G),
-        run("halyard/storefront", "site", "node", NOW + MINUTE, 8, G),
+        late,
     ];
     let replay = replayed(&jobs, 8 * G, Barriers::Off);
     assert_eq!(replay.never_started, 1);
-    let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
-    assert_eq!(waits, 7 * 60, "the second node job waits for the first");
+    assert_eq!(replay.waited, 418_500, "unrounded");
     assert_eq!(
         replay.guards.values().sum::<u64>(),
-        1000 * waits,
+        418_500,
         "{:?}",
         replay.guards
     );
+    let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
+    assert_eq!(waits, 418, "rounded down to the second");
 }
 
 #[test]
@@ -928,9 +933,10 @@ fn a_job_that_fits_behind_a_barrier_waits_for_the_barrier() {
         "{:?}",
         replay.guards
     );
+    assert_eq!(1000 * waits, replay.waited, "whole minutes");
     assert_eq!(
         replay.guards.values().sum::<u64>(),
-        1000 * waits,
+        replay.waited,
         "{:?}",
         replay.guards
     );

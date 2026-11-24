@@ -586,8 +586,11 @@ pub struct Replay {
     /// What the replay found of a pooled count's risks; only with a trace.
     pub hazard: Hazard,
     /// How long the jobs that started waited, added up, in ms, by the guard that held each at each plan (`Guard`): they
-    /// add up to `pools`' waits. A job never started counts in none.
+    /// add up to `waited`. A job never started counts in none.
     pub guards: BTreeMap<Guard, u64>,
+    /// How long the jobs that started waited, added up, in ms, unrounded: `pools`' waits are each rounded down to the
+    /// second.
+    pub waited: u64,
 }
 
 /// The one admission rule that held a waiting job at a plan of a replay. A job its memory held goes to a rule of the
