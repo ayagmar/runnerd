@@ -1780,7 +1780,8 @@ impl Case {
 
     /// ADR 0125, 0126: once a restart after an aborted batch has ticked, every registration of this machine has a
     /// container, and every build cache open is a runner's. Recovery holds its containers in slots, which
-    /// `docker_runs_no_runner_the_engine_lost` checks.
+    /// `docker_runs_no_runner_the_engine_lost` checks. A registration whose delete GitHub's rate limit refused, as a
+    /// start that failed while another start's registration met the limit, waits for a listing after the limit.
     async fn a_restart_cleans_up_an_aborted_batch(&mut self) -> Result<(), Violation> {
         // The deletes a failed start sends in the background.
         self.settle_background().await;
@@ -1794,20 +1795,19 @@ impl Case {
             .filter(|container| container.labels.contains_key("runnerd.job"))
             .map(|container| container.name.clone())
             .collect();
-        let bare: Vec<String> = self
-            .github
-            .0
-            .lock()
-            .unwrap()
+        let github = self.github.0.lock().unwrap();
+        let bare: Vec<String> = github
             .runners
             .iter()
             .filter(|runner| {
                 !self.orphans.contains(&runner.id)
+                    && !github.refused_deletes.contains(&runner.id)
                     && !containers.contains(&runner.name)
                     && !runner.name.starts_with(PEER_PREFIX)
             })
             .map(|runner| runner.name.clone())
             .collect();
+        drop(github);
         if !bare.is_empty() {
             return violation(
                 self,
@@ -4768,6 +4768,31 @@ async fn broken(steps: &[Step]) -> Option<(&'static str, String)> {
         .await
         .err()
         .map(|found| (found.invariant, found.detail))
+}
+
+/// Seed 1506 broke this under load. The restart's tick starts a heavy runner, whose container takes long to start and
+/// then fails, and a light one, whose registration GitHub refuses for its rate limit while the heavy one's container
+/// starts. The rate limit then refuses the delete of the heavy runner's registration too, which waits for a listing
+/// after the limit: the next restart forgets the limit, and its tick's listing deletes it. Under a paused clock the slow
+/// start orders it so on any machine.
+#[tokio::test(start_paused = true)]
+async fn a_registration_whose_delete_the_rate_limit_refused_waits_for_a_listing_after_it() {
+    let steps = [
+        HEAVY,
+        LIGHT,
+        // Bars every start until the restart, which forgets the limit.
+        Step::RateLimitedDuringStart { after: 0 },
+        Step::Tick,
+        Step::SlowStart,
+        Step::StartFailsLate {
+            takes_job: false,
+            cleanup_fails: false,
+        },
+        Step::RateLimitedDuringStart { after: 1 },
+        Step::AbortMidBatch,
+        Step::AbortMidBatch,
+    ];
+    assert_eq!(broken(&steps).await, None);
 }
 
 #[tokio::test]
