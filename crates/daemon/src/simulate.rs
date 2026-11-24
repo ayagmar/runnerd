@@ -384,16 +384,7 @@ fn causal_guards(rows: &[Counting], replays: &[Replay]) -> String {
         }
         let _ = writeln!(out);
     }
-    let legend: Vec<String> = Guard::ALL
-        .iter()
-        .map(|guard| format!("{}: {}", guard.heading(), guard.meaning()))
-        .collect();
-    let _ = writeln!(
-        out,
-        "\n{}. A job held by its memory goes to a rule only that rule kept it waiting for; held by two, it goes to the \
-         budget that refused it.",
-        legend.join("; ")
-    );
+    let _ = writeln!(out, "\n{}", Guard::legend());
     out
 }
 
@@ -983,4 +974,64 @@ pub(crate) fn overcommit(text: &str) -> Result<f64, String> {
                 config::MAX_CPU_OVERCOMMIT
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_row_with_its_own_ceiling_is_not_told_it_is_the_daemons() {
+        // Catches the legend naming the daemon's 14G ceiling under a row that replayed another: the row's name says
+        // which ceiling it had.
+        let config = Config::parse(
+            r#"
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles.jvm]
+image_stage = "jvm"
+cpus = 8
+memory = "9G"
+slots = 2
+
+[[repositories]]
+name = "halyard/ledger"
+profile = "jvm"
+labels = ["jvm"]
+"#,
+        )
+        .unwrap();
+        let mut replay = simulate(
+            &config,
+            None,
+            None,
+            &[],
+            Policy::Measured,
+            &BTreeMap::new(),
+            Barriers::On,
+        );
+        replay.guards.insert(Guard::GrowthCeiling, 3_600_000);
+        let ceiling = Counting::Growth(GrowthCount {
+            growth: pooled::Growth {
+                ceiling: Some(10 << 30),
+                ..pooled::Growth::top(3)
+            },
+            brake: Brake::Off,
+            guard: GuardHold::Off,
+        });
+        let table = causal_guards(&[ceiling], &[replay]);
+        assert!(table.contains("top3+ceil10G"), "{table}");
+        assert!(
+            table.contains("CEIL: that count's ceiling alone"),
+            "{table}"
+        );
+        assert!(!table.contains("14G"), "{table}");
+    }
 }

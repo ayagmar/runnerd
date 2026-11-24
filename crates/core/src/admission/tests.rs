@@ -890,6 +890,27 @@ fn a_replay_starts_a_starved_job_where_younger_jobs_would_take_all_the_room_befo
 }
 
 #[test]
+fn a_job_that_never_starts_is_charged_to_no_guard() {
+    // In an 8G slice the jvm job's 9G cap never fits, so it never starts; the second node job waits for the first.
+    // The guards count the node job's wait and none of the jvm job's, as the waits do.
+    let jobs = [
+        run("halyard/ledger", "check", "jvm", NOW, 10, G),
+        run("halyard/storefront", "site", "node", NOW, 8, G),
+        run("halyard/storefront", "site", "node", NOW + MINUTE, 8, G),
+    ];
+    let replay = replayed(&jobs, 8 * G, Barriers::Off);
+    assert_eq!(replay.never_started, 1);
+    let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
+    assert_eq!(waits, 7 * 60, "the second node job waits for the first");
+    assert_eq!(
+        replay.guards.values().sum::<u64>(),
+        1000 * waits,
+        "{:?}",
+        replay.guards
+    );
+}
+
+#[test]
 fn a_job_that_fits_behind_a_barrier_waits_for_the_barrier() {
     // The node jobs that fit the room the jvm job's barrier keeps free wait for it alone; the jvm job waits for
     // MemoryMax. Every second of every wait goes to one guard.
