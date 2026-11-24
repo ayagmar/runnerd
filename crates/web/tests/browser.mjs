@@ -3,7 +3,8 @@
 // a first visit to Settings, the doctor's checks included, moves nothing once painted; the jobs list's chips sit in
 // the Filters fold on a phone and beside the search on a wide screen; on a phone a running job's log is part of the
 // page, last, followed only while the reader is at its newest line, and holds the reader's line as lines above go;
-// "Jump to newest" moves nothing; reseeding a snapshot asks first; a chart card holds its labels at a laptop's
+// "Jump to newest" moves nothing; reseeding a snapshot asks first; a profile's link on Insights opens its section on
+// Capacity and its link back opens its queue on Insights; a chart card holds its labels at a laptop's
 // widths; and every queued job is a row of the queue's page, reached from the overview whenever it shows fewer, by
 // keyboard and finger, as jobs leave it; and the live badge says "Retrying" while a dropped read is tried again,
 // keeping the page and its focus, "Offline" then "Live" when the stream's body breaks and the next request answers,
@@ -468,6 +469,38 @@ try {
     check(
       asked.length === 1 && asked[0].startsWith('Reseed') && sent.length === 0,
       `${size.name}: Reseed asks "${asked[0]?.slice(0, 40)}…" and sends nothing when dismissed`,
+    );
+    await context.close();
+  }
+
+  // Insights and Capacity link one profile's sections to each other by its name: a click from why jvm's jobs queued
+  // opens jvm's section on Capacity, in view, and its link back opens jvm's queue on Insights.
+  for (const size of [sizes[0], sizes[1]]) {
+    const { context, page } = await signedIn(size);
+    await page.goto(new URL('/insights', login).href);
+    const target = () =>
+      page.evaluate(() => {
+        const shown = document.querySelector(':target');
+        const box = shown?.getBoundingClientRect();
+        return {
+          path: location.pathname,
+          text: shown?.textContent ?? '',
+          inView: !!box && box.top >= 0 && box.top < innerHeight,
+        };
+      });
+    await page.locator('.queue-profile a[href^="/sizing#"]', { hasText: /^jvm / }).first().click();
+    await page.waitForURL(/\/sizing#profile-/);
+    const capacity = await target();
+    check(
+      capacity.path === '/sizing' && /\bjvm\b/.test(capacity.text) && capacity.inView,
+      `${size.name}: jvm's link on Insights opens jvm's section on Capacity, in view ("${capacity.text.trim().slice(0, 30)}")`,
+    );
+    await page.locator(':target').locator('xpath=ancestor::section[1]').locator('a[href^="/insights#"]').click();
+    await page.waitForURL(/\/insights#profile-/);
+    const insights = await target();
+    check(
+      insights.path === '/insights' && /\bjvm\b/.test(insights.text) && insights.inView,
+      `${size.name}: jvm's link back opens jvm's queue on Insights, in view ("${insights.text.trim().slice(0, 30)}")`,
     );
     await context.close();
   }

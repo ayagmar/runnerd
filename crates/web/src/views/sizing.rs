@@ -7,12 +7,13 @@
 use crate::views::Here;
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Section, Sizing, Tone, job_title,
+    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileQueue, ProfileSizing, Section, Sizing, Tone,
+    View, job_title,
 };
 use runnerd_core::client::{Client, ClientError};
 
 use super::insights::figure_list;
-use super::{Page, heading, page};
+use super::{Page, heading, page, profile_id};
 use crate::chart::ratio;
 use crate::format;
 
@@ -42,7 +43,7 @@ pub(crate) fn render(view: &SizingView, here: Here<'_>) -> Markup {
         .sum();
     let since = html! { p.page-figure { strong { (jobs) " jobs" } span.muted { " since " (format::date(sizing.since)) } } };
     let main = html! {
-        (heading(runnerd_core::api::View::Capacity.title(), Some(Page::Sizing), Some(since)))
+        (heading(View::Capacity.title(), Some(Page::Sizing), Some(since)))
         (lanes(view))
         (auto_plan(view))
         @for (index, profile) in sizing.profiles.iter().enumerate() {
@@ -161,7 +162,7 @@ fn lanes(view: &SizingView) -> Markup {
             @for (index, profile) in sizing.profiles.iter().enumerate().filter(|(_, profile)| profile.peaks.jobs > 0) {
                 li class=(format!("sizing-lane p{}", index % 6)) {
                     div.profile-head {
-                        p.profile-name { a.hit href=(format!("#sizing-{index}")) { span.swatch aria-hidden="true" {} (profile.name) } }
+                        p.profile-name { a.hit href=(format!("#{}", profile_id(&profile.name))) { span.swatch aria-hidden="true" {} (profile.name) } }
                         span.profile-size { (format::bytes(profile.memory)) " × " (profile.slots) }
                     }
                     div.profile-scale { (scale(sizing, profile, whole)) }
@@ -187,7 +188,7 @@ fn lanes(view: &SizingView) -> Markup {
                 @for (index, profile) in sizing.profiles.iter().enumerate().filter(|(_, profile)| profile.peaks.jobs == 0) {
                     li class=(format!("profile-chip p{}", index % 6)) {
                         span.swatch aria-hidden="true" {}
-                        a.hit href=(format!("#sizing-{index}")) { (profile.name) }
+                        a.hit href=(format!("#{}", profile_id(&profile.name))) { (profile.name) }
                         span.profile-size { (format::bytes(profile.memory)) " × " (profile.slots) }
                         span.muted { (profile.advice_word()) }
                     }
@@ -222,7 +223,7 @@ fn needs(job: &JobSizing) -> Markup {
 
 fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Markup {
     let peaks = &profile.peaks;
-    let id = format!("sizing-{index}");
+    let id = profile_id(&profile.name);
     html! {
         section class=(format!("sizing-profile p{}", index % 6)) aria-labelledby=(id) {
             div.section-head {
@@ -232,6 +233,10 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                         "Warm starts p50 " (format::duration(profile.starts.warm_p50)) ", others " (format::duration(profile.starts.cold_p50))
                     }
                     @if peaks.cpu_p99().is_none() { " " (peaks.cpu_runs_line(profile.cpus)) }
+                }
+                // Its section of why jobs queued, by the same id; a profile Insights has none for opens its top.
+                @if profile.starts.total() > 0 {
+                    a.hit href=(format!("/insights#{id}")) { (ProfileQueue::TITLE) " on " (View::Insights.title()) }
                 }
             }
             (changes(sizing, profile))
