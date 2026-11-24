@@ -7,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
@@ -145,24 +146,35 @@ async fn read(
     }
     let body = match kind {
         ReadKind::Head => Empty::new().map_err(|never| match never {}).boxed_unsync(),
-        ReadKind::Body => {
-            let chunks = futures_util::stream::unfold(file, |mut file| async move {
-                let mut chunk = vec![0; CHUNK];
-                match file.read(&mut chunk).await {
-                    Ok(0) => None,
-                    Ok(read) => {
-                        chunk.truncate(read);
-                        Some((Ok(Frame::data(Bytes::from(chunk))), file))
-                    }
-                    Err(error) => Some((Err(error), file)),
-                }
-            });
-            BodyExt::boxed_unsync(StreamBody::new(chunks))
-        }
+        ReadKind::Body => stream(file, bytes),
     };
     let mut response = Response::new(body);
     response.headers_mut().insert(CONTENT_LENGTH, bytes.into());
     response
+}
+
+/// A body of the `length` bytes of `file` from where it is read now, `CHUNK` at a time into one buffer: its room is
+/// taken back for the next chunk once hyper has sent and dropped the last, so a read allocates again only while hyper
+/// still holds one, and never zeroes what it reads into.
+pub(super) fn stream(file: tokio::fs::File, length: u64) -> Body {
+    let chunks = futures_util::stream::unfold(
+        (file, length, BytesMut::new()),
+        |(mut file, left, mut buffer)| async move {
+            if left == 0 {
+                return None;
+            }
+            buffer.reserve(CHUNK.min(usize::try_from(left).unwrap_or(usize::MAX)));
+            match (&mut file).take(left).read_buf(&mut buffer).await {
+                Ok(0) => None,
+                Ok(read) => {
+                    let chunk = buffer.split().freeze();
+                    Some((Ok(Frame::data(chunk)), (file, left - read as u64, buffer)))
+                }
+                Err(error) => Some((Err(error), (file, 0, buffer))),
+            }
+        },
+    );
+    BodyExt::boxed_unsync(StreamBody::new(chunks))
 }
 
 async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> Response<Body> {
@@ -187,7 +199,9 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
             .get(&entry)
             .is_some_and(|known| known.bytes == length)
     });
-    if same && writes == Some(Writes::Allowed) {
+    // An undecided job's too: kept, it would replace the entry with what it holds; dropped, it changes nothing. Either
+    // way held, it takes the room and the place among `MAX_HELD` its job's new uploads need.
+    if same && matches!(writes, Some(Writes::Allowed | Writes::Undecided)) {
         drain(body).await;
         // Still in use, though only ever sent again: Bazel's blobs an action's result needs.
         inner.touch(&entry);

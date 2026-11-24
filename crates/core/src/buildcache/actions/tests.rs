@@ -701,6 +701,50 @@ async fn blocks_join_in_the_lists_order_and_a_range_reads_part_of_an_entry() {
     assert_eq!(beyond.status, 416);
 }
 
+/// The inodes of the files under `dir`, at any depth.
+fn inodes(dir: &Path) -> Vec<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut found = Vec::new();
+    for item in std::fs::read_dir(dir).unwrap().flatten() {
+        let metadata = item.metadata().unwrap();
+        if metadata.is_dir() {
+            found.extend(inodes(&item.path()));
+        } else {
+            found.push(metadata.ino());
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn an_archive_in_one_block_becomes_the_entry_without_being_copied() {
+    let dir = TestDir::new("actions-one-block");
+    let cache = open(&dir, 1 << 20);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    let url = reserve(&main, "deps").await;
+    assert_eq!(
+        put_block(&main, &url, "QkxPQ0sxPT0=", b"node_modules").await,
+        201
+    );
+    let uploads = dir.0.join("entries").join(super::super::UPLOADS);
+    let block = inodes(&uploads);
+    assert_eq!(block.len(), 1);
+    assert_eq!(put_block_list(&main, &url, &["QkxPQ0sxPT0="]).await, 201);
+    assert_eq!(inodes(&uploads), block, "the block is the archive, renamed");
+    assert!(finalize(&main, "deps", 12).await);
+    assert_eq!(
+        inodes(&cache.directory().join("o")),
+        block,
+        "and then the entry"
+    );
+    assert_eq!(
+        restore(&main, "deps", &[]).await,
+        Some(("deps".to_owned(), b"node_modules".to_vec()))
+    );
+    assert_eq!(uploading(&cache), 0, "its room went with it to the entry");
+}
+
 #[tokio::test]
 async fn an_archive_over_a_quarter_of_the_limit_is_dropped_and_its_room_given_back() {
     let dir = TestDir::new("actions-limits");

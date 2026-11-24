@@ -19,6 +19,7 @@ runnerd-web = { path = "crates/web", version = "0.1.5" }
 runnerd-fixtures = { path = "crates/fixtures" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
+bytes = "1.12.2"
 clap = { version = "4.6.7", features = ["derive"] }
 futures-util = "0.3.34"
 # Decodes the action archives runnerd keeps (ADR 0147): the Rust backend, no C zlib.

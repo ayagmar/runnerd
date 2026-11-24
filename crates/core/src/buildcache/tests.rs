@@ -665,6 +665,9 @@ async fn a_trim_drops_the_least_recently_used_entries_first() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert_eq!(request(&app, "GET", "/gradle/used", b"").await.0, 200);
+    cache.set_max_size(3 * ENTRY as u64);
+    let unchanged = cache.trim();
+    assert_eq!(unchanged.before, unchanged.after, "all three fit");
     cache.set_max_size(2 * ENTRY as u64);
     let trimmed = cache.trim();
     assert_eq!(trimmed.before.bytes, 3 * ENTRY as u64);
@@ -849,6 +852,112 @@ async fn an_entry_only_ever_sent_again_stays_in_use() {
     cache.trim();
     assert_eq!(request(&app, "GET", "/bazel/cas/blob", b"").await.0, 200);
     assert_eq!(request(&app, "GET", "/bazel/cas/old", b"").await.0, 404);
+}
+
+/// When the file of `entry`, in the cache whose entries are in `entries`, says it was last used.
+fn file_time(entries: &Path, entry: &str) -> std::time::SystemTime {
+    std::fs::metadata(entries.join(entry))
+        .unwrap()
+        .modified()
+        .unwrap()
+}
+
+/// Sets the time of the file of `entry` to `ago` before now.
+fn age(entries: &Path, entry: &str, ago: std::time::Duration) -> std::time::SystemTime {
+    let at = std::time::SystemTime::now() - ago;
+    std::fs::File::open(entries.join(entry))
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+    file_time(entries, entry)
+}
+
+#[tokio::test]
+async fn a_hit_writes_an_entrys_file_time_at_most_hourly_and_a_restart_still_orders_by_it() {
+    use std::time::Duration;
+    let dir = TestDir::new("touch");
+    let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
+    let first = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    let app = first.attach("app", "o/app", ActionsCache::Off).unwrap();
+    first.decide("app", Writes::Allowed, Scopes::default());
+    for key in ["stale", "recent", "unused"] {
+        let path = format!("/gradle/{key}");
+        assert_eq!(request(&app, "PUT", &path, &[0; ENTRY]).await.0, 200);
+    }
+    drop(first);
+    let stale = age(
+        &entries.join("entries"),
+        "o/app/gradle/stale",
+        Duration::from_secs(3 * 3600),
+    );
+    let recent = age(
+        &entries.join("entries"),
+        "o/app/gradle/recent",
+        Duration::from_secs(600),
+    );
+    age(
+        &entries.join("entries"),
+        "o/app/gradle/unused",
+        Duration::from_secs(2 * 3600),
+    );
+    let second = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    let app = second.attach("app", "o/app", ActionsCache::Off).unwrap();
+    for key in ["stale", "recent"] {
+        assert_eq!(
+            request(&app, "GET", &format!("/gradle/{key}"), b"").await.0,
+            200
+        );
+    }
+    let root = second.directory().to_owned();
+    for _ in 0..500 {
+        if file_time(&root, "o/app/gradle/stale") != stale {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let touched = file_time(&root, "o/app/gradle/stale");
+    assert!(touched > stale, "a hour-old file's time moved to the hit");
+    // A second hit within the hour writes nothing, as no hit to the entry used ten minutes ago did.
+    assert_eq!(request(&app, "GET", "/gradle/stale", b"").await.0, 200);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(file_time(&root, "o/app/gradle/stale"), touched);
+    assert_eq!(file_time(&root, "o/app/gradle/recent"), recent);
+    drop(second);
+    // After a restart the entries hit before it outlast the one used two hours ago.
+    let third = BuildCache::open(&entries, &sockets, 2 * ENTRY as u64).unwrap();
+    let app = third.attach("app", "o/app", ActionsCache::Off).unwrap();
+    assert_eq!(third.trim().after.entries, 2);
+    assert_eq!(request(&app, "GET", "/gradle/unused", b"").await.0, 404);
+    assert_eq!(request(&app, "GET", "/gradle/stale", b"").await.0, 200);
+}
+
+#[tokio::test]
+async fn an_undecided_jobs_upload_of_an_entry_the_cache_has_holds_no_room() {
+    let Cache { cache, _dir } = open("held-same", 4 * ENTRY as u64);
+    let main = cache.attach("main", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("main", Writes::Allowed, Scopes::default());
+    assert_eq!(
+        request(&main, "PUT", "/bazel/cas/blob", b"blob").await.0,
+        200
+    );
+    let fork = cache.attach("fork", "o/app", ActionsCache::Off).unwrap();
+    // Bazel sends every blob of its outputs again, before GitHub has said whether the job may write.
+    for _ in 0..3 {
+        assert_eq!(
+            request(&fork, "PUT", "/bazel/cas/blob", b"evil").await.0,
+            200
+        );
+    }
+    assert_eq!(waiting(&cache), 0, "nothing held for a blob the cache has");
+    assert_eq!(request(&fork, "PUT", "/bazel/cas/new", b"new").await.0, 200);
+    assert_eq!(waiting(&cache), 1, "a blob it lacks is held");
+    cache.decide("fork", Writes::Refused, Scopes::default());
+    assert_eq!(
+        request(&main, "GET", "/bazel/cas/blob", b"").await,
+        (200, b"blob".to_vec())
+    );
+    assert_eq!(request(&main, "GET", "/bazel/cas/new", b"").await.0, 404);
+    assert_eq!(cache.detach("fork").unwrap().refused, 1);
 }
 
 #[tokio::test]

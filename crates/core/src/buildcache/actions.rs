@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use http_body_util::{BodyExt, Empty, Full, Limited, StreamBody};
-use hyper::body::{Bytes, Frame, Incoming};
+use http_body_util::{BodyExt, Empty, Full, Limited};
+use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HOST, HeaderName, HeaderValue};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncSeekExt;
 use tracing::debug;
 
 mod save;
@@ -25,7 +25,7 @@ mod save;
 pub(super) use save::Save;
 use save::{Finished, Part};
 
-use super::serve::{Body, Purpose, Receiving, drain, receive, status};
+use super::serve::{Body, Purpose, Receiving, drain, receive, status, stream};
 use super::{ActionsCache, Inner, Runner, State, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
 
@@ -697,6 +697,15 @@ impl Joining {
             file,
         } = self;
         let joined = (|| -> io::Result<u64> {
+            // One block is the archive already: renamed, its bytes are written once, not copied. Its data is synced
+            // as a join's is. A rename that fails falls back to the copy.
+            if let [part] = parts.as_slice()
+                && std::fs::rename(&part.file, &file).is_ok()
+            {
+                let out = std::fs::File::open(&file)?;
+                out.sync_data()?;
+                return Ok(out.metadata()?.len());
+            }
             let mut out = std::fs::File::create(&file)?;
             let mut bytes = 0;
             for part in &parts {
@@ -811,24 +820,7 @@ async fn download(
     let body = if head {
         Empty::new().map_err(|never| match never {}).boxed_unsync()
     } else {
-        let chunks = futures_util::stream::unfold((file, length), |(mut file, left)| async move {
-            if left == 0 {
-                return None;
-            }
-            let mut chunk = vec![0; (64 << 10).min(usize::try_from(left).unwrap_or(usize::MAX))];
-            match file.read(&mut chunk).await {
-                Ok(0) => None,
-                Ok(read) => {
-                    chunk.truncate(read);
-                    Some((
-                        Ok(Frame::data(Bytes::from(chunk))),
-                        (file, left - read as u64),
-                    ))
-                }
-                Err(error) => Some((Err(error), (file, 0))),
-            }
-        });
-        BodyExt::boxed_unsync(StreamBody::new(chunks))
+        stream(file, length)
     };
     let mut response = Response::new(body);
     if partial {
@@ -1109,7 +1101,7 @@ pub(crate) async fn send(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> Answer {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::UnixStream::connect(dir.join(super::SOCKET))
         .await
         .unwrap();
