@@ -375,7 +375,7 @@ always returns, so the daemon closes and flushes the history.
 |---|---|
 | Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)); 0600, as `init` writes it and every save leaves it, since it holds `[notify]` secrets ([ADR 0078](docs/adr/0078-a-first-run-that-can-start-and-keeps-its-secrets.md)) |
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
-| Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
+| Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>` (layers, Docker store, and the workspace and pnpm store of a slot that keeps its own), `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>` with the scope's ref and the key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Action archives | files in `[caches.actions] directory`, default `$XDG_CACHE_HOME/runnerd/actions`: `archives/<owner>_<repo>/<sha>.tar.gz` (0644, mounted read-only into runners), `staging/`, `quarantine/` and `index.json` (each archive's SHA-256, size, when fetched and when last pinned; each served repository's pins as last read and the archives they reached when all were last known; refused archives; repositories jobs resolved as immutable packages), and `lock`, held by the one runnerd that owns the directory, kept across restarts; what failed, in memory ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)) |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
@@ -675,6 +675,16 @@ always returns, so the daemon closes and flushes the history.
   emptied ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md),
   [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)).
+- A runner keeps pnpm's store where one value says, `cache::PnpmStore::of`, which both its mounts
+  (`cache::runner_mounts`) and its environment follow: the slot's own when `[caches] pnpm.store` is `"slot"`, the
+  default, its profile keeps no records and its image carries `runnerd.slot-pnpm-store=1`
+  (`docker::SLOT_PNPM_STORE_LABEL`); the `runnerd-pnpm` volume otherwise. A runner of the slot's own store mounts no
+  shared one and gets `RUNNERD_PNPM_SLOT_STORE=<max_size in bytes>`, and the entrypoint binds `/state/work`, the
+  slot's workspace with its store at `.pnpm-store`, over `/home/runner/_work`, after emptying all but the store and
+  dropping a store over its limit: store and `node_modules` on one mount, so pnpm links instead of copying. The
+  workspace goes again when the job ends. When the bind cannot be made, pnpm copies from the slot's store as from a
+  shared one; when Docker cannot say what the image carries, the runner waits for the next plan
+  ([ADR 0167](docs/adr/0167-a-slot-keeps-its-own-pnpm-store-beside-the-jobs-workspace.md)).
 - Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner whose image
   carries the label `runnerd.skip-syncs=1` (`docker::SKIP_SYNCS_LABEL`) `RUNNERD_SKIP_SYNCS=1`
   (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before anything of the runner's

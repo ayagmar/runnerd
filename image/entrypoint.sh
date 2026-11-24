@@ -20,9 +20,18 @@ jitconfig_file=/run/runnerd/jitconfig
 # shellcheck source=SCRIPTDIR/build-cache.sh
 . /usr/local/lib/runnerd-build-cache.sh
 
+# The slot's own pnpm store beside the job's workspace, on the slot's volume, when runnerd asks for it
+# (docs/adr/0167); runnerd then mounts no shared store. First: the tool cache's layer mounts inside the workspace.
+if [[ ${RUNNERD_PNPM_SLOT_STORE:-} =~ ^[0-9]+$ ]]; then
+    mount_slot_work "$RUNNERD_PNPM_SLOT_STORE" || true
+else
+    # A slot that kept its own store before its runners took the shared one again gives it up, with its workspace.
+    rm -rf --one-file-system "$SLOT_WORK"
+fi
 mount_layers
 start_build_cache
-# pnpm processes sharing the store must share their lock directory (Dockerfile).
+# pnpm processes sharing the store must share their lock directory (Dockerfile). Beside the slot's own store, which
+# one container uses at a time, it is the container's own directory.
 install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 
 start_docker
@@ -67,6 +76,13 @@ if pkill -TERM -u runner 2> /dev/null; then
     pkill -KILL -u runner 2> /dev/null || true
 fi
 /usr/local/sbin/runnerd-scrub
+# The job's workspace on the slot's volume goes with the job, as one on the container's disk goes with the container,
+# but for the slot's pnpm store and `_tool`, the tool cache's layer's mount point, which the kernel will not remove
+# while mounted (docs/adr/0167). Not on a requested stop, which has seconds: the slot's next runner empties it before
+# its job.
+if [[ $stopping == 0 ]] && mountpoint -q "$WORK"; then
+    empty_slot_work "$SLOT_WORK" _tool
+fi
 # What the job-completed hook's cleanup measured of the slot's Docker store, for runnerd, which takes the last such
 # line of the container's log (docs/adr/0156). Printed after every process of the runner's ended, and printed even
 # without a measure, so a line a job wrote to this log earlier is never the last. It starts on a line of its own:
