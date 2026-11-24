@@ -560,6 +560,12 @@ fn lines(captured: &[Captured]) -> Vec<String> {
         .iter()
         .flat_map(|captured| match captured {
             Captured::Lines { lines, .. } => lines.clone(),
+            // As the history stores it.
+            Captured::Gap { cut, .. } => cut
+                .iter()
+                .cloned()
+                .chain([crate::store::LOG_GAP.to_owned()])
+                .collect(),
             Captured::Job { .. } => Vec::new(),
         })
         .collect()
@@ -1869,6 +1875,9 @@ fn the_capture_script_follows_a_page_until_it_goes_and_resumes_mid_page_without_
         kept.exists(),
         "a page the history has not committed is kept"
     );
+    // Read past a later page, so every pass since printed what it would.
+    std::fs::write(diag.join("pages/tl_abc-1_5.log"), "x\n").unwrap();
+    capture.until("@@page 5 0 2\nx\n");
     assert_eq!(
         String::from_utf8_lossy(&capture.read)
             .matches("@@end 1")
@@ -1876,6 +1885,8 @@ fn the_capture_script_follows_a_page_until_it_goes_and_resumes_mid_page_without_
         1,
         "a kept page ends once"
     );
+    std::fs::remove_file(diag.join("pages/tl_abc-1_5.log")).unwrap();
+    std::fs::remove_file(diag.join(".runnerd-pages/tl_abc-1_5.log")).unwrap();
     capture.ack(2);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while kept.exists() {
@@ -1960,7 +1971,7 @@ fn a_capture_script_exits_once_its_stdin_ends_and_ignores_an_ack_it_cannot_read(
         "a malformed ack drops nothing"
     );
     assert!(
-        !capture.exits_within(std::time::Duration::ZERO),
+        capture.child.try_wait().unwrap().is_none(),
         "the script runs while its stdin is open"
     );
     capture.input = None;
@@ -2008,7 +2019,7 @@ fn a_capture_script_keeps_removed_pages_only_up_to_its_bound_and_the_parser_name
     let captured = feed_all(&[&output]);
     assert_eq!(
         lines(&captured),
-        ["one", "two", super::capture::GAP, "three"],
+        ["one", "two", crate::store::LOG_GAP, "three"],
         "the gap is named, not stitched over"
     );
     assert!(
@@ -2079,4 +2090,88 @@ fn docker_s_root_through_a_link_is_read_where_the_link_leads_and_an_unknown_devi
         gone.file_system.is_err(),
         "a root that is not there is unread"
     );
+}
+
+// Catches: a line the script printed over two passes stored with its offset counted twice, so a restart skips bytes
+// and a live capture reads the next block as a rewind.
+#[test]
+fn a_line_printed_over_two_passes_resumes_after_its_own_bytes() {
+    let captured = feed_all(&[b"@@page 1 0 3\nabc", b"@@page 1 3 2\nd\n"]);
+    assert_eq!(
+        captured,
+        [Captured::Lines {
+            lines: vec!["abcd".to_owned()],
+            position: LogPosition { page: 1, offset: 5 },
+        }]
+    );
+    let resumed = feed_from(LogPosition { page: 1, offset: 5 }, &[b"@@page 1 5 3\nef\n"]);
+    assert_eq!(
+        resumed,
+        [Captured::Lines {
+            lines: vec!["ef".to_owned()],
+            position: LogPosition { page: 1, offset: 8 },
+        }],
+        "no gap and no rewind after it"
+    );
+}
+
+// Catches: pages read in the order of their names, page 10 before page 9, which made a false gap and let the script
+// drop page 9 on an ack for page 10; and a rollover read as a loss while the runner still holds the page it closed,
+// which also lost a last line with no line end.
+#[test]
+fn a_capture_script_reads_pages_by_number_and_ends_one_once_the_next_begins() {
+    let dir = TestDir::new("capture-order");
+    let (diag, bin) = diag(&dir.0, TAKEN);
+    std::fs::write(diag.join("pages/tl_abc-1_9.log"), "nine\nlast").unwrap();
+    std::fs::write(diag.join("pages/tl_abc-1_10.log"), "ten\n").unwrap();
+    let mut capture = Capture::start(&diag, &bin, LogPosition { page: 9, offset: 0 });
+    let output = capture.until("@@page 10 0 4\nten\n").to_vec();
+    drop(capture);
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.find("@@end 9").unwrap() < text.find("@@page 10").unwrap(),
+        "page 9 ends before page 10 begins: {text:?}"
+    );
+    let captured = feed_from(LogPosition { page: 9, offset: 0 }, &[&output]);
+    assert_eq!(lines(&captured), ["nine", "last", "ten"], "no gap");
+    assert!(
+        diag.join(".runnerd-pages/tl_abc-1_9.log").exists(),
+        "page 9 is kept though the runner still has it"
+    );
+}
+
+// Catches: each capture started again over the same directory linking one more page, as when the history refuses
+// every write, so what the container keeps grows without bound.
+#[test]
+fn captures_started_again_keep_no_more_than_the_bound_between_them() {
+    let dir = TestDir::new("capture-bound-again");
+    let (diag, bin) = diag(&dir.0, TAKEN);
+    let kept_bytes = || -> u64 {
+        std::fs::read_dir(diag.join(".runnerd-pages")).map_or(0, |entries| {
+            entries
+                .map(|entry| entry.unwrap().metadata().unwrap().len())
+                .sum()
+        })
+    };
+    for page in 1..=4 {
+        let source = diag.join(format!("pages/tl_abc-1_{page}.log"));
+        std::fs::write(&source, "abcd\n").unwrap();
+        // No ack comes: each run starts from page 1 again, as the history stored nothing.
+        let mut capture = Capture::of(
+            super::capture::SCRIPT,
+            &diag,
+            &bin,
+            LogPosition { page: 1, offset: 0 },
+            5,
+        );
+        capture.until("@@page 1 0 5\n");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        std::fs::remove_file(&source).unwrap();
+        drop(capture);
+        assert!(
+            kept_bytes() <= 5,
+            "run {page} keeps {} bytes, 5 at most",
+            kept_bytes()
+        );
+    }
 }

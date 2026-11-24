@@ -122,11 +122,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// captures its job and log. If Docker fails to inspect it, `observe_again` tries on the next tick.
     pub(super) async fn observe(&mut self, slot: &SlotRef, occupant: &Occupant) {
         let inspected = self.docker.inspect(&occupant.container).await;
-        self.watch_inspected(slot, occupant, inspected);
+        self.watch_inspected(slot, occupant, inspected).await;
     }
 
     /// `observe`, from Docker's inspect of the runner's container, which a start's task made.
-    pub(super) fn watch_inspected(
+    pub(super) async fn watch_inspected(
         &mut self,
         slot: &SlotRef,
         occupant: &Occupant,
@@ -156,24 +156,34 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.leases
                 .start(address, &occupant.runner_name, started_at);
         }
-        self.capture(occupant);
+        self.capture(occupant).await;
     }
 
     /// Starts a runner's log capture, in place of any it had, from where its job's stored log ends: an adopted runner
     /// may have stored part of its log before the restart.
-    fn capture(&mut self, occupant: &Occupant) {
-        let task = tokio::spawn(capture_job(
-            self.docker.clone(),
-            self.store.clone(),
-            occupant.runner_name.clone(),
-            occupant.container.clone(),
-            self.config.history.log_max.0,
-            Told {
-                found: self.found.0.clone(),
-                packages: self.archives.packages(),
-            },
-        ));
-        self.watches.start(&occupant.runner_name, task);
+    /// Read here rather than in the capture's task, so the capture reports its job as soon as it runs. A failed read
+    /// is a capture broken off: `recapture` tries again after the break's wait, never from page 1.
+    async fn capture(&mut self, occupant: &Occupant) {
+        let runner = &occupant.runner_name;
+        let task = match committed_position(&self.store, runner).await {
+            Ok(start) => tokio::spawn(capture_job(
+                self.docker.clone(),
+                self.store.clone(),
+                runner.clone(),
+                occupant.container.clone(),
+                start,
+                self.config.history.log_max.0,
+                Told {
+                    found: self.found.0.clone(),
+                    packages: self.archives.packages(),
+                },
+            )),
+            Err(error) => {
+                warn!("{runner}: cannot read where its stored log ends, to capture it: {error}");
+                tokio::spawn(std::future::ready(Capture::Broken))
+            }
+        };
+        self.watches.start(runner, task);
     }
 
     /// Starts again the log captures that broke off while their container runs, each after a wait that grows with
@@ -194,7 +204,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         "{}: capturing its job and log again from where its history ends",
                         occupant.runner_name
                     );
-                    self.capture(&occupant);
+                    self.capture(&occupant).await;
                 }
                 // Its log ends where the capture broke off; `collect_finished` frees its slot.
                 Ok(_) => {
@@ -691,6 +701,67 @@ async fn committed_position(store: &Store, runner: &str) -> Result<LogPosition, 
     }
 }
 
+/// How long a capture waits to tell its script a page is stored, before it takes the script for stuck.
+const ACK_WITHIN: Duration = Duration::from_secs(5);
+
+/// Tells a capture's script the history stored every page before `page`; whether the script took it in time.
+async fn tell(input: &mut docker::Input, page: u64) -> bool {
+    let told = async {
+        input.write_all(capture::ack(page).as_bytes()).await?;
+        input.flush().await
+    };
+    matches!(tokio::time::timeout(ACK_WITHIN, told).await, Ok(Ok(())))
+}
+
+/// Acts on the history's answer for a capture's oldest segment: tells the script a page is stored, or ends the capture
+/// once every segment is answered, as `ending` says.
+async fn answered(
+    answer: Answer,
+    input: &mut docker::Input,
+    ending: &mut Option<Capture>,
+    runner: &str,
+) {
+    match answer {
+        Answer::Committed { ack: Some(page) } => {
+            // A script that cannot be told keeps every page and links no more once it holds its bound: one started
+            // again drops what the history has. One that ended already reads nothing more.
+            if !tell(input, page).await && ending.is_none() {
+                warn!(
+                    "{runner}: cannot tell its capture what the history stored; capturing it again"
+                );
+                *ending = Some(Capture::Broken);
+            }
+        }
+        Answer::Committed { ack: None } => {}
+        Answer::Full => {
+            ending.get_or_insert(Capture::Done);
+        }
+        Answer::Refused => {
+            warn!(
+                "{runner}: the history did not store its log; capturing it again from where it ends"
+            );
+            *ending = Some(Capture::Broken);
+        }
+    }
+}
+
+/// How a capture whose output ended ends: done once its container stopped or went; broken while it runs, as the
+/// script ended early, or when Docker cannot tell, so `recapture` looks again.
+async fn ended<D: DockerApi>(docker: &D, runner: &str, container: &str) -> Capture {
+    match docker.inspect(container).await {
+        Ok(state) if state.running => {
+            warn!("{runner}: its capture ended while its container runs; capturing it again");
+            Capture::Broken
+        }
+        Ok(_) => Capture::Done,
+        Err(error) if is_not_found(&error) => Capture::Done,
+        Err(error) => {
+            warn!("{runner}: cannot inspect its container as its capture ended: {error}");
+            Capture::Broken
+        }
+    }
+}
+
 /// How much of a job's log the history had when its capture found the job.
 enum Stored {
     /// These bytes, or none it could read.
@@ -726,16 +797,10 @@ async fn capture_job<D: DockerApi>(
     store: Store,
     runner: String,
     container: String,
+    start: LogPosition,
     max_bytes: u64,
     told: Told,
 ) -> Capture {
-    let start = match committed_position(&store, &runner).await {
-        Ok(start) => start,
-        Err(error) => {
-            warn!("{runner}: cannot read where its stored log ends, to capture it: {error}");
-            return Capture::Broken;
-        }
-    };
     let fed = match docker
         .exec_fed(&container, capture::command(start, max_bytes))
         .await
@@ -764,27 +829,16 @@ async fn capture_job<D: DockerApi>(
             break;
         }
         tokio::select! {
-            answer = cursor.answer(), if !cursor.is_settled() => match answer {
-                Answer::Committed { ack: Some(page) } => {
-                    // A script that ended reads no more; its output ends too.
-                    let _ = input.write_all(capture::ack(page).as_bytes()).await;
-                    let _ = input.flush().await;
-                }
-                Answer::Committed { ack: None } => {}
-                Answer::Full => {
-                    ending.get_or_insert(Capture::Done);
-                }
-                Answer::Refused => {
-                    warn!("{runner}: the history did not store its log; capturing it again from where it ends");
-                    ending = Some(Capture::Broken);
-                }
-            },
+            answer = cursor.answer(), if !cursor.is_settled() => {
+                answered(answer, &mut input, &mut ending, &runner).await;
+            }
             chunk = output.next(), if ending.is_none() => {
                 let chunk = match chunk {
                     Some(Ok(chunk)) => chunk,
-                    // The container stopped, or the script ended.
+                    // The container stopped, or the script ended while it runs, which only a capture started again
+                    // reads past.
                     None => {
-                        ending = Some(Capture::Done);
+                        ending = Some(ended(&*docker, &runner, &container).await);
                         continue;
                     }
                     // The container stopped, or Docker dropped the exec while it runs: `recapture` tells them apart.
@@ -806,8 +860,14 @@ async fn capture_job<D: DockerApi>(
                             }
                         }
                         Captured::Job { .. } => {}
-                        Captured::Lines { lines, position } => {
+                        Captured::Lines { .. } | Captured::Gap { .. } => {
                             let Some(job) = job else { continue };
+                            let (lines, position, missing) = match captured {
+                                Captured::Lines { lines, position } => (lines, position, false),
+                                Captured::Gap { cut, position } => (cut.into_iter().collect(), position, true),
+                                Captured::Job { .. } => continue,
+                            };
+                            // A gap's line is not the job's: it takes none of `max_bytes`.
                             sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
                             told.packages.read(&lines);
                             let appended = store
@@ -817,6 +877,7 @@ async fn capture_job<D: DockerApi>(
                                     from: cursor.read(),
                                     to: position,
                                     max_bytes,
+                                    missing,
                                 })
                                 .await;
                             cursor.sent(position, appended);

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::observe::capture::GAP;
+use crate::store::LOG_GAP as GAP;
 
 /// The worker log of a runner that took job 1 of run 1, as job record `abc-1`.
 const WORKER_LOG: &str = "\"k\": \"check_run_id\",\n\"v\": 1.0\n\"k\": \"run_id\",\n\"v\": \"1\"\n\"jobId\": \"abc-1\"\n";
@@ -317,6 +317,7 @@ async fn the_captures_of_several_runners_still_commit_together() {
                             offset: from.offset + 3,
                         },
                         max_bytes: u64::MAX,
+                        missing: false,
                     })
                     .await,
             );
@@ -346,4 +347,195 @@ fn commits(wal: &Path) -> usize {
         .take_while(|frame| frame.len() == 24 + page_size && frame[8..16] == wal[16..24])
         .filter(|frame| frame[4..8] != [0; 4])
         .count()
+}
+
+fn position(page: u64, offset: u64) -> crate::store::LogPosition {
+    crate::store::LogPosition { page, offset }
+}
+
+/// Sends job 1 a segment and waits for the history's answer.
+async fn send(
+    store: &Store,
+    lines: &[&str],
+    from: crate::store::LogPosition,
+    to: crate::store::LogPosition,
+    max_bytes: u64,
+    missing: bool,
+) -> crate::store::Appended {
+    store
+        .append_log(crate::store::LogSegment {
+            job: 1,
+            lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            from,
+            to,
+            max_bytes,
+            missing,
+        })
+        .await
+        .await
+        .unwrap()
+}
+
+// Catches: a segment that starts where the log ends but does not end past it, as a page read out of order makes,
+// moving the stored position back so lines are stored twice or skipped.
+#[tokio::test]
+async fn a_segment_that_does_not_move_the_log_forward_is_refused() {
+    use crate::store::Appended;
+    let dir = TestDir::new("capture-backward");
+    let store = Store::open(&dir.0.join("history.db")).unwrap();
+    store.queued("o/r", &job(1), 1);
+    let stored = send(
+        &store,
+        &["ten"],
+        position(1, 0),
+        position(10, 4),
+        u64::MAX,
+        false,
+    )
+    .await;
+    assert_eq!(stored, Appended::Stored);
+    let back = send(
+        &store,
+        &["nine"],
+        position(10, 4),
+        position(9, 5),
+        u64::MAX,
+        false,
+    )
+    .await;
+    assert_eq!(back, Appended::Refused, "a segment that goes back");
+    let still = send(
+        &store,
+        &[],
+        position(10, 4),
+        position(10, 4),
+        u64::MAX,
+        false,
+    )
+    .await;
+    assert_eq!(still, Appended::Refused, "a segment that stays");
+    assert_eq!(store.log_position(1).await.unwrap(), position(10, 4));
+    assert_eq!(
+        store.log_lines(1, 0, 10).await.unwrap(),
+        [(0, "ten".to_owned())]
+    );
+}
+
+// Catches: a gap's line charged to `log_max`, which turned a loss near the cap into a cut that hides it and drops
+// the job's lines that still fit.
+#[tokio::test]
+async fn a_gap_takes_none_of_log_max() {
+    use crate::store::Appended;
+    let dir = TestDir::new("capture-gap-cap");
+    let store = Store::open(&dir.0.join("history.db")).unwrap();
+    store.queued("o/r", &job(1), 1);
+    let cap = 6;
+    assert_eq!(
+        send(&store, &["a1"], position(1, 0), position(1, 3), cap, false).await,
+        Appended::Stored
+    );
+    assert_eq!(
+        send(&store, &[], position(1, 3), position(3, 0), cap, true).await,
+        Appended::Stored
+    );
+    assert_eq!(
+        send(&store, &["ok"], position(3, 0), position(3, 3), cap, false).await,
+        Appended::Stored
+    );
+    let lines: Vec<String> = store
+        .log_lines(1, 0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(lines, ["a1", GAP, "ok"]);
+    let job = store.job(1).await.unwrap().unwrap().summary;
+    assert!(!job.log.truncated, "a gap is not a cut");
+    assert_eq!(job.log.bytes, 6, "only the job's own lines count");
+}
+
+// Catches: a page the runner numbers 10 read before page 9, so an ack for page 10 dropped page 9 though its write
+// failed, and the stored position passed it.
+#[tokio::test]
+async fn a_failed_write_on_page_9_holds_page_9_however_many_pages_follow() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("capture-page-order");
+    let diag = script_runner(&github, &docker, &dir);
+    for number in 1..=10 {
+        append(&page(&diag, number), &format!("p{number}\n"));
+    }
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    let fault = Fault::on(&dir, "p9");
+    engine.recover().await.unwrap();
+    until_capture_ends(&mut engine).await;
+    handle.store.flush().await;
+    let wanted: Vec<String> = (1..=10).map(|number| format!("p{number}")).collect();
+    assert_eq!(
+        until_log(&handle, 8).await,
+        wanted[..8],
+        "nothing past page 9"
+    );
+    let job = handle.store.job(1).await.unwrap().unwrap().summary;
+    assert_eq!(job.log.lines, 8, "page 10 is not stored past page 9");
+    assert!(kept(&diag, 9).exists(), "page 9 is kept: its write failed");
+    fault.heal();
+    recapture_after(&mut engine, Duration::ZERO).await;
+    assert_eq!(until_log(&handle, 10).await, wanted);
+}
+
+/// A running runner in slot 1 whose capture prints job 1's first page whole, and then prints nothing, open.
+fn open_capture(github: &FakeGithub, docker: &FakeDocker) {
+    running_runner(github, docker, "@@job 1 1\n@@page 1 0 6\nhello\n@@end 1\n");
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .stuck_captures
+        .insert("container-1".to_owned());
+}
+
+// Catches: an ack the script never got ignored while its output stays open, so the script keeps every page at its
+// bound and links no more, with nothing to start it again.
+#[tokio::test]
+async fn a_capture_whose_script_cannot_be_told_starts_again() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    open_capture(&github, &docker);
+    docker.0.lock().unwrap().capture_input_fails = 1;
+    let dir = TestDir::new("capture-ack-fails");
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    until_capture_ends(&mut engine).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(docker.0.lock().unwrap().captured.len(), 2, "started again");
+}
+
+// Catches: a capture whose script ended while its container runs taken as done for good, so the rest of the job's
+// log is never read; and one whose container stopped started again.
+#[tokio::test]
+async fn a_capture_whose_output_ends_starts_again_only_while_its_container_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 6\nhello\n");
+    let dir = TestDir::new("capture-ends");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    until_capture_ends(&mut engine).await;
+    engine.tick(Shutdown::No).await;
+    until_capture_ends(&mut engine).await;
+    assert_eq!(
+        docker.0.lock().unwrap().captured.len(),
+        2,
+        "started again while it runs"
+    );
+    until_log_lines(&handle, 1, 1).await;
+    docker.0.lock().unwrap().containers[0].running = false;
+    recapture_after(&mut engine, Duration::from_mins(10)).await;
+    assert_eq!(
+        docker.0.lock().unwrap().captured.len(),
+        2,
+        "not started again once its container stopped"
+    );
 }

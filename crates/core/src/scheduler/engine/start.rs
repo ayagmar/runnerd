@@ -577,7 +577,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some((index, launched)) = in_flight.starts.remove(&id) else {
             return;
         };
-        let became = self.fold(&launched.slot, ran);
+        let became = self.fold(&launched.slot, ran).await;
         if let Carried::Done(outcome) = became {
             self.started(&launched, outcome);
         }
@@ -865,7 +865,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// that Docker kept, holds the slot; otherwise the slot is free, the build cache its start opened is closed, and
     /// GitHub's or Docker's failure holds back its pool. A registration refused for the rate limit is carried as
     /// skipped, as a start the limit kept from launching is.
-    fn fold(&mut self, slot: &SlotRef, ran: StartRun) -> Carried {
+    async fn fold(&mut self, slot: &SlotRef, ran: StartRun) -> Carried {
         let Some(starting) = self
             .slots
             .get_mut(&slot.profile)
@@ -935,7 +935,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 let purpose = starting.purpose;
                 let occupant = starting.into_occupant(runner.id, container, first_sample);
-                self.place(slot, &occupant, purpose, made)
+                self.place(slot, occupant, purpose, made).await
             }
         };
         Carried::Done(outcome)
@@ -944,10 +944,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Puts a runner a start made in its slot and watches it, or after a start that failed, its container that
     /// Docker kept: it holds the slot, with its registration, until `collect_finished` confirms its removal, which
     /// keeps a second runner off the slot's volumes. If it runs, the next tick watches it as a runner.
-    fn place(
+    async fn place(
         &mut self,
         slot: &SlotRef,
-        occupant: &Occupant,
+        occupant: Occupant,
         purpose: Purpose,
         made: Result<Result<RunnerState, docker::Error>, String>,
     ) -> StartOutcome {
@@ -971,7 +971,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     "{repository}: started {name} in {} slot {number}{warm}",
                     slot.profile
                 );
-                self.watch_inspected(slot, occupant, inspected);
+                self.watch_inspected(slot, &occupant, inspected).await;
                 StartOutcome::Started
             }
             Err(failure) => {

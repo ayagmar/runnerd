@@ -5,14 +5,17 @@
 //! has not printed before. These pages are what GitHub shows, with secrets already masked by the runner.
 //!
 //! The script's output: `@@job <id> <run id>`, then `@@page <page> <offset> <length>` followed by exactly that
-//! many bytes, and `@@end <page>` once a page is complete. `Parser` turns it into whole lines and the position to
-//! resume from, so a restarted daemon continues where the stored log ends, and words a gap where bytes are missing.
+//! many bytes, and `@@end <page>` once a page is complete: the runner removed it, or began a later one, as it closes a
+//! page before it opens the next. It reads pages by number, never an earlier one after a later. `Parser` turns its
+//! output into whole lines and the position to resume from, so a restarted daemon continues where the stored log
+//! ends, and into a `Captured::Gap` where bytes are missing.
 //!
 //! The script's input (ADR 0176): a line `<page>` once the history committed every page before that one ([`ack`]).
 //! Only then does the script drop its links of those pages, so a capture that starts again from the stored position
-//! finds them. It keeps at most its third argument's bytes of pages the runner removed and the history has not
-//! committed: past that it links no new page, which a later read names as a gap. When its input ends, the daemon's
-//! end is gone, and the script exits.
+//! finds them. It links a page only while the pages it keeps, those of earlier runs too, hold less than its third
+//! argument's bytes, so what it keeps exceeds that by at most what the runner writes to the last page linked; a page
+//! it could not link and the runner removed is a gap. When its input ends, the daemon's end is gone, and the script
+//! exits.
 //!
 //! `worker_job` and `worker_run` read the same IDs from a worker log copied out of a stopped runner, which no script can
 //! run in.
@@ -25,7 +28,8 @@ use crate::store::LogPosition;
 /// `keep` bytes of removed pages the history has not committed.
 pub const SCRIPT: &str = r#"
 diag=/home/runner/_diag keep=/home/runner/_diag/.runnerd-pages start_page=$1 start_offset=$2 keep_max=$3 job= record=
-held=0
+# The latest page printed: no earlier one is linked after it.
+last=0
 # Each kept page's bytes printed, and whether its end was.
 declare -A off ended
 # The page number in a page's file name, in `page`: no command substitution, which forks a subshell.
@@ -50,36 +54,60 @@ while :; do
         done
     fi
     if [ -n "$job" ]; then
+        # By page number, as bash lists an indexed array's keys: page 10 after page 9, as the runner writes them.
+        # `top` is the latest page there is: the runner closes a page before it opens the next.
+        src=() kept=() sizes=() gone=() top=0 held=0
         for f in "$diag"/pages/*_"$record"_*.log; do
             [ -f "$f" ] || continue
             page_of "$f"
-            [ "$page" -ge "$start_page" ] && [ "$held" -lt "$keep_max" ] && [ ! -e "$keep/${f##*/}" ] &&
-                ln "$f" "$keep/${f##*/}" 2> /dev/null
+            src[page]=$f
+            [ "$page" -gt "$top" ] && top=$page
         done
-        held=0
+        # What is kept first, every link of earlier runs too, so the bound holds however often a capture starts again.
         for k in "$keep"/*_"$record"_*.log; do
             [ -f "$k" ] || continue
-            name=${k##*/} gone=
+            name=${k##*/}
             page_of "$k"
             if [ "$page" -lt "$start_page" ]; then
                 rm -f "$k"
                 unset "off[$name]" "ended[$name]"
                 continue
             fi
-            # Printed whole and gone: kept until the history commits it.
-            if [ -n "${ended[$name]}" ]; then held=$((held + off[$name])); continue; fi
-            [ -e "$diag/pages/$name" ] || gone=1
-            size=$(stat -c %s "$k")
+            kept[page]=$k
+            [ "$page" -gt "$top" ] && top=$page
+            if [ -n "${ended[$name]}" ]; then
+                held=$((held + off[$name]))
+                continue
+            fi
+            # Gone before its size is read: bytes the runner wrote before removing it are all there.
+            [ -e "$diag/pages/$name" ] || gone[page]=1
+            sizes[page]=$(stat -c %s "$k")
+            held=$((held + sizes[page]))
+        done
+        # A new link takes its size of the bound, which it may outgrow by what the runner writes to it after.
+        for page in "${!src[@]}"; do
+            [ "$page" -ge "$start_page" ] && [ "$page" -ge "$last" ] && [ -z "${kept[page]}" ] || continue
+            [ "$held" -lt "$keep_max" ] || break
+            f=${src[page]}
+            ln "$f" "$keep/${f##*/}" 2> /dev/null || break
+            kept[page]=$keep/${f##*/} sizes[page]=$(stat -c %s "$keep/${f##*/}")
+            held=$((held + sizes[page]))
+        done
+        for page in "${!kept[@]}"; do
+            k=${kept[page]} name=${kept[page]##*/}
+            [ -z "${ended[$name]}" ] || continue
+            size=${sizes[page]}
             o=${off[$name]:-0}
             [ -n "${off[$name]}" ] || [ "$page" -ne "$start_page" ] || o=$start_offset
             if [ "$size" -gt "$o" ]; then
                 echo "@@page $page $o $((size - o))"
                 tail -c +$((o + 1)) "$k" | head -c $((size - o))
             fi
-            off[$name]=$size
-            if [ -n "$gone" ]; then
+            off[$name]=$size last=$page
+            # Whole once the runner removed it or began a later page; kept until the history commits it.
+            if [ -n "${gone[page]}" ] || [ "$page" -lt "$top" ]; then
                 echo "@@end $page"
-                ended[$name]=1 held=$((held + size))
+                ended[$name]=1
             fi
         done
     fi
@@ -145,12 +173,6 @@ pub fn ack(page: u64) -> String {
     format!("{page}\n")
 }
 
-/// The line that stands where bytes of a job's log are missing: the runner removed them before the script kept them,
-/// as when no capture ran for a while, or the script kept as much as it may. Not a cut: `log_max` cuts a log with no
-/// line of its own.
-pub const GAP: &str =
-    "[runnerd: lines are missing here: the runner removed them before runnerd kept them]";
-
 /// What the script reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Captured {
@@ -166,6 +188,14 @@ pub enum Captured {
         /// The lines, without their line ends.
         lines: Vec<String>,
         /// The position after the last line.
+        position: LogPosition,
+    },
+    /// Bytes of the log are missing before `position`: the runner removed them before the script kept them, as when
+    /// no capture ran for a while, or the script kept as much as it may.
+    Gap {
+        /// The line the gap cut short, as far as it came.
+        cut: Option<String>,
+        /// Where the bytes after the gap start, which the capture resumes from.
         position: LogPosition,
     },
 }
@@ -256,23 +286,19 @@ impl Parser {
                     page: self.page,
                     offset: self.partial_offset + self.partial_len,
                 };
-                if at > next {
-                    // Bytes from `next` on are gone: the line they cut ends here, and the gap is named.
-                    let mut lines = Vec::new();
-                    if self.partial_len > 0 {
-                        lines.push(self.take_line());
+                if at != next {
+                    if at > next {
+                        // Bytes from `next` on are gone: the line they cut ends here, and the gap is named.
+                        let cut = (self.partial_len > 0).then(|| self.take_line());
+                        captured.push(Captured::Gap { cut, position: at });
+                    } else {
+                        // Read again from earlier: what was pending is read again too.
+                        self.take_line();
                     }
-                    lines.push(GAP.to_owned());
-                    captured.push(Captured::Lines {
-                        lines,
-                        position: at,
-                    });
-                } else if at < next {
-                    // Read again from earlier: what was pending is read again too.
-                    self.take_line();
+                    self.page = *page;
+                    self.partial_offset = *offset;
                 }
-                self.page = *page;
-                self.partial_offset = *offset;
+                // A block that goes on where the last one ended goes on with its pending line, from where it started.
                 self.remaining = usize::try_from(*length).unwrap_or(usize::MAX);
             }
             (Some("@@end"), [page]) if *page == self.page => {

@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::outline::Outlining;
 use super::read::{self, secs};
 use super::{
-    Appended, Cursor, Downtime, Downtimes, HOST_SAMPLE_BATCH, LOG_BACKLOG, LogPosition,
+    Appended, Cursor, Downtime, Downtimes, HOST_SAMPLE_BATCH, LOG_BACKLOG, LOG_GAP, LogPosition,
     MirrorPosition, Resolution, RunnerRecord, SampleRecord, Telemetry, Write, logged,
 };
 use crate::api::{self, Event, EventEnvelope};
@@ -231,8 +231,12 @@ enum Stored {
 enum At {
     /// Wherever the log ends; then the capture resumes at the position, if the write has one.
     End(Option<LogPosition>),
-    /// Only where the log ends at `from`; then it ends at `to`.
-    Segment { from: LogPosition, to: LogPosition },
+    /// Only where the log ends at `from`; then it ends at `to`, after a gap's line if bytes are `missing`.
+    Segment {
+        from: LogPosition,
+        to: LogPosition,
+        missing: bool,
+    },
 }
 
 impl Stored {
@@ -807,9 +811,14 @@ impl Writer<'_> {
                     backlogs.push(backlog);
                     let at = match cursor {
                         Cursor::Unchecked(position) => At::End(position),
-                        Cursor::Segment { from, to, done } => {
+                        Cursor::Segment {
+                            from,
+                            to,
+                            missing,
+                            done,
+                        } => {
                             segments.push((stored.len(), done));
-                            At::Segment { from, to }
+                            At::Segment { from, to, missing }
                         }
                     };
                     slots.push(Slot::Stored(stored.len()));
@@ -1465,13 +1474,17 @@ impl Writer<'_> {
                 [job],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )?;
-        let position = match at {
+        let (position, missing) = match at {
             At::Segment { .. } if truncated => return Ok(Appended::Full),
-            At::Segment { from, .. } if from != (LogPosition { page, offset }) => {
+            // Only forward from where the log ends: a segment that does not advance it would store lines twice, or
+            // move the position back over lines stored.
+            At::Segment { from, to, .. }
+                if from != (LogPosition { page, offset }) || to <= from =>
+            {
                 return Ok(Appended::Refused);
             }
-            At::Segment { to, .. } => Some(to),
-            At::End(position) => position,
+            At::Segment { to, missing, .. } => (Some(to), missing),
+            At::End(position) => (position, false),
         };
         let mut outlining = None;
         for line in lines {
@@ -1499,6 +1512,24 @@ impl Writer<'_> {
             });
             count += 1;
             bytes += size;
+        }
+        // A gap's line takes none of `max_bytes`: a loss is not a cut.
+        if missing && !truncated {
+            self.db.execute(
+                "INSERT OR IGNORE INTO log_lines (job, line, text) VALUES (?1, ?2, ?3)",
+                params![job, count, LOG_GAP],
+            )?;
+            let outlining = match &mut outlining {
+                Some(outlining) => outlining,
+                None => outlining.insert(Outlining::load(&self.db, job, count)?),
+            };
+            outlining.line(count, LOG_GAP)?;
+            announced.push(Event::LogLine {
+                job,
+                line: count,
+                text: LOG_GAP.to_owned(),
+            });
+            count += 1;
         }
         if let Some(outlining) = outlining {
             outlining.save()?;

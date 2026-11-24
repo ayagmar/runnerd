@@ -972,6 +972,8 @@ struct DockerState {
     captured: Vec<(String, String, String)>,
     /// What the daemon wrote to the log captures' stdin, by container: the pages the history committed.
     capture_input: HashMap<String, String>,
+    /// How many writes to log captures' stdin fail next, as when a script is gone while Docker keeps its output open.
+    capture_input_fails: u32,
     /// Containers whose log capture runs the real capture script, over a diagnostic directory of the test's.
     script_captures: HashMap<String, ScriptCapture>,
     /// How many log captures fail to start next, as when the Engine does not answer.
@@ -1410,9 +1412,12 @@ impl tokio::io::AsyncWrite for CaptureInput {
         _: &mut std::task::Context<'_>,
         written: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        self.docker
-            .lock()
-            .unwrap()
+        let mut state = self.docker.lock().unwrap();
+        if state.capture_input_fails > 0 {
+            state.capture_input_fails -= 1;
+            return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
+        state
             .capture_input
             .entry(self.container.clone())
             .or_default()

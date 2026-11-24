@@ -566,7 +566,15 @@ pub struct LogSegment {
     pub to: LogPosition,
     /// The job's log keeps at most this many bytes; the rest is cut, as `Store::log` cuts it.
     pub max_bytes: u64,
+    /// Bytes of the log are missing after these lines: the history stores [`LOG_GAP`] there, which `max_bytes` does
+    /// not count, so a loss never reads as a cut.
+    pub missing: bool,
 }
+
+/// The line that stands where bytes of a job's log are missing (ADR 0176): the runner removed them before the
+/// capture kept them. Not a cut: `log_max` cuts a log with no line of its own.
+pub const LOG_GAP: &str =
+    "[runnerd: lines are missing here: the runner removed them before runnerd kept them]";
 
 /// What became of a [`LogSegment`], once the writer's transaction is done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,7 +585,7 @@ pub enum Appended {
     /// final (ADR 0171). Intentional, not a loss.
     Full,
     /// Not known to be stored: the history's log did not end where the segment starts, as when an earlier segment
-    /// failed, or its write failed, or its commit failed and may have kept it. Only the history's stored position
+    /// failed, or the segment did not end past where it starts, or its write failed, or its commit failed and may have kept it. Only the history's stored position
     /// says where the log ends.
     Refused,
 }
@@ -609,6 +617,7 @@ enum Cursor {
     Segment {
         from: LogPosition,
         to: LogPosition,
+        missing: bool,
         done: oneshot::Sender<Appended>,
     },
 }
@@ -900,6 +909,7 @@ impl Store {
             from,
             to,
             max_bytes,
+            missing,
         } = segment;
         for line in &mut lines {
             // As `log` cuts it: no line takes the whole backlog.
@@ -920,7 +930,12 @@ impl Store {
         self.send(Write::Telemetry(Telemetry::Log {
             job,
             lines,
-            cursor: Cursor::Segment { from, to, done },
+            cursor: Cursor::Segment {
+                from,
+                to,
+                missing,
+                done,
+            },
             max_bytes,
             backlog,
         }));
