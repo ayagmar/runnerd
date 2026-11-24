@@ -57,7 +57,11 @@
       "slice": "runnerd.slice"
     },
     "github_limited_until": 1790000000,
+    "grype_database": {
+      "mounted": false
+    },
     "job_actions": "on",
+    "on_battery": true,
     "profiles": [
       {
         "cpus": 4,
@@ -264,7 +268,26 @@
       "slice_cpus": 16000
     },
     "github_limited_until": 1790000000,
+    "grype_database": {
+      "checked_at": 1761400000,
+      "failure": {
+        "detail": "Anchore answered 503",
+        "kind": "listing",
+        "since": 1761399000
+      },
+      "held": {
+        "built_at": 1761390000,
+        "bytes": 1363148800,
+        "schema": "v6.1.10"
+      },
+      "mounted": true
+    },
     "job_actions": "on",
+    "machine": {
+      "id": "4f2a91c0",
+      "name": "tern"
+    },
+    "on_battery": true,
     "profiles": [
       {
         "cpus": 4,

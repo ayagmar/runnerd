@@ -41,6 +41,13 @@
     "kind": "no-slot",
     "profile": "halyard"
   },
+  "on-battery": {
+    "kind": "on-battery"
+  },
+  "overflow": {
+    "kind": "overflow",
+    "until": 1761400045
+  },
   "paused": {
     "kind": "paused"
   },

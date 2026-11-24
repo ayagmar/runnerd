@@ -1,0 +1,8 @@
+{
+  "checksum": "checksum",
+  "download": "download",
+  "import": "import",
+  "listing": "listing",
+  "stale": "stale",
+  "store": "store"
+}

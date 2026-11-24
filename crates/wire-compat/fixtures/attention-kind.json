@@ -5,6 +5,7 @@
   "doctor-unavailable": "doctor-unavailable",
   "github-auth": "github-auth",
   "github-listing": "github-listing",
+  "grype-database": "grype-database",
   "host-memory": "host-memory",
   "insight": "insight",
   "rate-limited": "rate-limited",
