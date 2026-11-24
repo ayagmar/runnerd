@@ -6,11 +6,12 @@
     reason = "a test helper: a fake daemon that cannot start fails the test"
 )]
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use runnerd_core::client::{Client, Timeouts};
+use runnerd_core::client::{Client, Forwarding, SshOutput, SshProgram, Timeouts};
 
 /// A fake daemon serving until the test ends; its directory is removed on drop.
 #[derive(Debug)]
@@ -69,5 +70,76 @@ fn serve(socket: &std::path::Path, router: axum::Router) -> tokio::task::JoinHan
 impl Drop for Fake {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A fresh directory, removed on drop. Never under the user's home.
+#[derive(Debug)]
+pub(crate) struct TempDir(pub(crate) PathBuf);
+
+impl TempDir {
+    pub(crate) fn new() -> TempDir {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "runnerctl-dir-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A fake `ssh`: its forward is a fake daemon serving `router` on the forward's local socket, and the one command it
+/// runs prints `stdout`. No test runs the real `ssh`.
+#[derive(Debug)]
+pub(crate) struct FakeSsh {
+    router: axum::Router,
+    stdout: String,
+}
+
+impl FakeSsh {
+    pub(crate) fn serving(router: axum::Router, stdout: &str) -> std::sync::Arc<FakeSsh> {
+        std::sync::Arc::new(FakeSsh {
+            router,
+            stdout: stdout.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FakeForward(tokio::task::JoinHandle<()>);
+
+impl Forwarding for FakeForward {
+    fn exited(&mut self) -> std::io::Result<bool> {
+        Ok(self.0.is_finished())
+    }
+
+    fn stop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl SshProgram for FakeSsh {
+    fn start(&self, args: &[OsString], _: std::fs::File) -> std::io::Result<Box<dyn Forwarding>> {
+        let at = args.iter().position(|arg| arg == "-L").unwrap() + 1;
+        let forward = args[at].to_string_lossy();
+        let local = PathBuf::from(forward.split_once(':').unwrap().0);
+        Ok(Box::new(FakeForward(serve(&local, self.router.clone()))))
+    }
+
+    fn run(&self, _: &[OsString]) -> std::io::Result<SshOutput> {
+        Ok(SshOutput {
+            success: true,
+            stdout: self.stdout.clone(),
+            stderr: String::new(),
+        })
     }
 }

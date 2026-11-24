@@ -281,6 +281,8 @@ async fn run<G: GithubApi, D: DockerApi>(
         }
         return StartRun::Stopped;
     }
+    // What the start asked for besides, such as the Grype database's generation.
+    let asked = request.spec.labels.clone();
     let spec = RunnerSpec {
         labels: container_labels(
             &name,
@@ -294,7 +296,10 @@ async fn run<G: GithubApi, D: DockerApi>(
                 .mounts
                 .iter()
                 .any(|mount| mount.target.as_deref() == Some(crate::archives::MOUNT)),
-        ),
+        )
+        .into_iter()
+        .chain(asked)
+        .collect(),
         jit_config: Some(jit_config),
         ..request.spec
     };
@@ -742,6 +747,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let pnpm = cache::PnpmStore::of(&self.config.caches, profile, traits);
         // Read once, so its mount and its setting agree.
         let archives = self.archives.runner();
+        let grype = self.grype.runner();
         // Its build cache opens here, before GitHub registers its runner: the fold closes it if no container comes.
         let spec = RunnerSpec {
             name: name.clone(),
@@ -750,17 +756,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
             memory: profile.memory,
-            env: self.runner_env(&slot.profile, skips, pnpm, archives.as_ref()),
+            env: self.runner_env(
+                &slot.profile,
+                skips,
+                pnpm,
+                archives.as_ref(),
+                grype.as_ref(),
+            ),
             mounts: self.runner_mounts(
                 &slot.profile,
-                number,
-                pnpm,
+                cache::runner_mounts(&self.names, &slot.profile, number, pnpm),
                 &name,
                 repository,
                 archives.as_ref(),
+                grype.as_ref(),
             ),
             network: Some(self.names.network()),
-            labels: std::collections::BTreeMap::new(),
+            // The generation of the Grype database it mounts, which is not removed while its container is there.
+            labels: grype
+                .iter()
+                .map(|grype| (crate::grype::LABEL.to_owned(), grype.generation.clone()))
+                .collect(),
             entrypoint: None,
             jit_config: None,
         };

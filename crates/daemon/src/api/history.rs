@@ -365,6 +365,7 @@ pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> R
                 volumes,
                 build,
                 actions: state.handle.status.borrow().action_archives.clone(),
+                grype: state.handle.status.borrow().grype_database.clone(),
             })
             .into_response()
         }

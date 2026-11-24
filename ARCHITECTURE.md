@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["actions, admission, archives, buildcache, command, docker, github, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
+        host["actions, admission, archives, buildcache, command, docker, github, grype, cache, insights,<br/>isolation, record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -27,7 +27,7 @@ flowchart TB
     host --> bollard[("bollard: Docker")]
     host --> reqwest[("reqwest: GitHub")]
     daemon --> notify[("reqwest: [notify] targets")]
-    cli -.->|Unix socket| daemon
+    cli -.->|"Unix socket, or ssh -L to another machine's"| daemon
     web -.->|Unix socket| daemon
 ```
 
@@ -35,7 +35,7 @@ flowchart TB
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, the shared build cache's server, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper's client behind `client` and its server behind `host` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
-| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
+| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `machines` (`machine add|list|rm`, `--machine`, the `machines.toml` file), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 | `runnerd-fixtures` | `crates/fixtures` | tests only: the daemon data every client's parity test draws, and the facts core computes from it ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)); not published | `runnerd-core` without `host`; clients take it as a dev-dependency only |
 | `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
@@ -62,9 +62,12 @@ flowchart TB
   the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
   engine asks GitHub for once a day in a task of its own, off the tick.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
-  client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `actions`, `admission`, `archives`, `boots`, `buildcache`, `command`, `docker`, `github`, `cache`, `insights`,
-  `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
+  client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)). `ssh`, behind the same feature, reaches another machine's daemon
+  through one `ssh -N -L` per client, from a socket in a private directory, behind `SshProgram`, the boundary tests
+  replace; `config::machines` checks and edits `machines.toml`, the list of those machines, which only a client reads
+  ([ADR 0164](docs/adr/0164-runnerctl-reaches-another-machine-over-an-ssh-forward.md)).
+- `actions`, `admission`, `archives`, `boots`, `buildcache`, `command`, `docker`, `github`, `grype`, `cache`,
+  `insights`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `actions` cancels a job's run and re-runs a job on GitHub
   through the engine's own `Github`, off the engine's loop: a preview that reads the run and issues a confirmation,
   then, for a request that carries one, one POST within a deadline, once a permit `Github` asks with the token in hand
@@ -115,6 +118,14 @@ flowchart TB
   inventories only its methods write; `archives::state` keeps what failed. The task publishes a ready view only after
   a check found every file good; a runner's start reads it once, for both the mount and the environment, and the
   engine shows the task's status ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)).
+  `grype` keeps the Grype vulnerability database runners mount read-only, in a task of its own the engine starts:
+  it reads Anchore's listing (`grype::listing`), downloads the archive it names and checks its SHA-256, has Grype
+  itself import and check it in a container of the pinned Grype image without a network (`grype::sources`), and
+  publishes it as a generation under `dbs/` (`grype::store`, a leaf only its own methods write, holding an exclusive
+  lock on its directory); `grype::task`'s `Keeper` holds what failed and when the listing was last read. A runner's
+  start reads the ready view once, for the mount, Grype's settings and the label naming its generation, which keeps
+  that generation from removal while its container is there
+  ([ADR 0160](docs/adr/0160-runners-read-one-grype-database-runnerd-keeps-current.md)).
   `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.

@@ -96,3 +96,19 @@ When a job's log shows the runner downloading an action as an immutable package,
 
 `runnerctl caches` and the dashboard's Caches page show how many archives are kept, their size, when they were last refreshed, and what failed. A failure also shows in the attention list. `actions.enabled = false` turns them off.
 
+## Grype database
+
+[Grype](https://github.com/anchore/grype) downloads its vulnerability database into the job's own `~/.cache` when it finds none or an older one: about 200 MB packed and 3.5 GB once Grype has unpacked and indexed it, all written to the runner's disk. runnerd keeps one copy on the host and every runner mounts it read-only at `/opt/runnerd/grype`, with these set in the runner's environment:
+
+```sh
+GRYPE_DB_CACHE_DIR=/opt/runnerd/grype
+GRYPE_DB_AUTO_UPDATE=false
+GRYPE_DB_VALIDATE_AGE=true
+```
+
+A `grype` the job runs on the runner reads them, so a scan neither downloads nor unpacks a database. A step that sets its own `GRYPE_DB_CACHE_DIR` or `GRYPE_DB_AUTO_UPDATE`, or a Grype in a container of its own, does not use runnerd's copy. Two kinds of step fail with it, as the directory is read-only and its database is schema v6: `grype db update`, and a Grype older than 0.88, which reads schema v5. Such a step sets its own `GRYPE_DB_CACHE_DIR`, or the host turns the copy off with `grype.enabled = false`.
+
+Every 6 hours, runnerd reads Anchore's listing of the latest database. When it names one built after the copy held, runnerd downloads it, checks its SHA-256 against the listing, and has Grype itself import it and check what it imported (its schema, its age and its digest), in a container of a pinned Grype image without a network. Only then do new runners mount it. A failed step keeps the copy held. A failed listing or download is tried again 30 minutes later; an archive that failed after its download is not fetched again for a day, unless the listing names a newer one, and nothing is downloaded while Grype's image cannot be pulled. runnerd hashes the copy again at start before any runner mounts it, and stops giving one to new runners an hour before it passes the 5 days Grype accepts, so scans download their own again until a newer one is imported. A replaced database stays until the next refresh, and after that as long as a job's container still mounts it.
+
+`runnerctl caches` and the dashboard's Caches page show the database held, whether runners mount it, when the listing was last read, and what failed. A failure also shows in the attention list. `grype.enabled = false` turns it off.
+

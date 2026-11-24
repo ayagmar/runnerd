@@ -1,11 +1,13 @@
 //! A client of the daemon's API over its Unix socket, for every client crate: JSON requests, streamed text and the
 //! event stream, as [`api`](crate::api) types. Owns HTTP, timeouts, error decoding and the server-sent events reader,
 //! with reconnecting and `Last-Event-ID`; it knows no routes beyond the paths callers give it and nothing about how a
-//! client shows an answer. It never talks to Docker or GitHub. Built with the `client` feature.
+//! client shows an answer. Another machine's daemon is reached through an SSH forward to its socket (`ssh`, ADR
+//! 0164), never over a network API. It never talks to Docker or GitHub. Built with the `client` feature.
 
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
@@ -18,6 +20,11 @@ use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
 pub use hyper::{Method, StatusCode};
+
+pub use crate::ssh::{Forwarding, OpenSsh, SshOutput, SshProgram, remote_socket};
+use crate::ssh::{Mark, Tunnel};
+
+use crate::config::machines::Machine;
 
 use crate::api::{
     ActionPreview, ActionQuery, ActionResult, Busy, CompareQuery, ErrorResponse, EventEnvelope,
@@ -68,6 +75,13 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 pub enum ClientError {
     /// Nothing listens on the socket.
     NotRunning(PathBuf),
+    /// Another machine's daemon could not be reached over SSH, or is not running: why, worded.
+    Unreachable {
+        /// The machine's name, or the SSH target before it has one.
+        machine: String,
+        /// Why, worded for people.
+        reason: String,
+    },
     /// The daemon answered with an error.
     Api {
         /// The response's status.
@@ -94,6 +108,9 @@ impl fmt::Display for ClientError {
                  or `runnerd serve`",
                 socket.display()
             ),
+            ClientError::Unreachable { machine, reason } => {
+                write!(f, "cannot reach {machine}: {reason}")
+            }
             ClientError::Api {
                 status, message, ..
             } => write!(f, "{message} ({status})"),
@@ -161,11 +178,22 @@ impl Reply {
     }
 }
 
-/// A client of the daemon on one socket. Each request opens its own connection.
+/// Where a client finds the daemon.
+#[derive(Debug, Clone)]
+pub enum Endpoint {
+    /// A socket on this machine.
+    Unix(PathBuf),
+    /// Another machine's daemon, through an SSH forward to its socket.
+    Ssh(Machine),
+}
+
+/// A client of the daemon on one socket. Each request opens its own connection. A client of another machine's
+/// daemon holds the SSH forward it connects through, shared by its clones and stopped with the last of them.
 #[derive(Debug, Clone)]
 pub struct Client {
     socket: PathBuf,
     timeouts: Timeouts,
+    tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Client {
@@ -174,7 +202,33 @@ impl Client {
         Client {
             socket,
             timeouts: Timeouts::default(),
+            tunnel: None,
         }
+    }
+
+    /// A client of the daemon at `endpoint`. For another machine, starts the SSH forward with `program` in a private
+    /// directory under `private`, such as `$XDG_RUNTIME_DIR`, and waits until it is set up.
+    pub async fn open(
+        endpoint: Endpoint,
+        program: Arc<dyn SshProgram>,
+        private: &Path,
+    ) -> Result<Client, ClientError> {
+        match endpoint {
+            Endpoint::Unix(socket) => Ok(Client::new(socket)),
+            Endpoint::Ssh(machine) => {
+                let tunnel = Tunnel::open(machine, program, private).await?;
+                Ok(Client {
+                    socket: tunnel.socket(),
+                    timeouts: Timeouts::default(),
+                    tunnel: Some(Arc::new(tunnel)),
+                })
+            }
+        }
+    }
+
+    /// The other machine it reaches over SSH; `None` for a daemon on this machine.
+    pub fn machine(&self) -> Option<&Machine> {
+        self.tunnel.as_deref().map(Tunnel::machine)
     }
 
     /// The same client, waiting this long instead.
@@ -194,7 +248,7 @@ impl Client {
             .map_err(|_| ClientError::Timeout(after))?
     }
 
-    /// The socket it connects to.
+    /// The socket it connects to: for another machine, the local end of the forward.
     pub fn socket(&self) -> &Path {
         &self.socket
     }
@@ -309,7 +363,7 @@ impl Client {
         let path = with_query(&format!("/v1/records/{job}/shell"), query)?;
         let response = self
             .in_time(async {
-                let mut sender = self.connect().await?;
+                let (mut sender, mark) = self.connect().await?;
                 let request = Request::builder()
                     .method(Method::POST)
                     .uri(path)
@@ -318,7 +372,10 @@ impl Client {
                     .header(header::UPGRADE, SHELL_PROTOCOL)
                     .body(Full::new(Bytes::new()))
                     .map_err(transport)?;
-                sender.send_request(request).await.map_err(transport)
+                match sender.send_request(request).await {
+                    Ok(response) => Ok(response),
+                    Err(error) => Err(self.broken(transport(error), mark).await),
+                }
             })
             .await?;
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
@@ -328,25 +385,38 @@ impl Client {
         Ok(TokioIo::new(upgraded))
     }
 
-    /// Connects to the socket, ready for one request.
+    /// Connects to the socket, ready for one request; through a forward, also where the connection began in its
+    /// log.
     async fn connect(
         &self,
-    ) -> Result<hyper::client::conn::http1::SendRequest<Full<Bytes>>, ClientError> {
-        let stream =
-            UnixStream::connect(&self.socket)
-                .await
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-                        ClientError::NotRunning(self.socket.clone())
-                    }
-                    _ => transport(format_args!("{}: {error}", self.socket.display())),
-                })?;
+    ) -> Result<
+        (
+            hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+            Option<Mark>,
+        ),
+        ClientError,
+    > {
+        let (stream, mark) = if let Some(tunnel) = &self.tunnel {
+            let opened = tunnel.connect().await?;
+            (opened.stream, Some(opened.mark))
+        } else {
+            let stream =
+                UnixStream::connect(&self.socket)
+                    .await
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                            ClientError::NotRunning(self.socket.clone())
+                        }
+                        _ => transport(format_args!("{}: {error}", self.socket.display())),
+                    })?;
+            (stream, None)
+        };
         let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(transport)?;
         // Drives the connection until the response body is read or dropped, or the terminal it became closes.
         tokio::spawn(connection.with_upgrades());
-        Ok(sender)
+        Ok((sender, mark))
     }
 }
 
@@ -378,7 +448,7 @@ impl Client {
         body: Option<Body>,
         last_event_id: Option<u64>,
     ) -> Result<Response<Incoming>, ClientError> {
-        let mut sender = self.connect().await?;
+        let (mut sender, mark) = self.connect().await?;
         let mut request = Request::builder()
             .method(method)
             .uri(path)
@@ -394,7 +464,19 @@ impl Client {
         let request = request
             .body(Full::new(Bytes::from(bytes)))
             .map_err(transport)?;
-        sender.send_request(request).await.map_err(transport)
+        match sender.send_request(request).await {
+            Ok(response) => Ok(response),
+            Err(error) => Err(self.broken(transport(error), mark).await),
+        }
+    }
+
+    /// `error`, for a request begun at `mark` whose connection broke before its answer: through a forward, what
+    /// `ssh` said since or that it exited.
+    async fn broken(&self, error: ClientError, mark: Option<Mark>) -> ClientError {
+        match (&self.tunnel, mark) {
+            (Some(tunnel), Some(mark)) => tunnel.broken(error, mark).await,
+            _ => error,
+        }
     }
 
     /// `GET /v1/attention`: what needs attention (ADR 0132). `None` from a daemon without the route, before 0.2, which a

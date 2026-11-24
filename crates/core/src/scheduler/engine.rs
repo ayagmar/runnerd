@@ -94,6 +94,7 @@ use crate::cache::{self, Names, Trimmed};
 use crate::config::Config;
 use crate::docker::{self, Docker, DockerApi};
 use crate::github::{Github, GithubApi};
+use crate::grype;
 use crate::isolation::{self, Isolation};
 use crate::observe::disk::Disks;
 use crate::observe::metrics::{self, Paths, Sampler, Tracked};
@@ -235,6 +236,9 @@ pub struct Setup {
     /// Where the action archives are kept (`[caches.actions] directory` or its default), unless the daemon could not
     /// name a directory: then runners download their actions themselves.
     pub action_archives: Option<PathBuf>,
+    /// Where the Grype database is kept (`[caches.grype] directory` or its default), unless the daemon could not
+    /// name one: then runners get none.
+    pub grype_database: Option<PathBuf>,
     /// Where the engine keeps whether what runners wrote without syncing may be lost to a host crash (ADR 0141), such
     /// as `unsynced` beside the job history.
     pub unsynced: PathBuf,
@@ -570,6 +574,8 @@ pub struct Engine<G = Github, D = Docker> {
     build_cache: Option<BuildCache>,
     /// The action archives' store: where it is, its settings and what it last published (ADR 0147).
     archives: archives::Link,
+    /// The Grype database's store: where it is, whether it is on and what it last published (ADR 0160).
+    grype: grype::Link,
     /// The job actions, for the re-runs of runner faults the engine starts and the refusals its status shows.
     actions: Arc<JobActions>,
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
@@ -636,6 +642,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             paths,
             build_cache,
             action_archives,
+            grype_database,
             unsynced,
             durability,
         } = setup;
@@ -689,12 +696,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             repositories: announced.repositories,
             queued: Vec::new(),
             action_archives: None,
+            grype_database: None,
             machine: Some(identity.machine()),
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();
         let (docker_disk, disk_receiver) = watch::channel(None);
         let archives = archives::Link::new(action_archives, &config);
+        let grype = grype::Link::new(grype_database, &config);
         let mut engine = Engine {
             clock: Clock::default(),
             sleep: sleep::Sleep::default(),
@@ -750,6 +759,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             records,
             build_cache: build_cache.clone(),
             archives,
+            grype,
             actions: Arc::new(actions.clone()),
             default_branches: BTreeMap::new(),
             ended_uploads: BTreeMap::new(),
@@ -799,6 +809,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         tokio::spawn(disk_target(self.docker.clone(), self.paths.clone(), disk));
         // Stopped when this returns, as `archives` goes with it.
         let archives = self.archives.start(self.github.clone());
+        let grype = match grype::Anchore::new(grype::ANCHORE) {
+            Ok(anchore) => self.grype.start(
+                Arc::new(anchore),
+                Arc::new(grype::Importer::new(self.docker.clone())),
+            ),
+            Err(error) => {
+                warn!("no Grype database: {error}");
+                None
+            }
+        };
         // Ends at a stop, as it waits for one.
         tokio::spawn(JobActions::clone(&self.actions).rerun_faults());
         let control = self.control.clone();
@@ -820,6 +840,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         drop(self);
         if let Some(archives) = archives {
             archives.stop().await;
+        }
+        if let Some(grype) = grype {
+            grype.stop().await;
         }
         let _ = sampler.await;
     }

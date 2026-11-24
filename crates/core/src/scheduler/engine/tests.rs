@@ -2250,6 +2250,7 @@ fn engine_durable(
             },
             build_cache: None,
             action_archives: None,
+            grype_database: None,
             unsynced: dir.0.join("unsynced"),
             durability,
         },
@@ -7937,6 +7938,7 @@ mod cadence;
 mod exit;
 mod governor;
 mod growth;
+mod grype;
 mod invariants;
 mod ledger;
 mod occupant;

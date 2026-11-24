@@ -61,6 +61,12 @@ const ACCEPTED: &[Accepted] = &[
         item: "attention-kind/rerun-refused",
         adr: "0153",
     },
+    // An older client draws the item by its title, as for any kind it does not know.
+    Accepted {
+        reader: Reader::Previous,
+        item: "attention-kind/grype-database",
+        adr: "0160",
+    },
     // An older client reads a new insight kind as `Unknown` and shows its sentence.
     Accepted {
         reader: Reader::Previous,
@@ -352,6 +358,7 @@ documents! {
     new:
     "failure-cause": FailureCause => variants(samples::failure_cause()),
     "archive-failure-kind": ArchiveFailureKind => variants(samples::archive_failure_kind()),
+    "grype-failure-kind": GrypeFailureKind => variants(samples::grype_failure_kind()),
     "wait-cause": WaitCause => variants(samples::wait_cause()),
     "runner-probe": RunnerProbe => variants(samples::runner_probe()),
 }

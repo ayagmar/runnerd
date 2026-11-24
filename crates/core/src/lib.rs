@@ -29,6 +29,8 @@ pub mod docker;
 #[cfg(feature = "host")]
 pub mod github;
 #[cfg(feature = "host")]
+pub mod grype;
+#[cfg(feature = "host")]
 pub mod insights;
 #[cfg(feature = "host")]
 pub mod isolation;
@@ -40,6 +42,8 @@ pub mod record;
 pub mod scheduler;
 #[cfg(feature = "host")]
 pub mod sizing;
+#[cfg(feature = "client")]
+mod ssh;
 #[cfg(feature = "host")]
 pub mod store;
 #[cfg(feature = "host")]
