@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use super::leftovers::Unread;
 use super::records::Undecided;
 use super::unsynced::Recovered;
-use super::{Engagement, Engine, Occupant, Slot};
+use super::{Engagement, Engine, FirstSample, Occupant, Slot};
 use crate::api;
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerState, is_being_removed, is_not_found};
@@ -156,13 +156,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// What a runner container left running by an earlier daemon runs as, from its labels, `caps` and its record.
     async fn adopted(&self, container: &docker::Container, caps: &Caps) -> Occupant {
         let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
+        // Its uptime goes on from its container's start, not from this restart.
+        let started_at = caps.started_at.unwrap_or_else(SystemTime::now);
         Occupant {
             repository: label("runnerd.repository"),
             runner_name: container.name.clone(),
             runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
             container: container.id.clone(),
-            // Its uptime goes on from its container's start, not from this restart.
-            started_at: caps.started_at.unwrap_or_else(SystemTime::now),
+            started_at,
+            first_sample: caps.started_at.map_or(FirstSample::Unwatched, |at| {
+                FirstSample::Awaited {
+                    since: time::ms(at),
+                }
+            }),
             memory: caps.memory,
             cpus: caps.cpus,
             // Missing for a runner without one, and for one an earlier release started, which `other_spec` replaces.

@@ -291,8 +291,6 @@ struct Footprint<'slot> {
     cpus: u64,
     /// What it reserves of the CPU budget, in millicores.
     reserved_cpu: u64,
-    /// When it started, or its start was launched.
-    started_at: SystemTime,
     /// Its job, as admission tells jobs apart.
     key: Option<&'slot Key>,
     /// When it took its job, if this daemon saw it do so.
@@ -309,7 +307,18 @@ enum Stage {
     /// Named and admitted, registering its runner or creating its container: there is nothing to sample yet.
     InFlight,
     /// A runner in its slot, with its container.
-    Placed,
+    Placed(FirstSample),
+}
+
+/// How a placed runner counts until the sampler first reads its container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstSample {
+    /// The sampler watches its container from `since`, in ms by the engine's clock: it counts at its reservation for
+    /// three sample intervals from then.
+    Awaited { since: u64 },
+    /// Nothing samples it yet: the container of a failed start Docker kept, one Docker gave no process to watch or
+    /// failed to inspect, or one adopted without a start time. It counts at its cap until a sample of its own comes.
+    Unwatched,
 }
 
 /// A slot's runner and its container.
@@ -320,6 +329,11 @@ struct Occupant {
     runner_id: u64,
     container: String,
     started_at: SystemTime,
+    /// How it counts until its first sample. A placed runner the sampler watches waits for it from when it took its
+    /// slot, by the engine's clock (`clock::Clock`), not from `started_at`, which its launch stamped before its caches,
+    /// the mirror and its registration; one adopted after a restart, from its container's start. Not kept across a
+    /// restart, nor changed by a reload.
+    first_sample: FirstSample,
     /// Its container's memory cap, which a reload does not change.
     memory: u64,
     /// Its container's CPU limit in millicores, which a reload does not change.
@@ -383,11 +397,10 @@ impl Occupant {
             reserved: self.reserved(),
             cpus: self.cpus,
             reserved_cpu: self.reserved_cpu(),
-            started_at: self.started_at,
             key: self.key(),
             job_found_here: self.job_found_here(),
             basis: self.admission.map(|admission| admission.basis),
-            stage: Stage::Placed,
+            stage: Stage::Placed(self.first_sample),
         }
     }
 
