@@ -34,7 +34,7 @@ The rest of `runnerd.toml`'s keys; [Configuration](../configuration/) has the ru
 |---|---|---|
 | `database` | `$XDG_STATE_HOME/runnerd/runnerd.db` | the [job history](../../concepts/terms/#job-history)'s file |
 | `samples` | `"7d"` | how long a job's CPU and memory samples are kept; totals and peaks outlive them |
-| `logs` | `"30d"` | how long a finished job's log is kept |
+| `logs` | `"30d"` | how long a finished job's log is kept; within about an hour of the job's end, its log is stored deflated, about a fifth of its size |
 | `events` | `"30d"` | how long events are kept for `Last-Event-ID` resumes |
 | `jobs` | `"90d"` | how long a finished job is kept |
 | `log_max` | `"50M"` | the most log kept per job |

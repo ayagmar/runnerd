@@ -62,7 +62,7 @@ impl Disks {
     /// What `root`, Docker's root directory, is on, from the mount that holds it: its file system's block devices,
     /// each a partition's disk, and its btrfs UUID; through a loop device, the disks and file system its backing
     /// file is on. `None` when the mount or its devices can't be read, as without `/proc/self/mountinfo` or sysfs,
-    /// or on a file system without a block device.
+    /// on a file system without a block device, or through a loop device whose backing file can't be read.
     pub fn resolve(paths: &Paths, root: &Path) -> Option<Disks> {
         let mountinfo = std::fs::read_to_string(paths.proc.join("self/mountinfo")).ok()?;
         Disks::under(paths, &mountinfo, root, LOOP_DEPTH)
@@ -79,6 +79,9 @@ impl Disks {
                 let under = Disks::under(paths, mountinfo, &backing, depth.checked_sub(1)?)?;
                 drive.extend(under.drive);
                 btrfs = under.btrfs;
+            } else if disk.join("loop").is_dir() {
+                // A loop device whose backing file cannot be read: what it is on is unknown, not the device itself.
+                return None;
             } else {
                 drive.insert(device.clone());
             }

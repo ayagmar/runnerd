@@ -25,6 +25,9 @@ use crate::sync::lock;
 use crate::time;
 use tracing::warn;
 
+/// Keeps the host's reading of the `budget.changed` event `?1`, if it has one (ADR 0171).
+pub(super) const HOST_READING: &str = concat!(host_reading!(), " AND id = ?1");
+
 /// How long after the host woke GitHub may still fail a job for its sleep, in ms (ADR 0159): it fails a job whose
 /// runner went silent while the host slept, or once the runner reconnects to a session that has ended. A job that
 /// ended later survived the sleep.
@@ -963,6 +966,9 @@ impl Writer<'_> {
                 params![at, body],
             )?;
             let id = self.db.last_insert_rowid();
+            if matches!(event, Event::BudgetChanged { .. }) {
+                self.db.prepare_cached(HOST_READING)?.execute([id])?;
+            }
             let latest = match &event {
                 Event::RepositoryChanged { repository } => {
                     Some((ANNOUNCE_REPOSITORY, &repository.name))
@@ -1409,6 +1415,10 @@ impl Writer<'_> {
         max_bytes: u64,
         announced: &mut Announced,
     ) -> rusqlite::Result<()> {
+        // A packed log is final: a line that comes after it is not kept (ADR 0171).
+        if super::logs::packed(&self.db, job)? {
+            return Ok(());
+        }
         let (mut count, mut bytes, mut truncated): (u64, u64, bool) = self.db.query_row(
             "SELECT log_lines, log_bytes, log_truncated FROM jobs WHERE id = ?1",
             [job],

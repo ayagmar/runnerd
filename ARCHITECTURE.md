@@ -143,7 +143,8 @@ flowchart TB
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
 notifications, each kind of target a `Sender` in a module of its own, `api/doctor_cache` keeps the doctor's last run
 for the config running, and `api/attention` the attention snapshot, each in one worker), `init`, `doctor` (its
-commands run through core's `command`, which kills each one's process group past its deadline or at a stop),
+commands run through core's `command`, which kills each one's process group past its deadline or at a stop; the
+history's and Docker's storage it reads and words through core's `observe::storage`),
 `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
 check), `views` (one per page: overview, history, records, sizing, insights, caches, config, and a job; the navigation
@@ -387,7 +388,7 @@ always returns, so the daemon closes and flushes the history.
 | Doctor's checks and attention | in memory: the doctor's last run in `api/doctor_cache`, the attention snapshot in `api/attention`; a restart starts with the doctor not run and a new `instance` whose revisions count from 1, and forgets why listings failed ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)) |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, each log's outline, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and for a slot alone, and how much of its wait passed while no runnerd ran; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, each log's outline, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and for a slot alone, and how much of its wait passed while no runnerd ran; times in ms. A directory runnerd creates for it, and a database it creates, are made without btrfs's copy-on-write (`observe::storage::no_cow`, [ADR 0171](docs/adr/0171-the-history-packs-final-logs-and-reads-events-by-type.md)) |
 
 ## Invariants
 
@@ -518,6 +519,15 @@ always returns, so the daemon closes and flushes the history.
   `schema.sql`; a test compares a history brought up from 0.0.22's schema with a new one. A read-only look
   (`runnerd doctor`, `simulate`) reads an older history through temporary views
   ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
+- A job's log lines are rows of `log_lines` while its record may grow; pruning packs a final job's lines into
+  deflated `log_packs` and deletes the rows. A job with packs is read from them alone and takes no more lines, and
+  every read of a job's lines goes through `store::logs` in one snapshot. Packing is bounded in bytes per job and per
+  pack; a log past them, or with a row that is not UTF-8 text, stays in rows, and a pack that inflates past its bound
+  or names other lines than its row reads as an error, never as lines. Reads that run every few minutes find events
+  of one type through `events_by_type`, by the expression `store::event_type!` names, and insights read the host's
+  memory from `host_readings`, which the writer keeps beside each `budget.changed` event and a foreign key deletes
+  with it; none of them reads every event, which a test checks with `EXPLAIN QUERY PLAN`
+  ([ADR 0171](docs/adr/0171-the-history-packs-final-logs-and-reads-events-by-type.md)).
 - A wait for a slot is `sizing::Wait::counted`: from queued, or the history's start, to started, less what of it
   passed while no runnerd ran (`jobs.unseen`, which `Store::open` measures from the history's last sign of life,
   recording itself as one). Sizing, insights, activity and stats count it; a job's own page shows its whole wait and

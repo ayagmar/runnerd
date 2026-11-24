@@ -24,7 +24,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0014](0014-host-feature-for-daemon-only-code.md) | Daemon-only code behind core's `host` feature | Accepted |
 | [0015](0015-engine-behind-github-and-docker-traits.md) | The engine calls GitHub and Docker through traits | Accepted |
 | [0016](0016-strict-lints.md) | Strict lints, every exception with a reason | Accepted |
-| [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread | Amended by 0027, 0028, 0073 |
+| [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread | Amended by 0027, 0028, 0073, 0171 |
 | [0018](0018-job-identity-and-logs-from-inside-the-runner.md) | Job identity and logs from inside the runner container | Accepted |
 | [0019](0019-control-commands-through-the-engine.md) | Control commands go through the engine; a reload keeps running jobs | Amended by 0026 |
 | [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login | Amended by 0042, 0043 |
@@ -139,7 +139,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0130](0130-the-budgets-count-what-runs-uses-and-keep-room-for-its-largest-growths.md) | The budgets count what runs uses and keep room for its largest growths | Accepted |
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |
 | [0132](0132-one-attention-list-core-words.md) | One attention list that core words, with a cached doctor and five views | Accepted |
-| [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Amended by 0139 |
+| [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Amended by 0139, 0171 |
 | [0134](0134-a-job-action-is-previewed-then-sent-to-github-once.md) | A job action is previewed, then sent to GitHub once | Accepted |
 | [0135](0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md) | The job history is searched, sorted and laid out by core | Accepted |
 | [0136](0136-the-dashboard-is-laid-out-by-task.md) | The dashboard is laid out by task | Accepted |
@@ -177,4 +177,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0168](0168-the-build-cache-writes-each-byte-once.md) | The build cache writes each byte once | Accepted |
 | [0169](0169-the-history-commits-telemetry-together-and-leases-runner-names.md) | The history commits telemetry together and leases runner names | Accepted |
 | [0170](0170-a-runner-container-skips-work-its-job-does-not-need.md) | A runner container skips work its job does not need | Accepted |
+| [0171](0171-the-history-packs-final-logs-and-reads-events-by-type.md) | The history packs final logs and reads events by type | Accepted |
 | [0172](0172-simulate-names-the-guard-that-held-each-wait.md) | `simulate` names the guard that held each wait | Accepted |
