@@ -6,7 +6,6 @@
 //! write.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,7 +23,7 @@ use crate::github::{JobDetails, JobStep, NamedRun, QueuedJob};
 use crate::record;
 use crate::sync::lock;
 use crate::time;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// How long after the host woke GitHub may still fail a job for its sleep, in ms (ADR 0159): it fails a job whose
 /// runner went silent while the host slept, or once the runner reconnects to a session that has ended. A job that
@@ -215,10 +214,8 @@ enum Stored {
     Log {
         job: u64,
         lines: Vec<String>,
-        from: Option<LogPosition>,
         position: Option<LogPosition>,
         max_bytes: u64,
-        refused: Arc<AtomicBool>,
     },
     Samples(Vec<SampleRecord>),
 }
@@ -231,14 +228,6 @@ impl Stored {
             Stored::Samples(_) => "record samples",
         }
     }
-
-    /// The log chain it belongs to, if it is log lines.
-    fn chain(&self) -> Option<&Arc<AtomicBool>> {
-        match self {
-            Stored::Log { refused, .. } => Some(refused),
-            Stored::Samples(_) => None,
-        }
-    }
 }
 
 /// Why a batch's transaction kept nothing.
@@ -247,13 +236,6 @@ enum Undone {
     Abandoned(rusqlite::Error),
     /// SQLite rolled it back, or a savepoint could not be used, so it is rolled back: nothing of it was kept.
     RolledBack(rusqlite::Error),
-}
-
-/// Refuses the rest of each chain.
-fn refuse<'chain>(chains: impl IntoIterator<Item = &'chain Arc<AtomicBool>>) {
-    for chain in chains {
-        chain.store(true, Ordering::Release);
-    }
 }
 
 /// The events a change announces once it commits.
@@ -797,10 +779,8 @@ impl Writer<'_> {
                 Telemetry::Log {
                     job,
                     lines,
-                    from,
                     position,
                     max_bytes,
-                    refused,
                     backlog,
                 } => {
                     // Its share of the backlog is given back once its transaction is done.
@@ -809,10 +789,8 @@ impl Writer<'_> {
                     stored.push(Stored::Log {
                         job,
                         lines,
-                        from,
                         position,
                         max_bytes,
-                        refused,
                     });
                 }
                 Telemetry::Samples(samples) => {
@@ -854,28 +832,23 @@ impl Writer<'_> {
     /// logged, and the others are kept. Returns each write's events, `None` for one not kept. When SQLite rolled the
     /// whole transaction back, as on a full disk, nothing of it was kept, and each write is tried once more in a
     /// transaction of its own. When it never began, or its commit failed, nothing is tried again: a commit that failed
-    /// may have kept it. The chains of log lines not kept are refused from then on.
+    /// may have kept it.
     fn store_batch(&self, stored: &[Stored]) -> Vec<Option<Vec<EventEnvelope>>> {
-        let mut broken = Vec::new();
         let attempt = (|| {
             // Immediate, so a busy database is waited for: a deferred transaction that read first fails at once.
             let transaction = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)
                 .map_err(Undone::Abandoned)?;
             let mut kept = Vec::with_capacity(stored.len());
             for write in stored {
-                kept.push(self.savepoint(write, &mut broken)?);
+                kept.push(self.savepoint(write)?);
             }
             transaction.commit().map_err(Undone::Abandoned)?;
             Ok(kept)
         })();
         match attempt {
-            Ok(kept) => {
-                refuse(&broken);
-                kept
-            }
+            Ok(kept) => kept,
             Err(Undone::Abandoned(error)) => {
                 warn!("job history: cannot record telemetry: {error}");
-                refuse(stored.iter().filter_map(Stored::chain));
                 stored.iter().map(|_| None).collect()
             }
             Err(Undone::RolledBack(error)) => {
@@ -885,15 +858,7 @@ impl Writer<'_> {
                 stored
                     .iter()
                     .map(|write| {
-                        let mut broken = Vec::new();
-                        let kept = self.transact(write.what(), |announced| {
-                            self.store_write(write, &mut broken, announced)
-                        });
-                        if kept.is_none() {
-                            broken.extend(write.chain().cloned());
-                        }
-                        refuse(&broken);
-                        kept
+                        self.transact(write.what(), |announced| self.store_write(write, announced))
                     })
                     .collect()
             }
@@ -903,17 +868,13 @@ impl Writer<'_> {
     /// Stores one write of a batch in a savepoint of the open transaction, with the durable events it announces.
     /// `Ok(None)` when it failed, logged and rolled back alone; [`Undone::RolledBack`] when the transaction is gone
     /// or a savepoint cannot be used, which leaves the whole transaction to roll back.
-    fn savepoint(
-        &self,
-        write: &Stored,
-        broken: &mut Vec<Arc<AtomicBool>>,
-    ) -> Result<Option<Vec<EventEnvelope>>, Undone> {
+    fn savepoint(&self, write: &Stored) -> Result<Option<Vec<EventEnvelope>>, Undone> {
         self.db
             .execute_batch("SAVEPOINT telemetry")
             .map_err(Undone::RolledBack)?;
         let made = (|| {
             let mut announced = Vec::new();
-            self.store_write(write, broken, &mut announced)?;
+            self.store_write(write, &mut announced)?;
             announced
                 .into_iter()
                 .map(|event| self.store_event(event))
@@ -933,61 +894,21 @@ impl Writer<'_> {
                 self.db
                     .execute_batch("ROLLBACK TO telemetry; RELEASE telemetry")
                     .map_err(Undone::RolledBack)?;
-                broken.extend(write.chain().cloned());
                 Ok(None)
             }
         }
     }
 
-    /// Stores one telemetry write. Log lines of a chain refused before, or that do not start where the job's stored
-    /// log ends, are refused: nothing is stored or announced, and the chain is `broken`.
-    fn store_write(
-        &self,
-        write: &Stored,
-        broken: &mut Vec<Arc<AtomicBool>>,
-        announced: &mut Announced,
-    ) -> rusqlite::Result<()> {
+    /// Stores one telemetry write.
+    fn store_write(&self, write: &Stored, announced: &mut Announced) -> rusqlite::Result<()> {
         match write {
             Stored::Samples(samples) => self.samples(samples, announced),
             Stored::Log {
                 job,
                 lines,
-                from,
                 position,
                 max_bytes,
-                refused,
-            } => {
-                if refused.load(Ordering::Acquire)
-                    || broken.iter().any(|chain| Arc::ptr_eq(chain, refused))
-                {
-                    return Ok(());
-                }
-                // No row to store them in, as for a job neither a listing nor its runner's record named: nothing is
-                // stored, as before, and the chain goes on. Once the row comes, the next lines do not start where its
-                // empty log does, so the capture starts again from the start.
-                let exists = self
-                    .db
-                    .query_row("SELECT 1 FROM jobs WHERE id = ?1", [job], |_| Ok(()))
-                    .optional()?
-                    .is_some();
-                if !exists {
-                    debug!("job history: no job {job} to store log lines in");
-                    return Ok(());
-                }
-                if let Some(from) = from {
-                    let stored = read::log_position(&self.db, *job)?;
-                    if stored != *from {
-                        warn!(
-                            "job history: job {job}'s log is stored to page {} at byte {}, not where its next lines \
-                             start, page {} at byte {}: its capture starts again",
-                            stored.page, stored.offset, from.page, from.offset
-                        );
-                        broken.push(refused.clone());
-                        return Ok(());
-                    }
-                }
-                self.log(*job, lines, *position, *max_bytes, announced)
-            }
+            } => self.log(*job, lines, *position, *max_bytes, announced),
         }
     }
 

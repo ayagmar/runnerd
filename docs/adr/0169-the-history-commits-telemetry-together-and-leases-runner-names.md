@@ -1,7 +1,8 @@
 # 0169. The history commits telemetry together and leases runner names
 
 Status: **Accepted** (2026-11-24). Amends [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md): after a
-restart, runner names run ahead of the clock, by up to five minutes per restart that starts one. No wire or schema change.
+restart, runner names run ahead of the clock: each name lease reaches 300 s past the second it was taken for. No wire or
+schema change.
 
 ## Context
 
@@ -28,16 +29,11 @@ four noisy runners through `Store` wrote 85 MB in two minutes, about 61 GB a day
   tried once more in a transaction of its own, in order. When the transaction never began, or its commit failed, which
   may have kept it, nothing is tried again. Events go out after the commit, in the order the writes were sent, only for
   writes kept.
-- **Host samples do not wait on the database.** Their live events are taken out of the batch before any SQL and go
-  out in order with the rest, whatever becomes of the stored writes; a batch of host samples alone opens no
-  transaction. Storing the held ones, a minute's worth at a time, is its own transaction after.
-- **A capture's log is a chain.** Each capture's lines carry where they start in the runner's log (`LogChain`). The
-  writer stores them only if the job's stored position is that start, and no earlier line of the chain was refused;
-  otherwise it refuses them, storing and announcing nothing, and refuses the rest of the chain. The capture then
-  breaks off, and `recapture` starts it again from the stored position, so a segment that failed is captured again
-  rather than skipped. Lines a capture saw before its job are dropped, as before, and its next lines are not checked. Lines of a job
-  the history has no row for are dropped, as before, without breaking the chain; once the row comes, the next lines
-  do not start where its empty log does, so the capture starts again from the start.
+- **Host samples are not lost with their batch.** Their live events are taken out of the batch before any SQL and go
+  out whatever becomes of the stored writes. A batch of host samples alone opens no transaction and waits on no lock.
+  A batch that also holds stored writes sends every event, host samples included, in the order the writes were sent,
+  once its transaction is done: its host samples wait as long as the database does, up to the 5 s busy timeout when
+  another connection holds it. Storing the held ones, a minute's worth at a time, is its own transaction after.
 - **Counters are written when they rise.** A runner's `ooms`, `local_ooms` and `sock_throttled` are written only when
   unknown (`NULL`) or lower than the sample's count. The first sample of a kernel that counts writes 0 once, so
   `hit_cap` and `own_cap` still read `Some(false)` rather than unknown.
@@ -56,14 +52,16 @@ four noisy runners through `Store` wrote 85 MB in two minutes, about 61 GB a day
 
 - The same replay writes 25 MB in two minutes instead of 85 MB. A 2 s window would write 19 MB; 1 s keeps the live
   log and samples within about a second.
-- A process crash loses the batch being gathered, up to about a second of telemetry, with its log position, so a
-  capture after a restart reads those lines again. A power loss can also take back telemetry committed since the last
+- A process crash loses every write not yet committed: the batch being gathered, up to about a second of telemetry,
+  and whatever waits in the queue behind it or behind a transaction that waits on the database, which the window does
+  not bound. Log lines lost so go with their log position, so a capture after a restart reads those lines again. A power loss can also take back telemetry committed since the last
   sync, as `synchronous = NORMAL` always could; the name lease is synced and survives it.
 - Each lease reaches 300 s past the second it was taken for. A restart that starts a runner names past the last
   lease and takes a new one, so after several quick restarts names can run further ahead of the clock than that. The
   second in a name only tells names apart.
-- The WAL is checkpointed every 32 MiB, and cut back to 64 MiB after a checkpoint. Neither is a cap: a reader that
-  holds an old snapshot keeps the WAL from being reused, as before.
+- SQLite tries a checkpoint once the WAL holds 8192 pages (32 MiB), and cuts the file back to 64 MiB when it next
+  resets the WAL to reuse it, not after every checkpoint. Neither is a cap: a reader that holds an old snapshot keeps
+  the WAL from being reused, as before.
 - `meta.runner_named` stays a second at or past every one named, which any runnerd reads with the same query. That
   is all this keeps compatible: a 0.1.5 daemon still refuses this history in place, which is at schema 32, past the
   28 it reads.

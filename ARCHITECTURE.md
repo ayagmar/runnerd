@@ -537,8 +537,7 @@ always returns, so the daemon closes and flushes the history.
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)). Telemetry sent within a second, log lines and
   samples, commits in one transaction, each write in its own savepoint; any other write ends the batch and comes next,
-  and events go out after the commit. A capture's log lines are stored only where the job's stored log ends. The
-  writer grants each runner's name past every one the history knows, and keeps a lease a few minutes ahead, synced
+  and events go out after the commit. The writer grants each runner's name past every one the history knows, and keeps a lease a few minutes ahead, synced
   once per lease
   ([ADR 0169](docs/adr/0169-the-history-commits-telemetry-together-and-leases-runner-names.md)).
 - A job's log outline (`store::outline`) is written in the transaction that stores the lines it describes, from the
