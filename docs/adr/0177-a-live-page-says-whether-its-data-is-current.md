@@ -38,7 +38,10 @@ on the page was.
   refused or stopped. It holds when the page's data is from, the page's render or the stream's last delivery. Only a
   render of the daemon's data sets it: one after a read, or after an event whose data the page takes in, a sample or
   a log line (`Delivery::Fresh`). A render after events the page ignores moves the page's clock and nothing else
-  (`Delivery::Tick`), and a keep-alive sends nothing.
+  (`Delivery::Tick`), and a keep-alive sends nothing. A sample counts only when the page kept it: the overview
+  drops one of a job it does not follow. The page carries the time across a reconnect in `shown.fed`, which only a
+  delivery sets, apart from `shown.at`, its clock, which every render sets; a stream that connects starts its feed
+  from `fed`.
   The stream sends the `_feed` signal when it connects, with each retry, with each delivery and when it ends.
 - **The badge shows the feed, and what only the page knows.** The stream's state and words come from `Feed`. What
   the page's request does is `_conn`, set from Datastar's `datastar-fetch` events of the badge's element, not from

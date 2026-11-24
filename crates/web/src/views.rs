@@ -167,9 +167,11 @@ pub(crate) struct Live<'url> {
 }
 
 impl Live<'_> {
-    /// The `shown` signal as a Datastar expression.
+    /// The `shown` signal as a Datastar expression: `at`, which live charts follow and each render moves, and `fed`,
+    /// when the page's data is from, which only a render of the daemon's data moves (ADR 0177).
     fn signals(&self) -> String {
-        let mut signals = format!("{{shown: {{at: {}", self.at);
+        // The page's data is from its render.
+        let mut signals = format!("{{shown: {{at: {}, fed: {}", self.at, self.at);
         if let Some(log) = self.log {
             let _ = write!(signals, ", log: {log}");
         }

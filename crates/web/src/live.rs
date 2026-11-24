@@ -123,7 +123,9 @@ async fn run_page(
     shown: Option<Shown>,
 ) {
     let what = page.name();
-    let mut feed = Feed::connecting(shown.as_ref().map(|shown| shown.at));
+    // When the page's data is from, not when it was last rendered: a render that only moved its clock delivered
+    // nothing.
+    let mut feed = Feed::connecting(shown.as_ref().and_then(|shown| shown.fed));
     if send_feed(&patches, &feed).await.is_err() {
         done.store(true, Ordering::Release);
         return;
@@ -234,11 +236,13 @@ struct Page {
     shown: Shown,
 }
 
-/// The time a page was rendered at, and a digest of each region it had then, by id; on a job's page, also the
-/// number of its last log line.
+/// The time a page was rendered at, when its data is from (`fed`, the last render that delivered the daemon's data;
+/// a render that only moved the clock leaves it), and a digest of each region it had then, by id; on a job's page,
+/// also the number of its last log line.
 #[derive(Debug, Deserialize)]
 struct Shown {
     at: u64,
+    fed: Option<u64>,
     log: Option<u64>,
     #[serde(flatten)]
     regions: HashMap<String, String>,
@@ -404,11 +408,12 @@ impl Sent {
             }
         }
         let mut signals = feed::connected();
-        signals.insert("shown".to_owned(), shown.into());
         if delivery == Delivery::Fresh {
             feed.delivered(at);
+            shown.insert("fed".to_owned(), at.into());
             signals.insert("_feed".to_owned(), feed.json());
         }
+        signals.insert("shown".to_owned(), shown.into());
         let signals = serde_json::Value::Object(signals).to_string();
         patches
             .send(PatchSignals::new(signals).write_as_axum_sse_event())
@@ -487,12 +492,16 @@ enum Again {
     Attention,
 }
 
-/// What the overview reads again after a batch of events.
+/// What a batch of events did to the overview: what to read again, and whether it took in a sample, the daemon's
+/// data, which makes the next render a delivery.
 #[derive(Debug, Default)]
-struct Stale(std::collections::BTreeSet<Again>);
+struct Stale {
+    reads: std::collections::BTreeSet<Again>,
+    sampled: bool,
+}
 
 impl Stale {
-    /// Adds the batch's samples to `data`, and says what to read again: what an event says changed, the status when a
+    /// Adds the batch's samples to `data`, says whether it kept any, and says what to read again: what an event says changed, the status when a
     /// host sample comes and it is `status_old`, and the day's figures when they are `day_old`.
     fn of(
         batch: Vec<Event>,
@@ -502,19 +511,23 @@ impl Stale {
     ) -> Stale {
         let mut stale = Stale::default();
         if day_old {
-            stale.0.insert(Again::Day);
+            stale.reads.insert(Again::Day);
         }
         for event in batch {
             match event {
-                Event::JobSample { job, sample } => data.add_job_sample(job, sample),
+                // A sample of a job the overview does not follow is dropped: it delivers nothing.
+                Event::JobSample { job, sample } => {
+                    stale.sampled |= data.add_job_sample(job, sample);
+                }
                 Event::HostSample { sample } => {
                     data.add_host_sample(sample);
+                    stale.sampled = true;
                     if status_old {
-                        stale.0.insert(Again::Status);
+                        stale.reads.insert(Again::Status);
                     }
                 }
                 Event::AttentionChanged { .. } => {
-                    stale.0.insert(Again::Attention);
+                    stale.reads.insert(Again::Attention);
                 }
                 Event::LogLine { .. }
                 | Event::CacheReseeded { .. }
@@ -529,23 +542,23 @@ impl Stale {
                 | Event::ProfileRemoved { .. }
                 | Event::RepositoryChanged { .. }
                 | Event::RepositoryRemoved { .. } => {
-                    stale.0.insert(Again::Status);
+                    stale.reads.insert(Again::Status);
                 }
                 Event::JobStep { .. } => {
-                    stale.0.insert(Again::Jobs);
+                    stale.reads.insert(Again::Jobs);
                 }
                 // The status's queue and slots follow jobs.
                 Event::SlotChanged { .. } => {
-                    stale.0.insert(Again::Jobs);
-                    stale.0.insert(Again::Queue);
-                    stale.0.insert(Again::Status);
+                    stale.reads.insert(Again::Jobs);
+                    stale.reads.insert(Again::Queue);
+                    stale.reads.insert(Again::Status);
                 }
                 // The health figures count the day's jobs too.
                 Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
-                    stale.0.insert(Again::Jobs);
-                    stale.0.insert(Again::Queue);
-                    stale.0.insert(Again::Status);
-                    stale.0.insert(Again::Day);
+                    stale.reads.insert(Again::Jobs);
+                    stale.reads.insert(Again::Queue);
+                    stale.reads.insert(Again::Status);
+                    stale.reads.insert(Again::Day);
                 }
             }
         }
@@ -553,12 +566,12 @@ impl Stale {
     }
 
     fn has(&self, read: Again) -> bool {
-        self.0.contains(&read)
+        self.reads.contains(&read)
     }
 
     /// Whether anything is read again.
     fn any(&self) -> bool {
-        !self.0.is_empty()
+        !self.reads.is_empty()
     }
 }
 
@@ -616,9 +629,6 @@ async fn run_overview(app: &App, patches: &Patches, feed: &mut Feed, shown: Opti
         let first = next_event(&mut events, patches, &mut stopping).await?;
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await?;
-        let sampled = batch
-            .iter()
-            .any(|event| matches!(event, Event::JobSample { .. } | Event::HostSample { .. }));
         let stale = Stale::of(
             batch,
             &mut data,
@@ -648,7 +658,7 @@ async fn run_overview(app: &App, patches: &Patches, feed: &mut Feed, shown: Opti
         // Which queued jobs have a page: again when the queue may have changed, never for a step alone, and when the
         // status shows a job the last read did not ask about or that read failed.
         let local = stale.has(Again::Queue) || data.local.stale(&data.status);
-        delivery = Delivery::of(sampled || local || stale.any());
+        delivery = Delivery::of(stale.sampled || local || stale.any());
         if local {
             data.local = read!(
                 feed,

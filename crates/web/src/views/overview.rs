@@ -164,11 +164,13 @@ impl Overview {
         Ok(())
     }
 
-    /// Adds a live sample of a running job.
-    pub(crate) fn add_job_sample(&mut self, job: u64, sample: Sample) {
-        if let Some(samples) = self.samples.get_mut(&job) {
-            samples.push(sample);
-        }
+    /// Adds a live sample of a running job the overview follows; whether it did.
+    pub(crate) fn add_job_sample(&mut self, job: u64, sample: Sample) -> bool {
+        let Some(samples) = self.samples.get_mut(&job) else {
+            return false;
+        };
+        samples.push(sample);
+        true
     }
 
     /// Adds a live sample of the slice, dropping those older than the window and its margin.

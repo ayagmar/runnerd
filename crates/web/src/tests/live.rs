@@ -4,9 +4,12 @@
 use std::time::Duration;
 
 use http_body_util::BodyExt;
-use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Step};
+use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Sample, Step};
 
-use super::{CURRENT, DELIVERED, Dashboard, LEDGER_RUNNING, NOW, ShownLog, read_until, signals_of};
+use super::{
+    CURRENT, DELIVERED, Dashboard, LEDGER_RUNNING, NOW, ShownLog, page_signals, query, read_until,
+    signals_of,
+};
 
 impl Dashboard {
     fn send_event(&self, event: Event) {
@@ -362,4 +365,94 @@ async fn a_dropped_read_of_the_savings_is_read_again() {
     dashboard.send_event(Event::JobFinished { job: finished });
     let recovery = read_until(&mut stream, |text| text.contains(CURRENT)).await;
     assert_eq!(states(&recovery), ["retrying", "current"], "{recovery}");
+}
+
+/// Applies the `shown` signal of each patch in `text` to `shown`, as the page keeps it.
+fn apply_shown(shown: &mut serde_json::Value, text: &str) {
+    for json in text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: signals "))
+    {
+        let Ok(signals) = serde_json::from_str::<serde_json::Value>(json) else {
+            continue;
+        };
+        if let Some(patch) = signals.get("shown").and_then(serde_json::Value::as_object) {
+            for (key, value) in patch {
+                shown[key] = value.clone();
+            }
+        }
+    }
+}
+
+/// A page that connected again after a render that only moved its clock said its data was from that render.
+#[tokio::test]
+async fn a_page_that_connects_again_after_a_render_that_delivered_nothing_keeps_when_its_data_is_from()
+ {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let (page, url) = dashboard.job_page(&cookie).await;
+    let mut shown = page_signals(&page)["shown"].clone();
+    let mut stream = dashboard
+        .stream(&cookie, &format!("{url}?{}", signals_of(&page)))
+        .await;
+    apply_shown(
+        &mut shown,
+        &read_until(&mut stream, |text| text.contains(DELIVERED)).await,
+    );
+    let fed = shown["fed"].as_u64().unwrap();
+    // A second on, a line the page has already: the stream ignores it, and the render only moves the clock.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    dashboard.send_event(Event::LogLine {
+        job: LEDGER_RUNNING,
+        line: 0,
+        text: "a line the page has".to_owned(),
+    });
+    let tick = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    assert!(feeds(&tick).is_empty(), "{tick}");
+    apply_shown(&mut shown, &tick);
+    assert!(
+        shown["at"].as_u64().unwrap() > fed,
+        "the clock moved: {shown}"
+    );
+    drop(stream);
+    // The page connects again with what it shows; its first read fails, so nothing new is delivered yet.
+    dashboard.drop_reads(&format!("/v1/jobs/{LEDGER_RUNNING}"), 1);
+    let retried = serde_json::json!({ "shown": shown });
+    let mut again = dashboard
+        .stream(&cookie, &format!("{url}?{}", query(&retried)))
+        .await;
+    let before = read_until(&mut again, |text| text.contains(r#""state":"retrying""#)).await;
+    assert_eq!(states(&before), ["awaiting", "retrying"], "{before}");
+    for feed in feeds(&before) {
+        assert_eq!(
+            feed["at"].as_u64(),
+            Some(fed),
+            "the data is from the last delivery, not the last render: {feed}"
+        );
+    }
+}
+
+/// A sample of a job the overview does not follow, which it drops, counted as a delivery.
+#[tokio::test]
+async fn a_sample_of_a_job_the_overview_does_not_follow_delivers_nothing() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    // Sent at once, before the day's figures are a second old and read again.
+    dashboard.send_event(Event::JobSample {
+        job: 999,
+        sample: Sample {
+            at: NOW + 2,
+            cpu: 1000,
+            memory: 1 << 30,
+            network_received: 0,
+            network_sent: 0,
+        },
+    });
+    let tick = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    assert!(
+        feeds(&tick).is_empty(),
+        "a dropped sample is no delivery: {tick}"
+    );
 }

@@ -1681,6 +1681,7 @@ fn page_signals(page: &str) -> serde_json::Value {
     // The page writes a JavaScript object.
     let json = signals
         .replace("{shown: {at:", r#"{"shown": {"at":"#)
+        .replace(", fed:", r#", "fed":"#)
         .replace(", log:", r#", "log":"#)
         .replace('\'', "\"");
     serde_json::from_str(&json).unwrap()
