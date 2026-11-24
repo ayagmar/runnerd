@@ -182,3 +182,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0173](0173-a-drain-survives-a-restart.md) | A drain survives a restart | Accepted |
 | [0174](0174-every-waiting-job-is-a-row-of-the-queues-page.md) | Every waiting job is a row of the queue's page | Accepted |
 | [0175](0175-the-list-of-machines-fills-each-machine-as-it-answers.md) | The list of machines fills each machine as it answers | Accepted |
+| [0176](0176-a-captured-page-goes-only-once-its-lines-commit.md) | A captured page goes only once its lines commit | Accepted |

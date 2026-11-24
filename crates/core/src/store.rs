@@ -371,8 +371,8 @@ pub struct SlotJob {
     pub key: crate::admission::Key,
 }
 
-/// Where a job's log capture continues: the runner's page file and the byte offset in it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where a job's log capture continues: the runner's page file and the byte offset in it. Ordered as the log is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogPosition {
     /// The page number, from 1.
     pub page: u64,
@@ -553,6 +553,43 @@ enum Write {
     Flush(oneshot::Sender<()>),
 }
 
+/// A run of a job's log lines a capture read, from where the run it read before ended (ADR 0176).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogSegment {
+    /// The job.
+    pub job: u64,
+    /// The lines, without their line ends.
+    pub lines: Vec<String>,
+    /// Where they start: the history stores them only if its log of the job ends exactly there.
+    pub from: LogPosition,
+    /// Where the capture resumes after them.
+    pub to: LogPosition,
+    /// The job's log keeps at most this many bytes; the rest is cut, as `Store::log` cuts it.
+    pub max_bytes: u64,
+    /// Bytes of the log are missing after these lines: the history stores [`LOG_GAP`] there, which `max_bytes` does
+    /// not count, so a loss never reads as a cut.
+    pub missing: bool,
+}
+
+/// The line that stands where bytes of a job's log are missing (ADR 0176): the runner removed them before the
+/// capture kept them. Not a cut: `log_max` cuts a log with no line of its own.
+pub const LOG_GAP: &str =
+    "[runnerd: lines are missing here: the runner removed them before runnerd kept them]";
+
+/// What became of a [`LogSegment`], once the writer's transaction is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appended {
+    /// Committed: the history's log of the job reaches the segment's end.
+    Stored,
+    /// The job's log keeps nothing more: it reached its `max_bytes`, with this segment or before, or it is packed as
+    /// final (ADR 0171). Intentional, not a loss.
+    Full,
+    /// Not known to be stored: the history's log did not end where the segment starts, as when an earlier segment
+    /// failed, or the segment did not end past where it starts, or its write failed, or its commit failed and may have kept it. Only the history's stored position
+    /// says where the log ends.
+    Refused,
+}
+
 /// The writes that come every few seconds while runners run: the writer commits those sent close together in one
 /// transaction, each in its own savepoint, so a busy host commits a few times a second rather than once per write.
 #[derive(Debug)]
@@ -560,14 +597,29 @@ enum Telemetry {
     Log {
         job: u64,
         lines: Vec<String>,
-        /// Where the capture resumes once these lines are stored; `None` for all but the last part of a batch.
-        position: Option<LogPosition>,
+        cursor: Cursor,
         max_bytes: u64,
         /// The lines' share of `LOG_BACKLOG`, given back once they are stored.
         backlog: OwnedSemaphorePermit,
     },
     Samples(Vec<SampleRecord>),
     HostSample(api::HostSample),
+}
+
+/// How a write of log lines moves the history's stored position of its job's log.
+#[derive(Debug)]
+enum Cursor {
+    /// `Store::log`: the lines are appended wherever the log ends; the position is where the capture resumes once
+    /// they are stored, `None` for all but the last part of a batch.
+    Unchecked(Option<LogPosition>),
+    /// `Store::append_log`: the lines are stored only where the log ends at `from`, and then it ends at `to`; `done`
+    /// is told what became of them once the transaction is done.
+    Segment {
+        from: LogPosition,
+        to: LogPosition,
+        missing: bool,
+        done: oneshot::Sender<Appended>,
+    },
 }
 
 /// What the notifier records.
@@ -800,7 +852,9 @@ impl Store {
         self.send(Write::Lost { job, at });
     }
 
-    /// Appends log lines to a job, up to `max_bytes` per job, and records where the capture continues. Waits while
+    /// Appends log lines to a job wherever its log ends, up to `max_bytes` per job, and records where the capture
+    /// continues; a capture uses [`Store::append_log`], which checks where the log ends and says when the lines are
+    /// stored. Waits while
     /// `LOG_BACKLOG` bytes of lines are waiting to be stored; a larger batch goes in parts, each waiting its turn.
     pub async fn log(&self, job: u64, lines: Vec<String>, position: LogPosition, max_bytes: u64) {
         let size = |line: &String| line.len() as u64 + 1;
@@ -832,7 +886,7 @@ impl Store {
             self.send(Write::Telemetry(Telemetry::Log {
                 job,
                 lines: part,
-                position: last.then_some(position),
+                cursor: Cursor::Unchecked(last.then_some(position)),
                 max_bytes,
                 backlog,
             }));
@@ -840,6 +894,52 @@ impl Store {
                 return;
             }
         }
+    }
+
+    /// Appends a capture's segment of a job's log, committed with the telemetry around it, and returns what becomes of
+    /// it once its transaction is done. Unlike [`Store::log`], it is stored only where the history's log of the job
+    /// ends at `segment.from`, so a segment never lands past one that failed, and never in parts. Waits while
+    /// `LOG_BACKLOG` bytes of lines are waiting to be stored; a segment larger than that waits for the whole backlog.
+    /// Sending is not storing: only [`Appended::Stored`] says the lines are in the history.
+    pub async fn append_log(&self, segment: LogSegment) -> oneshot::Receiver<Appended> {
+        let (done, appended) = oneshot::channel();
+        let LogSegment {
+            job,
+            mut lines,
+            from,
+            to,
+            max_bytes,
+            missing,
+        } = segment;
+        for line in &mut lines {
+            // As `log` cuts it: no line takes the whole backlog.
+            if line.len() as u64 + 1 > LOG_BACKLOG {
+                let mut end = usize::try_from(LOG_BACKLOG / 2).unwrap_or(usize::MAX);
+                while !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                line.truncate(end);
+            }
+        }
+        let bytes: u64 = lines.iter().map(|line| line.len() as u64 + 1).sum();
+        let share = u32::try_from(bytes.clamp(1, LOG_BACKLOG)).unwrap_or(u32::MAX);
+        // The semaphore is never closed; a dropped `done` reads as refused.
+        let Ok(backlog) = self.backlog.clone().acquire_many_owned(share).await else {
+            return appended;
+        };
+        self.send(Write::Telemetry(Telemetry::Log {
+            job,
+            lines,
+            cursor: Cursor::Segment {
+                from,
+                to,
+                missing,
+                done,
+            },
+            max_bytes,
+            backlog,
+        }));
+        appended
     }
 
     /// Records samples of runner containers.

@@ -970,6 +970,14 @@ struct DockerState {
     slot_captures: HashMap<usize, String>,
     /// The capture commands run: container, page, offset.
     captured: Vec<(String, String, String)>,
+    /// What the daemon wrote to the log captures' stdin, by container: the pages the history committed.
+    capture_input: HashMap<String, String>,
+    /// How writes to log captures' stdin fault next, as when a script is gone or stalled while its output stays open.
+    capture_input_fault: CaptureInputFault,
+    /// Distinct ack payloads the daemon attempted to write to a log capture's stdin.
+    capture_input_attempts: Vec<String>,
+    /// Containers whose log capture runs the real capture script, over a diagnostic directory of the test's.
+    script_captures: HashMap<String, ScriptCapture>,
     /// How many log captures fail to start next, as when the Engine does not answer.
     fail_execs: u32,
     /// How many of the next log captures print what they have and then break off, as when Docker drops an exec
@@ -1281,6 +1289,177 @@ enum Outage {
 
 #[derive(Clone, Default)]
 struct FakeDocker(Arc<Mutex<DockerState>>);
+
+/// A container whose capture runs the real capture script over `diag` in place of the runner's `_diag`.
+#[derive(Debug, Clone)]
+struct ScriptCapture {
+    diag: std::path::PathBuf,
+    /// Once the script prints this, its output ends after that chunk, as when the container stops just then; the
+    /// script itself runs on, as the container does.
+    end_after: Option<String>,
+}
+
+/// The real capture script, run by bash: its stdout as Docker streams it, which kills the script once dropped.
+struct ScriptOutput {
+    child: std::process::Child,
+    chunks: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    end_after: Option<String>,
+    ended: bool,
+}
+
+impl futures_util::Stream for ScriptOutput {
+    type Item = Result<Vec<u8>, docker::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.ended {
+            return std::task::Poll::Ready(None);
+        }
+        match self.chunks.poll_recv(context) {
+            std::task::Poll::Ready(Some(chunk)) => {
+                if let Some(end) = &self.end_after
+                    && String::from_utf8_lossy(&chunk).contains(end.as_str())
+                {
+                    self.ended = true;
+                }
+                std::task::Poll::Ready(Some(Ok(chunk)))
+            }
+            other => other.map(|chunk| chunk.map(Ok)),
+        }
+    }
+}
+
+impl Drop for ScriptOutput {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The real capture script's stdin.
+struct ScriptInput(std::process::ChildStdin);
+
+impl tokio::io::AsyncWrite for ScriptInput {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        written: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(std::io::Write::write(&mut self.0, written))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(std::io::Write::flush(&mut self.0))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Runs `command`, the capture's, as `docker exec` would in a container whose `_diag` is `script.diag`.
+fn run_script(script: &ScriptCapture, command: &[String]) -> docker::Fed {
+    let mut command = command.to_vec();
+    command[2] = command[2].replace(
+        crate::observe::capture::DIAG,
+        &script.diag.to_string_lossy(),
+    );
+    let mut child = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let input = ScriptInput(child.stdin.take().unwrap());
+    let mut stdout = child.stdout.take().unwrap();
+    let (send, chunks) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(read @ 1..) = std::io::Read::read(&mut stdout, &mut buffer) {
+            if send.send(buffer[..read].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    docker::Fed {
+        output: ScriptOutput {
+            child,
+            chunks,
+            end_after: script.end_after.clone(),
+            ended: false,
+        }
+        .boxed(),
+        input: Box::pin(input),
+    }
+}
+
+/// Fault injected into `CaptureInput::poll_write`.
+#[derive(Default)]
+enum CaptureInputFault {
+    #[default]
+    None,
+    /// Fail the next `n` writes with `BrokenPipe`.
+    Fail(u32),
+    /// Leave every write pending forever.
+    Stall,
+}
+
+/// A log capture's stdin, which keeps what the daemon writes in `DockerState::capture_input`.
+struct CaptureInput {
+    docker: Arc<Mutex<DockerState>>,
+    container: String,
+}
+
+impl tokio::io::AsyncWrite for CaptureInput {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        written: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let mut state = self.docker.lock().unwrap();
+        let payload = String::from_utf8_lossy(written).into_owned();
+        if state.capture_input_attempts.last() != Some(&payload) {
+            state.capture_input_attempts.push(payload);
+        }
+        match &mut state.capture_input_fault {
+            CaptureInputFault::Stall => return std::task::Poll::Pending,
+            CaptureInputFault::Fail(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            CaptureInputFault::Fail(_) | CaptureInputFault::None => {}
+        }
+        state
+            .capture_input
+            .entry(self.container.clone())
+            .or_default()
+            .push_str(&String::from_utf8_lossy(written));
+        std::task::Poll::Ready(Ok(written.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
 
 impl FakeDocker {
     fn calls(&self) -> Vec<String> {
@@ -1844,6 +2023,36 @@ impl DockerApi for FakeDocker {
             .boxed());
         }
         Ok(futures_util::stream::iter([Ok(output.unwrap_or_default().into_bytes())]).boxed())
+    }
+
+    async fn exec_fed(
+        &self,
+        container: &str,
+        command: Vec<String>,
+    ) -> Result<docker::Fed, docker::Error> {
+        let script = self
+            .0
+            .lock()
+            .unwrap()
+            .script_captures
+            .get(container)
+            .cloned();
+        if let Some(script) = script {
+            self.outage().await?;
+            let mut state = self.0.lock().unwrap();
+            state.exec_trace.push(format!("exec {container}"));
+            state
+                .captured
+                .push((container.to_owned(), command[4].clone(), command[5].clone()));
+            return Ok(run_script(&script, &command));
+        }
+        Ok(docker::Fed {
+            output: self.exec(container, command).await?,
+            input: Box::pin(CaptureInput {
+                docker: self.0.clone(),
+                container: container.to_owned(),
+            }),
+        })
     }
 
     async fn image_present(&self, image: &str) -> Result<bool, docker::Error> {
@@ -8215,56 +8424,13 @@ async fn a_capture_started_again_that_reached_log_max_is_not_started_again_while
     assert!(job.log.truncated, "job 1's log stops at log_max");
 }
 
-#[tokio::test]
-async fn a_broken_capture_resumes_from_the_later_of_where_it_stored_and_what_the_history_has() {
-    let github = FakeGithub::default();
-    let docker = FakeDocker::default();
-    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 6\nhello\n");
-    {
-        let mut state = docker.0.lock().unwrap();
-        state.fail_execs = 1;
-        state.break_captures = 1;
-    }
-    let (mut engine, handle, _dir) = engine(&github, &docker);
-    engine.recover().await.unwrap();
-    until_captures_end(&engine).await;
-    engine.tick(Shutdown::No).await;
-    until_log_lines(&handle, 1, 1).await;
-    until_captures_end(&engine).await;
-    engine.tick(Shutdown::No).await;
-    let last_start = || {
-        let state = docker.0.lock().unwrap();
-        let (_, page, offset) = state.captured.last().unwrap().clone();
-        (page, offset)
-    };
-    assert_eq!(last_start(), ("1".to_owned(), "0".to_owned()));
-
-    // The history has page 1 up to byte 6. The capture stored further, which the store has not written yet.
-    engine.set_recapture_resumes(crate::store::LogPosition {
-        page: 1,
-        offset: 12,
-    });
-    docker.0.lock().unwrap().break_captures = 1;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(5)).await;
-    engine.tick(Shutdown::No).await;
-    assert_eq!(last_start(), ("1".to_owned(), "12".to_owned()));
-
-    // Now the history is the further one.
-    until_captures_end(&engine).await;
-    engine.tick(Shutdown::No).await;
-    engine.set_recapture_resumes(crate::store::LogPosition { page: 1, offset: 0 });
-    tokio::time::advance(Duration::from_secs(60)).await;
-    engine.tick(Shutdown::No).await;
-    assert_eq!(last_start(), ("1".to_owned(), "6".to_owned()));
-}
-
 mod access;
 mod admission;
 mod archives;
 mod battery;
 mod build_cache;
 mod cadence;
+mod capture;
 mod exit;
 mod governor;
 mod growth;

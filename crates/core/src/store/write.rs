@@ -5,6 +5,7 @@
 //! samples, commits in one transaction, each write in its own savepoint, in the order it was sent among every other
 //! write.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,8 +16,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::outline::Outlining;
 use super::read::{self, secs};
 use super::{
-    Downtime, Downtimes, HOST_SAMPLE_BATCH, LOG_BACKLOG, LogPosition, MirrorPosition, Resolution,
-    RunnerRecord, SampleRecord, Telemetry, Write, logged,
+    Appended, Cursor, Downtime, Downtimes, HOST_SAMPLE_BATCH, LOG_BACKLOG, LOG_GAP, LogPosition,
+    MirrorPosition, Resolution, RunnerRecord, SampleRecord, Telemetry, Write, logged,
 };
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, NamedRun, QueuedJob};
@@ -217,10 +218,25 @@ enum Stored {
     Log {
         job: u64,
         lines: Vec<String>,
-        position: Option<LogPosition>,
+        at: At,
         max_bytes: u64,
+        /// What its last try did, which counts only if that try was kept.
+        appended: Cell<Appended>,
     },
     Samples(Vec<SampleRecord>),
+}
+
+/// Where a write of log lines goes in its job's log.
+#[derive(Clone, Copy)]
+enum At {
+    /// Wherever the log ends; then the capture resumes at the position, if the write has one.
+    End(Option<LogPosition>),
+    /// Only where the log ends at `from`; then it ends at `to`, after a gap's line if bytes are `missing`.
+    Segment {
+        from: LogPosition,
+        to: LogPosition,
+        missing: bool,
+    },
 }
 
 impl Stored {
@@ -500,7 +516,7 @@ impl Writer<'_> {
     /// change fails, the jobs keep their waits as they were, and the session goes on.
     fn slept(&mut self, downtime: Downtime) {
         self.store_host_samples();
-        let session = std::cell::Cell::new(None);
+        let session = Cell::new(None);
         self.change("record that the host slept", |_| {
             downtime.credit_queued(&self.db)?;
             self.db.execute(
@@ -775,6 +791,8 @@ impl Writer<'_> {
         let mut slots = Vec::new();
         let mut stored = Vec::new();
         let mut backlogs = Vec::new();
+        // The segments' senders, with their index in `stored`.
+        let mut segments = Vec::new();
         let mut store_host = false;
         for telemetry in batch {
             match telemetry {
@@ -785,18 +803,31 @@ impl Writer<'_> {
                 Telemetry::Log {
                     job,
                     lines,
-                    position,
+                    cursor,
                     max_bytes,
                     backlog,
                 } => {
                     // Its share of the backlog is given back once its transaction is done.
                     backlogs.push(backlog);
+                    let at = match cursor {
+                        Cursor::Unchecked(position) => At::End(position),
+                        Cursor::Segment {
+                            from,
+                            to,
+                            missing,
+                            done,
+                        } => {
+                            segments.push((stored.len(), done));
+                            At::Segment { from, to, missing }
+                        }
+                    };
                     slots.push(Slot::Stored(stored.len()));
                     stored.push(Stored::Log {
                         job,
                         lines,
-                        position,
+                        at,
                         max_bytes,
+                        appended: Cell::new(Appended::Refused),
                     });
                 }
                 Telemetry::Samples(samples) => {
@@ -811,6 +842,15 @@ impl Writer<'_> {
             self.store_batch(&stored)
         };
         drop(backlogs);
+        // Told only now: a segment is stored once its transaction committed, not when it was sent or applied.
+        for (index, done) in segments {
+            let appended = match (kept.get(index), stored.get(index)) {
+                (Some(Some(_)), Some(Stored::Log { appended, .. })) => appended.get(),
+                _ => Appended::Refused,
+            };
+            // A capture that ended meanwhile asks no more.
+            let _ = done.send(appended);
+        }
         for slot in slots {
             let envelopes = match slot {
                 // Live: no ID to wait for.
@@ -912,9 +952,13 @@ impl Writer<'_> {
             Stored::Log {
                 job,
                 lines,
-                position,
+                at,
                 max_bytes,
-            } => self.log(*job, lines, *position, *max_bytes, announced),
+                appended,
+            } => {
+                appended.set(self.log(*job, lines, *at, *max_bytes, announced)?);
+                Ok(())
+            }
         }
     }
 
@@ -1410,23 +1454,38 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// Stores log lines of a job at `at`, up to `max_bytes` of its log; what became of them. A segment that does not
+    /// start where the stored log ends is refused whole: storing it would stitch its lines to the wrong ones.
     fn log(
         &self,
         job: u64,
         lines: &[String],
-        position: Option<LogPosition>,
+        at: At,
         max_bytes: u64,
         announced: &mut Announced,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<Appended> {
         // A packed log is final: a line that comes after it is not kept (ADR 0171).
         if super::logs::packed(&self.db, job)? {
-            return Ok(());
+            return Ok(Appended::Full);
         }
-        let (mut count, mut bytes, mut truncated): (u64, u64, bool) = self.db.query_row(
-            "SELECT log_lines, log_bytes, log_truncated FROM jobs WHERE id = ?1",
-            [job],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        let (mut count, mut bytes, mut truncated, page, offset): (u64, u64, bool, u64, u64) =
+            self.db.query_row(
+                "SELECT log_lines, log_bytes, log_truncated, log_page, log_offset FROM jobs WHERE id = ?1",
+                [job],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )?;
+        let (position, missing) = match at {
+            At::Segment { .. } if truncated => return Ok(Appended::Full),
+            // Only forward from where the log ends: a segment that does not advance it would store lines twice, or
+            // move the position back over lines stored.
+            At::Segment { from, to, .. }
+                if from != (LogPosition { page, offset }) || to <= from =>
+            {
+                return Ok(Appended::Refused);
+            }
+            At::Segment { to, missing, .. } => (Some(to), missing),
+            At::End(position) => (position, false),
+        };
         let mut outlining = None;
         for line in lines {
             if truncated {
@@ -1454,6 +1513,24 @@ impl Writer<'_> {
             count += 1;
             bytes += size;
         }
+        // A gap's line takes none of `max_bytes`: a loss is not a cut, even when a partial line before it hit the cap.
+        if missing {
+            self.db.execute(
+                "INSERT OR IGNORE INTO log_lines (job, line, text) VALUES (?1, ?2, ?3)",
+                params![job, count, LOG_GAP],
+            )?;
+            let outlining = match &mut outlining {
+                Some(outlining) => outlining,
+                None => outlining.insert(Outlining::load(&self.db, job, count)?),
+            };
+            outlining.line(count, LOG_GAP)?;
+            announced.push(Event::LogLine {
+                job,
+                line: count,
+                text: LOG_GAP.to_owned(),
+            });
+            count += 1;
+        }
         if let Some(outlining) = outlining {
             outlining.save()?;
         }
@@ -1469,7 +1546,11 @@ impl Writer<'_> {
                 position.map(|position| position.offset)
             ],
         )?;
-        Ok(())
+        Ok(if truncated {
+            Appended::Full
+        } else {
+            Appended::Stored
+        })
     }
 
     fn samples(&self, samples: &[SampleRecord], announced: &mut Announced) -> rusqlite::Result<()> {

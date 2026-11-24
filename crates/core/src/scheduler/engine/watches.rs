@@ -10,29 +10,20 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::history::Capture;
-use crate::store::LogPosition;
 
 /// Each runner's watch, by runner name, from `observe`'s first look at its container until `forget`.
 ///
 /// A runner with no entry is unwatched: `observe` has not inspected its container yet, and `observe_again` tries each
 /// tick. Nothing survives a restart: `recover` adopts each runner unwatched, and its first `observe` watches it again
-/// from where its job's stored log ends. A reload keeps every entry: a runner of a retired slot is watched until it is
+/// from where its job's stored log ends, as does every capture started again. A reload keeps every entry: a runner of a retired slot is watched until it is
 /// gone.
 #[derive(Debug, Default)]
 pub(super) struct Watches(BTreeMap<String, Watch>);
 
-/// A capture due to start again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Due {
-    /// Where the lines its broken captures stored end, as far as they said: the store may lag.
-    pub(super) resume: Option<LogPosition>,
-}
-
 /// One runner's watch.
 #[derive(Debug)]
 enum Watch {
-    /// Its log capture runs. `broke` says how often captures broke off before it, so a break after it waits longer and
-    /// resumes past what they stored.
+    /// Its log capture runs. `broke` says how often captures broke off before it, so a break after it waits longer.
     Live {
         capture: JoinHandle<Capture>,
         broke: Option<Broke>,
@@ -50,8 +41,6 @@ enum Watch {
 /// What a runner's broken captures left.
 #[derive(Debug, Clone, Copy)]
 struct Broke {
-    /// Where the lines they stored end, as far as they said.
-    resume: Option<LogPosition>,
     /// How many broke off so far.
     breaks: u32,
 }
@@ -92,17 +81,10 @@ impl Watches {
                 continue;
             };
             let watch = match (capture.await, broke) {
-                (Ok(Capture::Broken { resume }), broke) => {
-                    let earlier = broke.unwrap_or(Broke {
-                        resume: None,
-                        breaks: 0,
-                    });
-                    let breaks = earlier.breaks + 1;
+                (Ok(Capture::Broken), broke) => {
+                    let breaks = broke.map_or(0, |broke| broke.breaks) + 1;
                     Watch::Waiting {
-                        broke: Broke {
-                            resume: later(earlier.resume, resume),
-                            breaks,
-                        },
+                        broke: Broke { breaks },
                         at: now + capture_backoff(breaks),
                     }
                 }
@@ -159,14 +141,9 @@ impl Watches {
         self.0.contains_key(runner)
     }
 
-    /// Whether `runner`'s capture is due to start again by `now`, and from where.
-    pub(super) fn due(&self, runner: &str, now: Instant) -> Option<Due> {
-        match self.0.get(runner)? {
-            Watch::Waiting { broke, at } if *at <= now => Some(Due {
-                resume: broke.resume,
-            }),
-            Watch::Waiting { .. } | Watch::Live { .. } | Watch::Spent { .. } | Watch::Done => None,
-        }
+    /// Whether `runner`'s capture is due to start again by `now`.
+    pub(super) fn is_due(&self, runner: &str, now: Instant) -> bool {
+        matches!(self.0.get(runner), Some(Watch::Waiting { at, .. }) if *at <= now)
     }
 }
 
@@ -188,20 +165,6 @@ impl Watches {
         for runner in self.0.keys().cloned().collect::<Vec<_>>() {
             if let Some(capture) = self.take_capture(&runner) {
                 capture.abort();
-            }
-        }
-    }
-
-    /// As if every broken capture last stored up to `position`.
-    pub(super) fn resume_every_break_at(&mut self, position: LogPosition) {
-        for watch in self.0.values_mut() {
-            if let Watch::Live {
-                broke: Some(broke), ..
-            }
-            | Watch::Waiting { broke, .. }
-            | Watch::Spent { broke } = watch
-            {
-                broke.resume = Some(position);
             }
         }
     }
@@ -237,13 +200,6 @@ fn capture_backoff(breaks: u32) -> Duration {
     Duration::from_secs(5 << (breaks - 2).min(6)).min(Duration::from_mins(5))
 }
 
-/// The later of two log positions.
-pub(super) fn later(a: Option<LogPosition>, b: Option<LogPosition>) -> Option<LogPosition> {
-    a.into_iter()
-        .chain(b)
-        .max_by_key(|position| (position.page, position.offset))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -255,7 +211,7 @@ mod tests {
     /// How a test's capture ends.
     #[derive(Debug, Clone, Copy)]
     enum End {
-        Broken(Option<LogPosition>),
+        Broken,
         Done,
         /// It panicked, or a daemon's exit aborted it: `settle` reads a `JoinError`.
         Failed,
@@ -266,7 +222,7 @@ mod tests {
         let (end, ends) = oneshot::channel();
         let task = tokio::spawn(async move {
             match ends.await {
-                Ok(End::Broken(resume)) => Capture::Broken { resume },
+                Ok(End::Broken) => Capture::Broken,
                 Ok(End::Done) | Err(_) => Capture::Done,
                 Ok(End::Failed) => std::future::pending().await,
             }
@@ -291,19 +247,8 @@ mod tests {
         }
     }
 
-    fn position(offset: u64) -> LogPosition {
-        LogPosition { page: 1, offset }
-    }
-
-    fn due_now(watches: &Watches, runner: &str) -> Option<Due> {
-        watches.due(runner, Instant::now())
-    }
-
-    /// Due, to resume at byte `offset` of page 1.
-    fn due_at(offset: u64) -> Due {
-        Due {
-            resume: Some(position(offset)),
-        }
+    fn due_now(watches: &Watches, runner: &str) -> bool {
+        watches.is_due(runner, Instant::now())
     }
 
     #[tokio::test(start_paused = true)]
@@ -334,7 +279,7 @@ mod tests {
         watches.settle(Instant::now()).await;
         tokio::time::advance(Duration::from_hours(1)).await;
         watches.settle(Instant::now()).await;
-        assert_eq!(due_now(&watches, "r"), None, "nothing is left to capture");
+        assert!(!due_now(&watches, "r"), "nothing is left to capture");
         assert!(
             watches.is_watched("r"),
             "`observe_again` must not watch it afresh"
@@ -344,46 +289,36 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_capture_breaking_off_twice_waits_longer_and_resumes_past_what_both_stored() {
+    async fn a_capture_breaking_off_again_waits_longer() {
         let mut watches = Watches::default();
         let (task, first) = capture();
         watches.start("r", task);
-        assert_eq!(due_now(&watches, "r"), None, "a live capture is not due");
-        end(&watches, "r", first, End::Broken(Some(position(6)))).await;
-        assert_eq!(
-            due_now(&watches, "r"),
-            None,
+        assert!(!due_now(&watches, "r"), "a live capture is not due");
+        end(&watches, "r", first, End::Broken).await;
+        assert!(
+            !due_now(&watches, "r"),
             "not due before `settle` notes the break"
         );
         watches.settle(Instant::now()).await;
-        assert_eq!(
-            due_now(&watches, "r"),
-            Some(due_at(6)),
-            "the first break is due at once"
-        );
+        assert!(due_now(&watches, "r"), "the first break is due at once");
 
         let (task, second) = capture();
         watches.start("r", task);
         assert_eq!(watches.live_after_breaks(), 1);
-        // This one broke before it stored a line: the first one's position stands.
-        end(&watches, "r", second, End::Broken(None)).await;
+        end(&watches, "r", second, End::Broken).await;
         watches.settle(Instant::now()).await;
-        assert_eq!(due_now(&watches, "r"), None, "the second break waits");
+        assert!(!due_now(&watches, "r"), "the second break waits");
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(due_now(&watches, "r"), Some(due_at(6)));
+        assert!(due_now(&watches, "r"), "due once its wait is over");
 
         let (task, third) = capture();
         watches.start("r", task);
-        end(&watches, "r", third, End::Broken(Some(position(12)))).await;
+        end(&watches, "r", third, End::Broken).await;
         watches.settle(Instant::now()).await;
         tokio::time::advance(Duration::from_secs(9)).await;
-        assert_eq!(
-            due_now(&watches, "r"),
-            None,
-            "the third break waits 10 seconds"
-        );
+        assert!(!due_now(&watches, "r"), "the third break waits 10 seconds");
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(due_now(&watches, "r"), Some(due_at(12)));
+        assert!(due_now(&watches, "r"), "due once its wait is over");
     }
 
     #[tokio::test(start_paused = true)]
@@ -391,7 +326,7 @@ mod tests {
         let mut watches = Watches::default();
         let (task, first) = capture();
         watches.start("r", task);
-        end(&watches, "r", first, End::Broken(Some(position(6)))).await;
+        end(&watches, "r", first, End::Broken).await;
         watches.settle(Instant::now()).await;
         let (task, again) = capture();
         watches.start("r", task);
@@ -399,7 +334,7 @@ mod tests {
         watches.settle(Instant::now()).await;
         tokio::time::advance(Duration::from_hours(1)).await;
         watches.settle(Instant::now()).await;
-        assert_eq!(due_now(&watches, "r"), None, "nothing is left to capture");
+        assert!(!due_now(&watches, "r"), "nothing is left to capture");
         assert!(watches.take_capture("r").is_none(), "no capture runs");
         assert!(
             watches.is_watched("r"),
@@ -417,7 +352,7 @@ mod tests {
         let mut watches = Watches::default();
         let (task, first) = capture();
         watches.start("r", task);
-        end(&watches, "r", first, End::Broken(None)).await;
+        end(&watches, "r", first, End::Broken).await;
         watches.settle(Instant::now()).await;
         let (task, _again) = capture();
         watches.start("r", task);
@@ -460,21 +395,17 @@ mod tests {
     struct Old {
         observed: bool,
         capture: bool,
-        recapture: Option<(Option<LogPosition>, u32, Option<Instant>)>,
+        recapture: Option<(u32, Option<Instant>)>,
     }
 
     /// The engine's old `recapture` bookkeeping for one capture that ended `how`, but for a capture started again that
     /// ends without breaking, which leaves its recapture never due instead of due at once.
     fn old_settle(old: &mut Old, how: End, now: Instant) {
         old.capture = false;
-        if let End::Broken(resume) = how {
-            let (earlier, breaks, _) = old.recapture.unwrap_or((None, 0, None));
-            old.recapture = Some((
-                later(earlier, resume),
-                breaks + 1,
-                Some(now + capture_backoff(breaks + 1)),
-            ));
-        } else if let Some((_, _, at)) = &mut old.recapture {
+        if let End::Broken = how {
+            let (breaks, _) = old.recapture.unwrap_or((0, None));
+            old.recapture = Some((breaks + 1, Some(now + capture_backoff(breaks + 1))));
+        } else if let Some((_, at)) = &mut old.recapture {
             *at = None;
         }
     }
@@ -516,8 +447,8 @@ mod tests {
                         let how = match rng.below(5) {
                             0 => End::Done,
                             1 => End::Failed,
-                            2 => End::Broken(None),
-                            _ => End::Broken(Some(position(rng.below(100)))),
+                            // As often as before, when a break said where it stored up to, or did not.
+                            _ => End::Broken,
                         };
                         let sender = ends.remove(runner).unwrap();
                         end(&watches, runner, sender, how).await;
@@ -533,15 +464,11 @@ mod tests {
                         for runner in RUNNERS {
                             let model = old.get_mut(runner).unwrap();
                             let at = format!("{at}, recapture of {runner}");
-                            let due = model.recapture.filter(|(_, _, due)| {
+                            let due = model.recapture.is_some_and(|(_, due)| {
                                 due.is_some_and(|due| due <= now) && !model.capture
                             });
-                            assert_eq!(
-                                watches.due(runner, now).map(|due| due.resume),
-                                due.map(|(resume, _, _)| resume),
-                                "{at}"
-                            );
-                            if due.is_none() {
+                            assert_eq!(watches.is_due(runner, now), due, "{at}");
+                            if !due {
                                 continue;
                             }
 

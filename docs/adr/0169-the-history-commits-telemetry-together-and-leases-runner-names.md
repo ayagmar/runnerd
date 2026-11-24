@@ -1,6 +1,7 @@
 # 0169. The history commits telemetry together and leases runner names
 
-Status: **Accepted** (2026-11-24). Amends [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md): after a
+Status: **Accepted** (2026-11-24); its promise of restart recovery is made good by
+[0176](0176-a-captured-page-goes-only-once-its-lines-commit.md). Amends [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md): after a
 restart, runner names run ahead of the clock: each name lease reaches 300 s past the second it was taken for. No wire or
 schema change.
 
@@ -54,8 +55,10 @@ four noisy runners through `Store` wrote 85 MB in two minutes, about 61 GB a day
   log and samples within about a second.
 - A process crash loses every write not yet committed: the batch being gathered, up to about a second of telemetry,
   and whatever waits in the queue behind it or behind a transaction that waits on the database, which the window does
-  not bound. Log lines lost so go with their log position, so a capture after a restart reads those lines again. A power loss can also take back telemetry committed since the last
-  sync, as `synchronous = NORMAL` always could; the name lease is synced and survives it.
+  not bound. Log lines lost so go with their log position, and a capture after a restart reads them again only from
+  pages the container still holds: [0176](0176-a-captured-page-goes-only-once-its-lines-commit.md) keeps each page
+  until the history commits its lines, as this decision alone did not. A power loss can also take back telemetry
+  committed since the last sync, as `synchronous = NORMAL` always could; the name lease is synced and survives it.
 - Each lease reaches 300 s past the second it was taken for. A restart that starts a runner names past the last
   lease and takes a new one, so after several quick restarts names can run further ahead of the clock than that. The
   second in a name only tells names apart.
