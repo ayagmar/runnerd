@@ -1,6 +1,6 @@
 # 0082. GitHub Actions' cache served from the host, on by default
 
-Status: **Accepted** (2026-10-30), amended by [0085](0085-actions-cache-saves-wait-for-the-decision-not-the-job.md). Amends [0052](0052-shared-build-cache.md).
+Status: **Accepted** (2026-10-30), amended by [0085](0085-actions-cache-saves-wait-for-the-decision-not-the-job.md), [0168](0168-the-build-cache-writes-each-byte-once.md). Amends [0052](0052-shared-build-cache.md).
 
 ## Context
 

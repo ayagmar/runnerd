@@ -51,6 +51,10 @@ const MIN_CHARGE: u64 = 4 << 10;
 /// The uploads one runner may hold while its writes are undecided; past them, its uploads are refused.
 const MAX_HELD: usize = 10_000;
 
+/// How long after its file's time last moved an entry's use sets it again, in ms: a hit, which may come thousands of
+/// times an hour, writes the file's inode at most this often, and a restart orders entries to within it.
+const TOUCH_EVERY_MS: u64 = 60 * 60 * 1000;
+
 /// The connections one runner's socket serves at once; more wait to be accepted. Above the connection pools of the
 /// tools it serves (Bazel opens 100).
 const MAX_CONNECTIONS: usize = 256;
@@ -244,11 +248,15 @@ impl State {
     }
 }
 
+/// An entry in the index. A restart reads it again from its file: its size, and `used` and `on_disk` both from the
+/// file's time.
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     bytes: u64,
     /// When it was last written or served, in ms: the least recently used go first.
     used: u64,
+    /// The time its file says it was last used, in ms: `touch` moves it only once `used` is `TOUCH_EVERY_MS` past it.
+    on_disk: u64,
 }
 
 #[derive(Debug)]
@@ -572,6 +580,12 @@ impl BuildCache {
                 bytes: state.bytes,
                 entries: state.entries.len() as u64,
             };
+            if fits(&state, limit) {
+                return Trimmed {
+                    before,
+                    after: before,
+                };
+            }
             let mut by_use: Vec<(PathBuf, Entry)> = state
                 .entries
                 .iter()
@@ -580,7 +594,7 @@ impl BuildCache {
             by_use.sort_by_key(|(path, entry)| (entry.used, path.clone()));
             let mut victims = Vec::new();
             for (path, entry) in by_use {
-                if state.charged <= limit && (limit > 0 || state.entries.is_empty()) {
+                if fits(&state, limit) {
                     break;
                 }
                 state.entries.remove(&path);
@@ -616,6 +630,11 @@ impl BuildCache {
     }
 }
 
+/// Whether the entries of `state` fit in `limit`: none do in 0.
+fn fits(state: &State, limit: u64) -> bool {
+    state.charged <= limit && (limit > 0 || state.entries.is_empty())
+}
+
 impl Inner {
     /// Makes an upload of `runner`'s, whose job may write, an entry; refuses it when the entries already take twice
     /// the size limit, which only a busy hour between two trims reaches. Renames under the lock: quick, on the
@@ -642,9 +661,15 @@ impl Inner {
             && std::fs::rename(&upload.file, &path).is_ok();
         Self::give_back(state, Some(runner), upload.room);
         if stored {
+            let now = crate::time::now_ms();
+            // What its file says, as a restart reads it: a held upload's time is when it was sent.
+            let on_disk = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .map_or(0, crate::time::ms);
             let entry = Entry {
                 bytes: upload.bytes,
-                used: crate::time::now_ms(),
+                used: now,
+                on_disk,
             };
             state.index(&upload.entry);
             if let Some(old) = state.entries.insert(upload.entry, entry) {
@@ -729,17 +754,46 @@ impl Inner {
         }
     }
 
-    /// Marks an entry used now, in the index and, so the order survives a restart, in its file's time.
+    /// Marks an entry used now, in the index and, so the order survives a restart, in its file's time once that is
+    /// `TOUCH_EVERY_MS` old: a hit otherwise writes nothing to the disk.
     fn touch(&self, entry: &Path) {
-        if let Some(used) = lock(&self.state).entries.get_mut(entry) {
-            used.used = crate::time::now_ms();
-        }
-        let path = self.root.join(entry);
-        tokio::task::spawn_blocking(move || {
-            if let Ok(file) = std::fs::File::open(&path) {
-                let _ = file.set_modified(std::time::SystemTime::now());
+        let now = crate::time::now_ms();
+        let file = {
+            let mut state = lock(&self.state);
+            let Some(known) = state.entries.get_mut(entry) else {
+                return;
+            };
+            known.used = now;
+            if now.saturating_sub(known.on_disk) < TOUCH_EVERY_MS {
+                return;
             }
-        });
+            // Opened under the lock, as `store` renames and `trim` removes under it: the file is this entry's, and a
+            // time set after it was replaced is the replaced file's, never the new one's. One that cannot be opened
+            // keeps its time, and the next hit tries again.
+            let file = std::fs::File::open(self.root.join(entry));
+            if file.is_ok() {
+                known.on_disk = now;
+            }
+            file
+        };
+        let path = entry.to_owned();
+        match file {
+            Ok(file) => {
+                let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now);
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = file.set_modified(at) {
+                        warn!(
+                            "cannot mark build cache entry {} used: {error}",
+                            path.display()
+                        );
+                    }
+                });
+            }
+            Err(error) => warn!(
+                "cannot mark build cache entry {} used: {error}",
+                path.display()
+            ),
+        }
     }
 }
 
@@ -809,11 +863,13 @@ fn count_entries(root: &Path, dir: &Path, entries: &mut HashMap<PathBuf, Entry>)
         } else if metadata.is_file()
             && let Ok(relative) = path.strip_prefix(root)
         {
+            let used = metadata.modified().map_or(0, crate::time::ms);
             entries.insert(
                 relative.to_owned(),
                 Entry {
                     bytes: metadata.len(),
-                    used: metadata.modified().map_or(0, crate::time::ms),
+                    used,
+                    on_disk: used,
                 },
             );
         }

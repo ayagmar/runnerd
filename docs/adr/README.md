@@ -174,4 +174,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0165](0165-one-view-over-several-machines-is-merged-by-core.md) | One view over several machines is merged by core | Accepted |
 | [0166](0166-the-tui-switches-machines-and-dashboards-link-peers.md) | The TUI switches between machines, and dashboards link to their peers | Accepted |
 | [0167](0167-a-slot-keeps-its-own-pnpm-store-beside-the-jobs-workspace.md) | A slot keeps its own pnpm store beside the job's workspace | Accepted |
+| [0168](0168-the-build-cache-writes-each-byte-once.md) | The build cache writes each byte once | Accepted |
 | [0170](0170-a-runner-container-skips-work-its-job-does-not-need.md) | A runner container skips work its job does not need | Accepted |
