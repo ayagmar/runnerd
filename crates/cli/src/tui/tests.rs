@@ -1040,6 +1040,327 @@ fn a_queued_job_left_open_shows_what_its_runner_reserved_once_it_starts() {
     }
 }
 
+/// Labels no pool serves, some of them not ASCII: core's reason names each, longer than a queue row has room for at
+/// 80 columns.
+fn unserved_labels() -> Waiting {
+    Waiting::NoPool {
+        labels: [
+            "self-hosted",
+            "linux",
+            "arm64",
+            "gpu-ünïcødé-✓",
+            "large-memory-64g",
+            "région-eu-ouest",
+            "構築-キャッシュ",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    }
+}
+
+/// Fourteen slots, and twenty queued jobs `job-00` to `job-19` that alternate between labels no pool serves and a
+/// busy slot.
+fn crowded_queue() -> App {
+    let mut app = app();
+    app.live.status.profiles = vec![profile("jvm", 8, 9 << 30), profile("node", 6, 7 << 30)];
+    app.live.status.queued = (0..20)
+        .map(|at| QueuedJob {
+            waiting: Some(if at % 2 == 0 {
+                unserved_labels()
+            } else {
+                Waiting::NoSlot {
+                    profile: "node".to_owned(),
+                }
+            }),
+            ..queued(
+                60 + at,
+                "halyard/ledger",
+                &format!("job-{at:02}"),
+                1000 + at,
+            )
+        })
+        .collect();
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    app
+}
+
+/// Why the selected queued job waits, as core words it.
+fn selected_reason(app: &App) -> String {
+    let job = &app.live.status.queued[app.queued];
+    job.waiting
+        .as_ref()
+        .unwrap()
+        .reason(job, &app.live.status, NOW)
+}
+
+#[test]
+fn the_selected_queued_job_and_its_whole_reason_are_in_sight_at_80_by_24_however_many_slots_and_jobs()
+ {
+    // Catches a queue starved of rows by the lanes, whose selected row or reason is then out of sight, and a reason
+    // cut to what is left of its row.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.pane, Pane::Queue);
+    for at in 0..20 {
+        assert_eq!(app.queued, at);
+        let shown = screen(&app, 80, 24, false);
+        let name = format!("job-{at:02}");
+        assert!(
+            shown.contains(&name),
+            "the selected {name}'s row is in sight: {shown}"
+        );
+        let reason = selected_reason(&app);
+        assert!(
+            reads(&shown, &reason),
+            "{name}'s reason reads whole, not only its start: {reason}\n{shown}"
+        );
+        app.update(key(KeyCode::Down));
+    }
+    let shown = screen(&app, 80, 24, false);
+    let heading = shown
+        .lines()
+        .find(|line| line.starts_with("Waiting "))
+        .unwrap_or_default();
+    assert!(
+        heading.contains("17 above") && !heading.contains("below"),
+        "the last job selected, the heading counts the rows scrolled past: {shown}"
+    );
+}
+
+#[test]
+fn a_queued_job_s_page_shows_its_whole_reason_at_80_by_24() {
+    // Catches the page fitting the reason into what the timeline's legend leaves of one line.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    let reason = selected_reason(&app);
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [60]);
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        reads(&shown, &reason),
+        "its page says why it waits in full: {reason}\n{shown}"
+    );
+    assert!(
+        shown.contains("Waiting for a runner"),
+        "the timeline still shows: {shown}"
+    );
+}
+
+#[test]
+fn a_crowded_queue_on_a_short_terminal_keeps_the_selected_row_and_never_panics() {
+    // Catches a layout that subtracts past zero or hands the queue no row on a short or narrow terminal.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    for _ in 0..19 {
+        app.update(key(KeyCode::Down));
+    }
+    for (width, height) in [(80, 14), (80, 10), (40, 14), (80, 6), (20, 4)] {
+        screen(&app, width, height, false);
+    }
+    let shown = screen(&app, 80, 14, false);
+    assert!(
+        shown.contains("job-19"),
+        "the selected row stays at 80 by 14: {shown}"
+    );
+    assert!(
+        reads(&shown, "All 6 node slots are busy"),
+        "a reason that fits under the row reads whole: {shown}"
+    );
+    app.update(key(KeyCode::Up));
+    let shown = screen(&app, 80, 14, false);
+    assert!(
+        shown.contains("job-18") && shown.contains("No profile serves the labels"),
+        "a reason longer than the rows left starts under the selected row: {shown}"
+    );
+    app.update(key(KeyCode::Enter));
+    for (width, height) in [(80, 14), (80, 10), (40, 14), (80, 6), (20, 4)] {
+        screen(&app, width, height, false);
+    }
+}
+
+#[test]
+fn the_selected_queued_job_starting_moves_the_selection_to_a_job_still_waiting() {
+    // Catches a selection left past the end of the queue, or a reason drawn for a job no longer in it.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    for _ in 0..19 {
+        app.update(key(KeyCode::Down));
+    }
+    app.update(event(
+        Some(9),
+        Event::JobStarted {
+            job: summary(79, JobState::Running),
+        },
+    ));
+    assert_eq!(app.pane, Pane::Queue);
+    assert_eq!(
+        app.live.status.queued.get(app.queued).map(|job| job.id),
+        Some(78),
+        "the selection moves to the last job still waiting"
+    );
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        shown.contains("job-18") && !shown.contains("job-19"),
+        "{shown}"
+    );
+    assert!(
+        !reads(&shown, "No profile serves"),
+        "a start may change every reason: none shows until read again: {shown}"
+    );
+}
+
+/// The crowded queue with its first job waiting for `waiting`, selected.
+fn first_waiting_for(waiting: Waiting) -> App {
+    let mut app = crowded_queue();
+    app.live.status.queued[0].waiting = Some(waiting);
+    app.update(key(KeyCode::Tab));
+    app
+}
+
+/// Sixty labels of 48 characters, each named by its number, the last `…-final`.
+fn sixty_labels() -> Vec<String> {
+    (0..60)
+        .map(|at| {
+            let end = if at == 59 { "final" } else { "label" };
+            format!("pool-{at:02}-{}-{end}", "x".repeat(37))
+        })
+        .collect()
+}
+
+/// The rows of a job's page between the timeline's legend and the log, the reason wrapped under the legend, each
+/// trimmed.
+fn under_legend(shown: &str) -> Vec<String> {
+    shown
+        .lines()
+        .skip_while(|line| !line.contains("Waiting for a runner"))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_reason_of_sixty_labels_reads_whole_a_page_at_a_time_on_its_job_s_page() {
+    // Catches a page that cuts a reason longer than its rows with no way to the rest: core names every label.
+    let labels = sixty_labels();
+    for (width, height) in [(80, 24), (80, 14), (80, 10)] {
+        let mut app = first_waiting_for(Waiting::NoPool {
+            labels: labels.clone(),
+        });
+        assert_eq!(opened(&app.update(key(KeyCode::Enter))), [60]);
+        let mut seen = Vec::new();
+        let first = under_legend(&screen(&app, width, height, false));
+        assert!(
+            first
+                .first()
+                .is_some_and(|line| line.starts_with("No profile serves the labels")),
+            "the first page starts the reason at {width}x{height}: {first:?}"
+        );
+        assert!(
+            first
+                .last()
+                .is_some_and(|line| line.starts_with("lines 1–")),
+            "the last row says which lines show at {width}x{height}: {first:?}"
+        );
+        loop {
+            let page = under_legend(&screen(&app, width, height, false));
+            if !seen.is_empty() && page == first {
+                break;
+            }
+            assert!(seen.len() < 100, "the pages come round at {width}x{height}");
+            seen.push(page);
+            app.update(key(KeyCode::Char(']')));
+        }
+        let read = seen.concat().join(" ");
+        for label in &labels {
+            assert!(
+                read.contains(label.as_str()),
+                "{label} is on a page at {width}x{height}: {read}"
+            );
+        }
+        app.update(key(KeyCode::Char('[')));
+        assert!(
+            under_legend(&screen(&app, width, height, false))
+                .concat()
+                .contains("final"),
+            "the page before the first is the last at {width}x{height}"
+        );
+    }
+}
+
+#[test]
+fn a_label_wider_than_the_terminal_reads_whole_with_its_end() {
+    // Catches wrapping that cuts a word wider than a line, losing its end, such as one long unserved label.
+    let label = format!("{}終端-zz9", "ünïcødé-".repeat(12));
+    let mut app = first_waiting_for(Waiting::NoPool {
+        labels: vec![label.clone()],
+    });
+    let detail: String = screen(&app, 80, 24, false)
+        .lines()
+        .filter(|line| line.starts_with("  ") && !line.contains("more below"))
+        .map(str::trim)
+        .collect();
+    assert!(
+        detail.contains(&label),
+        "the queue's detail keeps every character of {label}: {detail}"
+    );
+    app.update(key(KeyCode::Enter));
+    let page = under_legend(&screen(&app, 80, 24, false)).concat();
+    assert!(
+        page.contains(&label),
+        "its page keeps every character of {label}: {page}"
+    );
+}
+
+#[test]
+fn an_emoji_with_a_selector_at_the_edge_moves_to_the_next_line_whole() {
+    // Catches a word broken between a character and the selector that makes it an emoji: `❤️` takes two cells, the
+    // heart alone one, so at the edge the selector would start the next line alone and the heart lose its look.
+    let heart = "\u{2764}\u{fe0f}";
+    let label = format!("{}{heart}tail-zz7", "x".repeat(77));
+    let mut app = first_waiting_for(Waiting::NoPool {
+        labels: vec![label],
+    });
+    let whole = |rows: Vec<String>| {
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with(&format!("{heart}tail-zz7"))),
+            "the emoji starts the next line whole, its tail after it: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| *row == "x".repeat(77)),
+            "the line before ends before the emoji: {rows:?}"
+        );
+    };
+    whole(
+        screen(&app, 80, 24, false)
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.contains("more below"))
+            .map(|line| line.trim().to_owned())
+            .collect(),
+    );
+    app.update(key(KeyCode::Enter));
+    whole(under_legend(&screen(&app, 80, 24, false)));
+}
+
+#[test]
+fn a_reason_cut_under_the_queue_keeps_its_mark_when_its_lines_fill_the_width() {
+    // Catches the mark of a cut reason drawn past the edge when the last line shown is as wide as the terminal.
+    let volumes = (0..6)
+        .map(|at| format!("v{at}{}", "y".repeat(76)))
+        .collect();
+    let app = first_waiting_for(Waiting::Torn { volumes });
+    let shown = screen(&app, 80, 24, false);
+    let detail: Vec<&str> = shown
+        .lines()
+        .filter(|line| line.starts_with("  ") && !line.contains("more below"))
+        .collect();
+    assert_eq!(detail.len(), 4, "four lines at most: {shown}");
+    assert!(
+        detail[3].trim_end().ends_with(" …"),
+        "the last line ends in its mark: {shown}"
+    );
+}
+
 #[test]
 fn the_selected_job_stays_selected_when_jobs_above_it_start_or_finish() {
     let mut app = app();

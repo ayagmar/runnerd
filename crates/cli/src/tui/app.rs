@@ -477,6 +477,10 @@ pub(crate) struct JobView {
     pub(crate) runs: Option<Vec<JobSummary>>,
     /// The cancel or re-run asked of the daemon and not answered yet; only its answer is shown.
     asked: Option<Asked>,
+    /// The page of why it waits that the page shows, while that does not fit: `]` and `[` turn it, and the drawing
+    /// counts it round the pages there are at the terminal's width, so the next after the last is the first. Opening
+    /// a job starts at the first.
+    reason_page: isize,
 }
 
 /// A cancel or re-run under way on the open job.
@@ -497,6 +501,11 @@ impl Asked {
 }
 
 impl JobView {
+    /// The page of why it waits that `]` and `[` turned to, counted round by the drawing.
+    pub(crate) fn reason_page(&self) -> isize {
+        self.reason_page
+    }
+
     /// The cancel or re-run whose preview or result is awaited.
     pub(crate) fn asking(&self) -> Option<Asked> {
         self.asked
@@ -1624,6 +1633,8 @@ impl App {
         };
         let id = open.job.summary.id;
         match code {
+            KeyCode::Char(']') => open.reason_page = open.reason_page.saturating_add(1),
+            KeyCode::Char('[') => open.reason_page = open.reason_page.saturating_sub(1),
             KeyCode::Char('G') | KeyCode::End => open.log.end(),
             KeyCode::Char('g') | KeyCode::Home => {
                 open.log.start();
@@ -2256,6 +2267,7 @@ impl App {
             comparison: Reading::default(),
             runs: None,
             asked: None,
+            reason_page: 0,
         };
         for sample in &open.samples {
             open.job.observe(sample);

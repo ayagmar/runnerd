@@ -149,6 +149,29 @@ fn why_jobs_wait_for_caches_a_crash_tore_or_on_battery_reads_as_core_says_it() {
 }
 
 #[test]
+fn the_selected_queued_job_s_reason_reads_whole_as_core_says_it_at_80_by_24() {
+    // Catches a reason cut to what its queue row leaves at 80 columns, such as the volumes to remove after a crash.
+    for daemon in [daemon(), runnerd_fixtures::torn()] {
+        let facts = facts(&daemon);
+        let mut app = app(&daemon);
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.pane, Pane::Queue);
+        for wait in &facts.waits {
+            assert_eq!(app.live.status.queued[app.queued].id, wait.job);
+            let (rows, _) = frame_of(&app, 80, 24);
+            assert!(
+                words(&rows.join(" ")).contains(&words(&wait.reason)),
+                "job {}'s reason whole: {}\n{}",
+                wait.job,
+                wait.reason,
+                rows.join("\n")
+            );
+            app.update(key(KeyCode::Char('j')));
+        }
+    }
+}
+
+#[test]
 fn why_an_overflow_host_leaves_jobs_to_the_primary_reads_as_core_says_it() {
     let daemon = runnerd_fixtures::overflow();
     let facts = facts(&daemon);

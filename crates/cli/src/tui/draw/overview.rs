@@ -1,6 +1,6 @@
 //! The overview: the headline figures, what needs attention as one line, the budget strip, a lane per slot in the
-//! strip's order, the queue with why each job waits, the repositories and the latest jobs, and the slice's charts
-//! when there is room.
+//! strip's order, the queue with why each job waits (the selected job's reason whole under it while it is focused), the
+//! repositories and the latest jobs, and the slice's charts when there is room.
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -34,6 +34,12 @@ const CHARTS_MIN: u16 = 4;
 /// The share of the overview the attention list takes at most while it is open.
 const ATTENTION_SHARE: u16 = 2;
 
+/// The most rows the selected queued job's reason takes under the queue; its page has room for more.
+const REASON_MOST: usize = 4;
+
+/// The queue's rows a focused queue keeps beside its heading and the selected job's reason.
+const QUEUE_FOCUSED_ROWS: usize = 3;
+
 /// Top to bottom: the four headline figures, what needs attention as one line (the whole list while it is focused),
 /// the budget strip, a lane per slot in the strip's order, the queue, then the repositories and latest jobs; the
 /// slice's charts take what the lists do not need, as tall as their samples reach, and are the first to go.
@@ -46,7 +52,6 @@ pub(super) fn overview(
     hits: &mut Hits,
 ) {
     let slots = length(app.slots().count());
-    let queued = app.live.status.queued.len();
     let health_height: u16 = if area.height >= 20 { 2 } else { 1 };
     let bar_rows: u16 = if area.height >= 36 { 2 } else { 1 };
     let budget_height = budget::height(bar_rows);
@@ -59,14 +64,18 @@ pub(super) fn overview(
     let rest = area
         .height
         .saturating_sub(health_height + attention_height + budget_height);
-    let lanes_height = slots.min(rest.saturating_sub(LISTS_MIN.min(rest / 2)));
+    let QueueRows {
+        wanted: queue_wanted,
+        kept: queue_kept,
+    } = QueueRows::of(app, now, area.width);
+    let lanes_height = slots.min(rest.saturating_sub(LISTS_MIN.min(rest / 2) + queue_kept));
     let left = rest.saturating_sub(lanes_height);
-    let queue_height = if queued == 0 {
+    let queue_height = if queue_wanted == 0 {
         0
     } else {
-        length(queued + 1)
+        queue_wanted
             .min(left.saturating_sub(LISTS_MIN))
-            .max(left.min(2))
+            .max(left.min(queue_kept.max(2)))
     };
     let left = left.saturating_sub(queue_height);
     let side_by_side = area.width >= 100;
@@ -345,27 +354,203 @@ pub(super) fn reason_style(kind: WaitKind, theme: Theme) -> Style {
     }
 }
 
-/// Why `job` waits in `width` cells, in the daemon's words as the dashboard shows them; nothing from a daemon that
-/// does not say.
-pub(super) fn reason(
-    app: &App,
-    job: &QueuedJob,
-    now: u64,
-    width: usize,
-    theme: Theme,
-) -> Span<'static> {
-    job.waiting.as_ref().map_or_else(Span::default, |waiting| {
+/// Why `job` waits, whole, in the daemon's words as the dashboard shows them; nothing from a daemon that does not
+/// say.
+pub(super) fn why(app: &App, job: &QueuedJob, now: u64, theme: Theme) -> Option<Span<'static>> {
+    job.waiting.as_ref().map(|waiting| {
         Span::styled(
-            fit(&waiting.reason(job, &app.live.status, now), width)
-                .trim_end()
-                .to_owned(),
+            waiting.reason(job, &app.live.status, now),
             reason_style(waiting.kind(), theme),
         )
     })
 }
 
+/// Why `job` waits in `width` cells, cut when it is longer.
+fn reason(app: &App, job: &QueuedJob, now: u64, width: usize, theme: Theme) -> Span<'static> {
+    why(app, job, now, theme).map_or_else(Span::default, |why| {
+        Span::styled(fit(&why.content, width).trim_end().to_owned(), why.style)
+    })
+}
+
+/// What a reason cut short ends in.
+const CUT: &str = " …";
+
+/// `text` in lines of at most `width` cells, broken between words, and a word wider than a line broken across lines
+/// between graphemes where it reaches the edge: unlike [`super::wrap`], every character is kept, as a reason is read
+/// whole.
+pub(super) fn wrap_whole(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() <= width {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        // Broken between graphemes, as the terminal draws them: an emoji and the selector after it, or a letter
+        // and its accent, move to the next line together. The width is measured on the whole line, as a character
+        // and a selector take more cells together than apart; a lone grapheme wider than the line stays, as nothing
+        // narrower holds it.
+        for grapheme in Span::raw(word).styled_graphemes(Style::default()) {
+            if !line.is_empty() && (line.clone() + grapheme.symbol).width() > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push_str(grapheme.symbol);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// `why` wrapped under what it belongs to, `width` cells wide and indented by two, every character kept, in at most
+/// `most` lines: a reason longer than that ends in ` …`, which its lines leave room for.
+pub(super) fn reason_lines(
+    why: &Span<'_>,
+    width: usize,
+    most: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let indented = |text: String| Line::styled(format!("  {text}"), why.style);
+    let whole = wrap_whole(&why.content, width.saturating_sub(2));
+    if whole.len() <= most {
+        return whole.into_iter().map(indented).collect();
+    }
+    let mut lines: Vec<Line<'static>> =
+        wrap_whole(&why.content, width.saturating_sub(2 + CUT.width()))
+            .into_iter()
+            .take(most)
+            .map(indented)
+            .collect();
+    if let Some(last) = lines.last_mut() {
+        last.spans.push(Span::styled(CUT, theme.dim()));
+    }
+    lines
+}
+
+/// The rows the overview's queue wants.
+struct QueueRows {
+    /// Its heading, a row per job and, while it is focused, the selected job's reason under them; 0 when nothing waits.
+    wanted: u16,
+    /// What it keeps before the lanes take their rows: while it is focused, its heading, a few rows round the selected
+    /// job and that job's reason, so they are in sight at 80 by 24 however many slots there are; else 0.
+    kept: u16,
+}
+
+impl QueueRows {
+    fn of(app: &App, now: u64, width: u16) -> QueueRows {
+        let queued = app.live.status.queued.len();
+        if queued == 0 {
+            return QueueRows { wanted: 0, kept: 0 };
+        }
+        if app.pane != Pane::Queue {
+            return QueueRows {
+                wanted: length(queued + 1),
+                kept: 0,
+            };
+        }
+        let columns = QueueColumns::of(app, now, usize::from(width));
+        let detail = length(detail(app, &columns, now, REASON_MOST, Theme { colour: false }).len());
+        let wanted = length(queued + 1).saturating_add(detail);
+        QueueRows {
+            wanted,
+            kept: wanted.min(1 + length(queued.min(QUEUE_FOCUSED_ROWS)) + detail),
+        }
+    }
+}
+
+/// The queue's cells: each job's wait, name and place, and the widths of their columns; 0 for one left out.
+struct QueueColumns {
+    waits: Vec<String>,
+    names: Vec<String>,
+    places: Vec<String>,
+    /// The whole queue's.
+    width: usize,
+    wait: usize,
+    name: usize,
+    place: usize,
+    reason: usize,
+}
+
+impl QueueColumns {
+    /// The wait as wide as the widest, the name at most three tenths of `width`, the repository (and pool) from 120
+    /// columns; the reason takes the rest.
+    fn of(app: &App, now: u64, width: usize) -> QueueColumns {
+        let queued = &app.live.status.queued;
+        let waits: Vec<String> = queued
+            .iter()
+            .map(|job| match job.queued_at {
+                0 => "–".to_owned(),
+                at => duration(now.saturating_sub(at)),
+            })
+            .collect();
+        let wait = waits.iter().map(|wait| wait.width()).max().unwrap_or(0);
+        let names: Vec<String> = queued.iter().map(|job| job.title().to_string()).collect();
+        let name = names
+            .iter()
+            .map(|name| name.width())
+            .max()
+            .unwrap_or(0)
+            .min((width * 3 / 10).max(12));
+        let places: Vec<String> = queued
+            .iter()
+            .map(|job| job.place(&app.live.status))
+            .collect();
+        let place = if width >= 120 {
+            places
+                .iter()
+                .map(|place| place.width())
+                .max()
+                .unwrap_or(0)
+                .min(32)
+        } else {
+            0
+        };
+        // A cell between columns.
+        let reason =
+            width.saturating_sub(wait + 1 + name + 1 + if place > 0 { place + 1 } else { 0 });
+        QueueColumns {
+            waits,
+            names,
+            places,
+            width,
+            wait,
+            name,
+            place,
+            reason,
+        }
+    }
+}
+
+/// While the queue is focused, the selected job's reason whole under it when its row cuts it, in at most `most`
+/// lines; nothing otherwise.
+fn detail(
+    app: &App,
+    columns: &QueueColumns,
+    now: u64,
+    most: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    app.live
+        .status
+        .queued
+        .get(app.queued)
+        .filter(|_| app.pane == Pane::Queue)
+        .and_then(|job| why(app, job, now, theme))
+        .filter(|why| why.width() > columns.reason)
+        .map_or_else(Vec::new, |why| {
+            reason_lines(&why, columns.width, most, theme)
+        })
+}
+
 /// Every queued job, oldest first: how long it has waited, its name, its repository (and pool) where there is room,
-/// and why it waits, which takes the rest of the line.
+/// and why it waits, which takes the rest of the line; while the queue is focused, the selected job's reason whole
+/// under the rows when its row cuts it.
 pub(super) fn queue(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -376,62 +561,27 @@ pub(super) fn queue(
 ) {
     let focused = app.pane == Pane::Queue;
     let queued = &app.live.status.queued;
-    let [title, table_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let hidden = queued.len().saturating_sub(usize::from(table_area.height));
-    heading(
-        frame,
-        title,
-        "Waiting",
-        if hidden > 0 {
-            format!("oldest first; {hidden} more below")
-        } else {
-            "oldest first".to_owned()
-        },
-        theme,
-    );
-    let width = usize::from(table_area.width);
-    let waits: Vec<String> = queued
-        .iter()
-        .map(|job| match job.queued_at {
-            0 => "–".to_owned(),
-            at => duration(now.saturating_sub(at)),
-        })
-        .collect();
-    let wait_width = waits.iter().map(|wait| wait.width()).max().unwrap_or(0);
-    let names: Vec<String> = queued.iter().map(|job| job.title().to_string()).collect();
-    let name_width = names
-        .iter()
-        .map(|name| name.width())
-        .max()
-        .unwrap_or(0)
-        .min((width * 3 / 10).max(12));
-    let places: Vec<String> = queued
-        .iter()
-        .map(|job| job.place(&app.live.status))
-        .collect();
-    let repository_width = if width >= 120 {
-        places
-            .iter()
-            .map(|place| place.width())
-            .max()
-            .unwrap_or(0)
-            .min(32)
-    } else {
-        0
-    };
-    // A cell between columns.
-    let reason_width = width.saturating_sub(
-        wait_width
-            + 1
-            + name_width
-            + 1
-            + if repository_width > 0 {
-                repository_width + 1
-            } else {
-                0
-            },
-    );
+    let columns = QueueColumns::of(app, now, usize::from(area.width));
+    // The heading and the selected job's row come first; the job's page shows the rest of a longer reason.
+    let most = REASON_MOST.min(usize::from(area.height.saturating_sub(2)));
+    let detail = detail(app, &columns, now, most, theme);
+    let detail_height = length(detail.len());
+    let [title, table_area, detail_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(detail_height),
+    ])
+    .areas(area);
+    let QueueColumns {
+        waits,
+        names,
+        places,
+        wait: wait_width,
+        width: _,
+        name: name_width,
+        place: repository_width,
+        reason: reason_width,
+    } = columns;
     let rows = queued
         .iter()
         .zip(waits)
@@ -460,12 +610,21 @@ pub(super) fn queue(
     let table = Table::new(rows, widths).row_highlight_style(super::selected());
     let mut state = TableState::default().with_selected(focused.then_some(app.queued));
     frame.render_stateful_widget(table, table_area, &mut state);
-    hits.rows(
-        table_area,
-        List::Queue,
-        state.offset(),
-        queued.len() - state.offset().min(queued.len()),
-    );
+    frame.render_widget(Paragraph::new(detail), detail_area);
+    // The rows scrolled past and those under the table, as the table drew them.
+    let above = state.offset().min(queued.len());
+    let below = queued
+        .len()
+        .saturating_sub(above + usize::from(table_area.height));
+    let mut note = vec!["oldest first".to_owned()];
+    if above > 0 {
+        note.push(format!("{above} above"));
+    }
+    if below > 0 {
+        note.push(format!("{below} more below"));
+    }
+    heading(frame, title, "Waiting", note.join("; "), theme);
+    hits.rows(table_area, List::Queue, above, queued.len() - above);
 }
 
 /// What the repositories pane needs to show each repository whole, with its profiles when that fits in `most`
