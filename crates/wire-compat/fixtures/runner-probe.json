@@ -1,0 +1,8 @@
+{
+  "broken": "broken",
+  "clean": "clean",
+  "mount": "mount",
+  "mount-and-procfs": "mount-and-procfs",
+  "procfs": "procfs",
+  "timed-out": "timed-out"
+}

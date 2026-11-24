@@ -1,0 +1,13 @@
+{
+  "download": "download",
+  "exposed": "exposed",
+  "full": "full",
+  "held": "held",
+  "not-action": "not-action",
+  "package": "package",
+  "pins": "pins",
+  "quarantined": "quarantined",
+  "rejected": "rejected",
+  "store": "store",
+  "unreadable": "unreadable"
+}

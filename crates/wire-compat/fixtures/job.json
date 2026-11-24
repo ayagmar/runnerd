@@ -3,6 +3,7 @@
     "admission": null,
     "branch": "main",
     "conclusion": "success",
+    "failure_cause": "action-archive",
     "id": 42,
     "labels": [
       "self-hosted"
@@ -37,9 +38,11 @@
       "network_sent": 10485760
     },
     "name": "build",
+    "probe": "mount",
     "record": null,
     "record_mark": "kept",
     "repository": "tidewater/halyard",
+    "rerun_at": 1763000000,
     "run_attempt": 1,
     "run_id": 900,
     "runner": {
@@ -95,6 +98,7 @@
     },
     "branch": "main",
     "conclusion": "success",
+    "failure_cause": "action-archive",
     "id": 42,
     "labels": [
       "self-hosted"
@@ -133,6 +137,7 @@
       "sock_throttled": 2
     },
     "name": "build",
+    "probe": "mount",
     "record": {
       "bytes": 2147483648,
       "created_at": 1761400610,
@@ -143,6 +148,7 @@
     },
     "record_mark": "kept",
     "repository": "tidewater/halyard",
+    "rerun_at": 1763000000,
     "run_attempt": 1,
     "run_id": 900,
     "runner": {

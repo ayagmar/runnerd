@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.1.4";
+const PREVIOUS: &str = "v0.1.5";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,17 +50,6 @@ struct Accepted {
 }
 
 const ACCEPTED: &[Accepted] = &[
-    Accepted {
-        reader: Reader::Previous,
-        item: "attention-kind/action-archives",
-        adr: "0147",
-    },
-    // An older client draws the item by its title, as for any kind it does not know.
-    Accepted {
-        reader: Reader::Previous,
-        item: "attention-kind/rerun-refused",
-        adr: "0153",
-    },
     // An older client draws the item by its title, as for any kind it does not know.
     Accepted {
         reader: Reader::Previous,
@@ -89,6 +78,24 @@ const ACCEPTED: &[Accepted] = &[
     Accepted {
         reader: Reader::Previous,
         item: "waiting/overflow",
+        adr: "0162",
+    },
+    // An older client shows the queue's time on battery as `other` waits, and a downgraded daemon reads a stored
+    // `battery` wait as `other`.
+    Accepted {
+        reader: Reader::Previous,
+        item: "insights/full",
+        adr: "0161",
+    },
+    Accepted {
+        reader: Reader::Previous,
+        item: "wait-cause/battery",
+        adr: "0161",
+    },
+    // An older client and a downgraded daemon read an overflow host's `overflow` wait as `other`.
+    Accepted {
+        reader: Reader::Previous,
+        item: "wait-cause/overflow",
         adr: "0162",
     },
 ];
@@ -354,13 +361,13 @@ documents! {
     "action-refusal": ActionRefusal => variants(samples::action_refusal()),
     "job-actions": JobActions => variants(samples::job_actions()),
     "measure": Measure => variants(samples::measure()),
-    // Documents the previous release does not have; the release after this one reads their fixtures.
-    new:
     "failure-cause": FailureCause => variants(samples::failure_cause()),
     "archive-failure-kind": ArchiveFailureKind => variants(samples::archive_failure_kind()),
-    "grype-failure-kind": GrypeFailureKind => variants(samples::grype_failure_kind()),
     "wait-cause": WaitCause => variants(samples::wait_cause()),
     "runner-probe": RunnerProbe => variants(samples::runner_probe()),
+    // Documents the previous release does not have; the release after this one reads their fixtures.
+    new:
+    "grype-failure-kind": GrypeFailureKind => variants(samples::grype_failure_kind()),
 }
 
 /// The previous release's samples, one file per document.
