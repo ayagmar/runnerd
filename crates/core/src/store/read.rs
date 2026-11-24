@@ -66,6 +66,26 @@ macro_rules! slept {
 /// [`slept!`] for a query built at run time.
 pub(super) const SLEPT: &str = slept!();
 
+/// Each `profile.changed` event, oldest first: the profile's name, `cpus`, the event's time, `memory` and its count
+/// of slots. Through `events_by_type`, as every read of the periodic paths: auto sizing reads it every few minutes.
+pub(super) const PROFILE_CHANGES: &str = concat!(
+    "SELECT json_extract(body, '$.profile.name'), json_extract(body, '$.profile.cpus'), at, \
+     json_extract(body, '$.profile.memory'), json_array_length(body, '$.profile.slots') FROM events WHERE ",
+    event_type!(),
+    " = 'profile.changed' ORDER BY id"
+);
+
+/// Each `cache.reseeded` event's time and body, through `events_by_type`.
+pub(super) const RESEEDS: &str = concat!(
+    "SELECT at, body FROM events WHERE ",
+    event_type!(),
+    " = 'cache.reseeded'"
+);
+
+/// The host's memory as the `budget.changed` events since `?1` (ms) read it, oldest first (`host_reading!`).
+pub(super) const HOST_READINGS: &str = "SELECT at, total, available, swap_free, credit, running FROM host_readings \
+     WHERE at >= ?1 ORDER BY event";
+
 /// How many columns `SUMMARY` has: a query that adds one after them reads it at this index.
 const SUMMARY_COLUMNS: usize = 55;
 
@@ -894,50 +914,21 @@ pub(super) fn log_lines(
     from: u64,
     limit: u64,
 ) -> rusqlite::Result<Vec<(u64, String)>> {
-    db.prepare_cached(
-        "SELECT line, text FROM log_lines WHERE job = ?1 AND line >= ?2 ORDER BY line LIMIT ?3",
-    )?
-    .query_map(params![job, from, limit], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-    })?
-    .collect()
+    super::logs::lines(db, job, from, limit)
 }
 
-/// The stored lines of a job's log `read` asks for, their text read as UTF-8 with anything else replaced: what the
-/// capture stores is text, but a history is a file anyone may have written. SQLite hands over only the prefix of
-/// each line asked for, and the rows stop at the byte budget, so no read holds more than it asked for whatever the
-/// lines' size.
+/// The stored lines of a job's log `read` asks for (`logs::lines_from`).
 pub(super) fn lines_from(
     db: &Connection,
     job: u64,
     read: api::LineRead,
 ) -> rusqlite::Result<Vec<api::StoredLine>> {
-    let mut statement = db.prepare_cached(
-        "SELECT line, substr(CAST(text AS BLOB), 1, ?3), octet_length(text) FROM log_lines \
-         WHERE job = ?1 AND line >= ?2 ORDER BY line LIMIT ?4",
-    )?;
-    let mut rows = statement.query(params![job, read.from, read.prefix, read.limit])?;
-    let mut lines = Vec::new();
-    let mut bytes = 0;
-    while bytes < read.bytes
-        && let Some(row) = rows.next()?
-    {
-        let text = match row.get_ref(1)? {
-            ValueRef::Text(text) | ValueRef::Blob(text) => text,
-            ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => &[],
-        };
-        let line = api::StoredLine::cut(row.get(0)?, text, row.get(2)?);
-        bytes += line.text.len() as u64;
-        lines.push(line);
-    }
-    Ok(lines)
+    super::logs::lines_from(db, job, read)
 }
 
 /// Every stored line of a job's log, in order.
 pub(super) fn log_text(db: &Connection, job: u64) -> rusqlite::Result<Vec<String>> {
-    db.prepare_cached("SELECT text FROM log_lines WHERE job = ?1 ORDER BY line")?
-        .query_map([job], |row| row.get(0))?
-        .collect()
+    super::logs::text(db, job)
 }
 
 pub(super) fn sizing_change(row: &Row<'_>) -> rusqlite::Result<api::SizingChange> {
@@ -984,11 +975,7 @@ pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing
         .query_map([], |row| Ok((row.get("id")?, sizing_change(row)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let events = db
-        .prepare_cached(
-            "SELECT json_extract(body, '$.profile.name'), json_extract(body, '$.profile.cpus'), at, \
-             json_extract(body, '$.profile.memory'), json_array_length(body, '$.profile.slots') FROM events \
-             WHERE json_extract(body, '$.type') = 'profile.changed' ORDER BY id",
-        )?
+        .prepare_cached(PROFILE_CHANGES)?
         .query_map([], |row| {
             Ok((
                 sizing::CpusSet {
@@ -1610,27 +1597,18 @@ fn host_readings(
     db: &Connection,
     since: u64,
 ) -> rusqlite::Result<Vec<crate::insights::HostReading>> {
-    db.prepare_cached(
-        "SELECT at, json_extract(body, '$.budget.host.memory.total'), \
-         json_extract(body, '$.budget.host.memory.available'), json_extract(body, '$.budget.host.memory.swap.free'), \
-         coalesce(json_extract(body, '$.budget.host.credit.bytes'), 0), \
-         json_extract(body, '$.budget.memory_in_use') > json_extract(body, '$.budget.mirror_memory') \
-         + (SELECT coalesce(sum(json_extract(value, '$.memory')), 0) FROM json_each(body, '$.budget.seed_memory')) \
-         + (SELECT coalesce(sum(json_extract(value, '$.memory')), 0) FROM json_each(body, '$.budget.shell_memory')) \
-         FROM events WHERE at >= ?1 AND body LIKE '{\"type\":\"budget.changed\"%' \
-         AND json_extract(body, '$.budget.host.memory.total') IS NOT NULL ORDER BY id",
-    )?
-    .query_map([since], |row| {
-        Ok(crate::insights::HostReading {
-            at: row.get(0)?,
-            total: row.get(1)?,
-            available: row.get(2)?,
-            swap_free: row.get(3)?,
-            credit: row.get(4)?,
-            running: row.get(5)?,
-        })
-    })?
-    .collect()
+    db.prepare_cached(HOST_READINGS)?
+        .query_map([since], |row| {
+            Ok(crate::insights::HostReading {
+                at: row.get(0)?,
+                total: row.get(1)?,
+                available: row.get(2)?,
+                swap_free: row.get(3)?,
+                credit: row.get(4)?,
+                running: row.get(5)?,
+            })
+        })?
+        .collect()
 }
 
 /// Those of `jobs` still queued, with how long each waited for the host's memory.
@@ -1807,7 +1785,7 @@ pub(super) fn slot_jobs(db: &Connection) -> rusqlite::Result<Vec<SlotJob>> {
     // A reseed that made a snapshot dropped every slot's layer of its profile: what ran before it left nothing.
     let mut reseeded = BTreeMap::<String, u64>::new();
     let bodies: Vec<(u64, String)> = db
-        .prepare_cached("SELECT at, body FROM events WHERE body LIKE '%\"cache.reseeded\"%'")?
+        .prepare_cached(RESEEDS)?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (at, body) in bodies {

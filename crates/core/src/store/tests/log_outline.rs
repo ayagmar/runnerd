@@ -16,17 +16,17 @@ use crate::testdir::TestDir;
 const SCHEMA_21: &str = include_str!("schema-21.sql");
 
 /// 2026-10-23T01:00:00Z, in seconds.
-const HOUR: u64 = 1_792_717_200;
+pub(super) const HOUR: u64 = 1_792_717_200;
 
-const POSITION: LogPosition = LogPosition { page: 1, offset: 0 };
+pub(super) const POSITION: LogPosition = LogPosition { page: 1, offset: 0 };
 
-fn at(second: u64, text: &str) -> String {
+pub(super) fn at(second: u64, text: &str) -> String {
     format!("2026-10-23T01:00:{second:02}.5Z {text}")
 }
 
 /// A log with set-up groups, a step header, a nested group left open across a batch, a warning, a post step and a
 /// failure.
-fn log() -> Vec<String> {
+pub(super) fn log() -> Vec<String> {
     vec![
         at(0, "Current runner version: '2.330.0'"),
         at(0, "##[group]Operating System"),
@@ -61,7 +61,7 @@ fn step(number: u32, name: &str, start: u64, end: u64, conclusion: &str) -> JobS
 }
 
 /// Job `id`'s runner took it, as runner `r<id>`.
-fn running(store: &Store, id: u64) {
+pub(super) fn running(store: &Store, id: u64) {
     let name = format!("r{id}");
     store.queued("o/r", &queued(id), HOUR * 1000);
     store.runner_started(runner(&name, HOUR * 1000));
@@ -69,7 +69,7 @@ fn running(store: &Store, id: u64) {
 }
 
 /// GitHub reports job `id` concluded and its runner is gone: its record is final.
-fn finish(store: &Store, id: u64, conclusion: &str) {
+pub(super) fn finish(store: &Store, id: u64, conclusion: &str) {
     let name = format!("r{id}");
     store.details(JobDetails {
         id,

@@ -25,7 +25,40 @@ use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
 
+/// The type of the durable event whose JSON is `body`, such as `profile.changed`, as `events_by_type` indexes it;
+/// NULL for a body that is not JSON. A query that reads events of one type names them by this expression, word for
+/// word, so SQLite reads the index and not every event (ADR 0171).
+macro_rules! event_type {
+    () => {
+        "(CASE WHEN json_valid(body) THEN json_extract(body, '$.type') END)"
+    };
+}
+
+/// The host's memory as each `budget.changed` event of `events` that has it read it, as `host_readings` keeps it:
+/// the event's ID and time, `MemTotal`, `MemAvailable`, `SwapFree`, what the host's limit took off the plain count,
+/// and whether a runner ran, as the budget counted more than the mirror, the seeds and the shells. A query appends
+/// conditions to its `WHERE`, on `events`' columns. A body that is not JSON reads as no reading, and a seed or a
+/// shell that is not an object as none, and the seeds and shells are summed with `total`, in floating point, which no
+/// value overflows, so a damaged row can fail neither the migration nor the writer.
+macro_rules! host_reading {
+    () => {
+        "INSERT INTO host_readings (event, at, total, available, swap_free, credit, running) \
+         SELECT id, at, json_extract(budget, '$.host.memory.total'), json_extract(budget, '$.host.memory.available'), \
+         json_extract(budget, '$.host.memory.swap.free'), coalesce(json_extract(budget, '$.host.credit.bytes'), 0), \
+         json_extract(budget, '$.memory_in_use') > json_extract(budget, '$.mirror_memory') \
+         + (SELECT total(CASE WHEN type = 'object' THEN json_extract(value, '$.memory') END) \
+         FROM json_each(budget, '$.seed_memory')) \
+         + (SELECT total(CASE WHEN type = 'object' THEN json_extract(value, '$.memory') END) \
+         FROM json_each(budget, '$.shell_memory')) \
+         FROM (SELECT id, at, CASE WHEN json_valid(body) AND json_type(body, '$.budget') = 'object' \
+         THEN json_extract(body, '$.budget') END AS budget FROM events \
+         WHERE body LIKE '{\"type\":\"budget.changed\"%') \
+         WHERE json_extract(budget, '$.host.memory.total') IS NOT NULL"
+    };
+}
+
 mod lens;
+mod logs;
 mod outline;
 mod prune;
 mod read;
@@ -127,6 +160,22 @@ const MIGRATIONS: &[(u32, &str)] = &[
     ),
     (31, "ALTER TABLE disk_windows ADD COLUMN owners TEXT;"),
     (32, "ALTER TABLE jobs ADD COLUMN elsewhere_runner TEXT;"),
+    (
+        33,
+        concat!(
+            "CREATE TABLE host_readings (event INTEGER PRIMARY KEY REFERENCES events (id) ON DELETE CASCADE, \
+             at INTEGER NOT NULL, total INTEGER NOT NULL, \
+             available INTEGER, swap_free INTEGER, credit INTEGER NOT NULL, running INTEGER);\n\
+             CREATE INDEX host_readings_by_at ON host_readings (at);\n",
+            host_reading!(),
+            ";\nCREATE INDEX events_by_type ON events (",
+            event_type!(),
+            ", at);\n\
+             CREATE TABLE log_packs (job INTEGER NOT NULL, first_line INTEGER NOT NULL, last_line INTEGER NOT NULL, \
+             data BLOB NOT NULL);\n\
+             CREATE INDEX log_packs_by_job ON log_packs (job, last_line);"
+        ),
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -602,18 +651,27 @@ impl Store {
 
     /// [`Store::open`] at `now` (ms).
     fn open_at(path: &Path, now: u64) -> Result<Store, StoreError> {
-        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty())
+            && !dir.exists()
+        {
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(dir)?;
+            // Before any file is made in it: the database, its `-wal` and `-shm` take the flag (ADR 0171).
+            no_cow(dir);
         }
+        let new = !path.exists();
         // Owner-only, as SQLite then makes its `-wal` and `-shm` files: logs may say more than the owner wants shared.
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
             .open(path)?;
+        if new {
+            // A database made in a directory that has copy-on-write still takes the flag while it is empty.
+            no_cow(path);
+        }
         let mut db = Connection::open(path)?;
         configure(&db)?;
         prepare(&mut db)?;
@@ -1537,6 +1595,15 @@ pub fn last_queued_at(path: &Path) -> Result<Option<u64>, StoreError> {
         Ok(db.query_row("SELECT MAX(queued_at) FROM jobs", [], |row| row.get(0))?)
     })?;
     Ok(last.flatten())
+}
+
+/// Turns btrfs's copy-on-write off for `path`, a directory or an empty file just made: SQLite rewrites the database a
+/// page at a time, which copy-on-write turns into a new extent per page. Best effort: a file system that has no such
+/// flag, or refuses it, leaves the history as it was, and the doctor says so.
+fn no_cow(path: &Path) {
+    if let Err(error) = crate::observe::storage::no_cow(path) {
+        tracing::debug!("{}: copy-on-write stays on: {error}", path.display());
+    }
 }
 
 /// What `read` finds in the database at `path`, opened read-only and left as it is; `None` when there is none.

@@ -108,8 +108,8 @@ enum Command {
         #[arg(long)]
         priority: bool,
         /// Also replay the config's policy and slots as the jobs really ran, each using its recorded samples from its
-        /// replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs and hazards,
-        /// beside what the same jobs waited as they ran.
+        /// replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs, the guard that
+        /// held each wait and hazards, beside what the same jobs waited as they ran.
         #[arg(long)]
         causal: bool,
         /// With --causal, give every run of a job the samples of its heaviest run, placed so that the run reaches its

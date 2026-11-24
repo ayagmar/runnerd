@@ -1,8 +1,9 @@
 //! Pruning: deletes what is older than `[history]` keeps, on its own connection off the writer thread, a batch per
 //! transaction with a pause after each as long as the batch took, so the writer's transactions get the lock in
 //! between. It stops between two batches once the store is closed. It keeps each repository's latest
-//! `repository.*` event, and jobs that are not final. It must not write anything but deletions, and, before it
-//! deletes job records, the time from which the history still holds every final job (`history_kept`).
+//! `repository.*` event, and jobs that are not final. It must not write anything but deletions, before it deletes
+//! job records the time from which the history still holds every final job (`history_kept`), and, last, the packs
+//! of the final jobs' logs (`logs::pack_final`, ADR 0171).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -22,7 +23,7 @@ pub(super) struct Db<'prune> {
 }
 
 impl Db<'_> {
-    fn stopped(&self) -> bool {
+    pub(super) fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
 }
@@ -62,7 +63,8 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
         batches(
             db,
             // `announced` and `announced_profiles` keep each repository's and profile's latest: what a restarted
-            // daemon compares its config with to announce a removal (`read::announced`).
+            // daemon compares its config with to announce a removal (`read::announced`). A deleted event's host
+            // reading goes with it, by `host_readings`' foreign key, in the same transaction.
             "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE at < ?1 \
              AND id NOT IN (SELECT event FROM announced) \
              AND id NOT IN (SELECT event FROM announced_profiles) LIMIT ?2)",
@@ -85,7 +87,12 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
         ),
     );
     logged("prune jobs", jobs(db, before(history.jobs)));
+    // Last, so no log is packed that this prune deletes.
+    logged("pack logs", super::logs::pack_final(db, before(PACK_AFTER)));
 }
+
+/// How long after its record is final a job's log is packed: well past the capture's last read of its runner.
+const PACK_AFTER: Duration = Duration::from_mins(10);
 
 /// Runs `delete` until it deletes nothing or the prune is stopped, pausing after each run as long as it took.
 fn batched(
@@ -140,6 +147,7 @@ fn logs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
         .prepare(
             "SELECT id FROM jobs WHERE finished_at < ?1 AND state IN ('completed', 'lost', 'elsewhere') \
              AND (EXISTS (SELECT 1 FROM log_lines WHERE job = id) \
+             OR EXISTS (SELECT 1 FROM log_packs WHERE job = id) \
              OR EXISTS (SELECT 1 FROM log_outlines WHERE job = id))",
         )?
         .query_map([before], |row| row.get(0))?
@@ -148,15 +156,13 @@ fn logs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
 }
 
 fn delete_logs(db: &Db<'_>, jobs: &[u64]) -> rusqlite::Result<()> {
-    let mut delete = db.prepare(
-        "DELETE FROM log_lines WHERE job = ?1 AND line IN \
-         (SELECT line FROM log_lines WHERE job = ?1 LIMIT ?2)",
-    )?;
     for job in jobs {
-        batched(db, || delete.execute(params![job, BATCH]))?;
+        // A few MiB of text at most per delete, however long the lines.
+        batched(db, || super::logs::delete_some_rows(db, *job))?;
         // After the lines, so an outline never describes lines that are all gone yet reads as kept; at most a few
         // thousand rows.
         if !db.stopped() {
+            super::logs::delete_packs(db, *job)?;
             super::outline::delete(db, *job)?;
         }
     }

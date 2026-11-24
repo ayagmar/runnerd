@@ -1,6 +1,6 @@
 # 0130. The budgets count what runs uses and keep room for its largest growths
 
-Status: **Accepted** (2026-11-10). Amends [0033](0033-measured-admission.md),
+Status: **Accepted** (2026-11-10), amended by [0172](0172-simulate-names-the-guard-that-held-each-wait.md). Amends [0033](0033-measured-admission.md),
 [0055](0055-admission-follows-the-hosts-memory.md),
 [0099](0099-the-budget-counts-jobs-that-do-not-peak-at-once.md),
 [0102](0102-the-larger-host-margin-stands-only-while-no-waiter-fits-the-plain-one.md),

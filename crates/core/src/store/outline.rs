@@ -132,12 +132,6 @@ fn mark_line(db: &Connection, job: u64, line: u64, kind: &str) -> rusqlite::Resu
     Ok(())
 }
 
-/// Whether line `line` of `job`'s log is stored.
-fn stored(db: &Connection, job: u64, line: u64) -> rusqlite::Result<bool> {
-    db.prepare_cached("SELECT 1 FROM log_lines WHERE job = ?1 AND line = ?2")?
-        .exists(params![job, line])
-}
-
 /// A job's outline, read at one time; `None` without the job.
 pub(super) fn outline(db: &Connection, id: u64) -> rusqlite::Result<Option<LogOutline>> {
     // Deferred: a snapshot of the database as of the first read, kept to the last. Dropped, it rolls back: it wrote
@@ -151,7 +145,9 @@ pub(super) fn outline(db: &Connection, id: u64) -> rusqlite::Result<Option<LogOu
     let stored_log = StoredLog {
         lines: log.lines,
         truncated: log.truncated,
-        kept: log.lines > 0 && stored(db, id, 0)? && stored(db, id, log.lines - 1)?,
+        kept: log.lines > 0
+            && super::logs::stored(db, id, 0)?
+            && super::logs::stored(db, id, log.lines - 1)?,
     };
     let saved = db
         .prepare_cached(
