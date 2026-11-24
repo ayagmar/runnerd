@@ -2195,19 +2195,41 @@ dl.health-figures {
 
 
 /* A waiting job in two lines: how long, its name and where it runs, then why it waits. */
-.queue-list a {
+/* The row is outlined; the job's page is its main link, and GitHub's a second one at its end when both are there. */
+.queue-list > li {
   display: grid;
-  grid-template-columns: 4.25rem minmax(0, auto) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.queue-main {
+  display: grid;
+  grid-template-columns: 5.25rem minmax(0, auto) minmax(0, 1fr);
   align-items: baseline;
   gap: 0 0.6rem;
   padding: 0.4rem 0.75rem;
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--line);
+  color: inherit;
   text-decoration: none;
+}
+
+.queue-github {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 0.75rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+  box-shadow: inset 1px 0 0 var(--line);
+}
+
+.queue-github:hover {
+  color: var(--ink);
 }
 
 .queue-list .waited {
   grid-row: 1 / span 2;
+  white-space: nowrap;
   align-self: center;
   font-size: 1.125rem;
   font-weight: 700;
@@ -2222,7 +2244,7 @@ dl.health-figures {
   white-space: nowrap;
 }
 
-.queue-list a:hover .job-name {
+a.queue-main:hover .job-name {
   text-decoration: underline;
 }
 
@@ -2264,9 +2286,63 @@ dl.health-figures {
   background: var(--accent);
 }
 
-.queue-list > li.linked a {
+.queue-list > li.linked {
   outline: 2px solid var(--ink);
   outline-offset: -2px;
+}
+
+/* The queue's page: how many wait beside the title, the repositories left out of the list, then every job. */
+.queue-count {
+  margin: 0;
+  font-weight: 500;
+}
+
+.queue-count-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+/* The overview's link to the repositories its queue leaves out: shown however few jobs it lists. */
+.queue-unlisted {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.queue-back {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+/* On a phone the page's rows stack the job's name, where it runs and why it waits beside the wait, so none is cut
+   to a few letters. The overview keeps its two lines. */
+@media (max-width: 40rem) {
+  .queue-page .queue-main {
+    grid-template-columns: 5.25rem minmax(0, 1fr);
+  }
+
+  .queue-page .queue-main .waited {
+    grid-row: 1 / span 3;
+  }
+
+  .queue-page .queue-main :is(.repo, .reason) {
+    grid-column: 2;
+  }
+
+  /* The page is where every row is read whole: a name or a branch wraps rather than end in an ellipsis, so two jobs
+     of one name whose branches differ at their end tell apart. */
+  .queue-page .queue-main :is(.job-name, .repo) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+.unlisted {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
 }
 
 /* A job's latest runs: a column each, run time stacked on its wait, and its memory peak under them. */
@@ -5325,7 +5401,7 @@ html:has(.editor-frame) {
   }
 
   .recent .job-list > li:nth-child(n + 4),
-  .queue-list > li:nth-child(n + 4) {
+  #queue .queue-list > li:nth-child(n + 4) {
     display: none;
   }
 

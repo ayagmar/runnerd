@@ -46,6 +46,7 @@ use runnerd_core::api::{
 use crate::views::{repository_id, slot_id};
 
 mod parity;
+mod queue;
 
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;
@@ -282,6 +283,8 @@ async fn without_the_session_cookie_every_page_and_write_is_401() {
         ("GET", "/jobs/1"),
         ("GET", "/sizing"),
         ("GET", "/live/overview"),
+        ("GET", "/queue"),
+        ("GET", "/live/queue"),
         ("POST", "/v1/repositories/x/pause"),
         ("POST", "/v1/repositories/halyard/ledger/pause"),
     ] {
@@ -951,13 +954,21 @@ async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits
         "each queued job says why it waits: {queue}"
     );
     assert!(
-        queue.contains(r#"<li data-row data-class:linked="$_repo == 'halyard/storefront'""#),
+        queue.contains(r#"<li id="queued-120055991710" data-row data-class:linked="$_repo == 'halyard/storefront'""#),
         "a queued row lights up with its repository: {queue}"
     );
     assert_eq!(
-        body.matches("120055991710").count(),
+        body.matches(r#"href="/jobs/120055991710""#).count(),
         1,
         "a queued job the history also has shows once, in the queue: {body}"
+    );
+    assert!(
+        queue.contains(r#"<a class="queue-github" href="https://github.com/halyard/storefront/actions/runs/40018663903/job/120055991710" rel="noopener" aria-label="visual-diff on GitHub">GitHub</a>"#),
+        "a job the history holds opens here, with GitHub's page a second link: {queue}"
+    );
+    assert!(
+        queue.contains(r#"<a class="queue-main" href="https://github.com/halyard/storefront/actions/runs/1/job/2" rel="noopener">"#),
+        "a job the history lacks opens on GitHub, never a page that is not here: {queue}"
     );
     let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
     assert!(

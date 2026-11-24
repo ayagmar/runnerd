@@ -1492,6 +1492,8 @@ pub struct Facts {
     pub figures: Vec<Figure>,
     /// Why each queued job waits, oldest first.
     pub waits: Vec<WaitFact>,
+    /// Why each repository whose queued jobs the status leaves out is left out, in config order.
+    pub unlisted: Vec<String>,
     /// Each slot that holds a runner.
     pub slots: Vec<SlotFact>,
     /// [`TIMED_OUT`]'s page.
@@ -1625,6 +1627,11 @@ pub fn facts(daemon: &Daemon) -> Facts {
                     kind: waiting.kind(),
                 })
             })
+            .collect(),
+        unlisted: status
+            .unlisted()
+            .into_iter()
+            .map(|unlisted| unlisted.line)
             .collect(),
         slots: slot_facts(status),
         job: JobFacts {
@@ -1806,6 +1813,31 @@ pub fn github_failing() -> Daemon {
             },
         });
     }
+    daemon
+}
+
+/// The fixtures with storefront's listing failing (502) since 3 minutes ago, so the status leaves its queued jobs out
+/// (`QueueShown::Unlisted`) while ledger's are listed, and ledger's job behind storefront's waits behind a job the
+/// status no longer shows (ADR 0174).
+pub fn unlisted() -> Daemon {
+    let mut daemon = daemon();
+    for repository in &mut daemon.status.repositories {
+        if repository.name == STOREFRONT {
+            repository.listing = Some(api::ListingFailure {
+                since: NOW - 180,
+                problem: api::ListingProblem::Failed { status: 502 },
+            });
+            repository.queue = api::QueueShown::Unlisted;
+            repository.queued_jobs = 0;
+            for pool in &mut repository.pools {
+                pool.queued_jobs = 0;
+            }
+        }
+    }
+    daemon
+        .status
+        .queued
+        .retain(|queued| queued.repository != STOREFRONT);
     daemon
 }
 

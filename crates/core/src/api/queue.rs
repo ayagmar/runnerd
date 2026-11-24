@@ -1,6 +1,7 @@
 //! What holds the queue as a whole, for a script to ask in one call: whether a queued job waits for the host's
-//! memory; and what a job's wait is counted under in the history, [`WaitCause`] (ADR 0154). It reads the status the
-//! daemon served; it decides nothing about scheduling.
+//! memory; what a job's wait is counted under in the history, [`WaitCause`] (ADR 0154); and which repositories'
+//! queued jobs the status leaves out, and why, [`Unlisted`] (ADR 0174). It reads the status the daemon served; it
+//! decides nothing about scheduling.
 
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +169,17 @@ impl QueuedJob {
     }
 }
 
+/// A repository whose queued jobs [`Status::queued`] leaves out, while the history may still hold them queued, and why,
+/// as every client says it beside the queue (ADR 0174).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unlisted<'status> {
+    /// The repository, `owner/name`.
+    pub repository: &'status str,
+    /// Why none of its queued jobs is shown: `Cannot list halyard/ledger's queued jobs: GitHub answers 502; none
+    /// shows here`.
+    pub line: String,
+}
+
 /// Whether queued jobs wait for the host's memory, as [`Status::host_wait`] answers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostWait {
@@ -201,6 +213,61 @@ impl HostWait {
 }
 
 impl Status {
+    /// The repositories whose queued jobs `queued` leaves out (`QueueShown::Unlisted`), in config order, each with
+    /// why: its listing's failure when it has one, else the daemon stopping, GitHub's rate limit, or no listing yet.
+    /// A repository of a daemon that does not say (`QueueShown::Unknown`) is not named: nothing is known of it.
+    pub fn unlisted(&self) -> Vec<Unlisted<'_>> {
+        const NONE_SHOWN: &str = "; none shows here";
+        self.repositories
+            .iter()
+            .filter(|repository| repository.queue == QueueShown::Unlisted)
+            .map(|repository| {
+                let name = repository.name.as_str();
+                let why = match &repository.listing {
+                    Some(failure) => failure.line(name),
+                    None if self.shutting_down || self.stopping.is_some() => {
+                        format!("runnerd is stopping, so it lists {name}'s queued jobs no more")
+                    }
+                    None if self.github_limited_until.is_some() => {
+                        format!("GitHub's rate limit stops runnerd listing {name}'s queued jobs")
+                    }
+                    None => format!("{name}'s queued jobs are not listed yet"),
+                };
+                Unlisted {
+                    repository: name,
+                    line: format!("{why}{NONE_SHOWN}"),
+                }
+            })
+            .collect()
+    }
+
+    /// What an empty queue says, as every client says it: that nothing waits only while every repository is
+    /// `QueueShown::Listed`; while [`Status::unlisted`] names one, that no listed job does; and while the daemon does
+    /// not say whether it listed one (`QueueShown::Unknown`), only that it shows none.
+    pub fn empty_queue_line(&self) -> &'static str {
+        if !self.unlisted().is_empty() {
+            "No job of a listed repository waits."
+        } else if self
+            .repositories
+            .iter()
+            .all(|repository| repository.queue == QueueShown::Listed)
+        {
+            "Nothing waiting: every queued job has a runner."
+        } else {
+            "runnerd shows no waiting job."
+        }
+    }
+
+    /// How many repositories [`Status::unlisted`] names, as a link to the queue's page says it: `1 repository not
+    /// listed`; `None` while it names none.
+    pub fn unlisted_line(&self) -> Option<String> {
+        match self.unlisted().len() {
+            0 => None,
+            1 => Some("1 repository not listed".to_owned()),
+            count => Some(format!("{count} repositories not listed")),
+        }
+    }
+
     /// Whether a queued job, of `repository` (`owner/name`, in any case, as GitHub reads it) when given, waits for
     /// the host's memory ([`QueuedJob::waits_for_host_memory`]): what a local build asks before it takes memory CI
     /// could start with. A job seen waiting is an answer however the rest stands; `Clear` needs every repository
