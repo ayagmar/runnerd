@@ -17,7 +17,7 @@ use super::budget::{self, budget};
 use super::job::drop_least;
 use super::slice;
 use super::slots::lanes;
-use super::{bold, fit, heading, length, list_block, picked, row_of, spark, wrap};
+use super::{bold, fit, heading, length, list_block, picked, row_of, spark};
 use crate::human::{self, ago, duration};
 use crate::tui::app::{App, Pane};
 use crate::tui::mouse::{Hits, List};
@@ -372,23 +372,62 @@ fn reason(app: &App, job: &QueuedJob, now: u64, width: usize, theme: Theme) -> S
     })
 }
 
-/// `why` wrapped under what it belongs to, `width` cells wide and indented by two, in at most `most` lines: a reason
-/// longer than that ends in ` …`.
+/// What a reason cut short ends in.
+const CUT: &str = " …";
+
+/// `text` in lines of at most `width` cells, broken between words, and a word wider than a line broken across lines
+/// where it reaches the edge: unlike [`super::wrap`], every character is kept, as a reason is read whole.
+pub(super) fn wrap_whole(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() <= width {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        for character in word.chars() {
+            line.push(character);
+            // The width is measured on the whole line, as a character and a selector after it take more cells
+            // together than apart; a lone character wider than the line stays, as nothing narrower holds it.
+            if line.width() > width && line.chars().count() > 1 {
+                line.pop();
+                lines.push(std::mem::take(&mut line));
+                line.push(character);
+            }
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// `why` wrapped under what it belongs to, `width` cells wide and indented by two, every character kept, in at most
+/// `most` lines: a reason longer than that ends in ` …`, which its lines leave room for.
 pub(super) fn reason_lines(
     why: &Span<'_>,
     width: usize,
     most: usize,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = wrap(&why.content, width.saturating_sub(2))
-        .into_iter()
-        .map(|line| Line::styled(format!("  {line}"), why.style))
-        .collect();
-    if lines.len() > most {
-        lines.truncate(most);
-        if let Some(last) = lines.last_mut() {
-            last.spans.push(Span::styled(" …", theme.dim()));
-        }
+    let indented = |text: String| Line::styled(format!("  {text}"), why.style);
+    let whole = wrap_whole(&why.content, width.saturating_sub(2));
+    if whole.len() <= most {
+        return whole.into_iter().map(indented).collect();
+    }
+    let mut lines: Vec<Line<'static>> =
+        wrap_whole(&why.content, width.saturating_sub(2 + CUT.width()))
+            .into_iter()
+            .take(most)
+            .map(indented)
+            .collect();
+    if let Some(last) = lines.last_mut() {
+        last.spans.push(Span::styled(CUT, theme.dim()));
     }
     lines
 }
@@ -415,7 +454,7 @@ impl QueueRows {
             };
         }
         let columns = QueueColumns::of(app, now, usize::from(width));
-        let detail = length(detail(app, &columns, now, Theme { colour: false }).len());
+        let detail = length(detail(app, &columns, now, REASON_MOST, Theme { colour: false }).len());
         let wanted = length(queued + 1).saturating_add(detail);
         QueueRows {
             wanted,
@@ -487,9 +526,15 @@ impl QueueColumns {
     }
 }
 
-/// While the queue is focused, the selected job's reason whole under it when its row cuts it, at most
-/// `REASON_MOST` lines; nothing otherwise.
-fn detail(app: &App, columns: &QueueColumns, now: u64, theme: Theme) -> Vec<Line<'static>> {
+/// While the queue is focused, the selected job's reason whole under it when its row cuts it, in at most `most`
+/// lines; nothing otherwise.
+fn detail(
+    app: &App,
+    columns: &QueueColumns,
+    now: u64,
+    most: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
     app.live
         .status
         .queued
@@ -498,7 +543,7 @@ fn detail(app: &App, columns: &QueueColumns, now: u64, theme: Theme) -> Vec<Line
         .and_then(|job| why(app, job, now, theme))
         .filter(|why| why.width() > columns.reason)
         .map_or_else(Vec::new, |why| {
-            reason_lines(&why, columns.width, REASON_MOST, theme)
+            reason_lines(&why, columns.width, most, theme)
         })
 }
 
@@ -516,15 +561,10 @@ pub(super) fn queue(
     let focused = app.pane == Pane::Queue;
     let queued = &app.live.status.queued;
     let columns = QueueColumns::of(app, now, usize::from(area.width));
-    let mut detail = detail(app, &columns, now, theme);
-    // The heading and the selected job's row come first.
-    let detail_height = length(detail.len()).min(area.height.saturating_sub(2));
-    if detail.len() > usize::from(detail_height) {
-        detail.truncate(usize::from(detail_height));
-        if let Some(last) = detail.last_mut() {
-            last.spans.push(Span::styled(" …", theme.dim()));
-        }
-    }
+    // The heading and the selected job's row come first; the job's page shows the rest of a longer reason.
+    let most = REASON_MOST.min(usize::from(area.height.saturating_sub(2)));
+    let detail = detail(app, &columns, now, most, theme);
+    let detail_height = length(detail.len());
     let [title, table_area, detail_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),

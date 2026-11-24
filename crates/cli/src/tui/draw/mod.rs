@@ -597,7 +597,7 @@ fn help(frame: &mut Frame<'_>, area: Rect, page: usize, hits: &mut Hits) {
         ("/ n N", "search; the next and the previous match"),
         ("f s t", "jobs: filter, sort, time range"),
         ("l x", "jobs: timeline; clear the filters"),
-        ("] [", "jobs: the next and the previous page"),
+        ("] [", "next, previous page: jobs, a job's wait"),
         ("enter", "job: fold a step; settings: the passing checks"),
         ("G g", "follow the log, or go to its start"),
         ("c", "job: compare with an earlier run"),

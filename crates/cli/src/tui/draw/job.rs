@@ -16,7 +16,7 @@ use super::Theme;
 use super::budget::scale;
 use super::compare::compare;
 use super::log::{log, styled_line};
-use super::overview::{badge, reason_lines, why};
+use super::overview::{badge, why, wrap_whole};
 use super::resources::{job_charts, job_spark};
 use super::steps::steps;
 use super::{bold, centred, fit, heading, length, spark, wrap};
@@ -66,11 +66,21 @@ pub(super) fn job(
     } else {
         0
     };
-    let most = area
+    // A reason longer than the rows under the legend takes the log's too: a waiting job has no log yet.
+    let rows = area
         .height
-        .saturating_sub(3 + failure_height + 2 + runs_height + 1);
-    let WaitingReason { beside, under } =
-        WaitingReason::of(app, summary, now, width, usize::from(most.max(1)), theme);
+        .saturating_sub(3 + failure_height + 2 + runs_height)
+        .max(1);
+    let WaitingReason { beside, under } = WaitingReason::of(
+        app,
+        open,
+        Room {
+            width,
+            rows: usize::from(rows),
+        },
+        now,
+        theme,
+    );
     let timeline_height = 2 + length(under.len());
     let fixed = 3 + failure_height + timeline_height + runs_height;
     // Until a runner has it there is nothing to chart.
@@ -143,21 +153,23 @@ pub(super) fn job(
 struct WaitingReason {
     /// After the timeline's legend, where it fits whole.
     beside: Option<Span<'static>>,
-    /// Wrapped under the legend, where it does not.
+    /// Wrapped under the legend, where it does not: the page of it `]` and `[` turned to, and, while it does not fit,
+    /// which of its lines show and the keys that turn the page.
     under: Vec<Line<'static>>,
 }
 
+/// The cells and rows something may take.
+#[derive(Clone, Copy)]
+struct Room {
+    width: usize,
+    rows: usize,
+}
+
 impl WaitingReason {
-    /// `summary`'s reason while it waits for a runner, in `width` cells and at most `most` lines under the legend;
-    /// nothing once a runner has it or from a daemon that does not say.
-    fn of(
-        app: &App,
-        summary: &JobSummary,
-        now: u64,
-        width: usize,
-        most: usize,
-        theme: Theme,
-    ) -> WaitingReason {
+    /// The open job's reason while it waits for a runner, under the legend in at most `room`; nothing once a runner
+    /// has it or from a daemon that does not say.
+    fn of(app: &App, open: &JobView, room: Room, now: u64, theme: Theme) -> WaitingReason {
+        let summary = &open.job.summary;
         let why = app
             .live
             .status
@@ -166,15 +178,17 @@ impl WaitingReason {
             .find(|queued| queued.id == summary.id)
             .filter(|_| summary.timeline.started_at.is_none())
             .and_then(|queued| why(app, queued, now, theme));
-        let room = width.saturating_sub(Line::from(legend(summary, now, theme)).width());
+        let beside = room
+            .width
+            .saturating_sub(Line::from(legend(summary, now, theme)).width());
         match why {
-            Some(why) if why.width() <= room => WaitingReason {
+            Some(why) if why.width() <= beside => WaitingReason {
                 beside: Some(why),
                 under: Vec::new(),
             },
             Some(why) => WaitingReason {
                 beside: None,
-                under: reason_lines(&why, width, most, theme),
+                under: reason_page(&why, room, open.reason_page(), theme),
             },
             None => WaitingReason {
                 beside: None,
@@ -182,6 +196,38 @@ impl WaitingReason {
             },
         }
     }
+}
+
+/// `why` wrapped `room.width` cells wide and indented by two, every character kept. Longer than `room.rows`, it shows
+/// a page at a time, `page` counted round the pages there are, over a line saying which of its lines show and how to
+/// turn the page.
+fn reason_page(why: &Span<'_>, room: Room, page: isize, theme: Theme) -> Vec<Line<'static>> {
+    let whole = wrap_whole(&why.content, room.width.saturating_sub(2));
+    let indented = |text: &String| Line::styled(format!("  {text}"), why.style);
+    if whole.len() <= room.rows {
+        return whole.iter().map(indented).collect();
+    }
+    // The last row says where the page is, when there is a row for it besides one of the reason.
+    let shown = room.rows.saturating_sub(1).max(1);
+    let pages = whole.len().div_ceil(shown);
+    let page =
+        usize::try_from(page.rem_euclid(isize::try_from(pages).unwrap_or(isize::MAX))).unwrap_or(0);
+    let first = page * shown;
+    let mut lines: Vec<Line<'static>> =
+        whole.iter().skip(first).take(shown).map(indented).collect();
+    if room.rows > 1 {
+        let last = (first + shown).min(whole.len());
+        let note = format!(
+            "  lines {}–{last} of {}; ] next page, [ previous",
+            first + 1,
+            whole.len()
+        );
+        lines.push(Line::styled(
+            fit(&note, room.width).trim_end().to_owned(),
+            theme.dim(),
+        ));
+    }
+    lines
 }
 
 /// The job's repository, its name and outcome, and its details.
