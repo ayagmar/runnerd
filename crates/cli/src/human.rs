@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     self, ActionPreview, ActionResult, AutoPlan, BuildCacheCounts, Caches, Digest, Event,
-    EventEnvelope, Insights, Job, JobPage, JobSizing, JobSummary, NotifyTest, ProfilePlan,
+    EventEnvelope, Fleet, Insights, Job, JobPage, JobSizing, JobSummary, NotifyTest, ProfilePlan,
     ProfileSizing, QueuedJob, RecordNote, RecordState, Records, Savings, Sizing, SlotState, Status,
     Step, WaitSpread,
 };
@@ -331,6 +331,67 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
         );
     }
     if let Some(next) = page.next {
+        let _ = writeln!(
+            out,
+            "{}",
+            paint.paint(Tone::Dim, &format!("older jobs: --before {next}"))
+        );
+    }
+    out
+}
+
+/// `runnerctl fleet`: each machine's line as core words it, then the page of every machine's jobs with the
+/// machine whose record shows (ADR 0165).
+pub(crate) fn fleet(fleet: &Fleet, now: u64, paint: Paint) -> String {
+    let width = fleet
+        .machines
+        .iter()
+        .map(|machine| machine.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for machine in &fleet.machines {
+        let name = format!("{:width$}", machine.name);
+        let _ = writeln!(
+            out,
+            "{}  {}",
+            paint.paint(Tone::Bold, &name),
+            paint.paint(machine.tone().into(), &machine.summary())
+        );
+    }
+    out.push('\n');
+    if fleet.jobs.is_empty() {
+        out.push_str("no jobs match\n");
+        return out;
+    }
+    let mut table = Table::columns(&[
+        Column::Id,
+        Column::Machine,
+        Column::Repository,
+        Column::Job,
+        Column::Branch,
+        Column::Outcome,
+        Column::Waited,
+        Column::Ran,
+        Column::Queued,
+    ])
+    .right(&[6, 7]);
+    for entry in &fleet.jobs {
+        let job = &entry.job;
+        table.row(vec![
+            cell(job.id.to_string(), Tone::Dim),
+            plain(&entry.machine),
+            plain(&job.repository),
+            plain(job.title().to_string()),
+            job.branch.as_deref().map_or_else(dash, plain),
+            outcome(job),
+            job.waited(now).map_or_else(dash, |s| plain(duration(s))),
+            job.ran(now).map_or_else(dash, |s| plain(duration(s))),
+            cell(ago(job.timeline.queued_at, now), Tone::Dim),
+        ]);
+    }
+    out.push_str(&table.render(paint, ""));
+    if let Some(next) = fleet.next {
         let _ = writeln!(
             out,
             "{}",

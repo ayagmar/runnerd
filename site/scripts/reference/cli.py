@@ -21,7 +21,7 @@ PAGES = [
     ("runnerd-simulate", "runnerd simulate", "Every option of `runnerd simulate`, as its `--help` prints them.", "runnerd",
      ["simulate"]),
     ("runnerctl", "runnerctl", "The `runnerctl` commands that show something, and their options, as `--help` prints them.",
-     "runnerctl", ["status", "jobs", "job", "logs", "watch", "tui", "insights", "caches", "config", "doctor", "web"]),
+     "runnerctl", ["status", "jobs", "job", "logs", "watch", "tui", "insights", "caches", "config", "doctor", "web", "fleet"]),
     ("runnerctl-actions", "runnerctl actions",
      "The `runnerctl` commands that change something, and their options, as `--help` prints them.", "runnerctl",
      ["pause", "resume", "cancel", "rerun", "reseed", "shell", "records", "sizing", "notify", "machine"]),
