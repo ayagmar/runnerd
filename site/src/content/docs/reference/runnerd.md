@@ -20,6 +20,7 @@ Never overwrites a file without --force and never runs anything as root: it prin
 - `--config <CONFIG>`: Where to write the config [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml]
 - `--force`: Replace the config and the unit if they exist
 - `--memory-ceiling <SIZE>`: The most memory this host can grow to, such as 24G, for a VM whose hypervisor adds memory as the guest asks for it. The config gets it as memory_ceiling, and the first runner is sized for the host as it can grow
+- `--overflow`: Write an overflow host's config, for a machine that takes only the jobs the primary machine on the same labels did not take in time: role = "overflow", warm = 0 and auto sizing off
 
 ## `runnerd check-config [PATH]`
 
