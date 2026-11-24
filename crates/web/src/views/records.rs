@@ -2,10 +2,10 @@
 //! job page's, where a record's shell opens. A record outlives its job's history: one whose job the history no
 //! longer holds says so, and has no job page to link to.
 
+use crate::views::Here;
 use maud::{Markup, html};
 use std::collections::BTreeSet;
 
-use runnerd_core::api::Machine;
 use runnerd_core::api::{Column, JobQuery, RecordFilter, Records, Section, Status, Tone};
 use runnerd_core::client::{Client, ClientError};
 
@@ -48,14 +48,14 @@ impl RecordsView {
 }
 
 /// The whole page.
-pub(crate) fn render(view: &RecordsView, machine: Option<&Machine>) -> Markup {
+pub(crate) fn render(view: &RecordsView, here: Here<'_>) -> Markup {
     let main = html! {
         (heading(runnerd_core::api::View::Jobs.title(), Some(Page::Records), None))
         (section(&view.status, &view.records, view.in_history.as_ref(), view.now))
     };
     page(
         Section::Records.title(),
-        machine,
+        here,
         Some(Page::Records),
         None,
         &main,

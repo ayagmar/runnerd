@@ -31,6 +31,20 @@ impl Machine {
         }
     }
 
+    /// What a client's title ends with to say which machine it shows (ADR 0166): the daemon's name, else `chosen`,
+    /// the name the client reached it by, as in `machines.toml`; both when they differ, ` on tern (lab)`. Empty
+    /// when neither is known, as for this machine's 0.1.5 daemon.
+    pub fn shown_suffix(machine: Option<&Machine>, chosen: Option<&str>) -> String {
+        let own = machine
+            .map(|machine| machine.name.as_str())
+            .filter(|name| !name.is_empty());
+        match (own, chosen.filter(|name| !name.is_empty())) {
+            (Some(own), Some(chosen)) if own != chosen => format!(" on {own} ({chosen})"),
+            (Some(name), _) | (None, Some(name)) => format!(" on {name}"),
+            (None, None) => String::new(),
+        }
+    }
+
     /// A notification's title, saying which machine sent it: `o/app: build failed on tern`.
     pub fn notification_title(machine: Option<&Machine>, title: &str) -> String {
         format!("{title}{}", Machine::notification_suffix(machine))
@@ -102,6 +116,24 @@ impl Machine {
 #[cfg(test)]
 mod tests {
     use super::Machine;
+
+    /// Catches: a client showing a 0.1.5 daemon it switched to with no name, as if it were this machine, or hiding
+    /// that the machine it chose calls itself otherwise.
+    #[test]
+    fn a_client_names_the_machine_it_shows_by_the_daemons_name_or_its_own() {
+        let tern = Machine {
+            id: "1a2b3c4d".to_owned(),
+            name: "tern".to_owned(),
+        };
+        assert_eq!(Machine::shown_suffix(Some(&tern), None), " on tern");
+        assert_eq!(Machine::shown_suffix(Some(&tern), Some("tern")), " on tern");
+        assert_eq!(
+            Machine::shown_suffix(Some(&tern), Some("lab")),
+            " on tern (lab)"
+        );
+        assert_eq!(Machine::shown_suffix(None, Some("skiff")), " on skiff");
+        assert_eq!(Machine::shown_suffix(None, None), "");
+    }
 
     #[test]
     fn a_job_that_ran_elsewhere_names_the_machine_its_runner_name_carries() {
