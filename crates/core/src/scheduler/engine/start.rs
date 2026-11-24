@@ -341,28 +341,59 @@ async fn run<G: GithubApi, D: DockerApi>(
 }
 
 /// The runners batches launched, by name, in launch order, for a test to tell the launches a reading taken
-/// mid-batch binds from those before it, whose registration or Docker start may come later.
+/// mid-batch binds from those before it, whose registration or Docker start may come later; and the runners placed
+/// with nothing to sample them, each with how many runners had launched when its start was folded, for a test to
+/// tell the launches that were checked against its cap from those checked before it was known.
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
-pub(super) struct Launches(Arc<std::sync::Mutex<Vec<String>>>);
+pub(super) struct Launches {
+    launched: Arc<std::sync::Mutex<Vec<String>>>,
+    unwatched: Arc<std::sync::Mutex<Vec<FoldedUnwatched>>>,
+}
+
+/// A runner placed with nothing to sample it, as `Launches` keeps it.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct FoldedUnwatched {
+    runner: String,
+    /// How many runners had launched when its start was folded.
+    launched_before: usize,
+}
 
 #[cfg(test)]
 impl Launches {
     fn note(&self, runner: &str) {
-        crate::sync::lock(&self.0).push(runner.to_owned());
+        crate::sync::lock(&self.launched).push(runner.to_owned());
+    }
+
+    fn note_unwatched(&self, runner: &str) {
+        let launched_before = self.count();
+        crate::sync::lock(&self.unwatched).push(FoldedUnwatched {
+            runner: runner.to_owned(),
+            launched_before,
+        });
     }
 
     /// How many runners were launched so far.
     pub(super) fn count(&self) -> usize {
-        crate::sync::lock(&self.0).len()
+        crate::sync::lock(&self.launched).len()
     }
 
     /// The runners launched after the first `count`, in order.
     pub(super) fn after(&self, count: usize) -> Vec<String> {
-        crate::sync::lock(&self.0)
+        crate::sync::lock(&self.launched)
             .get(count..)
             .unwrap_or_default()
             .to_vec()
+    }
+
+    /// Whether `runner` was placed with nothing to sample it after the last launch so far: no launch was checked
+    /// against its cap.
+    pub(super) fn unwatched_after_every_launch(&self, runner: &str) -> bool {
+        let count = self.count();
+        crate::sync::lock(&self.unwatched)
+            .iter()
+            .any(|folded| folded.runner == runner && folded.launched_before == count)
     }
 }
 
@@ -898,6 +929,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     },
                     _ => FirstSample::Unwatched,
                 };
+                #[cfg(test)]
+                if first_sample == FirstSample::Unwatched {
+                    self.launches.note_unwatched(&starting.runner_name);
+                }
                 let purpose = starting.purpose;
                 let occupant = starting.into_occupant(runner.id, container, first_sample);
                 self.place(slot, occupant, purpose, made).await

@@ -3302,8 +3302,9 @@ impl Case {
     /// while the host stalls short of memory (ADR 0055). What runs may be past it otherwise: nothing is stopped for
     /// it. A runner nothing samples counts at its cap until a sample of its own comes: the container of a start that
     /// failed after Docker started it and that Docker kept, or one whose first inspect failed. The check counts one
-    /// this tick started at what it was admitted for (`unwatched_past_admission`), and every later start fits beside
-    /// it at its cap.
+    /// this tick started at what it was admitted for only when its start was folded after the tick's last launch,
+    /// which no admission could check against its cap (`unwatched_past_admission`); one folded before a later launch
+    /// counts in full against it.
     fn starts_fit_the_budget(
         &self,
         status: &api::Status,
@@ -3410,13 +3411,15 @@ impl Case {
         Ok(())
     }
 
-    /// What the runners of `started` that nothing samples count past what each was admitted for, at their caps.
+    /// What the runners of `started` that nothing samples, whose starts were folded after the last launch, count past
+    /// what each was admitted for, at their caps: an increase no admission checked.
     fn unwatched_past_admission(&self, started: &BTreeSet<String>) -> u64 {
+        let launches = self.engine.launches();
         self.engine
             .occupied()
             .filter(|(_, occupant)| {
                 started.contains(&occupant.runner_name)
-                    && occupant.first_sample == crate::scheduler::engine::FirstSample::Unwatched
+                    && launches.unwatched_after_every_launch(&occupant.runner_name)
             })
             .map(|(_, occupant)| {
                 self.engine
@@ -5421,4 +5424,65 @@ async fn a_runner_whose_first_inspect_failed_counts_at_its_cap_until_sampled() {
         .map(|(_, runner)| runner.reserved)
         .collect();
     assert_eq!(o_t, vec![4 * G], "o/t's unwatched runner counts at its cap");
+}
+
+/// Re-check of #353. One tick starts o/t's and o/s's heavy jobs, each predicted at 1.25G beside o/r's 4.8G. o/t's start
+/// fails after Docker started its container, which Docker keeps, while o/s's caches take longer to prepare: its
+/// failure is folded before o/s's start is checked again, at o/t's 4G cap, 10.05G of 8.5G, so o/s waits. The check
+/// counts o/t's container in full against a launch after its fold: a scheduler that started o/s here would break it.
+#[tokio::test(start_paused = true)]
+async fn a_failure_folded_before_a_later_start_in_the_batch_counts_against_it() {
+    let heavy = |second| Step::Queue {
+        second,
+        labels: Labels::Heavy,
+    };
+    let mut case = Case::new();
+    case.recover().await.unwrap();
+    case.tick().await.unwrap();
+    for step in [
+        Step::PastRuns,
+        Step::Reload(Change::Policy),
+        Step::Reload(Change::HeavySlots(3)),
+        heavy(false),
+        Step::Tick,
+        Step::Assign(0),
+        Step::Sample {
+            percent: 120,
+            available: 20,
+            stalled: false,
+        },
+        Step::StartFailsLate {
+            takes_job: false,
+            cleanup_fails: true,
+        },
+        Step::QueueQuiet {
+            labels: Labels::Heavy,
+        },
+        heavy(true),
+    ] {
+        case.apply(step).await.unwrap();
+    }
+    {
+        let mut docker = case.docker.0.lock().unwrap();
+        docker.latency.prepare = Duration::from_secs(10);
+        docker.latency.start = Duration::from_secs(1);
+    }
+    let launched = case.engine.launches().count();
+    let outcome = case.apply(Step::Tick).await;
+    assert_eq!(
+        outcome.err().map(|found| (found.invariant, found.detail)),
+        None
+    );
+    let status = case.status();
+    let kept = runners_of(&status)
+        .filter(|(_, runner)| {
+            runner.repository == "o/t" && kept_by_a_failed_start(&runner.container)
+        })
+        .count();
+    assert_eq!(kept, 1, "o/t's start fails and Docker keeps its container");
+    assert_eq!(
+        case.engine.launches().count(),
+        launched + 1,
+        "the tick launches o/t's start alone: o/s's is checked again after o/t's failure and waits"
+    );
 }
