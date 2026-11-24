@@ -400,6 +400,9 @@ impl Writer<'_> {
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
+            Write::Drains { began, ended, done } => {
+                let _ = done.send(self.drains(&began, &ended));
+            }
             Write::SizingIntent { change, done } => {
                 let _ = done.send(self.sizing_intent(&change));
             }
@@ -1553,6 +1556,29 @@ impl Writer<'_> {
         })
     }
 
+    /// Records the drains that `began` and forgets those that `ended`, as `draining:<repository>` keys of `meta`, synced
+    /// to disk: a reload records the drains it begins before the config file without their repositories is written.
+    fn drains(&self, began: &[String], ended: &[String]) -> bool {
+        self.durably(|| {
+            self.change("record the draining repositories", |_| {
+                for repository in ended {
+                    self.db.execute(
+                        "DELETE FROM meta WHERE key = 'draining:' || ?1",
+                        [repository],
+                    )?;
+                }
+                for repository in began {
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO meta (key, value) VALUES ('draining:' || ?1, 0)",
+                        [repository],
+                    )?;
+                }
+                Ok(())
+            })
+        })
+        .unwrap_or(false)
+    }
+
     /// Records what the notifier did, and sends whether it committed.
     fn notify(&self, change: super::NotifyChange, done: oneshot::Sender<bool>) {
         let committed = match change {
@@ -1600,8 +1626,8 @@ impl Writer<'_> {
     }
 
     /// Runs `write` with its commits synced to disk (`synchronous = FULL`), for what must outlast a power failure:
-    /// an auto sizing change recorded before the config file is written and synced, what became of it, and the second
-    /// a runner was named for. `None` when the database will not sync them.
+    /// an auto sizing change recorded before the config file is written and synced, what became of it, the second
+    /// a runner was named for, and the drains a reload begins. `None` when the database will not sync them.
     fn durably<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
         logged(
             "sync commits to disk",

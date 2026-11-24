@@ -303,7 +303,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     tmp_tmpfs: None,
                 });
         }
-        self.repositories.found_running(&occupant.repository);
+        if self.repositories.drain(&occupant.repository) {
+            drop(
+                self.store
+                    .drains(vec![occupant.repository.clone()], Vec::new()),
+            );
+        }
     }
 
     /// Reads the mirror's actual cap after a reload may have lowered the configured one.

@@ -1115,6 +1115,15 @@ pub(super) fn paused(db: &Connection) -> rusqlite::Result<Vec<String>> {
         .collect()
 }
 
+/// The repositories whose drain the history keeps: `draining:<repository>` keys of `meta` (`write::draining`).
+pub(super) fn draining(db: &Connection) -> rusqlite::Result<Vec<String>> {
+    db.prepare_cached(
+        "SELECT substr(key, length('draining:') + 1) FROM meta WHERE key GLOB 'draining:*' ORDER BY key",
+    )?
+    .query_map([], |row| row.get(0))?
+    .collect()
+}
+
 pub(super) fn host_samples(db: &Connection, since: u64) -> rusqlite::Result<Vec<api::HostSample>> {
     db.prepare_cached("SELECT at, cpu, memory FROM host_samples WHERE at >= ?1 ORDER BY at")?
         .query_map([since.saturating_mul(1000)], |row| {

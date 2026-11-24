@@ -2252,6 +2252,8 @@ fn engine_durable(
             cpus: None,
             announced: store.announced().unwrap(),
             paused: store.paused_repositories().unwrap(),
+            draining: store.draining_repositories().unwrap(),
+            default_database: store.path().to_owned(),
             store,
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
@@ -5747,6 +5749,297 @@ fn o_s_listings(github: &FakeGithub) -> usize {
         .iter()
         .filter(|call| *call == "runners o/s")
         .count()
+}
+
+/// Replaces `engine`'s config with `config` through the command the API sends, which `commit` writes.
+async fn replace_config(
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    config: &str,
+    commit: Commit,
+) -> Result<Vec<String>, ControlError> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(Config::parse(config).unwrap()),
+            memory_max: None,
+            cpus: None,
+            commit,
+            running: RunningSlots::Drain,
+            author: Author::Owner,
+            reply,
+        })
+        .await;
+    answer.await.unwrap()
+}
+
+/// A commit that writes the file, durably.
+fn written() -> Commit {
+    Commit::new(|| Ok(None))
+}
+
+/// `two_repositories` and `o/t`.
+fn three_repositories() -> String {
+    format!(
+        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\nwarm = 0\n",
+        two_repositories()
+    )
+}
+
+/// Registers runner `id` of this machine on `repository` with no container, and has GitHub's rate limit refuse every
+/// request until `unblock`.
+fn left_registered_under_the_limit(github: &FakeGithub, id: u64, repository: &str) {
+    let mut state = github.0.lock().unwrap();
+    let name = identity("ci", ID_A).runner_name("app", 2, 1);
+    state.runners.push(runner(id, &name, false));
+    state.registered_on.insert(id, repository.to_owned());
+    state.blocked_until = Some(std::time::SystemTime::now() + Duration::from_mins(30));
+}
+
+/// `o/s` is removed while GitHub's rate limit holds, then added back by a config whose file may not survive a crash:
+/// the crash brings back the file without `o/s`. The history still keeps its drain, so the restart deletes the
+/// registration the limit kept.
+#[tokio::test]
+async fn a_drain_outlives_a_config_adding_its_repository_back_that_a_crash_undid() {
+    const LEFT: u64 = 78;
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    left_registered_under_the_limit(&github, LEFT, "o/s");
+    assert_eq!(
+        replace_config(&mut engine, CONFIG, written()).await,
+        Ok(Vec::new())
+    );
+    engine.tick(Shutdown::No).await;
+    let unsure = Commit::new(|| Ok(Some("flushing its directory failed".to_owned())));
+    let added_back = replace_config(&mut engine, &two_repositories(), unsure).await;
+    assert_eq!(added_back.map(|warnings| warnings.len()), Ok(1));
+    drop(engine);
+
+    let (mut restarted, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    restarted.recover().await.unwrap();
+    github.unblock();
+    restarted.tick(Shutdown::No).await;
+
+    assert!(
+        github.calls().contains(&format!("delete {LEFT}")),
+        "the restart under the old file drains o/s and deletes runner {LEFT}"
+    );
+}
+
+/// As above, with a restart between that reads the new file before it reached the disk: a start that finds `o/s`
+/// listed keeps its recorded drain, so a power loss that brings back the old file still drains it.
+#[tokio::test]
+async fn a_start_under_a_config_a_crash_may_undo_keeps_the_drains_of_what_it_lists() {
+    const LEFT: u64 = 79;
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    left_registered_under_the_limit(&github, LEFT, "o/s");
+    assert_eq!(
+        replace_config(&mut engine, CONFIG, written()).await,
+        Ok(Vec::new())
+    );
+    engine.tick(Shutdown::No).await;
+    let unsure = Commit::new(|| Ok(Some("flushing its directory failed".to_owned())));
+    let added_back = replace_config(&mut engine, &two_repositories(), unsure).await;
+    assert_eq!(added_back.map(|warnings| warnings.len()), Ok(1));
+    drop(engine);
+
+    let (mut under_new, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    under_new.recover().await.unwrap();
+    handle.store.flush().await;
+    drop(under_new);
+    let (mut under_old, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    under_old.recover().await.unwrap();
+    github.unblock();
+    under_old.tick(Shutdown::No).await;
+
+    assert!(
+        github.calls().contains(&format!("delete {LEFT}")),
+        "the start under the old file drains o/s and deletes runner {LEFT}"
+    );
+}
+
+/// A config that would have the next start open another history is refused unwritten while a repository drains,
+/// one it removes or one an earlier config removed, as that history knows nothing of the drain. With nothing to
+/// drain, the move is taken.
+#[tokio::test]
+async fn a_config_moving_the_history_is_refused_unwritten_while_a_repository_drains() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let moved = |config: &str| {
+        config.replace(
+            "[host]",
+            &format!(
+                "[history]\ndatabase = {:?}\n\n[host]",
+                dir.0.join("moved.db")
+            ),
+        )
+    };
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &three_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let wrote = Arc::new(AtomicBool::new(false));
+    let watched = || {
+        let wrote = wrote.clone();
+        Commit::new(move || {
+            wrote.store(true, Ordering::SeqCst);
+            Ok(None)
+        })
+    };
+
+    let removing = replace_config(&mut engine, &moved(&two_repositories()), watched()).await;
+    assert!(
+        matches!(removing, Err(ControlError::Conflict(_))),
+        "{removing:?}"
+    );
+    assert!(
+        !wrote.load(Ordering::SeqCst),
+        "removing o/t and moving: not written"
+    );
+
+    assert_eq!(
+        replace_config(&mut engine, &two_repositories(), written()).await,
+        Ok(Vec::new())
+    );
+    let later = replace_config(&mut engine, &moved(&two_repositories()), watched()).await;
+    assert!(matches!(later, Err(ControlError::Conflict(_))), "{later:?}");
+    assert!(
+        !wrote.load(Ordering::SeqCst),
+        "moving while o/t drains: not written"
+    );
+
+    let (mut idle, _handle) = engine_with(&github, &docker, &TestDir::new("engine"), CONFIG);
+    idle.recover().await.unwrap();
+    assert!(
+        replace_config(&mut idle, &moved(CONFIG), watched())
+            .await
+            .is_ok(),
+        "nothing drains, so the move is taken"
+    );
+    assert!(wrote.load(Ordering::SeqCst), "and written");
+}
+
+/// Makes the history refuse to record a drain, as a full disk would, until it is dropped.
+fn refuse_drain_records(dir: &TestDir) -> rusqlite::Connection {
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_drain BEFORE INSERT ON meta WHEN NEW.key GLOB 'draining:*' \
+             BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    fault
+}
+
+/// A config that removes a repository is refused unwritten when the history cannot record its drain, and the drains
+/// recorded before stay.
+#[tokio::test]
+async fn a_config_whose_drain_the_history_cannot_record_is_refused_unwritten() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &three_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        replace_config(&mut engine, &two_repositories(), written()).await,
+        Ok(Vec::new())
+    );
+    let _fault = refuse_drain_records(&dir);
+    let wrote = Arc::new(AtomicBool::new(false));
+    let commit = {
+        let wrote = wrote.clone();
+        Commit::new(move || {
+            wrote.store(true, Ordering::SeqCst);
+            Ok(None)
+        })
+    };
+
+    let refused = replace_config(&mut engine, CONFIG, commit).await;
+
+    assert!(
+        matches!(refused, Err(ControlError::Failed(_))),
+        "{refused:?}"
+    );
+    assert!(!wrote.load(Ordering::SeqCst), "the file is not written");
+    assert!(
+        engine.repositories.listed("o/s").is_some(),
+        "o/s stays listed"
+    );
+    handle.store.flush().await;
+    assert_eq!(handle.store.draining_repositories().unwrap(), ["o/t"]);
+}
+
+/// A reload removes `o/s` while GitHub's rate limit refuses every request, so a registration of this machine there,
+/// with no container, waits for the drain's listing. The daemon restarts before the limit lifts: the history kept the
+/// drain, so once the limit lifts the restarted engine lists `o/s` and deletes that registration.
+#[tokio::test]
+async fn a_drain_a_reload_began_survives_a_restart_and_deletes_what_the_limit_kept() {
+    const LEFT: u64 = 77;
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    {
+        let mut state = github.0.lock().unwrap();
+        let name = identity("ci", ID_A).runner_name("app", 2, 1);
+        state.runners.push(runner(LEFT, &name, false));
+        state.registered_on.insert(LEFT, "o/s".to_owned());
+        state.blocked_until = Some(std::time::SystemTime::now() + Duration::from_mins(30));
+    }
+    assert_eq!(
+        replace_config(&mut engine, CONFIG, written()).await,
+        Ok(Vec::new())
+    );
+    engine.tick(Shutdown::No).await;
+    drop(engine);
+
+    let (mut restarted, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    restarted.recover().await.unwrap();
+    github.unblock();
+    restarted.tick(Shutdown::No).await;
+
+    assert!(
+        github.calls().contains(&format!("delete {LEFT}")),
+        "the restarted engine lists o/s and deletes runner {LEFT}"
+    );
+    assert!(
+        github.0.lock().unwrap().runners.is_empty(),
+        "no registration of this machine is left on o/s"
+    );
+}
+
+/// A drain that ended is no longer kept: a restart after it lists only what the config has.
+#[tokio::test]
+async fn a_restart_after_a_drain_ended_drains_nothing() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        replace_config(&mut engine, CONFIG, written()).await,
+        Ok(Vec::new())
+    );
+    // Two clean listings end the drain.
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    drop(engine);
+    let before = o_s_listings(&github);
+
+    let (mut restarted, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    restarted.recover().await.unwrap();
+    restarted.tick(Shutdown::No).await;
+
+    assert_eq!(o_s_listings(&github), before, "o/s is not listed again");
 }
 
 #[tokio::test]

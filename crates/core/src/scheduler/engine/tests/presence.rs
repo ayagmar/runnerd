@@ -185,9 +185,9 @@ fn a_running_runner_found_at_a_restart_drains_only_a_repository_nothing_else_has
     repositories.runners_listed("o/gone", ANSWERED_CLEAN);
     mark(&mut repositories, "o/kept");
 
-    repositories.found_running("o/kept");
-    repositories.found_running("o/gone");
-    repositories.found_running("o/found");
+    assert!(!repositories.drain("o/kept"), "listed, so no drain");
+    assert!(!repositories.drain("o/gone"), "drains already");
+    assert!(repositories.drain("o/found"), "a drain begins");
 
     assert!(
         is_marked(&repositories, "o/kept"),
@@ -276,7 +276,7 @@ impl Model {
 }
 
 /// Reloads, restarts' finds and every kind of listing, on names that come and go, an empty and an unknown one
-/// among them. A restart begins again from the config, with what the runners found.
+/// among them. A restart begins again from the config, with the drains the history kept and what the runners found.
 #[tokio::test(start_paused = true)]
 async fn a_generated_sequence_behaves_as_the_two_maps_did() {
     const NAMES: [&str; 5] = ["a/first", "m/middle", "z/last", "", "o/never-configured"];
@@ -297,28 +297,38 @@ async fn a_generated_sequence_behaves_as_the_two_maps_did() {
                         .filter(|_| rng.below(2) == 0)
                         .map(|name| (*name).to_owned())
                         .collect();
+                    let after = repositories.draining_after(&kept);
                     repositories.reload(&kept);
                     model.reload(&kept);
+                    assert_eq!(
+                        after,
+                        repositories.draining_names(),
+                        "seed {seed} step {step}: what a reload is said to leave draining"
+                    );
                 }
                 1 => {
-                    repositories.found_running(name);
+                    repositories.drain(name);
                     model.found_running(name);
                 }
                 2 => {
+                    // The history keeps every drain, and the runners may find one more.
                     let listed = model.listed.clone();
-                    let found: Vec<&str> = model
-                        .draining
-                        .keys()
-                        .map(String::as_str)
-                        .filter(|_| rng.below(2) == 0)
-                        .collect();
+                    let mut kept = repositories.draining_names();
+                    assert_eq!(
+                        kept,
+                        model.draining.keys().cloned().collect::<Vec<_>>(),
+                        "seed {seed} step {step}: the drains the history keeps"
+                    );
+                    if rng.below(2) == 0 {
+                        kept.push(name.to_owned());
+                    }
                     repositories = Repositories::new(listed.clone());
                     let mut restarted = Model {
                         listed,
                         ..Model::default()
                     };
-                    for name in found {
-                        repositories.found_running(name);
+                    for name in &kept {
+                        repositories.drain(name);
                         restarted.found_running(name);
                     }
                     model = restarted;

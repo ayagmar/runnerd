@@ -719,14 +719,16 @@ struct History {
     announced: Announced,
     /// The repositories recorded paused.
     paused: Vec<String>,
+    /// The repositories recorded draining.
+    draining: Vec<String>,
     /// The dashboard's session secret, kept beside it.
     sessions: std::sync::Arc<runnerd_web::Sessions>,
     /// Where the engine keeps whether what runners wrote without syncing may be lost to a host crash, beside it.
     unsynced: PathBuf,
 }
 
-/// The job history, the profiles and repositories its events last announced and the ones recorded paused, and the
-/// dashboard's session secret beside it.
+/// The job history, the profiles and repositories its events last announced and the ones recorded paused or draining,
+/// and the dashboard's session secret beside it.
 fn open_history(config: &Config) -> Result<History, ExitCode> {
     let database = config
         .history
@@ -753,6 +755,12 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
             database.display()
         ))
     })?;
+    let draining = store.draining_repositories().map_err(|error| {
+        fail(&format_args!(
+            "cannot read the draining repositories in the job history {}: {error}",
+            database.display()
+        ))
+    })?;
     let session_file = runnerd_web::session_file(&database);
     let sessions = runnerd_web::Sessions::open(session_file.clone()).map_err(|error| {
         fail(&format_args!(
@@ -764,6 +772,7 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
         store,
         announced,
         paused,
+        draining,
         sessions,
         unsynced: database.with_file_name("unsynced"),
     })
@@ -905,13 +914,8 @@ async fn serve(
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
     let identity = HostIdentity::read(config.host.name.as_deref()).map_err(|error| fail(&error))?;
-    let History {
-        store,
-        announced,
-        paused,
-        sessions,
-        unsynced,
-    } = open_history(&config)?;
+    let history = open_history(&config)?;
+    let sessions = history.sessions;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
     let web_listener = runnerd_web::listen(web)
@@ -931,14 +935,17 @@ async fn serve(
             identity,
             memory_max: memory_max.map(|max| max.0),
             cpus,
-            store: store.clone(),
-            announced,
-            paused,
+            store: history.store.clone(),
+            announced: history.announced,
+            paused: history.paused,
+            draining: history.draining,
+            // Without one, the next start fails unless its config names the history.
+            default_database: default_database().unwrap_or_else(|| history.store.path().to_owned()),
             paths: Paths::default(),
             build_cache,
             action_archives,
             grype_database,
-            unsynced,
+            unsynced: history.unsynced,
             durability: Durability::host(),
         },
     );
@@ -973,8 +980,8 @@ async fn serve(
     let engine_done = engine.await;
     let _ = web_stopped.send(());
     let _ = stopped.send(());
-    store.close();
-    store.flush().await;
+    history.store.close();
+    history.store.flush().await;
     let drained = drain(server, web).await;
     let _ = std::fs::remove_file(&socket);
     engine_done.map_err(|error| fail(&error))?;

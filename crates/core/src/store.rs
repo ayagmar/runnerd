@@ -1,5 +1,5 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
-//! from, cache sizes, the paused repositories and where the notifier got to. Owns the schema, the one writer and
+//! from, cache sizes, the paused and draining repositories and where the notifier got to. Owns the schema, the one writer and
 //! the event broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and
 //! pruning run on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about
 //! scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
@@ -510,6 +510,12 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
+    Drains {
+        began: Vec<String>,
+        ended: Vec<String>,
+        /// Whether it committed, synced to disk.
+        done: oneshot::Sender<bool>,
+    },
     Visibility {
         repository: String,
         visibility: api::Visibility,
@@ -609,6 +615,8 @@ pub struct AutoSizing {
 /// The job history. Cloning shares it.
 #[derive(Debug, Clone)]
 pub struct Store {
+    /// Where the database is, as it was opened.
+    path: Arc<Path>,
     writes: mpsc::UnboundedSender<Write>,
     reader: Arc<Mutex<Connection>>,
     /// Taken with `try_lock`, so one prune runs at a time; one that panicked midway left rows the next one deletes.
@@ -697,6 +705,7 @@ impl Store {
                 );
             })?;
         Ok(Store {
+            path: Arc::from(path),
             writes,
             reader: Arc::new(Mutex::new(reader)),
             pruner: Arc::new(Mutex::new(pruner)),
@@ -1082,6 +1091,20 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
+    /// Records that the repositories `began` drain and `ended` no longer do, synced to disk: a restart drains every
+    /// recorded one again that its config does not list, though no runner of it runs (ADR 0173). Only what is named
+    /// changes, so a record kept for a config that may not have lasted stays until a drain of its repository ends. The write is sent at once, in order with every other; the future says whether it
+    /// committed.
+    pub fn drains(
+        &self,
+        began: Vec<String>,
+        ended: Vec<String>,
+    ) -> impl Future<Output = bool> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::Drains { began, ended, done });
+        async move { committed.await.unwrap_or(false) }
+    }
+
     /// The second to name a runner whose name starts with `prefix` for, `secs` or later, before GitHub or Docker
     /// knows the name: past every second the history knows was named, whatever the engine read at its start, so a
     /// restart never names a runner the same even when nothing else recorded one. The history keeps a lease a few
@@ -1350,6 +1373,17 @@ impl Store {
     /// The repositories recorded paused, for the engine to start with. Blocks on the database: for startup.
     pub fn paused_repositories(&self) -> Result<Vec<String>, StoreError> {
         Ok(read::paused(&lock(&self.reader))?)
+    }
+
+    /// Where the database is, as it was opened.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The repositories recorded draining (`Store::drains`), for the engine to start with. Blocks on the database:
+    /// for startup.
+    pub fn draining_repositories(&self) -> Result<Vec<String>, StoreError> {
+        Ok(read::draining(&lock(&self.reader))?)
     }
 
     /// The slice's samples since `since` (seconds), oldest first, the ones not yet stored included.

@@ -229,6 +229,12 @@ pub struct Setup {
     pub announced: Announced,
     /// The repositories recorded paused (`Store::paused_repositories`): they stay paused from the first tick.
     pub paused: Vec<String>,
+    /// The repositories recorded draining (`Store::draining_repositories`): those the config no longer lists drain from
+    /// the first tick, as they did before the restart.
+    pub draining: Vec<String>,
+    /// Where the job history is when the config names none (`history.database`), as a start finds it: a config that
+    /// would move the history is refused while a repository drains (ADR 0173).
+    pub default_database: PathBuf,
     /// Where the cgroup and proc file systems are.
     pub paths: Paths,
     /// The shared build cache, unless the daemon could not open it.
@@ -564,6 +570,8 @@ pub struct Engine<G = Github, D = Docker> {
     commands: Commands,
     caches: watch::Sender<Vec<api::CacheVolume>>,
     store: Store,
+    /// Where the job history is when the config names none (`Setup::default_database`).
+    default_database: PathBuf,
     paths: Paths,
     /// The containers the sampler reads.
     tracked: watch::Sender<Vec<Tracked>>,
@@ -657,6 +665,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             store,
             announced,
             paused,
+            draining,
+            default_database,
             paths,
             build_cache,
             action_archives,
@@ -674,12 +684,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 (name.clone(), slots)
             })
             .collect();
-        let repositories = Repositories::new(
+        let mut repositories = Repositories::new(
             config
                 .repositories
                 .iter()
                 .map(|repository| repository.name.clone()),
         );
+        // A drain recorded for a repository the config lists is ignored, and kept: the file read may not have
+        // reached the disk yet, and a power loss can bring back one without the repository.
+        for name in &draining {
+            if repositories.listed(name).is_none() {
+                repositories.drain(name);
+            }
+        }
         let (control, commands) = Control::new(
             config
                 .repositories
@@ -762,6 +779,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             commands,
             caches,
             store: store.clone(),
+            default_database,
             paths,
             tracked: watch::channel(Vec::new()).0,
             found: mpsc::unbounded_channel(),

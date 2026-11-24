@@ -1594,8 +1594,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             self.registrations.listed(&repository, &listed);
-            self.repositories
-                .runners_listed(&repository, RunnersListing::Answered { left });
+            if self
+                .repositories
+                .runners_listed(&repository, RunnersListing::Answered { left })
+            {
+                drop(self.store.drains(Vec::new(), vec![repository.clone()]));
+            }
         }
     }
 
@@ -1617,6 +1621,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             gone: error.is_gone(),
         };
         if self.repositories.runners_listed(repository, failed) {
+            // Not waited for: a drain restored after its end was lost drains on until its listings end it again.
+            drop(self.store.drains(Vec::new(), vec![repository.to_owned()]));
             warn!(
                 "{repository}: stops draining, so any of this machine's runners still registered there stay: \
                  cannot list its runners: {error}"
