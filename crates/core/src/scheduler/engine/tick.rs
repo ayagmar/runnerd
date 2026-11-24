@@ -1274,10 +1274,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .latest_host_sample()
                     .is_some_and(|sample| sample.at.saturating_mul(1000) + fresh >= now);
                 let own = self.store.latest_sample(occupant.runner_name);
-                // Before its first sample, a runner is as fresh as its start.
-                let sampled_at = own
-                    .as_ref()
-                    .map_or_else(|| time::ms(occupant.started_at), |sample| sample.at);
+                // Before its first sample, a runner is as fresh as its placing: its launch may have waited for its
+                // caches, the mirror and GitHub longer than the sampler takes to read a container.
+                let placed = match occupant.stage {
+                    Stage::Placed { since } => since,
+                    // Held at its reservation above.
+                    Stage::InFlight => now,
+                };
+                let sampled_at = own.as_ref().map_or(placed, |sample| sample.at);
                 if !slice_sampled || sampled_at + fresh < now {
                     Held {
                         takes: occupant.memory,

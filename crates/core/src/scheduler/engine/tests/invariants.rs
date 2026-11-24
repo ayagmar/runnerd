@@ -5221,3 +5221,74 @@ async fn a_job_a_failed_listing_forgot_is_shown_again_at_the_next_listing_of_its
     ];
     assert_eq!(broken(&steps).await, None);
 }
+
+/// Up to the start: o/r's heavy job runs at 120% of its 4G cap, 4.8G, and o/t's heavy job, predicted at 1.25G by its
+/// past runs, fits the 3.7G that leaves of 8.5G. The reload's tick starts its runner, which the sampler has not read.
+fn a_job_past_its_cap_beside_a_predicted_one(jump: Option<Step>) -> Vec<Step> {
+    let heavy = |second| Step::Queue {
+        second,
+        labels: Labels::Heavy,
+    };
+    let mut steps = vec![
+        Step::PastRuns,
+        Step::Reload(Change::Policy),
+        heavy(false),
+        heavy(true),
+        Step::Tick,
+        Step::Assign(0),
+        Step::Assign(0),
+    ];
+    steps.extend(jump);
+    steps.extend([
+        Step::Finish(3),
+        Step::QueueQuiet {
+            labels: Labels::Heavy,
+        },
+        Step::Sample {
+            percent: 120,
+            available: 20,
+            stalled: false,
+        },
+    ]);
+    steps
+}
+
+/// Shrunk from seed 413 at 1000 cases. The wall clock steps 5 minutes before the start. A runner the sampler has not
+/// read yet counts at its reservation for three sample intervals, which went from its launch's stamp on the system
+/// clock while the engine's clock had stepped on: it counted at its 4G cap, 8.8G of 8.5G, the moment it started.
+#[tokio::test(start_paused = true)]
+async fn a_runner_started_after_the_clock_steps_counts_at_its_reservation() {
+    let mut steps =
+        a_job_past_its_cap_beside_a_predicted_one(Some(Step::ClockJumps { minutes: 5 }));
+    steps.push(Step::Reload(Change::LightPool));
+    assert_eq!(broken(&steps).await, None);
+}
+
+/// The same start, whose launch waits 7 s for its caches, the mirror and GitHub, past the sampler's three intervals,
+/// while the sampler reads the others: placed, the runner the sampler has not read yet still counts at its 1.25G
+/// reservation, not at its 4G cap past the budget.
+#[tokio::test(start_paused = true)]
+async fn a_runner_whose_launch_waited_counts_at_its_reservation_until_sampled() {
+    let mut case = Case::new();
+    case.recover().await.unwrap();
+    case.tick().await.unwrap();
+    for step in a_job_past_its_cap_beside_a_predicted_one(None) {
+        case.apply(step).await.unwrap();
+    }
+    let (store, took_job, clock) = (
+        case.handle.store.clone(),
+        case.took_job.clone(),
+        case.clock.clone(),
+    );
+    case.docker.0.lock().unwrap().on_start = Some(Box::new(move |docker| {
+        clock.advance(Duration::from_secs(7));
+        sample(docker, &store, &took_job, clock.now_ms(), 120, 20, false);
+    }));
+    let outcome = case.apply(Step::Reload(Change::LightPool)).await;
+    assert_eq!(
+        outcome.err().map(|found| (found.invariant, found.detail)),
+        None
+    );
+    let started = case.docker.0.lock().unwrap().hooked_start.clone();
+    assert!(started.is_some(), "the reload's tick starts o/t's runner");
+}

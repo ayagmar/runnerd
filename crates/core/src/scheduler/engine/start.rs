@@ -72,7 +72,7 @@ pub(super) struct Starting {
     memory: u64,
     /// Its container's CPU limit, in millicores.
     cpus: u64,
-    /// What `held_by` reads as a fresh runner's start, and its runner's start once placed.
+    /// When its start was launched: its runner's start once placed.
     launched_at: SystemTime,
     /// The labels its runner registers with.
     labels: Vec<String>,
@@ -88,7 +88,6 @@ impl Starting {
             reserved: self.admission.reserved,
             cpus: self.cpus,
             reserved_cpu: self.admission.cpu.map_or(self.cpus, |cpu| cpu.reserved),
-            started_at: self.launched_at,
             key: None,
             job_found_here: None,
             basis: Some(self.admission.basis),
@@ -109,14 +108,21 @@ impl Starting {
         self.behind
     }
 
-    /// The runner it became once Docker made `container` for its registration `runner_id`.
-    pub(super) fn into_occupant(self, runner_id: u64, container: String) -> Occupant {
+    /// The runner it became once Docker made `container` for its registration `runner_id`, placed at `placed_at` ms
+    /// by the engine's clock.
+    pub(super) fn into_occupant(
+        self,
+        runner_id: u64,
+        container: String,
+        placed_at: u64,
+    ) -> Occupant {
         Occupant {
             repository: self.repository,
             runner_name: self.runner_name,
             runner_id,
             container,
             started_at: self.launched_at,
+            placed_at,
             memory: self.memory,
             cpus: self.cpus,
             admission: Some(self.admission),
@@ -848,7 +854,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     }
                 };
                 let purpose = starting.purpose;
-                let occupant = starting.into_occupant(runner.id, container);
+                let occupant = starting.into_occupant(runner.id, container, self.clock.now_ms());
                 self.place(slot, occupant, purpose, made).await
             }
         };

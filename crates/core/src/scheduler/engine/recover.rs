@@ -156,13 +156,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// What a runner container left running by an earlier daemon runs as, from its labels, `caps` and its record.
     async fn adopted(&self, container: &docker::Container, caps: &Caps) -> Occupant {
         let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
+        // Its uptime goes on from its container's start, not from this restart.
+        let started_at = caps.started_at.unwrap_or_else(SystemTime::now);
         Occupant {
             repository: label("runnerd.repository"),
             runner_name: container.name.clone(),
             runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
             container: container.id.clone(),
-            // Its uptime goes on from its container's start, not from this restart.
-            started_at: caps.started_at.unwrap_or_else(SystemTime::now),
+            started_at,
+            placed_at: time::ms(started_at),
             memory: caps.memory,
             cpus: caps.cpus,
             // What it reserved before the restart, as its record kept it; its cap if the record has none.
