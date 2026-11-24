@@ -59,7 +59,11 @@ for part in $what; do
       for command in status caches insights; do
         target/debug/runnerctl --socket "$RUNNERD_CAPTURE_SOCKET" "$command" >"$scratch/$command.txt"
       done
-      for command in status caches insights; do
+      # fleet reads the machines added in $XDG_CONFIG_HOME, so it runs in the scratch home, where there are none: it
+      # shows the demo's one machine.
+      HOME="$RUNNERD_CAPTURE_HOME" XDG_CONFIG_HOME="$RUNNERD_CAPTURE_HOME/.config" \
+        target/debug/runnerctl --socket "$RUNNERD_CAPTURE_SOCKET" fleet --limit 3 >"$scratch/fleet.txt"
+      for command in status caches insights fleet; do
         mv "$scratch/$command.txt" "site/src/assets/terminal/$command.txt"
       done
       ;;

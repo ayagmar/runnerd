@@ -54,13 +54,6 @@ const parts = [
   { name: 'part-disk', path: '/insights', elements: ['section.disk'] },
   { name: 'part-failure', path: '/jobs/9401', elements: ['#failure'] },
   { name: 'part-timeline', path: '/history?lens=timeline', elements: ['.timeline'] },
-  {
-    name: 'part-cancel',
-    path: '/jobs/120055991700',
-    elements: ['#job-action'],
-    press: '[data-asks="cancel"]',
-    ready: '[data-asks="cancel"]',
-  },
 ];
 const sizes = {
   desktop: { width: 1280, height: 900, scale: 1.5, suffix: '' },
