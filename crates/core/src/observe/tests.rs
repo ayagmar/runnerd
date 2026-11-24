@@ -1710,3 +1710,204 @@ fn only_a_system_battery_that_discharges_puts_the_host_on_battery() {
         assert_eq!(read(&sys), power, "{host}");
     }
 }
+
+/// The capture script, run by bash over the fake diagnostic directory `diag`, from `start` on, with `bin` first on its
+/// `PATH`; stdin is empty, as under `docker exec`.
+struct Capture {
+    child: std::process::Child,
+    output: std::sync::mpsc::Receiver<Vec<u8>>,
+    read: Vec<u8>,
+}
+
+impl Capture {
+    fn start(diag: &Path, bin: &Path, start: LogPosition) -> Capture {
+        Capture::of(super::capture::SCRIPT, diag, bin, start)
+    }
+
+    /// `script` in place of the capture script; what it prints on stderr goes to `bin/stderr`.
+    fn of(script: &str, diag: &Path, bin: &Path, start: LogPosition) -> Capture {
+        let script = script.replace(super::capture::DIAG, &diag.to_string_lossy());
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = std::process::Command::new("bash")
+            .args(["-c", &script, "capture"])
+            .args([start.page.to_string(), start.offset.to_string()])
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::fs::File::create(bin.join("stderr")).unwrap())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (send, output) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(read @ 1..) = std::io::Read::read(&mut stdout, &mut buffer) {
+                if send.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Capture {
+            child,
+            output,
+            read: Vec::new(),
+        }
+    }
+
+    /// Everything printed so far, once it holds `wanted`; fails after 10 s without it.
+    fn until(&mut self, wanted: &str) -> &[u8] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !String::from_utf8_lossy(&self.read).contains(wanted) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.output.recv_timeout(left) {
+                Ok(chunk) => self.read.extend(chunk),
+                Err(error) => panic!(
+                    "no {wanted:?} in {:?}: {error}",
+                    String::from_utf8_lossy(&self.read)
+                ),
+            }
+        }
+        &self.read
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A runner's diagnostic directory whose worker took job 7 of run 8, as job record `abc-1`, and `bin`, which holds
+/// `sleep` and `grep` stand-ins when asked.
+fn diag(dir: &Path, worker_log: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let diag = dir.join("_diag");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(diag.join("pages")).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(diag.join("Worker_20261124.log"), worker_log).unwrap();
+    (diag, bin)
+}
+
+const TAKEN: &str = "\"k\": \"check_run_id\",\n\"v\": 7.0\n\"k\": \"run_id\",\n\"v\": \"8\"\n\"jobId\": \"abc-1\"\n";
+
+/// Puts an executable `name` in `bin` that appends a line to `bin/<name>.calls` and prints nothing.
+fn stand_in(bin: &Path, name: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = bin.join(name);
+    let calls = bin.join(format!("{name}.calls"));
+    std::fs::write(&path, format!("#!/bin/sh\necho >> '{}'\n", calls.display())).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn calls(bin: &Path, name: &str) -> usize {
+    std::fs::read_to_string(bin.join(format!("{name}.calls")))
+        .map_or(0, |calls| calls.lines().count())
+}
+
+#[test]
+fn the_capture_script_follows_a_page_until_it_goes_and_resumes_mid_page_without_forking_sleep() {
+    let dir = TestDir::new("capture-script");
+    let (diag, bin) = diag(&dir.0, TAKEN);
+    stand_in(&bin, "sleep");
+    let page = diag.join("pages/tl_abc-1_1.log");
+    std::fs::write(&page, "first\nsecond\n").unwrap();
+
+    let mut capture = Capture::start(&diag, &bin, LogPosition { page: 1, offset: 0 });
+    capture.until("@@page 1 0 13\n");
+    // The runner appends to the page, then uploads and deletes it: the hard link keeps what came last.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&page)
+        .and_then(|mut page| std::io::Write::write_all(&mut page, b"third\n"))
+        .unwrap();
+    capture.until("@@page 1 13 6\n");
+    std::fs::remove_file(&page).unwrap();
+    let output = capture.until("@@end 1\n").to_vec();
+    drop(capture);
+    let captured = feed_all(&[&output]);
+    assert_eq!(captured[0], Captured::Job { id: 7, run_id: 8 });
+    assert_eq!(lines(&captured), ["first", "second", "third"]);
+    assert!(matches!(
+        captured.last(),
+        Some(Captured::Lines {
+            position: LogPosition { page: 2, offset: 0 },
+            ..
+        })
+    ));
+
+    // A restarted daemon resumes after the stored "first" line, and the kept link of an older page goes.
+    std::fs::write(diag.join("pages/tl_abc-1_2.log"), "first\nsecond\n").unwrap();
+    std::fs::write(diag.join(".runnerd-pages/tl_abc-1_1.log"), "old\n").unwrap();
+    let mut capture = Capture::start(&diag, &bin, LogPosition { page: 2, offset: 6 });
+    let output = capture.until("@@page 2 6 7\nsecond\n").to_vec();
+    drop(capture);
+    assert_eq!(lines(&feed_all(&[&output])), ["second"]);
+    assert!(
+        !diag.join(".runnerd-pages/tl_abc-1_1.log").exists(),
+        "a page before the resumed one is dropped"
+    );
+    assert_eq!(
+        calls(&bin, "sleep"),
+        0,
+        "the script waits without forking sleep"
+    );
+}
+
+#[test]
+fn an_idle_capture_script_waits_between_passes_rather_than_spinning() {
+    let dir = TestDir::new("capture-idle");
+    // A worker log with no job yet: each pass greps it three times, and finds nothing.
+    let (diag, bin) = diag(
+        &dir.0,
+        "Waiting to receive the job message from the channel.\n",
+    );
+    stand_in(&bin, "grep");
+    stand_in(&bin, "sleep");
+    let capture = Capture::start(&diag, &bin, LogPosition { page: 1, offset: 0 });
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    drop(capture);
+    let passes = calls(&bin, "grep") / 3;
+    // Five a second; a `read` that returned at once, as at EOF, would make thousands.
+    assert!(
+        (2..=8).contains(&passes),
+        "{passes} passes in a second, about five expected"
+    );
+    assert_eq!(
+        calls(&bin, "sleep"),
+        0,
+        "the script waits without forking sleep"
+    );
+}
+
+// Catches: a container whose shell cannot open the wait's pipe, as one without /dev/fd, spinning, or sending the
+// daemon an error about `read -u` five times a second.
+#[test]
+fn a_capture_script_that_cannot_open_its_pipe_sleeps_quietly_between_passes() {
+    let dir = TestDir::new("capture-no-pipe");
+    let (diag, bin) = diag(
+        &dir.0,
+        "Waiting to receive the job message from the channel.\n",
+    );
+    stand_in(&bin, "grep");
+    let opened = "exec {tick}<> <(:)";
+    assert!(
+        super::capture::SCRIPT.contains(opened),
+        "the script opens its pipe so"
+    );
+    let script = super::capture::SCRIPT.replace(opened, "exec {tick}<> /nonexistent/pipe");
+    let capture = Capture::of(&script, &diag, &bin, LogPosition { page: 1, offset: 0 });
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    drop(capture);
+    let passes = calls(&bin, "grep") / 3;
+    assert!(
+        (2..=8).contains(&passes),
+        "{passes} passes in a second, about five expected"
+    );
+    let stderr = std::fs::read_to_string(bin.join("stderr")).unwrap();
+    assert_eq!(stderr, "", "nothing on stderr");
+}

@@ -49,6 +49,9 @@ pub struct RunnerSpec {
     pub env: Vec<String>,
     /// Volumes to mount.
     pub mounts: Vec<Mount>,
+    /// Memory `/tmp` and `/var/tmp` may hold together as `tmpfs` (`tmp_tmpfs`); `None` keeps them on the
+    /// container's disk.
+    pub tmp_tmpfs: Option<ByteSize>,
     /// The network the container joins; `None` is Docker's default bridge.
     pub network: Option<String>,
     /// Labels on top of `runnerd.profile` and `runnerd.isolation`.
@@ -284,6 +287,31 @@ pub fn cpu_shares(cpus: u32) -> i64 {
     (i64::from(cpus) * 1024).clamp(2, 262_144)
 }
 
+/// The largest page Linux uses, 64 KiB on some arm64 kernels: what `tmp_tmpfs` sizes its mounts in.
+pub const TMPFS_GRANULE: u64 = 64 << 10;
+
+/// The `tmpfs` mounts, by target, that hold a runner's `/tmp` and `/var/tmp` within `size` together (ADR 0170):
+/// a quarter for `/var/tmp` and the rest for `/tmp`, where tools put their temporary files, each down to whole
+/// `TMPFS_GRANULE`s, which the kernel's pages divide, so it rounds neither up. Each is at least one granule, as
+/// `size=0` would leave it unbounded; a `size` of `config::TMP_TMPFS_MIN` or more never needs that. With `exec`, as on disk: Docker mounts a `tmpfs` `noexec` unless told, and
+/// jobs run what they build there, such as `go test`'s binaries. Never the runner's `_diag`, which runnerd reads from a
+/// stopped container, nor `_work`, which holds the tool cache's mount and a failed job's record. These options take
+/// any Docker API version; a `Mount`'s `TmpfsOptions.Options`, the only other way to say `exec`, needs 1.46.
+pub fn tmp_tmpfs(size: ByteSize) -> HashMap<String, String> {
+    let granules = |bytes: u64| (bytes / TMPFS_GRANULE * TMPFS_GRANULE).max(TMPFS_GRANULE);
+    let var_tmp = granules(size.0 / 4);
+    let tmp = granules(size.0.saturating_sub(var_tmp));
+    [("/tmp", tmp), ("/var/tmp", var_tmp)]
+        .into_iter()
+        .map(|(target, bytes)| {
+            (
+                target.to_owned(),
+                format!("rw,exec,nosuid,nodev,mode=1777,size={bytes}"),
+            )
+        })
+        .collect()
+}
+
 /// The create-container request for a runner container under an isolation backend.
 pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCreateBody {
     // Clamped to 8 EiB, the most Docker takes.
@@ -297,6 +325,7 @@ pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCre
         cpu_shares: Some(cpu_shares(spec.cpus)),
         init: Some(true),
         mounts: Some(spec.mounts.clone()),
+        tmpfs: spec.tmp_tmpfs.map(tmp_tmpfs),
         network_mode: spec.network.clone(),
         ..Default::default()
     };

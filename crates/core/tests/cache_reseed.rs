@@ -52,6 +52,7 @@ async fn fixture_image(docker: &Docker, api: &bollard::Docker, tag: &str) -> Res
         memory: "1G".parse().map_err(|e: String| e)?,
         env: Vec::new(),
         mounts: Vec::new(),
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
@@ -166,6 +167,7 @@ async fn run(
         memory: "1G".parse().map_err(|e: String| e)?,
         env: Vec::new(),
         mounts,
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
@@ -449,6 +451,7 @@ async fn measured_beside_a_runner(
         memory: "1G".parse().map_err(|e: String| e)?,
         env: Vec::new(),
         mounts: runner_mounts(names, PROFILE, 1, PnpmStore::Shared),
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
