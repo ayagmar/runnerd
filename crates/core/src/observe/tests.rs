@@ -1951,6 +1951,18 @@ fn docker_s_root_through_a_link_is_read_where_the_link_leads_and_an_unknown_devi
         DockerRoot::read(&paths, &other).backing,
         Backing::Unresolved
     );
+    // A known loop device whose backing file cannot be read is not a device of its own.
+    std::fs::remove_file(
+        paths
+            .sys
+            .join("devices/virtual/block/loop0/loop/backing_file"),
+    )
+    .unwrap();
+    assert_eq!(
+        DockerRoot::read(&paths, &link).backing,
+        Backing::Unresolved,
+        "loop0 without its backing file"
+    );
     let gone = DockerRoot::read(&paths, &dir.0.join("absent"));
     assert!(
         gone.file_system.is_err(),

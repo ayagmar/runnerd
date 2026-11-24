@@ -33,23 +33,25 @@ time, so on btrfs every checkpoint fragments the file further and writes more th
 - **Host readings are kept beside their events.** The writer stores each `budget.changed` event's reading of the host's
   memory in `host_readings`, in the transaction that stores the event, with the SQL the insights used to run over the
   events (`store::host_reading!`); the migration fills it from the events already stored. A body that is not JSON,
-  or a budget, seed or shell that is not an object, gives no reading, so a damaged event fails neither. Insights read
+  or a budget, seed or shell that is not an object, gives no reading, and seeds and shells are summed with `total`,
+  in floating point, which no value overflows, so a damaged event fails neither. Insights read
   `host_readings`. Each reading's foreign key deletes it with its event, in the statement that deletes the event, so
   the two never disagree.
 - **A final job's log is packed.** A job's lines stay rows of `log_lines` while its record may grow, so a running
   log is stored and streamed as before. Once its record has been final for 10 minutes, each prune packs it: it reads
   the rows and deflates them outside a write, then, in one short transaction, stores them as `log_packs` unless the
-  job's count of lines moved meanwhile, then deletes the rows at most 2000 or 4 MiB at a time, with a pause after
-  each. It asks whether the prune was stopped after each pack's worth of lines and before it stores them. A pack holds
+  job's count of lines moved meanwhile, then deletes the rows at most 2000 or 4 MiB at a time, one row at least, with
+  a pause after each. It asks whether the prune was stopped each time it closes a pack and before it stores them. A pack holds
   up to 1024 lines, takes no more once it holds 256 KiB of text, and inflates to 1 MiB at most; its data is a layout
   byte, then each line's number as the gap from the line before, its length and its bytes, deflated at level 6 by a
   pure Rust encoder.
-- **Packing is bounded.** A job whose log is past 16 MiB, has a line no pack holds, or has a row that is not UTF-8
-  text stays in rows, read as before: one prune never reads more than 16 MiB in one snapshot or stores more in one
-  transaction, and a strict read of a damaged row still fails rather than replacing its bytes.
+- **Packing is bounded.** A job whose log is past 16 MiB, counting its text and 32 bytes a line, has a line no pack
+  holds, or has a row that is not UTF-8 text stays in rows, read as before: one prune never reads more than 16 MiB in
+  one snapshot or stores more in one transaction, and a strict read of a damaged row still fails rather than
+  replacing its bytes.
 - **A pack is checked as it is read.** It inflates through a bound of 1 MiB and at most 1024 lines; data past either,
-  a varint past 64 bits, a number past SQLite's signed range, or first and last lines other than its row's is an
-  error, never lines, so no read holds more than its bound and no line number overflows a page's `line + 1`.
+  a varint past 64 bits, a number past SQLite's signed range, first and last lines other than its row's, or lines
+  that do not come after the pack before it is an error, never lines, so no read holds more than its bound and no line number overflows a page's `line + 1`.
 - **One rule for every read.** `store::logs` owns every read of a job's lines: a job with packs reads from them alone,
   one without from its rows, in one snapshot of the database. The writer stores no line for a packed job. So a crash
   between the packs and the last delete leaves rows no read sees, which the next prune deletes.

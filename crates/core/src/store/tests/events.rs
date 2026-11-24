@@ -225,8 +225,15 @@ async fn a_damaged_budget_event_in_a_history_at_32_reads_as_no_reading_and_the_u
         valid
             .replacen(r#""seed_memory":["#, r#""seed_memory":["node",7,"#, 1)
             .replacen(r#""shell_memory":[]"#, r#""shell_memory":"none""#, 1),
+        // Seeds whose sum is past SQLite's integers, which `sum` refuses with an error.
+        valid.replacen(
+            r#""seed_memory":["#,
+            r#""seed_memory":[{"profile":"a","memory":9223372036854775807},{"profile":"b","memory":9223372036854775807},"#,
+            1,
+        ),
     ];
     assert_ne!(damaged[2], valid, "the fixture reaches the seeds");
+    assert_ne!(damaged[3], valid, "the fixture reaches the seeds");
     for body in &damaged {
         db.execute("INSERT INTO events (at, body) VALUES (2, ?1)", [body])
             .unwrap();
@@ -245,10 +252,10 @@ async fn a_damaged_budget_event_in_a_history_at_32_reads_as_no_reading_and_the_u
         credit: 512 << 20,
         running: false,
     };
-    // The valid events, and the one whose seeds are damaged, which counts the seeds it can read.
+    // The valid events, and the two whose seeds are damaged, which count the seeds they can read.
     assert_eq!(
         readings(&store).await,
-        vec![reading, reading, reading],
+        vec![reading, reading, reading, reading],
         "each readable reading, none for the broken bodies"
     );
 }

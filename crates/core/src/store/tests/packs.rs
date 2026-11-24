@@ -439,3 +439,122 @@ async fn a_log_too_long_for_one_prune_stays_in_rows_and_a_stopped_prune_stores_n
     assert_eq!(rows(&path, 1), (0, 0));
     assert_eq!(rows(&path, 2), (0, 0));
 }
+
+#[tokio::test]
+async fn packs_whose_lines_overlap_are_an_error_and_packs_with_a_gap_between_read() {
+    // Catches packs each valid alone read one after the other: two holding line 1 handed a page `0, 1, 1, 2`, which
+    // pagination, counting on rising numbers, would loop on.
+    let dir = TestDir::new("packs");
+    let (store, path) = packed_job(&dir).await;
+    let db = Connection::open(&path).unwrap();
+    let packs = |packs: &[(u64, u64, Vec<u8>)]| {
+        db.execute("DELETE FROM log_packs WHERE job = 1", [])
+            .unwrap();
+        for (first, last, data) in packs {
+            db.execute(
+                "INSERT INTO log_packs (job, first_line, last_line, data) VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![first, last, data],
+            )
+            .unwrap();
+        }
+    };
+    packs(&[
+        (0, 1, pack_data(&[(0, 1, b"a"), (0, 1, b"b")])),
+        (1, 2, pack_data(&[(1, 1, b"b"), (0, 1, b"c")])),
+    ]);
+    assert!(store.log_lines(1, 0, 10).await.is_err(), "line 1 twice");
+    packs(&[
+        (0, 3, pack_data(&[(0, 1, b"a"), (2, 1, b"d")])),
+        (1, 2, pack_data(&[(1, 1, b"b"), (0, 1, b"c")])),
+    ]);
+    assert!(
+        store.log_lines(1, 0, 10).await.is_err(),
+        "a pack inside another"
+    );
+    packs(&[
+        (0, 1, pack_data(&[(0, 1, b"a"), (0, 1, b"b")])),
+        (5, 6, pack_data(&[(5, 1, b"f"), (0, 1, b"g")])),
+    ]);
+    let numbers = |lines: Vec<(u64, String)>| lines.into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+    assert_eq!(
+        numbers(store.log_lines(1, 0, 10).await.unwrap()),
+        [0, 1, 5, 6]
+    );
+    assert_eq!(numbers(store.log_lines(1, 2, 10).await.unwrap()), [5, 6]);
+}
+
+#[tokio::test]
+async fn a_delete_of_rows_stops_before_the_row_past_its_bytes_and_still_takes_one() {
+    // Catches a delete that takes the row that crosses its budget: two 3 MiB lines went in one 6 MiB transaction.
+    let dir = TestDir::new("packs");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    running(&store, 1);
+    store
+        .log(1, vec!["x".repeat(3 << 20); 3], POSITION, u64::MAX)
+        .await;
+    running(&store, 2);
+    store
+        .log(2, vec![String::new(); 4500], POSITION, u64::MAX)
+        .await;
+    store.flush().await;
+    let db = Connection::open(&path).unwrap();
+    for left in [2, 1, 0] {
+        assert_eq!(
+            logs::delete_some_rows(&db, 1).unwrap(),
+            1,
+            "one long line a delete"
+        );
+        assert_eq!(rows(&path, 1).0, left);
+    }
+    assert_eq!(logs::delete_some_rows(&db, 1).unwrap(), 0);
+    assert_eq!(
+        logs::delete_some_rows(&db, 2).unwrap(),
+        2000,
+        "short lines go 2000 at a time"
+    );
+}
+
+#[tokio::test]
+async fn many_short_lines_count_against_a_prune_and_a_stop_is_seen_at_each_pack() {
+    // Catches a bound on text alone, which half a million blank lines pass, and a stop polled every 1024 lines,
+    // which a log of long lines, a pack every line or two, never reaches.
+    let dir = TestDir::new("packs");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    running(&store, 1);
+    finish(&store, 1, "success");
+    running(&store, 2);
+    store
+        .log(2, vec!["y".repeat(300 << 10); 8], POSITION, u64::MAX)
+        .await;
+    finish(&store, 2, "success");
+    store.flush().await;
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 599999) \
+         INSERT INTO log_lines (job, line, text) SELECT 1, i, '' FROM n; \
+         UPDATE jobs SET log_lines = 600000, log_bytes = 600000 WHERE id = 1;",
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            logs::make(&db, 1, &|| false).unwrap(),
+            logs::Made::Unpackable(_)
+        ),
+        "600,000 blank lines are past what one prune packs"
+    );
+    let polls = std::cell::Cell::new(0);
+    let stopped = logs::make(&db, 2, &|| {
+        polls.set(polls.get() + 1);
+        polls.get() > 1
+    })
+    .unwrap();
+    assert!(
+        matches!(stopped, logs::Made::Stopped),
+        "the stop after the second pack is seen"
+    );
+    store.prune(PACK, &History::default()).await.unwrap();
+    assert_eq!(rows(&path, 1), (600_000, 0), "the blank lines stay in rows");
+    assert_eq!(rows(&path, 2).0, 0, "the long lines pack");
+}

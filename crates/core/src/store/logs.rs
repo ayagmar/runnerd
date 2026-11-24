@@ -39,9 +39,13 @@ const PACK_BYTES: usize = 256 << 10;
 /// inflates more per pack, whatever its row holds. A line too long for it leaves its job in rows.
 const PACK_MAX: usize = 1 << 20;
 
-/// The most text of one job packed, in bytes: what one prune reads in one snapshot and stores in one transaction. A
-/// longer log stays in rows.
+/// The most of one job packed, in bytes, its text and `ROW_COST` per line: what one prune reads in one snapshot and
+/// stores in one transaction. A longer log stays in rows.
 const PACK_JOB_MAX: u64 = 16 << 20;
+
+/// What one row counts against `PACK_JOB_MAX` beside its text, in bytes: its line's varints in a pack, and the row
+/// itself as SQLite reads it, so a log of many short lines is bounded too.
+const ROW_COST: u64 = 32;
 
 /// Rows of `log_lines` one delete takes at most.
 const DELETE_ROWS: u64 = 2000;
@@ -72,7 +76,8 @@ fn consistent<T>(
 }
 
 /// Calls `each` with each line of `job`'s packs from line `from` on, in order, until it returns `false`. A pack that
-/// does not read as the lines its row names is an error.
+/// does not read as the lines its row names, or whose lines do not all come after the pack before it, is an error:
+/// the lines it hands over always rise.
 fn each_packed(
     db: &Connection,
     job: u64,
@@ -84,14 +89,20 @@ fn each_packed(
          ORDER BY last_line",
     )?;
     let mut rows = statement.query(params![job, from])?;
+    let mut before: Option<u64> = None;
     while let Some(row) = rows.next()? {
+        let (first, last): (u64, u64) = (row.get(0)?, row.get(1)?);
+        if before.is_some_and(|before| first <= before) {
+            return Err(unreadable("packs whose lines overlap"));
+        }
+        before = Some(last);
         let data = match row.get_ref(2)? {
             ValueRef::Blob(data) => data,
             ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) | ValueRef::Text(_) => {
                 return Err(unreadable("a pack that is no blob"));
             }
         };
-        let pack = unpack(data, row.get(0)?, row.get(1)?)?;
+        let pack = unpack(data, first, last)?;
         for (number, text) in pack.lines() {
             if number >= from && !each(number, text)? {
                 return Ok(());
@@ -227,8 +238,8 @@ pub(super) fn delete_packs(db: &Connection, job: u64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Deletes `job`'s first rows: up to `DELETE_ROWS`, fewer once they hold `DELETE_BYTES` of text, one at least. How
-/// many it deleted.
+/// Deletes `job`'s first rows: up to `DELETE_ROWS`, as many as hold no more than `DELETE_BYTES` of text, one at
+/// least, however long. How many it deleted.
 pub(super) fn delete_some_rows(db: &Connection, job: u64) -> rusqlite::Result<usize> {
     let mut statement = db.prepare_cached(
         "SELECT line, octet_length(text) FROM log_lines WHERE job = ?1 ORDER BY line LIMIT ?2",
@@ -237,11 +248,12 @@ pub(super) fn delete_some_rows(db: &Connection, job: u64) -> rusqlite::Result<us
     let mut last = None;
     let mut bytes = 0u64;
     while let Some(row) = rows.next()? {
-        last = Some(row.get::<_, u64>(0)?);
+        let line: u64 = row.get(0)?;
         bytes = bytes.saturating_add(row.get::<_, Option<u64>>(1)?.unwrap_or(0));
-        if bytes >= DELETE_BYTES {
+        if last.is_some() && bytes > DELETE_BYTES {
             break;
         }
+        last = Some(line);
     }
     drop(rows);
     drop(statement);
@@ -254,15 +266,15 @@ pub(super) fn delete_some_rows(db: &Connection, job: u64) -> rusqlite::Result<us
 
 /// Packs the logs of the jobs whose records were final before `before` (ms) and that still have rows, oldest first,
 /// one job at a time with a pause after each as long as it took, until the prune is stopped. A log whose record
-/// counts more than `PACK_JOB_MAX` bytes is not read.
+/// counts more than `PACK_JOB_MAX` bytes, with `ROW_COST` per line, is not read.
 pub(super) fn pack_final(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
     let jobs: Vec<u64> = db
         .prepare(
             "SELECT id FROM jobs WHERE state IN ('completed', 'lost', 'elsewhere') \
-             AND coalesce(finished_at, queued_at) < ?1 AND log_bytes <= ?2 \
+             AND coalesce(finished_at, queued_at) < ?1 AND log_bytes + log_lines * ?3 <= ?2 \
              AND EXISTS (SELECT 1 FROM log_lines WHERE job = id) ORDER BY id",
         )?
-        .query_map(params![before, PACK_JOB_MAX], |row| row.get(0))?
+        .query_map(params![before, PACK_JOB_MAX, ROW_COST], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for job in jobs {
         if db.stopped() {
@@ -299,7 +311,7 @@ pub(super) enum Made {
 }
 
 /// Reads and deflates `job`'s rows in a snapshot, outside a write, so the writer goes on meanwhile; asks `stopped`
-/// after each pack's worth of lines.
+/// each time it closes a pack.
 pub(super) fn make(
     db: &Connection,
     job: u64,
@@ -319,6 +331,7 @@ pub(super) fn make(
         let mut rows = statement.query([job])?;
         let mut packs = Packer::default();
         let mut total = 0u64;
+        let mut polled = 0;
         while let Some(row) = rows.next()? {
             // A row a strict read would not take as text keeps its job in rows, read as strictly as before.
             let ValueRef::Text(text) = row.get_ref(1)? else {
@@ -327,15 +340,19 @@ pub(super) fn make(
             if std::str::from_utf8(text).is_err() {
                 return Ok(Made::Unpackable("a row that is not UTF-8"));
             }
-            total = total.saturating_add(text.len() as u64);
+            total = total.saturating_add(text.len() as u64 + ROW_COST);
             if total > PACK_JOB_MAX {
                 return Ok(Made::Unpackable("a log too long to pack"));
             }
             if packs.line(row.get(0)?, text)? == Added::TooLong {
                 return Ok(Made::Unpackable("a line too long for a pack"));
             }
-            if packs.lines % PACK_LINES == 0 && stopped() {
-                return Ok(Made::Stopped);
+            // Once per pack: after a pack is closed, however few lines it took.
+            if packs.packs.len() > polled {
+                polled = packs.packs.len();
+                if stopped() {
+                    return Ok(Made::Stopped);
+                }
             }
         }
         Ok(Made::Packs {
@@ -399,12 +416,11 @@ pub(super) struct Pack {
     data: Vec<u8>,
 }
 
-/// Lines in a pack being made, the packs made, and how many lines in all.
+/// Lines in a pack being made, and the packs made.
 #[derive(Default)]
 struct Packer {
     open: Option<Open>,
     packs: Vec<Pack>,
-    lines: usize,
 }
 
 /// The pack being made: its first and last line, how many lines and bytes of text it holds, what it inflates to,
@@ -476,7 +492,6 @@ impl Packer {
         open.lines += 1;
         open.text += text.len();
         open.inflated += next.len() + text.len();
-        self.lines += 1;
         Ok(Added::Line)
     }
 
