@@ -32,7 +32,7 @@ async fn dashboard_of(daemon: Daemon) -> (Dashboard, String, Daemon, Facts) {
 }
 
 /// The text a page shows: each tag a space, entities decoded and spaces collapsed.
-fn text(html: &str) -> String {
+pub(super) fn text(html: &str) -> String {
     let mut text = String::new();
     let mut tag = false;
     for c in html.chars() {

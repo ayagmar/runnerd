@@ -46,6 +46,7 @@ use runnerd_core::api::{
 use crate::views::{repository_id, slot_id};
 
 mod live;
+mod log_window;
 mod parity;
 mod queue;
 

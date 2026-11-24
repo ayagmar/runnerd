@@ -1014,3 +1014,135 @@ fn an_outline_of_the_last_lines_says_how_many_the_full_log_has_before_them() {
         Some("the last 5000 lines; the full log has the 1200 before them")
     );
 }
+
+/// A finished log of `lines` plain lines with a group from line 300 to 340 holding one from 305 to 330.
+fn grouped_log(lines: u64) -> LogOutline {
+    let text: Vec<String> = (0..lines)
+        .map(|line| match line {
+            300 => "##[group]Module ledger".to_owned(),
+            305 => "##[group]Test results".to_owned(),
+            330 | 340 => "##[endgroup]".to_owned(),
+            _ => format!("line {line}"),
+        })
+        .collect();
+    LogOutline::of(&job(JobState::Completed, "failure", Vec::new()), &text)
+}
+
+#[test]
+fn a_cited_line_before_the_tail_is_read_in_a_bounded_window_from_its_outermost_group() {
+    let outline = grouped_log(1000);
+    let tail = LogWindow::Tail(LineRange {
+        from: 960,
+        to: 1000,
+    });
+    // No line cited, one among the last lines or one past the end: the tail, as before.
+    for cited in [None, Some(960), Some(999), Some(1000), Some(u64::MAX)] {
+        assert_eq!(outline.window(cited, 40), tail, "{cited:?}");
+    }
+    // Two groups deep, 30 lines into the outer one: the window starts at the outer group, so both fold whole.
+    assert_eq!(
+        outline.window(Some(330), 40),
+        LogWindow::Around {
+            line: 330,
+            range: LineRange { from: 300, to: 340 }
+        }
+    );
+    // A group started too far back to leave a quarter of the window after the line: half the window before it.
+    assert_eq!(
+        outline.window(Some(338), 40).range(),
+        LineRange { from: 318, to: 358 }
+    );
+    // Near the start, never before line 0; near the tail, never past the end.
+    assert_eq!(
+        outline.window(Some(3), 40).range(),
+        LineRange { from: 0, to: 40 }
+    );
+    assert_eq!(
+        outline.window(Some(950), 40).range(),
+        LineRange { from: 930, to: 970 }
+    );
+    for line in [0, 3, 299, 300, 305, 329, 330, 338, 500, 959] {
+        let range = outline.window(Some(line), 40).range();
+        assert!(
+            range.from <= line && line < range.to && range.to - range.from <= 40,
+            "line {line}: {range:?} holds it, within 40 lines"
+        );
+    }
+}
+
+#[test]
+fn a_window_says_it_is_not_the_logs_end_and_a_tail_says_what_it_leaves_out() {
+    let outline = grouped_log(1000);
+    let around = outline.window(Some(330), 40);
+    assert_eq!(
+        around.words(40, outline.lines).as_deref(),
+        Some("lines 301 to 340 of 1000, around line 331, not the log's end")
+    );
+    assert_eq!(
+        outline.window(None, 40).words(40, outline.lines).as_deref(),
+        Some("the last 40 lines; the full log has the 960 before them")
+    );
+    assert_eq!(
+        outline.window(None, 5000).words(1000, outline.lines),
+        None,
+        "a log shown whole says nothing"
+    );
+    assert_eq!(
+        around.words(0, outline.lines),
+        None,
+        "a window that read nothing is around nothing, never an inverted range"
+    );
+}
+
+#[test]
+fn a_cited_line_not_read_says_why_by_the_logs_evidence() {
+    let mut outline = grouped_log(1000);
+    assert_eq!(
+        outline.absent_words(1000),
+        "line 1001 is past the log's end: it has 1000 lines"
+    );
+    assert_eq!(outline.absent_words(20), "line 21 is not in the stored log");
+    outline.evidence = LogEvidence::Truncated;
+    assert_eq!(
+        outline.absent_words(4000),
+        "line 4001 was not kept: the log was cut at history.log_max after 1000 lines"
+    );
+    outline.evidence = LogEvidence::Running;
+    assert_eq!(
+        outline.absent_words(1000),
+        "line 1001 is not printed yet: the log has 1000 lines so far"
+    );
+    outline.evidence = LogEvidence::Expired;
+    assert_eq!(
+        outline.absent_words(20),
+        "line 21 was deleted after history.logs"
+    );
+    // At the last line the log had, and past it: deleted either way, past its end said so.
+    assert_eq!(
+        outline.absent_words(999),
+        "line 1000 was deleted after history.logs"
+    );
+    for line in [1000, 5000] {
+        assert_eq!(
+            outline.absent_words(line),
+            format!(
+                "line {} is past the log's end, and its 1000 lines were deleted after history.logs",
+                line + 1
+            )
+        );
+    }
+    let missing = LogOutline::of(&job(JobState::Completed, "failure", Vec::new()), &[]);
+    assert_eq!(
+        missing.absent_words(0),
+        "line 1 is not there: no log was captured"
+    );
+    let unread = LogOutline::unread_words(999_999);
+    assert!(
+        !unread.contains("has it") && unread.contains("cannot be opened"),
+        "an older daemon never says the log has a line it cannot see: {unread}"
+    );
+    assert_eq!(
+        LogOutline::zero_line_words(),
+        "there is no line 0: lines count from 1"
+    );
+}

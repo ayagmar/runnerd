@@ -52,8 +52,9 @@ flowchart TB
   repository's `queue` says the status shows its listed jobs
   ([ADR 0150](docs/adr/0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md)). `api::jobs::log` reads a job's log as
   structure: it styles each stored line, builds the outline a line at a time (`Outliner`), tells each step's lines by
-  the runner's step headers in order and the steps' times, words a failure from what is stored, and searches a page
-  at a time ([ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md),
+  the runner's step headers in order and the steps' times, words a failure from what is stored, searches a page
+  at a time, and picks the lines a client reads around a line a reader cites
+  ([ADR 0178](docs/adr/0178-a-cited-log-line-is-read-where-it-is.md), [ADR 0133](docs/adr/0133-a-log-is-read-as-structure-kept-as-it-is-stored.md),
   [0139](docs/adr/0139-steps-that-share-a-second-are-told-apart-by-their-headers.md)). `api::jobs::query`,
   `api::jobs::timeline` and `api::jobs::compare` define the job list's search, sorts and pages, the slots' timeline and
   a job beside its baseline as pure functions over a history in memory, which the store answers in SQL and the demo

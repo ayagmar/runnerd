@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 mod outline;
 mod search;
+mod window;
 
 pub(crate) use outline::TITLE_SOURCE_MAX;
 pub(crate) use outline::title;
@@ -20,6 +21,7 @@ pub use outline::{
     OutlineParts, Outliner, SavedOutline, StepLines, StepLog, StoredLog,
 };
 pub use search::{LogNeedle, LogSearch, LogSearchQuery, SEARCH_QUERY_MAX, Search};
+pub use window::LogWindow;
 
 /// `GET /v1/jobs/{id}/log/lines`: lines a page holds unless `limit` says otherwise.
 pub const LINES_DEFAULT: u32 = 1000;

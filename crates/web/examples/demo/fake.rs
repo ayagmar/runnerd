@@ -102,6 +102,8 @@ pub struct Fixtures {
     pub action_answer: Option<ActionAnswer>,
     /// Answer as a runnerd older than this client: the routes it lacks answer the daemon's 404 for no such endpoint.
     pub older: bool,
+    /// How `GET /v1/jobs/{id}/log/lines` answers.
+    pub styled_lines: StyledPages,
     /// Fail a list of the history's queued jobs with a 500, as a history that cannot be read.
     pub queued_list_fails: bool,
     /// How many of the next reads of each path, such as `/v1/status`, are cut off mid-body, as when the daemon goes
@@ -110,6 +112,17 @@ pub struct Fixtures {
     /// How many of the next requests of each path the daemon denies with 403, as it does a caller that is not the
     /// user it runs as.
     pub denials: BTreeMap<String, u32>,
+}
+
+/// How the fake daemon answers a page of styled lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyledPages {
+    /// Every line the page asks for.
+    Whole,
+    /// Stopped once it holds this many bytes of JSON, at least one line, as the store stops one at a few MiB.
+    CutAt(usize),
+    /// As a route the daemon lacks, its outline still answered.
+    Unsupported,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -817,6 +830,7 @@ impl Fixtures {
             logs,
             logged: runnerd_fixtures::logged_jobs()
                 .into_iter()
+                .chain([runnerd_fixtures::long_logged_job()])
                 .map(|logged| (logged.job.summary.id, logged))
                 .collect(),
             host,
@@ -842,6 +856,7 @@ impl Fixtures {
             doctor: None,
             action_answer: None,
             older: false,
+            styled_lines: StyledPages::Whole,
             queued_list_fails: false,
             drops: BTreeMap::new(),
             denials: BTreeMap::new(),
@@ -1941,13 +1956,25 @@ fn router(fake: Fake) -> Router {
             "/v1/jobs/{id}/log/lines",
             get(
                 |State(fake): State<Fake>, UrlPath(id): UrlPath<u64>, Query(query): Query<LogLinesQuery>| async move {
-                    let lines = fake.fixtures.lock().unwrap().log_of(id);
+                    let (lines, pages) = {
+                        let fixtures = fake.fixtures.lock().unwrap();
+                        (fixtures.log_of(id), fixtures.styled_lines)
+                    };
+                    let bytes = match pages {
+                        StyledPages::Unsupported => return no_such_endpoint(),
+                        StyledPages::CutAt(bytes) => bytes,
+                        StyledPages::Whole => usize::MAX,
+                    };
                     let from = usize::try_from(query.from.unwrap_or(0)).unwrap().min(lines.len());
                     let to = (from + usize::try_from(query.page()).unwrap()).min(lines.len());
-                    let body: String = (from..to)
-                        .map(|line| serde_json::to_string(&StyledLine::parse(line as u64, &lines[line])).unwrap() + "\n")
-                        .collect();
-                    ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], body)
+                    let mut body = String::new();
+                    for (line, text) in lines.iter().enumerate().take(to).skip(from) {
+                        if !body.is_empty() && body.len() >= bytes {
+                            break;
+                        }
+                        body += &(serde_json::to_string(&StyledLine::parse(line as u64, text)).unwrap() + "\n");
+                    }
+                    ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
                 },
             ),
         )

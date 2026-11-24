@@ -32,7 +32,7 @@ pub(crate) use log::title;
 pub use log::{
     Color, FailureSummary, LINE_BYTES_MAX, LINES_DEFAULT, LINES_MAX, LineKind, LineRange, LineRead,
     LogEvidence, LogGroup, LogLinesQuery, LogMark, LogNeedle, LogOutline, LogSearch,
-    LogSearchQuery, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
+    LogSearchQuery, LogWindow, MarkKind, OutlineChange, OutlineParts, Outliner, RUNS_MAX, Run,
     SEARCH_QUERY_MAX, SavedOutline, Search, StepLines, StepLog, StoredLine, StoredLog, StyledLine,
 };
 pub use query::{

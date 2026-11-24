@@ -99,7 +99,11 @@ fn respond(
 enum LivePage {
     Overview,
     Queue,
-    Job(u64),
+    /// A job's page, and the line it cites, counted from 1: its log is then not followed.
+    Job {
+        id: u64,
+        line: Option<u64>,
+    },
 }
 
 impl LivePage {
@@ -107,7 +111,7 @@ impl LivePage {
         match self {
             LivePage::Overview => "overview",
             LivePage::Queue => "queue",
-            LivePage::Job(_) => "job",
+            LivePage::Job { .. } => "job",
         }
     }
 }
@@ -136,7 +140,7 @@ async fn run_page(
             let Err(end) = match page {
                 LivePage::Overview => run_overview(&app, &patches, feed, shown).await,
                 LivePage::Queue => run_queue(&app, &patches, feed, shown).await,
-                LivePage::Job(id) => run_job(&app, &patches, feed, id, shown).await,
+                LivePage::Job { id, line } => run_job(&app, &patches, feed, id, line, shown).await,
             };
             end
         };
@@ -222,6 +226,13 @@ async fn retry(
         () = patches.closed() => Err(End::Closed),
         _ = stopping.wait_for(|stopping| *stopping) => Err(End::Ended(Ending::Stopped)),
     }
+}
+
+/// The line a job's page cites, as its stream's URL carries it.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct Cited {
+    #[serde(default)]
+    line: Option<u64>,
 }
 
 /// What a page says it shows when its stream connects: the `shown` signal, which Datastar sends as JSON in the
@@ -802,6 +813,7 @@ pub(crate) async fn job(
     Extension(session): Extension<SignedIn>,
     Path(id): Path<u64>,
     Query(signals): Query<Signals>,
+    Query(cited): Query<Cited>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
     let (patches, receiver) = mpsc::channel(64);
     let done = Arc::new(AtomicBool::new(false));
@@ -812,7 +824,10 @@ pub(crate) async fn job(
             patches,
             ended,
             session,
-            LivePage::Job(id),
+            LivePage::Job {
+                id,
+                line: cited.line,
+            },
             signals.shown(),
         )
         .await;
@@ -889,9 +904,14 @@ async fn run_job(
     patches: &Patches,
     feed: &mut Feed,
     id: u64,
+    line: Option<u64>,
     shown: Option<Shown>,
 ) -> Run {
     let mut stopping = app.stopping.clone();
+    let page = job::JobPageQuery {
+        line,
+        ..job::JobPageQuery::default()
+    };
     let query = EventQuery {
         job: Some(id),
         logs: true,
@@ -907,11 +927,16 @@ async fn run_job(
         feed,
         patches,
         &mut stopping,
-        JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default())
+        JobView::load(&app.daemon, id, crate::now(), &page)
     )?;
+    // A page that cites a line shows the lines read around it, which no line from the stream belongs after.
+    let follows = data.follows_log();
     let mut next_line = data.log_from + data.log.len() as u64;
-    let mut shown_lines =
-        first_lines(patches, &data, shown.as_ref().and_then(|shown| shown.log)).await?;
+    let mut shown_lines = if follows {
+        first_lines(patches, &data, shown.as_ref().and_then(|shown| shown.log)).await?
+    } else {
+        0
+    };
     let mut sent = Sent::default();
     if let Some(shown) = shown {
         data.now = shown.at;
@@ -928,7 +953,7 @@ async fn run_job(
                 feed,
                 patches,
                 &mut stopping,
-                JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default())
+                JobView::load(&app.daemon, id, crate::now(), &page)
             )?;
             let finished = PatchElements::new(job::finished(&full).into_string());
             let _ = patches.send(finished.write_as_axum_sse_event()).await;
@@ -945,6 +970,7 @@ async fn run_job(
             match event {
                 // A line skipped means the daemon dropped some for this stream: the page connects again and gets
                 // them from the stored log.
+                Event::LogLine { .. } if !follows => {}
                 Event::LogLine { line, .. } if line > next_line => return Err(End::Lost),
                 Event::LogLine { line, text, .. } if line == next_line => {
                     next_line = line + 1;

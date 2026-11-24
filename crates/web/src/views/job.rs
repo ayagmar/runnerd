@@ -7,6 +7,11 @@
 //! command. A finished job's log reads as core outlines it: a fold per step and per group, the failed step open,
 //! colours from core's runs, a link per line, and a search of the lines' messages. A running job's log is its live
 //! tail. A daemon older than the outline gets the plain tail and says so; never an empty log.
+//!
+//! A cited line (`?line=N`, from a search hit, a line's own link or the failure's) is read where it is: the log's
+//! last lines when it is among them, else a window of them around it that core picks (ADR 0178), said to be one,
+//! with a link back to the end. On a running job the cited lines are a snapshot the stream leaves alone. A line not
+//! read says why in core's words, and nothing is marked as opened.
 
 use crate::views::Here;
 use std::fmt::Write as _;
@@ -16,8 +21,8 @@ use runnerd_core::api::{
     ActionPreview, Baseline, BuildCacheCounts, ChartLine, ChartLineKind, Color, CompareQuery,
     Feature, Job, JobAction, JobActions, JobComparison, JobPage, JobQuery, JobState, JobSummary,
     LINES_MAX, LineKind, LineRange, LogEvidence, LogLinesQuery, LogOutline, LogSearch,
-    LogSearchQuery, OutcomeKind, PhaseKind, ProfileStatus, RecordNote, RecordState, Sample,
-    SampleSeries, Status, StepLog, StyledLine, in_cores,
+    LogSearchQuery, LogWindow, OutcomeKind, PhaseKind, ProfileStatus, RecordNote, RecordState,
+    Sample, SampleSeries, Status, StepLog, StyledLine, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 use serde::Deserialize;
@@ -35,7 +40,8 @@ pub(crate) const LOG_TAIL: u64 = 1000;
 const PHONE_TAIL: u64 = 200;
 /// Runs of the same job the page compares.
 const RUNS: u32 = 30;
-/// The most lines of a finished job's log the page outlines, its last; the full log has the rest.
+/// The most lines of a finished job's log the page outlines: its last, or those around a cited line; the full log has
+/// the rest.
 const OUTLINED_LINES: u64 = 5000;
 /// How many reads of styled lines the page makes at most: each is cut at a few MiB.
 const LINE_READS: usize = 4;
@@ -55,19 +61,32 @@ pub(crate) struct JobPageQuery {
     pub(crate) line: Option<u64>,
 }
 
-/// A finished job's log as the page shows it.
+/// A job's log as the page shows it: a finished job's, or a running job's when a line is cited.
 #[derive(Debug, Clone)]
 pub(crate) enum Outlined {
-    /// Core's outline and the lines read of it, from `first`.
+    /// Core's outline and the lines of `window` read of it. On a running job, a snapshot the stream leaves alone.
     Read {
         outline: Box<LogOutline>,
         lines: Vec<StyledLine>,
-        first: u64,
+        window: LogWindow,
+        cited: Cited,
     },
-    /// The daemon is older than the outline: the plain tail shows.
-    Unsupported,
-    /// The job runs: its live tail shows.
+    /// The daemon is older than the outline or its lines: the plain tail shows, and a cited line, as asked (from 1),
+    /// is not opened.
+    Unsupported { cited: Option<u64> },
+    /// The job runs and no line is cited: its live tail shows.
     Live,
+}
+
+/// The line `?line=` asks the page to open, 0-based, and what became of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Cited {
+    /// None was asked.
+    None,
+    /// Among the lines read: the folds around it open and it is marked.
+    Opened(u64),
+    /// Not among them, or line 0: the line as asked, counted from 1, and why, in core's words; the log's end shows.
+    Absent { asked: u64, why: String },
 }
 
 /// A search of the log, when the page asks one.
@@ -112,8 +131,6 @@ pub(crate) struct JobView {
     pub(crate) outlined: Outlined,
     pub(crate) searched: Option<Searched>,
     pub(crate) compared: Option<Compared>,
-    /// The line the page opens at, 0-based.
-    pub(crate) line: Option<u64>,
 }
 
 impl JobView {
@@ -160,8 +177,9 @@ impl JobView {
             || "p-none".to_owned(),
             |runner| profile_class(&status, &runner.profile),
         );
-        let outlined = if job.summary.state.is_final() {
-            read_outline(daemon, id).await?
+        // Any `?line=`, line 0 too, is answered: a running job's page then reads its log once, not followed.
+        let outlined = if job.summary.state.is_final() || query.line.is_some() {
+            read_outline(daemon, id, query.line).await?
         } else {
             Outlined::Live
         };
@@ -188,7 +206,6 @@ impl JobView {
             outlined,
             searched,
             compared,
-            line: query.line.and_then(|line| line.checked_sub(1)),
             runs,
             profile_class,
             profile: configured(&status, &job),
@@ -207,18 +224,83 @@ impl JobView {
     }
 }
 
-/// A finished job's outline and its last lines, or that the daemon has none.
-async fn read_outline(daemon: &Client, id: u64) -> Result<Outlined, ClientError> {
+/// The outline and the lines core's window of it holds for `asked`, the line `?line=` names counted from 1, or that
+/// the daemon has neither. A cited line the lines read do not hold is absent, in core's words, and the log's end
+/// shows instead: never a window around nothing.
+async fn read_outline(
+    daemon: &Client,
+    id: u64,
+    asked: Option<u64>,
+) -> Result<Outlined, ClientError> {
+    let unsupported = Outlined::Unsupported { cited: asked };
     let outline = match daemon.log_outline(id).await {
         Ok(outline) => outline,
-        Err(error) if error.is_unsupported() => return Ok(Outlined::Unsupported),
+        Err(error) if error.is_unsupported() => return Ok(unsupported),
         Err(error) => return Err(error),
     };
-    let first = outline.lines.saturating_sub(OUTLINED_LINES);
+    let cited = asked.and_then(|asked| asked.checked_sub(1));
+    let mut window = outline.window(cited, OUTLINED_LINES);
+    let read = read_lines(daemon, id, window.range()).await;
+    let mut lines = match read {
+        Ok(lines) => lines,
+        Err(error) if error.is_unsupported() => return Ok(unsupported),
+        Err(error) => return Err(error),
+    };
+    // Lines too long for the reads to reach the cited one: read again from it.
+    if let Some(line) = cited
+        && lines.last().is_some_and(|last| last.line < line)
+        && line < window.range().to
+    {
+        let from_line = LogWindow::Around {
+            line,
+            range: LineRange {
+                from: line,
+                to: window.range().to,
+            },
+        };
+        let again = read_lines(daemon, id, from_line.range()).await?;
+        if again.first().is_some_and(|first| first.line == line) {
+            window = from_line;
+            lines = again;
+        }
+    }
+    let cited = match (asked, cited) {
+        (None, _) => Cited::None,
+        (Some(_), Some(cited)) if lines.iter().any(|read| read.line == cited) => {
+            Cited::Opened(cited)
+        }
+        (Some(asked), cited) => {
+            if matches!(window, LogWindow::Around { .. }) {
+                window = outline.window(None, OUTLINED_LINES);
+                lines = read_lines(daemon, id, window.range()).await?;
+            }
+            Cited::Absent {
+                asked,
+                why: cited.map_or_else(
+                    || LogOutline::zero_line_words().to_owned(),
+                    |line| outline.absent_words(line),
+                ),
+            }
+        }
+    };
+    Ok(Outlined::Read {
+        outline: Box::new(outline),
+        lines,
+        window,
+        cited,
+    })
+}
+
+/// The styled lines of `range`, in at most [`LINE_READS`] reads: fewer lines when they are long.
+async fn read_lines(
+    daemon: &Client,
+    id: u64,
+    range: LineRange,
+) -> Result<Vec<StyledLine>, ClientError> {
     let mut lines: Vec<StyledLine> = Vec::new();
-    let mut from = first;
+    let mut from = range.from;
     for _ in 0..LINE_READS {
-        if from >= outline.lines {
+        if from >= range.to {
             break;
         }
         let mut read = daemon
@@ -226,13 +308,16 @@ async fn read_outline(daemon: &Client, id: u64) -> Result<Outlined, ClientError>
                 id,
                 &LogLinesQuery {
                     from: Some(from),
-                    limit: Some(LINES_MAX),
+                    limit: Some(u32::try_from(range.to - from).unwrap_or(LINES_MAX)),
                     follow: false,
                 },
             )
             .await?;
         let before = lines.len();
         while let Some(line) = read.next().await? {
+            if line.line >= range.to {
+                break;
+            }
             from = line.line + 1;
             lines.push(line);
         }
@@ -240,11 +325,7 @@ async fn read_outline(daemon: &Client, id: u64) -> Result<Outlined, ClientError>
             break;
         }
     }
-    Ok(Outlined::Read {
-        outline: Box::new(outline),
-        lines,
-        first,
-    })
+    Ok(lines)
 }
 
 /// A page of a search of the log for `q`, from line `from`.
@@ -289,6 +370,35 @@ impl JobView {
     fn live(&self) -> bool {
         !self.job.summary.state.is_final()
     }
+
+    /// Whether the page's log is the live tail the stream appends to: not while a line is cited.
+    pub(crate) fn follows_log(&self) -> bool {
+        matches!(self.outlined, Outlined::Live)
+    }
+
+    /// The line the page was asked to open, as asked (from 1), whatever became of it.
+    pub(crate) fn cited(&self) -> Option<u64> {
+        match &self.outlined {
+            Outlined::Read { cited, .. } => match cited {
+                Cited::None => None,
+                Cited::Opened(line) => Some(line + 1),
+                Cited::Absent { asked, .. } => Some(*asked),
+            },
+            Outlined::Unsupported { cited } => *cited,
+            Outlined::Live => None,
+        }
+    }
+
+    /// The line the page opens and marks, 0-based: a cited line among those read.
+    fn opened(&self) -> Option<u64> {
+        match &self.outlined {
+            Outlined::Read {
+                cited: Cited::Opened(line),
+                ..
+            } => Some(*line),
+            _ => None,
+        }
+    }
 }
 
 /// The live regions, by id, in the order the page has them, with their parts.
@@ -310,12 +420,18 @@ pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 5] {
 /// The whole page.
 pub(crate) fn render(view: &JobView, here: Here<'_>) -> Markup {
     let summary = &view.job.summary;
-    let url = format!("/live/jobs/{}", summary.id);
+    // A cited line's page keeps it, so the stream leaves its lines alone and draws the same lines as the job ends.
+    let url = match view.cited() {
+        Some(line) => format!("/live/jobs/{}?line={line}", summary.id),
+        None => format!("/live/jobs/{}", summary.id),
+    };
     let [head, timeline, steps, metrics, runs] = regions(view);
     let live = view.live().then(|| Live {
         url: &url,
         at: view.now,
-        log: Some(view.log_from + view.log.len() as u64),
+        log: view
+            .follows_log()
+            .then(|| view.log_from + view.log.len() as u64),
         regions: [&head, &timeline, &steps, &metrics, &runs]
             .iter()
             .map(|(id, markup, _)| (*id, digest(&markup.0)))
@@ -486,11 +602,12 @@ fn failure(view: &JobView) -> Markup {
             h2 #failure-title { (failure.headline(&view.job.steps)) }
             @if let Some(excerpt) = &failure.excerpt {
                 ol.log-lines.excerpt aria-label="Its last lines" {
-                    @for line in excerpt { (styled_line(line, view.line, Place::Copy)) }
+                    @for line in excerpt { (styled_line(line, view.opened(), Place::Copy)) }
                 }
             }
             @if let Some(step) = failure.step.and_then(|step| outline.step_lines(step)).filter(|range| !range.is_empty()) {
-                p { a.hit href=(format!("#L{}", step.to)) { "The step in the log" } }
+                // A link to the line, not only its place on this page: past the log's last lines, the page reads it.
+                p { a.hit href=(format!("?line={0}#L{0}", step.to)) { "The step in the log" } }
             }
             @if let Some(shell) = &failure.shell { (copy_command(shell)) }
         }
@@ -1085,17 +1202,42 @@ pub(crate) fn log(view: &JobView) -> Markup {
             (search_form(view))
             (search_results(view))
             @match &view.outlined {
-                Outlined::Read { outline, lines, first } => {
+                Outlined::Read { outline, lines, window, cited } => {
                     @if let Some(words) = outline.evidence.words() {
                         p class=(format!("evidence {}", tone_class(outline.evidence.tone()))) { (format::sentence(words)) "." }
                     }
-                    @if let Some(tail) = LogOutline::tail_words(*first, lines.len()) {
-                        p.muted { (format::sentence(&tail)) "." }
+                    @if let Cited::Absent { why, .. } = cited {
+                        p.notice.tone-warn.log-cited role="alert" { (format::sentence(why)) ". " (back_to_end(view)) }
+                    }
+                    @let words = window.words(lines.len(), outline.lines);
+                    @match window {
+                        LogWindow::Around { .. } => {
+                            p.notice.log-window role="status" { (format::sentence(&words.unwrap_or_default())) ". " (back_to_end(view)) }
+                        }
+                        LogWindow::Tail(_) => {
+                            @if let Some(words) = words { p.muted { (format::sentence(&words)) "." } }
+                            // A running job's cited line is read once: the stream leaves these lines alone.
+                            @if view.live() && matches!(cited, Cited::Opened(_)) {
+                                p.notice.log-window role="status" { "These lines are as they were read, not followed. " (back_to_end(view)) }
+                            }
+                        }
                     }
                     (outlined(view, outline, lines))
                 }
-                Outlined::Unsupported => {
+                Outlined::Unsupported { cited } => {
                     p.evidence.tone-quiet { (format::sentence(&Feature::LogOutline.unsupported())) "." }
+                    @if let Some(asked) = cited {
+                        p.notice.tone-warn.log-cited role="alert" {
+                            @match asked.checked_sub(1) {
+                                Some(line) => {
+                                    (format::sentence(&LogOutline::unread_words(line))) ": "
+                                    a.hit href=(format!("/jobs/{}/log", summary.id)) { "Full log" } ". "
+                                }
+                                None => { (format::sentence(LogOutline::zero_line_words())) ". " }
+                            }
+                            (back_to_end(view))
+                        }
+                    }
                     (tail(view))
                 }
                 Outlined::Live => {
@@ -1121,6 +1263,16 @@ pub(crate) fn log(view: &JobView) -> Markup {
             }
         }
     }
+}
+
+/// The link from a cited line's page back to the log's end: the page without the line, live again while the job runs.
+fn back_to_end(view: &JobView) -> Markup {
+    let words = if view.live() {
+        "Back to the live tail"
+    } else {
+        "Back to the log's end"
+    };
+    html! { a.hit.log-end href=(format!("/jobs/{}#log", view.job.summary.id)) { (words) } }
 }
 
 /// The plain tail: a running job's, which the stream appends to, or an older daemon's.
@@ -1226,10 +1378,10 @@ fn outlined(view: &JobView, outline: &LogOutline, lines: &[StyledLine]) -> Marku
     html! {
         div.log-view #log-view tabindex="0" aria-label="Log lines" {
             @for (who, part) in &segments {
-                @let target = view.line.is_some_and(|line| part.iter().any(|each| each.line == line));
+                @let target = view.opened().is_some_and(|line| part.iter().any(|each| each.line == line));
                 @let open = target || matches!(who, Owner::Step(number) if Some(*number) == failed);
                 details.log-step.failed[open && !target && matches!(who, Owner::Step(number) if Some(*number) == failed)] open[open]
-                    data-scroll-here[open && (target || view.line.is_none())] {
+                    data-scroll-here[open && (target || view.opened().is_none())] {
                     summary {
                         @match who {
                             Owner::Step(number) => {
@@ -1240,14 +1392,16 @@ fn outlined(view: &JobView, outline: &LogOutline, lines: &[StyledLine]) -> Marku
                         }
                         span.muted.step-lines { (LogOutline::count_words(part.len())) }
                     }
-                    ol.log-lines { (lines_of(part, view.line)) }
+                    ol.log-lines { (lines_of(part, view.opened())) }
                 }
             }
         }
     }
 }
 
-/// `lines` with each `##[group]` folded up to its `##[endgroup]`, open when it holds `target`.
+/// `lines` with each `##[group]` folded up to its `##[endgroup]`, open when it holds `target`. An `##[endgroup]`
+/// is no line of its own unless it is `target`: then it shows, numbered and marked, last in its group's fold, or
+/// where it is when its group starts before `lines`.
 fn lines_of(lines: &[StyledLine], target: Option<u64>) -> Markup {
     let mut out = String::new();
     let mut index = 0;
@@ -1268,15 +1422,22 @@ fn lines_of(lines: &[StyledLine], target: Option<u64>) -> Markup {
                     }
                 }
                 let inner = &lines[index + 1..end.unwrap_or(lines.len())];
-                let open = target.is_some_and(|target| {
-                    target == line.line || inner.iter().any(|each| each.line == target)
-                });
+                let closing = end
+                    .and_then(|end| lines.get(end))
+                    .filter(|closing| target == Some(closing.line));
+                let open = closing.is_some()
+                    || target.is_some_and(|target| {
+                        target == line.line || inner.iter().any(|each| each.line == target)
+                    });
                 out.push_str(
                     &html! {
-                        li.group id=(format!("L{}", line.line + 1)) {
+                        li.group id=(format!("L{}", line.line + 1)) aria-current=[(target == Some(line.line)).then_some("true")] {
                             details open[open] {
                                 summary { (line_number(line)) span.text { (styled_runs(line)) } }
-                                ol.log-lines { (lines_of(inner, target)) }
+                                ol.log-lines {
+                                    (lines_of(inner, target))
+                                    @if let Some(closing) = closing { (styled_line(closing, target, Place::Log)) }
+                                }
                             }
                         }
                     }
@@ -1284,7 +1445,7 @@ fn lines_of(lines: &[StyledLine], target: Option<u64>) -> Markup {
                 );
                 index = end.map_or(lines.len(), |end| end + 1);
             }
-            LineKind::EndGroup => index += 1,
+            LineKind::EndGroup if target != Some(line.line) => index += 1,
             _ => {
                 out.push_str(&styled_line(line, target, Place::Log).into_string());
                 index += 1;
