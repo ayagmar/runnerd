@@ -614,7 +614,10 @@ always returns, so the daemon closes and flushes the history.
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
   `admission = "measured"` a runner reserves its predicted peak, at most its cap, and counts at the larger of that
-  and its last sampled memory, or at its cap when its own or the slice's sample is older than three intervals; the
+  and its last sampled memory, or at its cap when its own or the slice's sample is older than three intervals (one
+  rule, in ms, for admission and the count), a runner not sampled yet going by when it took its slot rather than when
+  its launch began, and one nothing samples (a failed start's container Docker kept, or one Docker could not
+  inspect) at its cap; the
   reservation follows its pool's queue until its job is known, then that job's prediction, and a waiting
   runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`, and refuses a slice without one; nothing
   starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
