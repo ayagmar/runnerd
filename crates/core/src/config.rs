@@ -419,8 +419,8 @@ pub enum Isolation {
 pub struct Caches {
     /// The Docker Hub mirror.
     pub mirror: Mirror,
-    /// The shared pnpm store.
-    pub pnpm: CacheLimit,
+    /// The pnpm store: each slot's own, or the one every slot shares.
+    pub pnpm: Pnpm,
     /// The shared Maven repository.
     pub maven: CacheLimit,
     /// When a profile has no job running and its slot 1 changed its layers by at least this much, slot 1's
@@ -591,6 +591,30 @@ pub struct Mirror {
 pub struct CacheLimit {
     /// The cache is emptied above this size when no job runs.
     pub max_size: ByteSize,
+}
+
+/// `[caches] pnpm`: where runners keep pnpm's store, and how large it may grow (ADR 0167).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pnpm {
+    /// The store is emptied above this size: the shared one when no job runs, a slot's own when its next runner
+    /// starts.
+    pub max_size: ByteSize,
+    /// Whose store a runner uses. Default `slot`.
+    #[serde(default)]
+    pub store: PnpmStores,
+}
+
+/// `[caches] pnpm.store`: whether each slot keeps its own pnpm store beside its jobs' workspace, which pnpm links
+/// packages from, or every slot shares one, which pnpm copies packages out of (ADR 0167).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PnpmStores {
+    /// Each slot's own, where its profile keeps no records and its image can (`cache::PnpmStore::of`).
+    #[default]
+    Slot,
+    /// The `runnerd-pnpm` volume, for every runner.
+    Shared,
 }
 
 /// Where runnerd's release workflow publishes the runner images, one tag per stage and version, such as

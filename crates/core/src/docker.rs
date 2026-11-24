@@ -84,6 +84,15 @@ pub const VOLATILE_LAYERS_LABEL: &str = "runnerd.volatile-layers";
 /// was not probed, whatever its exit code.
 pub const PROBE_LABEL: &str = "runnerd.runner-probe";
 
+/// The label of a runner image whose entrypoint, given `SLOT_PNPM_STORE_ENV`, keeps the slot's own pnpm store beside
+/// the job's workspace on the slot's volume (`image/layers.sh`, ADR 0167): `1`. An image without it would look for
+/// the store where the shared one is mounted, so runnerd mounts that one for it.
+pub const SLOT_PNPM_STORE_LABEL: &str = "runnerd.slot-pnpm-store";
+
+/// The variable that asks a runner's entrypoint for the slot's own pnpm store, with the store's limit in bytes:
+/// `RUNNERD_PNPM_SLOT_STORE=5000000000`.
+pub const SLOT_PNPM_STORE_ENV: &str = "RUNNERD_PNPM_SLOT_STORE";
+
 /// What a stopped runner container's exit code says its probe found, when its labels say its image probes
 /// (`PROBE_LABEL` at version 1): 200 every call worked, 201 a mount failed, 202 `/proc` did not open, 203 both, 204
 /// the probe timed out, 205 it could not run. Any other code, such as 137 for a container killed before or while the
@@ -112,6 +121,28 @@ pub fn skips_syncs<S: std::hash::BuildHasher>(labels: &HashMap<String, String, S
     labels
         .get(SKIP_SYNCS_LABEL)
         .is_some_and(|version| version == "1")
+}
+
+/// What a runner image's entrypoint does when runnerd asks, as its labels say. Each is the image's own and
+/// independent of the other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunnerImage {
+    /// It answers `SKIP_SYNCS` (`skips_syncs`).
+    pub skips_syncs: bool,
+    /// It keeps the slot's own pnpm store when given `SLOT_PNPM_STORE_ENV` (`SLOT_PNPM_STORE_LABEL` at `1`).
+    pub slot_pnpm_store: bool,
+}
+
+impl RunnerImage {
+    /// What `labels` say; an image Docker does not have does nothing of either.
+    pub fn of<S: std::hash::BuildHasher>(labels: &HashMap<String, String, S>) -> RunnerImage {
+        RunnerImage {
+            skips_syncs: skips_syncs(labels),
+            slot_pnpm_store: labels
+                .get(SLOT_PNPM_STORE_LABEL)
+                .is_some_and(|version| version == "1"),
+        }
+    }
 }
 
 /// What an image's runners skip when runnerd asks them, as its labels say: sync calls and their layers' unmount
@@ -448,8 +479,9 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<Output, Error>> + Send;
     /// Whether Docker has an image.
     fn image_present(&self, image: &str) -> impl Future<Output = Result<bool, Error>> + Send;
-    /// Whether Docker has an image and it answers `SKIP_SYNCS`, as its labels say (`skips_syncs`).
-    fn image_skips_syncs(&self, image: &str) -> impl Future<Output = Result<bool, Error>> + Send;
+    /// What a runner image does when asked, as its labels say (`RunnerImage::of`); the default when Docker does not
+    /// have it.
+    fn runner_image(&self, image: &str) -> impl Future<Output = Result<RunnerImage, Error>> + Send;
     /// Pulls an image, logging its progress every few seconds.
     fn pull(&self, image: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// Creates a bridge network unless it exists.
@@ -810,11 +842,12 @@ impl DockerApi for Docker {
         Ok(self.image_labels(image).await?.is_some())
     }
 
-    async fn image_skips_syncs(&self, image: &str) -> Result<bool, Error> {
+    async fn runner_image(&self, image: &str) -> Result<RunnerImage, Error> {
         Ok(self
             .image_labels(image)
             .await?
-            .is_some_and(|labels| skips_syncs(&labels)))
+            .map(|labels| RunnerImage::of(&labels))
+            .unwrap_or_default())
     }
 
     async fn pull(&self, image: &str) -> Result<(), Error> {
