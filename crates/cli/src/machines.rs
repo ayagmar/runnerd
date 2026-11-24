@@ -1,14 +1,17 @@
 //! `runnerctl machine add|list|rm` and `--machine`: reads and writes `$XDG_CONFIG_HOME/runnerd/machines.toml`, and
-//! opens a client of a machine it lists (ADR 0164). Core's `config::machines` checks the list and words what is
-//! wrong; `client` runs the SSH forward. This module only finds the file, asks the daemons and prints.
+//! opens a client of a machine it lists (ADR 0164). Reads every machine for `fleet`, status and jobs once all
+//! answered, and for the TUI's list of machines, status alone as each answers (ADR 0175). Core's `config::machines`
+//! checks the list and words what is wrong; `client` runs the SSH forward. This module only finds the file, asks the
+//! daemons and prints.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use runnerd_core::api::{JobPage, JobQuery, MachineReading, Status};
+use runnerd_core::api::{FleetMachine, JobPage, JobQuery, MachineReading, Status};
 use runnerd_core::client::{Client, ClientError, Endpoint, OpenSsh, SshProgram, remote_socket};
 use runnerd_core::config::machines::{Machine, Machines, SshTarget, check_name, check_socket};
+use tokio::task::JoinSet;
 
 use crate::{Error, output, print_json};
 
@@ -139,6 +142,61 @@ pub(crate) async fn readings(
         }
     }
     readings
+}
+
+/// One machine's line in the TUI's list of machines, and which machine it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Listed {
+    /// What choosing it reads: its name in `machines.toml`, or `None` for this machine's daemon.
+    pub(crate) target: Option<String>,
+    /// Its status, as core words it.
+    pub(crate) machine: FleetMachine,
+}
+
+/// Reads this machine's daemon's status and every added machine's at once, each landing in the set as it answers,
+/// so one that is slow to reach holds back none of the others. Only `/v1/status` is asked. Dropping the set stops
+/// every read still under way and its `ssh`. `local` is `None` without a socket to ask.
+pub(crate) fn statuses(
+    local: Option<Client>,
+    machines: &Machines,
+    program: &Arc<dyn SshProgram>,
+    private: &Path,
+) -> JoinSet<Listed> {
+    let mut reads = JoinSet::new();
+    reads.spawn(async move {
+        let machine = match local {
+            Some(client) => FleetMachine::this_machine(status(&client).await),
+            None => FleetMachine::unasked(),
+        };
+        Listed {
+            target: None,
+            machine,
+        }
+    });
+    for machine in machines.all() {
+        let machine = machine.clone();
+        let program = program.clone();
+        let private = private.to_owned();
+        reads.spawn(async move {
+            let name = machine.name.clone();
+            let status = match Client::open(Endpoint::Ssh(machine), program, &private).await {
+                Ok(client) => status(&client).await,
+                Err(error) => Err(reason(&error)),
+            };
+            Listed {
+                target: Some(name.clone()),
+                machine: FleetMachine::of_status(name, status),
+            }
+        });
+    }
+    reads
+}
+
+async fn status(client: &Client) -> Result<Status, String> {
+    client
+        .get::<Status>("/v1/status")
+        .await
+        .map_err(|error| reason(&error))
 }
 
 /// One daemon's status and jobs, or why each could not be read.
@@ -292,14 +350,19 @@ async fn add(
     reason = "tests: a fake that cannot start fails the test"
 )]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use axum::Router;
     use axum::routing::get;
-    use runnerd_core::api::{Machine as Identity, Status};
+    use runnerd_core::api::{Machine as Identity, Reach, Status};
+    use runnerd_core::client::SshProgram;
+    use runnerd_core::config::machines::Machines;
 
-    use super::{MachineCommand, read, run};
+    use super::{MachineCommand, read, run, statuses};
     use crate::testing::{Fake, FakeSsh};
 
     fn status(id: Option<&str>) -> Status {
@@ -409,6 +472,76 @@ mod tests {
         let machines = read(&path).unwrap();
         assert!(machines.get("dory").is_ok(), "dory is kept");
         assert!(machines.get("skiff").is_ok(), "skiff is added");
+    }
+
+    /// A daemon that answers its status, and notes any ask for jobs.
+    fn awake(id: &str, jobs_asked: &Arc<AtomicBool>) -> Router {
+        let asked = jobs_asked.clone();
+        daemon(Some(id)).route(
+            "/v1/jobs",
+            get(move || {
+                asked.store(true, Ordering::SeqCst);
+                async { axum::http::StatusCode::NOT_FOUND }
+            }),
+        )
+    }
+
+    /// Catches: the TUI's list of machines filling no machine until the slowest one answers, as a laptop asleep holds
+    /// it for up to 20 s; asking each machine for jobs it never shows; and a machine still being read when the list
+    /// closes keeping its `ssh` running.
+    #[tokio::test]
+    async fn statuses_land_as_each_machine_answers_and_stop_with_the_list() {
+        let dir = crate::testing::TempDir::new();
+        let jobs_asked = Arc::new(AtomicBool::new(false));
+        let local = Fake::serve(awake("0f0f0f0f", &jobs_asked));
+        let asleep = Router::new().route("/v1/status", get(std::future::pending::<String>));
+        let ssh = FakeSsh::by_target(
+            BTreeMap::from([
+                ("skiff".to_owned(), awake("1a2b3c4d", &jobs_asked)),
+                ("dory".to_owned(), asleep),
+            ]),
+            "",
+        );
+        let machines = Machines::parse(
+            "[[machine]]\nname = \"skiff\"\nssh = \"skiff\"\nsocket = \"/run/user/1001/runnerd.sock\"\nid = \"1a2b3c4d\"\n\
+             [[machine]]\nname = \"dory\"\nssh = \"dory\"\nsocket = \"/run/user/1002/runnerd.sock\"\nid = \"9f9f9f9f\"\n",
+        )
+        .unwrap();
+        let program: Arc<dyn SshProgram> = ssh.clone();
+        let mut reads = statuses(
+            Some(local.client(Duration::from_secs(5), Duration::from_secs(5))),
+            &machines,
+            &program,
+            &dir.0,
+        );
+        let mut landed = BTreeSet::new();
+        for _ in 0..2 {
+            let listed = tokio::time::timeout(Duration::from_secs(5), reads.join_next())
+                .await
+                .expect("this machine and skiff answer while dory sleeps")
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(listed.machine.reach, Reach::Read { .. }),
+                "{listed:?}"
+            );
+            landed.insert(listed.target);
+        }
+        assert_eq!(landed, BTreeSet::from([None, Some("skiff".to_owned())]));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), reads.join_next())
+                .await
+                .is_err(),
+            "dory is still being read"
+        );
+        assert!(
+            !jobs_asked.load(Ordering::SeqCst),
+            "no machine is asked for jobs"
+        );
+        assert_eq!(ssh.forwards(), 1, "dory's ssh runs while it is read");
+        drop(reads);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(ssh.forwards(), 0, "closing the list stops dory's ssh");
     }
 
     /// Catches: a 0.1.5 daemon, which names no machine id, being kept with an empty id no duplicate check can match.

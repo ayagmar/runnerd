@@ -1,4 +1,5 @@
-//! Three machines read together (ADR 0165): this one, `tern`, as [`daemon`] answers; `skiff`, an older daemon whose
+//! Three machines read together (ADR 0165): this one, `tern`, as [`daemon`] answers but on its battery, which holds
+//! every start (ADR 0175); `skiff`, an older daemon whose
 //! status names no machine, which ran [`ELSEWHERE`] and a newer job; and `dory`, which cannot be reached. With the
 //! facts core computes from them.
 
@@ -16,6 +17,8 @@ pub const DORY_DOWN: &str =
 /// What a client reads from the three machines, `tern` first.
 pub fn fleet_readings() -> Vec<MachineReading> {
     let tern = daemon();
+    let mut tern_status = tern.status.clone();
+    tern_status.on_battery = true;
     let mut skiff_status = tern.status.clone();
     skiff_status.machine = None;
     "0.1.5".clone_into(&mut skiff_status.version);
@@ -40,7 +43,7 @@ pub fn fleet_readings() -> Vec<MachineReading> {
     vec![
         MachineReading {
             machine: "tern".to_owned(),
-            status: Ok(tern.status.clone()),
+            status: Ok(tern_status),
             jobs: Ok(JobPage {
                 jobs: tern.summaries(),
                 next: None,
@@ -124,7 +127,7 @@ pub fn fleet() -> Fleet {
 
 #[cfg(test)]
 mod tests {
-    use runnerd_core::api::{MachineReading, Reach, THIS_MACHINE, Tone};
+    use runnerd_core::api::{FleetMachine, MachineReading, Reach, THIS_MACHINE, Tone};
 
     use super::{DORY_DOWN, FleetJobFact, SKIFF_ONLY, fleet, fleet_facts};
     use crate::ELSEWHERE;
@@ -160,8 +163,46 @@ mod tests {
             format!("cannot be read: {DORY_DOWN}")
         );
         assert_eq!(facts.machines[2].tone, Tone::Bad);
+        assert!(
+            facts.machines[0]
+                .summary
+                .contains(", on battery: no runner starts"),
+            "tern says its battery holds every start: {}",
+            facts.machines[0].summary
+        );
+        assert_eq!(facts.machines[0].tone, Tone::Warn, "a held machine warns");
+        assert!(
+            !facts.machines[1].summary.contains("battery"),
+            "{}",
+            facts.machines[1].summary
+        );
         assert_eq!(fleet.next, None);
         assert!(!fleet.all_read(), "dory was not read");
+    }
+
+    /// Catches: a list of machines that reads only each status (ADR 0175) calling every machine's jobs unread, so all
+    /// of them show as bad, or a machine read so losing its battery hold or its name.
+    #[test]
+    fn a_machine_read_from_its_status_alone_says_what_its_status_says() {
+        let readings = super::fleet_readings();
+        let merged = fleet();
+        for (reading, merged) in readings.into_iter().zip(&merged.machines) {
+            let alone = FleetMachine::of_status(reading.machine, reading.status);
+            assert_eq!(&alone, merged, "the same line as the fleet's, jobs or not");
+        }
+        let mut status = crate::daemon().status;
+        status.on_battery = true;
+        let this = FleetMachine::this_machine(Ok(status));
+        assert_eq!(this.name, "tern");
+        assert_eq!(this.tone(), Tone::Warn);
+        assert!(this.summary().contains("on battery"), "{}", this.summary());
+        let unasked = FleetMachine::unasked();
+        assert_eq!(unasked.name, THIS_MACHINE);
+        assert!(
+            unasked.summary().contains("XDG_RUNTIME_DIR"),
+            "{}",
+            unasked.summary()
+        );
     }
 
     /// Catches: this machine's line named by each client in its own words, or a daemon's own name ignored.

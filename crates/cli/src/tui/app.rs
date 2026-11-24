@@ -19,6 +19,7 @@ use super::mouse::{List, Target};
 use super::overlay::{Choice, Input, Overlay, Pick, Picker, Typing, Value};
 use super::prompts::{Prompt, Prompts};
 use super::reading::{Reading, Unread};
+use crate::machines::Listed;
 use crate::watch;
 
 /// Samples kept per running job: ten minutes at the daemon's two seconds.
@@ -141,11 +142,13 @@ pub(crate) enum Msg {
     Failed(String),
     /// A pause was refused because the repository, or one of them in a pause of all, runs a job.
     Busy(Refused),
-    /// The list of machines, as listed (none read yet) or read; `current` is the one read now.
+    /// The list of machines as `machines.toml` lists them, none read yet; `current` is the one read now.
     Machines {
         choices: Vec<MachineChoice>,
         current: Option<String>,
     },
+    /// One machine of the list of machines was read (ADR 0175).
+    MachineRead(Listed),
 }
 
 /// The daemon's config file and what its check says of it.
@@ -294,7 +297,7 @@ pub(crate) enum Effect {
     },
     /// Write a profile's new memory and slots into the daemon's config.
     Resize(Resizing),
-    /// Read every machine's status, for the list of machines (ADR 0166).
+    /// List every machine and read each one's status, for the list of machines (ADR 0166, ADR 0175).
     Machines,
     /// Read this machine, or the machine of `machines.toml` so named, instead; the loop's own, since it replaces the
     /// client and the state.
@@ -304,15 +307,13 @@ pub(crate) enum Effect {
     Quit,
 }
 
-/// A machine the list of machines offers, and what its daemon said once read.
+/// A machine the list of machines offers, before it is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MachineChoice {
     /// What choosing it reads: its name in `machines.toml`, or `None` for this machine's daemon.
     pub(crate) target: Option<String>,
     /// Its name before it is read.
     pub(crate) name: String,
-    /// Its name and state, as core words them; `None` while it is being read.
-    pub(crate) machine: Option<api::FleetMachine>,
 }
 
 /// A profile's advised memory and slots, as the sizing view showed them when `a` asked.
@@ -975,6 +976,7 @@ impl App {
             Msg::Failed(text) => self.flash(text, api::Tone::Bad),
             Msg::Busy(refused) => self.prompts.push(Prompt::Force(refused)),
             Msg::Machines { choices, current } => self.list_machines(choices, current),
+            Msg::MachineRead(listed) => self.machine_read(listed),
         }
         Vec::new()
     }
@@ -1204,30 +1206,19 @@ impl App {
         Some(Effect::Reasons)
     }
 
-    /// Opens the list of machines, each with its state as core words and tones it, on the one read now.
-    ///
-    /// The machines as listed open it at once, unless something else is open or asked; their readings then fill it
-    /// in place, the cursor kept, and only while it is open: a late answer never takes the keys from another list, a
-    /// search or a question.
+    /// Opens the list of machines, each being read, on the one read now, unless something else is open or asked:
+    /// it never takes the keys from another list, a search or a question.
     fn list_machines(&mut self, choices: Vec<MachineChoice>, current: Option<String>) {
-        let read = choices.iter().any(|choice| choice.machine.is_some());
         let choices: Vec<Choice> = choices
             .into_iter()
-            .map(|choice| match choice.machine {
-                Some(machine) => Choice {
-                    note: machine.summary(),
-                    tone: machine.tone(),
-                    ..Choice::of(machine.name, Value::Machine(choice.target))
-                },
-                None => Choice {
-                    note: api::BEING_READ.to_owned(),
-                    ..Choice::of(choice.name, Value::Machine(choice.target))
-                },
+            .map(|choice| Choice {
+                note: api::BEING_READ.to_owned(),
+                ..Choice::of(choice.name, Value::Machine(choice.target))
             })
             .collect();
         match &mut self.overlay {
             Overlay::Pick(picker) if picker.pick == Pick::Machine => picker.fill(choices),
-            Overlay::None if !read && self.prompts.top().is_none() => {
+            Overlay::None if self.prompts.top().is_none() => {
                 self.flash = None;
                 self.overlay = Overlay::Pick(Picker::new(
                     Pick::Machine,
@@ -1237,6 +1228,26 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Fills one machine's line of the open list of machines with its state as core words and tones it, in place,
+    /// the cursor kept. A list closed meanwhile is not opened again.
+    fn machine_read(&mut self, listed: Listed) {
+        if let Overlay::Pick(picker) = &mut self.overlay
+            && picker.pick == Pick::Machine
+        {
+            let value = Value::Machine(listed.target);
+            picker.replace(Choice {
+                note: listed.machine.summary(),
+                tone: listed.machine.tone(),
+                ..Choice::of(listed.machine.name, value)
+            });
+        }
+    }
+
+    /// Whether the list of machines is open, so its read is still wanted.
+    pub(crate) fn lists_machines(&self) -> bool {
+        matches!(&self.overlay, Overlay::Pick(picker) if picker.pick == Pick::Machine)
     }
 
     fn flash(&mut self, text: String, tone: api::Tone) {

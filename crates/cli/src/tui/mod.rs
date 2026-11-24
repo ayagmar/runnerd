@@ -21,7 +21,7 @@ use runnerd_core::api::{
     LineRange, LogLinesQuery, LogQuery, PauseQuery, Paused, Records, SampleSeries, Savings, Sizing,
     Status, StyledLine,
 };
-use runnerd_core::client::{Client, ClientError, Events, JobActionAnswer, StatusCode};
+use runnerd_core::client::{Client, ClientError, Events, JobActionAnswer, SshProgram, StatusCode};
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::oneshot;
@@ -33,6 +33,7 @@ use crate::{Error, now, output, watch};
 
 mod app;
 mod draw;
+mod listing;
 mod log;
 mod mouse;
 mod overlay;
@@ -40,6 +41,7 @@ mod prompts;
 mod reading;
 mod switching;
 
+use listing::Listing;
 use switching::{Switching, Ticket};
 #[cfg(test)]
 mod tests;
@@ -88,6 +90,7 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
     let mut changed = true;
     let mut next_frame = Instant::now();
     let ended = loop {
+        machine.keep_listing(&app);
         if changed && Instant::now() >= next_frame {
             let mut drawn = Hits::default();
             if let Err(error) = terminal.draw(|frame| drawn = draw::draw(frame, &app, now(), theme))
@@ -121,8 +124,7 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
             },
             () = keys.ended() => break Ok(()),
             Some(answer) = switched.recv() => {
-                machine.take(answer, &mut app, &mut requests, &mut feeding, &mut daemon);
-                changed = true;
+                changed |= machine.take(answer, &mut app, &mut requests, &mut feeding, &mut daemon);
                 continue;
             },
             _ = tick.tick() => {
@@ -140,7 +142,7 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
                 match effect {
                     Effect::Quit => quit = true,
                     Effect::Suspend => failed = suspend(&mut terminal, mouse).err().or(failed),
-                    Effect::Switch(_) | Effect::Machines => machine.start(effect, &requests.send),
+                    Effect::Switch(_) | Effect::Machines => machine.start(effect, &mut app),
                     effect => requests.make(effect),
                 }
             }
@@ -168,25 +170,34 @@ pub(crate) async fn run(client: &Client, colour: bool, mouse: Mouse) -> Result<(
         .map_err(|error| local(&error))
 }
 
-/// How the TUI reads another machine (ADR 0166): which one it reads and the switch under way are [`Switching`]'s.
-/// Nothing of it survives leaving the TUI.
+/// How the TUI reads another machine (ADR 0166): which one it reads and the switch under way are [`Switching`]'s,
+/// the list of machines' read [`Listing`]'s (ADR 0175). Nothing of it survives leaving the TUI.
 struct Switcher {
     /// This machine's daemon's socket, for the list of machines: the one read at start, unless that was another
     /// machine's; `None` without one to ask.
     this_machine: Option<std::path::PathBuf>,
     switching: Switching,
-    /// Where a switch's read answers.
-    switched: UnboundedSender<Answer>,
+    /// Where a switch's read answers, and the list of machines' read, a machine at a time.
+    answers: UnboundedSender<Answer>,
+    listing: Listing,
 }
 
-/// A switch's read, and which switch it was.
-struct Answer {
-    ticket: Ticket,
-    read: Result<Switched, String>,
+/// What a read of another machine answered, and which read it was.
+enum Answer {
+    /// A switch's read.
+    Switch {
+        ticket: Ticket,
+        read: Result<Box<Switched>, String>,
+    },
+    /// A machine of the list of machines, read.
+    Listed {
+        ticket: listing::Ticket,
+        listed: crate::machines::Listed,
+    },
 }
 
 impl Switcher {
-    /// The switcher of the TUI reading `client`, and where the answers of its switches arrive.
+    /// The switcher of the TUI reading `client`, and where the answers of its reads arrive.
     fn new(client: &Client) -> (Switcher, mpsc::UnboundedReceiver<Answer>) {
         let (answers, receive) = mpsc::unbounded_channel();
         let made = Switcher {
@@ -195,36 +206,74 @@ impl Switcher {
                 Some(_) => crate::default_socket(),
             },
             switching: Switching::new(client.machine().map(|machine| machine.name.clone())),
-            switched: answers,
+            answers,
+            listing: Listing::new(),
         };
         (made, receive)
     }
 
-    /// Starts reading another machine for `Effect::Switch`, giving up the switch under way, or lists every machine
-    /// for `Effect::Machines`, answering on `daemon`.
-    fn start(&mut self, effect: Effect, daemon: &UnboundedSender<Msg>) {
+    /// Starts reading another machine for `Effect::Switch`, giving up the switch under way; or, for
+    /// `Effect::Machines`, lists every machine in `app` at once and starts reading each one's status in place of the
+    /// list's read before. The list is open by the time the loop next asks [`Switcher::keep_listing`].
+    fn start(&mut self, effect: Effect, app: &mut App) {
         match effect {
             Effect::Switch(target) => {
                 let local = self.this_machine.clone();
-                let send = self.switched.clone();
+                let send = self.answers.clone();
                 self.switching.choose(target.clone(), move |ticket| {
                     tokio::spawn(switch(ticket, target, local, send))
                 });
             }
             Effect::Machines => {
-                tokio::spawn(machines(
-                    self.this_machine.clone(),
-                    self.switching.current().map(str::to_owned),
-                    daemon.clone(),
-                ));
+                self.listing.close();
+                let added =
+                    match crate::machines::file().and_then(|file| crate::machines::read(&file)) {
+                        Ok(added) => added,
+                        Err(error) => {
+                            let _ = app.update(Msg::Failed(error.to_string()));
+                            return;
+                        }
+                    };
+                let choices = std::iter::once(None)
+                    .chain(added.all().iter().map(|machine| Some(machine.name.clone())))
+                    .map(|target| app::MachineChoice {
+                        name: target
+                            .clone()
+                            .unwrap_or_else(|| api::THIS_MACHINE.to_owned()),
+                        target,
+                    })
+                    .collect();
+                let local = self.this_machine.clone().map(Client::new);
+                let send = self.answers.clone();
+                self.listing.open(move |ticket| {
+                    let reads = crate::machines::statuses(
+                        local,
+                        &added,
+                        &(Arc::new(runnerd_core::client::OpenSsh) as Arc<dyn SshProgram>),
+                        &crate::machines::private_base(),
+                    );
+                    tokio::spawn(deliver(ticket, reads, send))
+                });
+                let _ = app.update(Msg::Machines {
+                    choices,
+                    current: self.switching.current().map(str::to_owned),
+                });
             }
             _ => {}
         }
     }
 
-    /// Takes a switch's answer, unless a later choice gave that switch up: the new machine's client, feed and state
-    /// in place of the old, with a new channel for what its daemon sends, so nothing still on its way from the old
-    /// one arrives; or why not, flashed.
+    /// Gives up the list of machines' read once the list is not open: it lives only while the list does.
+    fn keep_listing(&mut self, app: &App) {
+        if !app.lists_machines() {
+            self.listing.close();
+        }
+    }
+
+    /// Takes an answer, unless a later choice or opening gave its read up; whether the screen changed. A machine of
+    /// the list of machines fills its line. A switch's puts the new machine's client, feed and state in place of the
+    /// old, with a new channel for what its daemon sends, so nothing still on its way from the old one arrives; or
+    /// flashes why not.
     fn take(
         &mut self,
         answer: Answer,
@@ -232,15 +281,25 @@ impl Switcher {
         requests: &mut Requests,
         feeding: &mut JoinHandle<()>,
         daemon: &mut mpsc::UnboundedReceiver<Msg>,
-    ) {
-        if !self.switching.answered(answer.ticket, answer.read.is_ok()) {
-            return;
+    ) -> bool {
+        let (ticket, read) = match answer {
+            Answer::Listed { ticket, listed } => {
+                let taken = self.listing.takes(ticket);
+                if taken {
+                    let _ = app.update(Msg::MachineRead(listed));
+                }
+                return taken;
+            }
+            Answer::Switch { ticket, read } => (ticket, read),
+        };
+        if !self.switching.answered(ticket, read.is_ok()) {
+            return false;
         }
-        let to = match answer.read {
+        let to = match read {
             Ok(to) => to,
             Err(why) => {
                 let _ = app.update(Msg::Failed(why));
-                return;
+                return true;
             }
         };
         feeding.abort();
@@ -250,6 +309,7 @@ impl Switcher {
         *daemon = receive;
         *feeding = tokio::spawn(feed(to.client, to.events, requests.send.clone(), RETRY));
         *app = to.app;
+        true
     }
 }
 
@@ -277,73 +337,34 @@ async fn switch(
             .ok_or_else(|| Error::Local("XDG_RUNTIME_DIR is not set".to_owned())),
     };
     let read = match opened {
-        Ok(client) => snapshot(&client).await.map(|(events, app)| Switched {
-            client,
-            events,
-            app,
+        Ok(client) => snapshot(&client).await.map(|(events, app)| {
+            Box::new(Switched {
+                client,
+                events,
+                app,
+            })
         }),
         Err(error) => Err(error),
     };
-    let _ = send.send(Answer {
+    let _ = send.send(Answer::Switch {
         ticket,
         read: read.map_err(|error| error.to_string()),
     });
 }
 
-/// Lists every machine for the list of machines at once, this machine's daemon first, then `machines.toml`'s, and
-/// sends the list again once each was read.
-async fn machines(
-    local: Option<std::path::PathBuf>,
-    current: Option<String>,
-    send: UnboundedSender<Msg>,
+/// Sends each machine of the list of machines as its read lands. Aborted, it drops `reads`, which stops them all.
+async fn deliver(
+    ticket: listing::Ticket,
+    mut reads: tokio::task::JoinSet<crate::machines::Listed>,
+    send: UnboundedSender<Answer>,
 ) {
-    let added = match crate::machines::file().and_then(|file| crate::machines::read(&file)) {
-        Ok(added) => added,
-        Err(error) => {
-            let _ = send.send(Msg::Failed(error.to_string()));
+    while let Some(read) = reads.join_next().await {
+        if let Ok(listed) = read
+            && send.send(Answer::Listed { ticket, listed }).is_err()
+        {
             return;
         }
-    };
-    let targets: Vec<Option<String>> = std::iter::once(None)
-        .chain(added.all().iter().map(|machine| Some(machine.name.clone())))
-        .collect();
-    let listed = targets
-        .iter()
-        .map(|target| app::MachineChoice {
-            target: target.clone(),
-            name: target
-                .clone()
-                .unwrap_or_else(|| api::THIS_MACHINE.to_owned()),
-            machine: None,
-        })
-        .collect();
-    let _ = send.send(Msg::Machines {
-        choices: listed,
-        current: current.clone(),
-    });
-    let query = JobQuery {
-        limit: Some(1),
-        ..JobQuery::default()
-    };
-    let readings = crate::machines::readings(
-        local.map(Client::new),
-        &added,
-        &query,
-        Arc::new(runnerd_core::client::OpenSsh),
-        &crate::machines::private_base(),
-    )
-    .await;
-    let fleet = api::Fleet::merge(readings, 0);
-    let choices = targets
-        .into_iter()
-        .zip(fleet.machines)
-        .map(|(target, machine)| app::MachineChoice {
-            target,
-            name: machine.name.clone(),
-            machine: Some(machine),
-        })
-        .collect();
-    let _ = send.send(Msg::Machines { choices, current });
+    }
 }
 
 /// Gives the terminal back for good.

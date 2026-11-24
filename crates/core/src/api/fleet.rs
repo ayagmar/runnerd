@@ -66,6 +66,10 @@ pub enum Reach {
         paused: u32,
         /// Whether the daemon is shutting down.
         shutting_down: bool,
+        /// Whether the host runs on its battery and holds every start ([`Status::on_battery`]); absent while it
+        /// does not.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        on_battery: bool,
         /// Why its jobs could not be read, when they could not: the page lacks them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         jobs_unread: Option<String>,
@@ -176,14 +180,8 @@ impl MachineReading {
         status: Result<Status, String>,
         jobs: Result<JobPage, String>,
     ) -> MachineReading {
-        let machine = status
-            .as_ref()
-            .ok()
-            .and_then(|status| status.machine.as_ref())
-            .filter(|machine| !machine.name.is_empty())
-            .map_or_else(|| THIS_MACHINE.to_owned(), |machine| machine.name.clone());
         MachineReading {
-            machine,
+            machine: this_machine_name(&status),
             status,
             jobs,
         }
@@ -191,12 +189,46 @@ impl MachineReading {
 
     /// This machine when the client has no socket to ask its daemon on.
     pub fn unasked() -> MachineReading {
-        let why = "no socket to ask: XDG_RUNTIME_DIR is not set".to_owned();
         MachineReading {
             machine: THIS_MACHINE.to_owned(),
-            status: Err(why.clone()),
-            jobs: Err(why),
+            status: Err(UNASKED.to_owned()),
+            jobs: Err(UNASKED.to_owned()),
         }
+    }
+}
+
+/// Why this machine was not read when the client has no socket to ask its daemon on.
+const UNASKED: &str = "no socket to ask: XDG_RUNTIME_DIR is not set";
+
+/// This machine's name as its daemon's status says, else [`THIS_MACHINE`].
+fn this_machine_name(status: &Result<Status, String>) -> String {
+    status
+        .as_ref()
+        .ok()
+        .and_then(|status| status.machine.as_ref())
+        .filter(|machine| !machine.name.is_empty())
+        .map_or_else(|| THIS_MACHINE.to_owned(), |machine| machine.name.clone())
+}
+
+impl FleetMachine {
+    /// A machine's line from its status alone, as a list of machines that asks no jobs reads it: nothing says its
+    /// jobs are unread, since none were asked.
+    pub fn of_status(name: String, status: Result<Status, String>) -> FleetMachine {
+        let reach = match status {
+            Ok(status) => Reach::read(&status, None),
+            Err(reason) => Reach::Unreachable { reason },
+        };
+        FleetMachine { name, reach }
+    }
+
+    /// This machine's line from its daemon's status alone, named as [`MachineReading::this_machine`] names it.
+    pub fn this_machine(status: Result<Status, String>) -> FleetMachine {
+        FleetMachine::of_status(this_machine_name(&status), status)
+    }
+
+    /// This machine's line when the client has no socket to ask its daemon on.
+    pub fn unasked() -> FleetMachine {
+        FleetMachine::of_status(THIS_MACHINE.to_owned(), Err(UNASKED.to_owned()))
     }
 }
 
@@ -238,6 +270,7 @@ impl Reach {
                     .count(),
             ),
             shutting_down: status.shutting_down,
+            on_battery: status.on_battery,
             jobs_unread,
         }
     }
@@ -245,7 +278,8 @@ impl Reach {
 
 impl FleetMachine {
     /// What a client shows after the machine's name: `2 running, 1 queued, 3 of 8 slots held, runnerd 0.1.6`, with
-    /// what is paused, shutting down or unread after it; or why it could not be read.
+    /// what is paused, held on battery, shutting down or unread after it; or why it could not be read. The counts
+    /// are the machine's own.
     pub fn summary(&self) -> String {
         match &self.reach {
             Reach::Unreachable { reason } => format!("cannot be read: {reason}"),
@@ -257,6 +291,7 @@ impl FleetMachine {
                 queued,
                 paused,
                 shutting_down,
+                on_battery,
                 jobs_unread,
                 ..
             } => {
@@ -271,6 +306,9 @@ impl FleetMachine {
                     };
                     let _ = write!(text, ", {paused} {repositories} paused");
                 }
+                if *on_battery {
+                    text.push_str(", on battery: no runner starts");
+                }
                 if *shutting_down {
                     text.push_str(", shutting down");
                 }
@@ -282,8 +320,8 @@ impl FleetMachine {
         }
     }
 
-    /// What the summary means: bad when nothing or not its jobs could be read, a warning while it shuts down or
-    /// has paused repositories, else neutral.
+    /// What the summary means: bad when nothing or not its jobs could be read, a warning while it shuts down, is
+    /// held on battery or has paused repositories, else neutral.
     pub fn tone(&self) -> Tone {
         match &self.reach {
             Reach::Unreachable { .. }
@@ -294,6 +332,9 @@ impl FleetMachine {
             Reach::Read {
                 shutting_down: true,
                 ..
+            }
+            | Reach::Read {
+                on_battery: true, ..
             }
             | Reach::Read { paused: 1.., .. } => Tone::Warn,
             Reach::Read { .. } => Tone::Neutral,
