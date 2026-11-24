@@ -75,10 +75,13 @@ const init = `runnerd init halyard/ledger halyard/storefront
 systemctl --user daemon-reload
 systemctl --user enable --now runnerd`;
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
-// A second machine, from guides/second-machine and guides/machines. Only role is written by init; overflow_after and
+// A second machine, from guides/second-machine and guides/machines: the laptop's setup is the quick start's with
+// --overflow; adding it on the desktop is for watching only. Only role is written by init; overflow_after and
 // on_battery are every host's defaults, shown because they are what make a laptop wait its turn and stay off battery.
-const overflow = `runnerd init --overflow halyard/ledger halyard/storefront
-runnerctl machine add laptop --ssh laptop
+const laptop = `runnerd init --overflow halyard/ledger halyard/storefront
+systemctl --user daemon-reload
+systemctl --user enable --now runnerd`;
+const desktop = `runnerctl machine add laptop --ssh laptop
 runnerctl fleet`;
 const overflowHost = `[host]
 role = "overflow"
@@ -88,6 +91,7 @@ on_battery = "pause"`;
 // What runnerctl printed against the dashboard's demo daemon; each block cuts out the lines it shows and changes none.
 const caches = `$ runnerctl caches\n${printed('caches', 'build cache for')}`;
 const savings = printed('insights', 'This month', '  ');
+const fleet = `$ runnerctl fleet --limit 3\n${printed('fleet', 'tern', 'older jobs')}`;
 const shell = `$ runnerctl shell 120055991489
 runnerd: the record of job 120055991489 of halyard/ledger, CI / build
 It failed at step 6: Unit tests (exit code 1)
@@ -255,18 +259,26 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
       <section class="part wrap split" aria-labelledby="overflow-title">
         <div class="part-text">
           <h2 id="overflow-title">A laptop takes what the desktop&nbsp;cannot</h2>
-          <p>The desktop runs as usual. A laptop on the same labels starts a runner only for a job still queued 45s later, so it takes the jobs the desktop was too full, asleep or off for, and starts none while it runs on battery. <code>runnerctl fleet</code> lists both machines and one page of their jobs; in <code>runnerctl tui</code>, <code>m</code> switches between them.</p>
+          <p>The desktop runs as usual. A laptop on the same labels starts a runner only for a job still queued 45s later, so it takes the jobs the desktop was too full, asleep or off for, and starts none while it runs on battery. The machines share nothing but GitHub.</p>
+          <p>To watch both from the desktop, add the laptop: <code>runnerctl fleet</code> then prints a line per machine and one page of their jobs, and in <code>runnerctl tui</code>, <code>m</code> opens the machine picker and Enter reads the one chosen.</p>
           <a class="text-link" href={`${base}guides/second-machine/`}>Add a second machine</a>
           <a class="text-link" href={`${base}guides/machines/`}>Read the laptop from the desktop</a>
         </div>
         <div class="stack">
-          <p class="aside">On the laptop, then on the desktop:</p>
+          <p class="aside">On the laptop, then the root commands <code>init</code> prints, if any:</p>
           <div class="command">
-            <pre class="terminal" tabindex="0"><code>{overflow}</code></pre>
-            <button class="copy" type="button" data-copy={overflow} hidden>Copy</button>
+            <pre class="terminal" tabindex="0" aria-label="Commands for the laptop"><code>{laptop}</code></pre>
+            <button class="copy" type="button" data-copy={laptop} hidden>Copy</button>
           </div>
-          <p class="aside">The laptop's <code>[host]</code>: <code>init</code> writes the role, and the other two are every machine's defaults.</p>
+          <p class="aside">What makes it the overflow, in its <code>[host]</code>: <code>init</code> writes the role, and the other two are every machine's defaults.</p>
           <pre class="terminal" tabindex="0" aria-label="The laptop's [host] table"><code>{overflowHost}</code></pre>
+          <p class="aside">On the desktop, optional: overflow works without it.</p>
+          <div class="command">
+            <pre class="terminal" tabindex="0" aria-label="Commands for the desktop"><code>{desktop}</code></pre>
+            <button class="copy" type="button" data-copy={desktop} hidden>Copy</button>
+          </div>
+          <p class="aside"><code>fleet</code> against the demo daemon, which is one machine, <code>tern</code>; an added laptop gets a line of its own:</p>
+          <pre class="terminal wide" tabindex="0" aria-label="runnerctl fleet against the demo: one machine's line and its latest jobs"><code>{fleet}</code></pre>
         </div>
       </section>
 
