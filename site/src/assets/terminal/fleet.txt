@@ -1,4 +1,4 @@
-tern  2 running, 5 queued, 5 of 6 slots held, runnerd 0.1.6
+tern  2 running, 5 queued, 5 of 6 slots held, runnerd 0.1.7
 
 ID            MACHINE  REPOSITORY          JOB               BRANCH            OUTCOME  WAITED  RAN  QUEUED
 120055991713  tern     halyard/storefront  E2E / unit        feat/checkout-v2  queued       9s    -  just now

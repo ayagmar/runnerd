@@ -29,7 +29,7 @@ BASE = {
     "caches.build": {},
     "caches.actions": {},
     "caches.grype": {},
-    "profiles.jvm": {"image": '"ghcr.io/ayagmar/runnerd-runner:jvm-0.1.6"', "cpus": "8", "memory": '"9G"', "slots": "2"},
+    "profiles.jvm": {"image": '"ghcr.io/ayagmar/runnerd-runner:jvm-0.1.7"', "cpus": "8", "memory": '"9G"', "slots": "2"},
     "[repositories]": {"name": '"halyard/ledger"', "profile": '"jvm"', "labels": '["self-hosted"]'},
     "history": {},
     "records": {},
