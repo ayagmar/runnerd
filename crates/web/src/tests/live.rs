@@ -102,9 +102,13 @@ async fn an_overview_read_that_drops_after_an_event_is_retried_on_the_same_strea
         "a retry keeps when the page's data is from: {retrying}"
     );
     assert_eq!(retrying["ended"], false);
-    let before_recovered = &recovery[..recovery.rfind("data: signals").unwrap()];
+    // From the first failure to the last: the render after the recovery may patch what moved meanwhile, such as the
+    // charts' time axis when the minute turns over.
+    let retrying_state = r#""state":"retrying""#;
+    let failing =
+        &recovery[recovery.find(retrying_state).unwrap()..recovery.rfind(retrying_state).unwrap()];
     assert!(
-        !before_recovered.contains("datastar-patch-elements"),
+        !failing.contains("datastar-patch-elements"),
         "nothing the page shows is replaced while the read fails: {recovery}"
     );
     assert!(!recovery.contains("toast failed"), "{recovery}");
