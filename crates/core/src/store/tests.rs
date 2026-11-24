@@ -21,6 +21,7 @@ mod disk;
 mod lens;
 mod log_outline;
 mod waits;
+mod writes;
 
 fn queued(id: u64) -> QueuedJob {
     QueuedJob {

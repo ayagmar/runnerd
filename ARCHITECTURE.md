@@ -533,7 +533,10 @@ always returns, so the daemon closes and flushes the history.
   ([ADR 0161](docs/adr/0161-a-host-on-battery-starts-no-runners.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
-  ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
+  ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)). Telemetry sent within a second, log lines and
+  samples, commits in one transaction, each write in its own savepoint; any other write ends the batch and comes next,
+  and events go out after the commit. A runner's name is kept as a lease a few minutes ahead, synced once per lease
+  ([ADR 0165](docs/adr/0165-the-history-commits-telemetry-together-and-leases-runner-names.md)).
 - A job's log outline (`store::outline`) is written in the transaction that stores the lines it describes, from the
   state the last batch left, so a restart resumes it where the stored lines end; pruning deletes it after the lines.
   It is read in one read transaction. The plain log and `log.line` carry the stored text; `/log/outline`, `/log/lines`
