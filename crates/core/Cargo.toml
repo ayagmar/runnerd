@@ -16,6 +16,7 @@ default = ["host"]
 # `api` and `config` alone.
 host = [
   "dep:bollard",
+  "dep:bytes",
   "dep:flate2",
   "dep:futures-util",
   "dep:http-body-util",
@@ -52,6 +53,7 @@ client = [
 
 [dependencies]
 bollard = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
