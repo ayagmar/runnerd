@@ -71,16 +71,15 @@ const waits = (j: (typeof queued)[number]) => `Needs ${size(caps[j.kind] * GIB)}
 
 // The quick start, from the install page.
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
-const init = `runnerd init halyard/ledger halyard/storefront
-systemctl --user daemon-reload
+// init and the start are two blocks: the root commands init prints, such as the slice's MemoryMax, go between them.
+const init = 'runnerd init halyard/ledger halyard/storefront';
+const start = `systemctl --user daemon-reload
 systemctl --user enable --now runnerd`;
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
 // A second machine, from guides/second-machine and guides/machines: the laptop's setup is the quick start's with
 // --overflow; adding it on the desktop is for watching only. Only role is written by init; overflow_after and
 // on_battery are every host's defaults, shown because they are what make a laptop wait its turn and stay off battery.
-const laptop = `runnerd init --overflow halyard/ledger halyard/storefront
-systemctl --user daemon-reload
-systemctl --user enable --now runnerd`;
+const laptop = 'runnerd init --overflow halyard/ledger halyard/storefront';
 const desktop = `runnerctl machine add laptop --ssh laptop
 runnerctl fleet`;
 const overflowHost = `[host]
@@ -265,14 +264,19 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
           <a class="text-link" href={`${base}guides/machines/`}>Read the laptop from the desktop</a>
         </div>
         <div class="stack">
-          <p class="aside">On the laptop, then the root commands <code>init</code> prints, if any:</p>
+          <p class="aside">On the laptop, which needs what any runnerd host <a href="#needs">needs</a>:</p>
           <div class="command">
-            <pre class="terminal" tabindex="0" aria-label="Commands for the laptop"><code>{laptop}</code></pre>
+            <pre class="terminal" tabindex="0" aria-label="The laptop's init"><code>{laptop}</code></pre>
             <button class="copy" type="button" data-copy={laptop} hidden>Copy</button>
+          </div>
+          <p class="aside">Run the root commands <code>init</code> printed, if any, then start it:</p>
+          <div class="command">
+            <pre class="terminal" tabindex="0" aria-label="Start the laptop's daemon"><code>{start}</code></pre>
+            <button class="copy" type="button" data-copy={start} hidden>Copy</button>
           </div>
           <p class="aside">What makes it the overflow, in its <code>[host]</code>: <code>init</code> writes the role, and the other two are every machine's defaults.</p>
           <pre class="terminal" tabindex="0" aria-label="The laptop's [host] table"><code>{overflowHost}</code></pre>
-          <p class="aside">On the desktop, optional: overflow works without it.</p>
+          <p class="aside">On the desktop, once the laptop's daemon runs. Optional: overflow works without it.</p>
           <div class="command">
             <pre class="terminal" tabindex="0" aria-label="Commands for the desktop"><code>{desktop}</code></pre>
             <button class="copy" type="button" data-copy={desktop} hidden>Copy</button>
@@ -358,11 +362,18 @@ const sides = ['runnerd', 'GitHub-hosted', 'Actions Runner Controller', 'A self-
           <li>
             <div>
               <h3>Point it at your repositories</h3>
-              <p><code>init</code> sizes the slots, writes the config and the service, and prints any root commands.</p>
+              <p><code>init</code> sizes the slots, writes the config and the service, and prints any root commands. Run those, then start it.</p>
             </div>
-            <div class="command">
-              <pre class="terminal" tabindex="0"><code>{init}</code></pre>
-              <button class="copy" type="button" data-copy={init} hidden>Copy</button>
+            <div class="stack">
+              <div class="command">
+                <pre class="terminal" tabindex="0" aria-label="runnerd init"><code>{init}</code></pre>
+                <button class="copy" type="button" data-copy={init} hidden>Copy</button>
+              </div>
+              <p class="aside">After the root commands it printed, if any:</p>
+              <div class="command">
+                <pre class="terminal" tabindex="0" aria-label="Start runnerd"><code>{start}</code></pre>
+                <button class="copy" type="button" data-copy={start} hidden>Copy</button>
+              </div>
             </div>
           </li>
           <li>
