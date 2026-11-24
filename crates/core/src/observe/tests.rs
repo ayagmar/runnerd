@@ -1721,7 +1721,12 @@ struct Capture {
 
 impl Capture {
     fn start(diag: &Path, bin: &Path, start: LogPosition) -> Capture {
-        let script = super::capture::SCRIPT.replace(super::capture::DIAG, &diag.to_string_lossy());
+        Capture::of(super::capture::SCRIPT, diag, bin, start)
+    }
+
+    /// `script` in place of the capture script; what it prints on stderr goes to `bin/stderr`.
+    fn of(script: &str, diag: &Path, bin: &Path, start: LogPosition) -> Capture {
+        let script = script.replace(super::capture::DIAG, &diag.to_string_lossy());
         let path = format!(
             "{}:{}",
             bin.display(),
@@ -1733,6 +1738,7 @@ impl Capture {
             .env("PATH", path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
+            .stderr(std::fs::File::create(bin.join("stderr")).unwrap())
             .spawn()
             .unwrap();
         let mut stdout = child.stdout.take().unwrap();
@@ -1876,4 +1882,32 @@ fn an_idle_capture_script_waits_between_passes_rather_than_spinning() {
         0,
         "the script waits without forking sleep"
     );
+}
+
+// Catches: a container whose shell cannot open the wait's pipe, as one without /dev/fd, spinning, or sending the
+// daemon an error about `read -u` five times a second.
+#[test]
+fn a_capture_script_that_cannot_open_its_pipe_sleeps_quietly_between_passes() {
+    let dir = TestDir::new("capture-no-pipe");
+    let (diag, bin) = diag(
+        &dir.0,
+        "Waiting to receive the job message from the channel.\n",
+    );
+    stand_in(&bin, "grep");
+    let opened = "exec {tick}<> <(:)";
+    assert!(
+        super::capture::SCRIPT.contains(opened),
+        "the script opens its pipe so"
+    );
+    let script = super::capture::SCRIPT.replace(opened, "exec {tick}<> /nonexistent/pipe");
+    let capture = Capture::of(&script, &diag, &bin, LogPosition { page: 1, offset: 0 });
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    drop(capture);
+    let passes = calls(&bin, "grep") / 3;
+    assert!(
+        (2..=8).contains(&passes),
+        "{passes} passes in a second, about five expected"
+    );
+    let stderr = std::fs::read_to_string(bin.join("stderr")).unwrap();
+    assert_eq!(stderr, "", "nothing on stderr");
 }

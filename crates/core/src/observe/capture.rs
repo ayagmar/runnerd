@@ -22,9 +22,11 @@ declare -A off
 # The page number in a page's file name, in `page`: no command substitution, which forks a subshell.
 page_of() { page=${1##*_} page=${page%.log}; }
 # Waits between passes with `read`'s timeout on a pipe this shell holds both ends of, so it never sees EOF: a builtin,
-# where `sleep` would fork a process five times a second in every running container. The one fork is here. A `read`
-# that fails rather than times out (status 128 or less), as on a container without /dev/fd, sleeps: never a busy loop.
-exec {tick}<> <(:)
+# where `sleep` would fork a process five times a second in every running container. The one fork is here. Where the
+# pipe cannot be opened, as without /dev/fd, every wait is `sleep`, chosen once; a `read` that fails rather than times
+# out (status 128 or less) sleeps too: never a busy loop.
+tick=
+{ exec {tick}<> <(:); } 2> /dev/null || tick=
 while :; do
     if [ -z "$job" ]; then
         for w in "$diag"/Worker_*.log; do
@@ -63,7 +65,11 @@ while :; do
             if [ -n "$gone" ]; then echo "@@end $page"; rm -f "$k"; fi
         done
     fi
-    read -rt 0.2 -u "$tick" || [ $? -gt 128 ] || sleep 0.2
+    if [ -n "$tick" ]; then
+        read -rt 0.2 -u "$tick" || [ $? -gt 128 ] || sleep 0.2
+    else
+        sleep 0.2
+    fi
 done
 "#;
 
