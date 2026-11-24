@@ -15,7 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use runnerd_core::cache::{self, Measure, Measured, Names, Reseed, measure_spec, runner_mounts};
+use runnerd_core::cache::{
+    self, Measure, Measured, Names, PnpmStore, Reseed, measure_spec, runner_mounts,
+};
 use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
@@ -147,7 +149,7 @@ async fn run(
     script: &str,
 ) -> Result<(i64, String), String> {
     let name = format!("{}-slot-{slot}-job", names.network());
-    let mut mounts = runner_mounts(names, PROFILE, slot);
+    let mut mounts = runner_mounts(names, PROFILE, slot, PnpmStore::Shared);
     if let Snapshot::Writable = snapshot {
         for mount in &mut mounts {
             if mount.target.as_deref() == Some("/base") {
@@ -446,7 +448,7 @@ async fn measured_beside_a_runner(
         cpus: 1,
         memory: "1G".parse().map_err(|e: String| e)?,
         env: Vec::new(),
-        mounts: runner_mounts(names, PROFILE, 1),
+        mounts: runner_mounts(names, PROFILE, 1, PnpmStore::Shared),
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![

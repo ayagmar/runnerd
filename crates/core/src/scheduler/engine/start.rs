@@ -21,7 +21,8 @@ use super::slot::Slot;
 use super::unsynced::Unsynced;
 use super::{Engagement, Engine, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs};
 use crate::api::{self, Basis, HoldCause};
-use crate::docker::{DockerApi, RunnerSpec, RunnerState};
+use crate::cache;
+use crate::docker::{self, DockerApi, RunnerSpec, RunnerState};
 use crate::github::{self, GithubApi, Runner};
 use crate::isolation::{self, Isolation};
 use crate::scheduler::{Decision, Pool, SlotRef, StartFor};
@@ -245,7 +246,7 @@ enum StartRun {
 /// How Docker's start of a container it made ended.
 enum Made {
     /// It runs, as Docker's inspect of it says, or not if that failed.
-    Running(Result<RunnerState, crate::docker::Error>),
+    Running(Result<RunnerState, docker::Error>),
     /// Docker failed after making it, and kept it.
     Failed(String),
 }
@@ -388,8 +389,8 @@ struct Readied {
     name: String,
     /// When its launch began.
     at: SystemTime,
-    /// Whether its image answers `docker::SKIP_SYNCS`.
-    filter: Filter,
+    /// What its image does when asked, as Docker said before the start.
+    image: docker::RunnerImage,
 }
 
 /// What committing a readied start came to.
@@ -671,7 +672,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !self.caches_ready(slot, now).await {
             return Launch::Failed(launched);
         }
-        let filter = self.image_filter(&slot.profile).await;
+        let Some(image) = self.runner_image(&slot.profile).await else {
+            warn!(
+                "{repository}: no runner starts until Docker says what its image does, which its slot's pnpm store \
+                 depends on"
+            );
+            return Launch::Failed(launched);
+        };
         let number = slot.index + 1;
         let secs = unix_secs(now).max(self.named + 1);
         self.named = secs;
@@ -689,26 +696,33 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             labels,
             name,
             at: now,
-            filter,
+            image,
         })
     }
 
-    /// Whether `profile`'s image answers `docker::SKIP_SYNCS`, as Docker says now: only then is its runner asked.
-    /// Docker is asked only under `skip_syncs`.
-    async fn image_filter(&self, profile: &str) -> Filter {
+    /// What `profile`'s image does when asked, as Docker says now: only what it does is asked of its runner. Docker
+    /// is asked only when the config would ask anything of it: under `skip_syncs`, or for the slot's own pnpm store
+    /// (`cache::PnpmStore::depends_on_image`). `None` when Docker could not say and the pnpm store depends on it: a
+    /// runner sent to the shared store on a failed inspect would have its entrypoint remove the slot's (ADR 0167). An
+    /// image Docker cannot tell about otherwise does nothing, as before the slot's store.
+    async fn runner_image(&self, profile: &str) -> Option<docker::RunnerImage> {
         let Some(profile) = self.config.profiles.get(profile) else {
-            return Filter::Lacking;
+            return Some(docker::RunnerImage::default());
         };
-        if !self.config.host.skip_syncs {
-            return Filter::Lacking;
+        let pnpm = cache::PnpmStore::depends_on_image(&self.config.caches, profile);
+        if !self.config.host.skip_syncs && !pnpm {
+            return Some(docker::RunnerImage::default());
         }
-        match self
-            .docker
-            .image_skips_syncs(&profile.image.reference())
-            .await
-        {
-            Ok(true) => Filter::Carried,
-            Ok(false) | Err(_) => Filter::Lacking,
+        match self.docker.runner_image(&profile.image.reference()).await {
+            Ok(image) => Some(image),
+            Err(error) if pnpm => {
+                warn!(
+                    "cannot read the labels of {}: {error}",
+                    profile.image.reference()
+                );
+                None
+            }
+            Err(_) => Some(docker::RunnerImage::default()),
         }
     }
 
@@ -722,7 +736,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             labels,
             name,
             at: now,
-            filter,
+            image: traits,
         } = readied;
         let (slot, repository) = (&launched.slot, launched.repository.as_str());
         let number = slot.index + 1;
@@ -730,7 +744,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return Committed::Failed(launched);
         };
         let image = profile.image.reference();
+        let filter = if traits.skips_syncs {
+            Filter::Carried
+        } else {
+            Filter::Lacking
+        };
         let skips = runner_skips(self.config.host.skip_syncs, filter, &mut self.unsynced);
+        let pnpm = cache::PnpmStore::of(&self.config.caches, profile, traits);
         // Read once, so its mount and its setting agree.
         let archives = self.archives.runner();
         let grype = self.grype.runner();
@@ -742,10 +762,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
             memory: profile.memory,
-            env: self.runner_env(&slot.profile, skips, archives.as_ref(), grype.as_ref()),
+            env: self.runner_env(
+                &slot.profile,
+                skips,
+                pnpm,
+                archives.as_ref(),
+                grype.as_ref(),
+            ),
             mounts: self.runner_mounts(
                 &slot.profile,
-                number,
+                cache::runner_mounts(&self.names, &slot.profile, number, pnpm),
                 &name,
                 repository,
                 archives.as_ref(),
@@ -869,7 +895,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         slot: &SlotRef,
         occupant: Occupant,
         purpose: Purpose,
-        made: Result<Result<RunnerState, crate::docker::Error>, String>,
+        made: Result<Result<RunnerState, docker::Error>, String>,
     ) -> StartOutcome {
         if let Some(entry) = self
             .slots

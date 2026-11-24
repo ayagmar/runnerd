@@ -1,6 +1,6 @@
 # 0007. Warm caches: per-profile snapshot plus per-slot layer
 
-Status: **Accepted**, amended by [0041](0041-snapshot-and-mirror-limits.md), [0052](0052-shared-build-cache.md), [0054](0054-slot-docker-stores-share-the-disk.md), [0066](0066-a-reseed-that-did-not-finish.md), [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md), [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md), [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md).
+Status: **Accepted**, amended by [0041](0041-snapshot-and-mirror-limits.md), [0052](0052-shared-build-cache.md), [0054](0054-slot-docker-stores-share-the-disk.md), [0066](0066-a-reseed-that-did-not-finish.md), [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md), [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md), [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md), [0167](0167-a-slot-keeps-its-own-pnpm-store-beside-the-jobs-workspace.md).
 
 ## Context
 
