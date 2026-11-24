@@ -607,39 +607,29 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Author::Owner => self.undone_raises(&config).await,
                     Author::AutoSizing => Vec::new(),
                 };
-                // A repository it removes drains, and a restart before its drain ends drains it again only if the
-                // history kept it: recorded, synced, before the file without it is written (ADR 0173).
-                let names = config
-                    .repositories
-                    .iter()
-                    .map(|repository| repository.name.clone())
-                    .collect();
-                let draining = self.repositories.draining_after(&names);
-                let drains_change = draining != self.repositories.draining_names();
-                if drains_change && !self.store.draining(draining).await {
-                    // Back to what drains now, as the write may have committed and its answer been lost.
-                    drop(self.record_drains());
-                    let _ = reply.send(Err(ControlError::Failed(
-                        "cannot record the repositories it removes as draining in the job history"
-                            .to_owned(),
-                    )));
-                    return;
-                }
+                let added_back = match self.drains_before_commit(&config).await {
+                    Ok(added_back) => added_back,
+                    Err(refused) => {
+                        let _ = reply.send(Err(refused));
+                        return;
+                    }
+                };
                 let answer = match commit.run().await {
                     Ok(warning) => {
                         for line in &undone {
                             warn!("config replaced: {line}");
                         }
+                        // The drains it ends are forgotten only once its file lasts: if a crash may bring back the
+                        // old one, they stay recorded until a start finds their repositories listed (ADR 0173).
+                        if warning.is_none() && !added_back.is_empty() {
+                            drop(self.store.drains(Vec::new(), added_back));
+                        }
                         self.reload(*config, memory_max, cpus);
                         Ok(warning.into_iter().chain(undone).collect())
                     }
-                    Err(message) => {
-                        // Not written: what drains is as it was.
-                        if drains_change {
-                            drop(self.record_drains());
-                        }
-                        Err(ControlError::Failed(message))
-                    }
+                    // Not written: a drain it recorded is of a repository the config still lists, which a start
+                    // forgets.
+                    Err(message) => Err(ControlError::Failed(message)),
                 };
                 let _ = reply.send(answer);
             }
@@ -963,6 +953,48 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     )
                 })
         })
+    }
+
+    /// What `config`, about to be written, does to the drains (ADR 0173). While a repository drains, one it removes or
+    /// one removed before, it is refused if the next start would open another job history, which knows nothing of the
+    /// drain. The drains it begins are recorded, synced, before its file is written, and it is refused if they cannot
+    /// be. Returns the drains it ends by adding their repositories back, which stay recorded until its file lasts.
+    async fn drains_before_commit(&self, config: &Config) -> Result<Vec<String>, ControlError> {
+        let names: BTreeSet<String> = config
+            .repositories
+            .iter()
+            .map(|repository| repository.name.clone())
+            .collect();
+        let after = self.repositories.draining_after(&names);
+        let next = config
+            .history
+            .database
+            .as_deref()
+            .unwrap_or(&self.default_database);
+        if !after.is_empty() && next != self.store.path() {
+            return Err(ControlError::Conflict(format!(
+                "{} still {}, and the next start would open the job history at {}, which does not know that: \
+                 change history.database once their drains end",
+                after.join(", "),
+                if after.len() == 1 { "drains" } else { "drain" },
+                next.display()
+            )));
+        }
+        let now = self.repositories.draining_names();
+        let began: Vec<String> = after
+            .into_iter()
+            .filter(|name| !now.contains(name))
+            .collect();
+        if !began.is_empty() && !self.store.drains(began, Vec::new()).await {
+            return Err(ControlError::Failed(
+                "cannot record the repositories it removes as draining in the job history"
+                    .to_owned(),
+            ));
+        }
+        Ok(now
+            .into_iter()
+            .filter(|name| names.contains(name))
+            .collect())
     }
 
     /// Runs with a new, validated config. Running jobs keep running: a removed profile, or slots past a lowered

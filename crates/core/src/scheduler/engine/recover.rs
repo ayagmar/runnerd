@@ -304,7 +304,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 });
         }
         if self.repositories.drain(&occupant.repository) {
-            drop(self.record_drains());
+            drop(
+                self.store
+                    .drains(vec![occupant.repository.clone()], Vec::new()),
+            );
         }
     }
 

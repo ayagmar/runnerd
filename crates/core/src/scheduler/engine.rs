@@ -232,6 +232,9 @@ pub struct Setup {
     /// The repositories recorded draining (`Store::draining_repositories`): those the config no longer lists drain from
     /// the first tick, as they did before the restart.
     pub draining: Vec<String>,
+    /// Where the job history is when the config names none (`history.database`), as a start finds it: a config that
+    /// would move the history is refused while a repository drains (ADR 0173).
+    pub default_database: PathBuf,
     /// Where the cgroup and proc file systems are.
     pub paths: Paths,
     /// The shared build cache, unless the daemon could not open it.
@@ -567,6 +570,8 @@ pub struct Engine<G = Github, D = Docker> {
     commands: Commands,
     caches: watch::Sender<Vec<api::CacheVolume>>,
     store: Store,
+    /// Where the job history is when the config names none (`Setup::default_database`).
+    default_database: PathBuf,
     paths: Paths,
     /// The containers the sampler reads.
     tracked: watch::Sender<Vec<Tracked>>,
@@ -661,6 +666,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             announced,
             paused,
             draining,
+            default_database,
             paths,
             build_cache,
             action_archives,
@@ -684,8 +690,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .iter()
                 .map(|repository| repository.name.clone()),
         );
-        for name in &draining {
+        // A drain recorded for a repository the config lists is of a config a crash undid, or one never written.
+        let (listed, restored): (Vec<String>, Vec<String>) = draining
+            .into_iter()
+            .partition(|name| repositories.listed(name).is_some());
+        for name in &restored {
             repositories.drain(name);
+        }
+        if !listed.is_empty() {
+            drop(store.drains(Vec::new(), listed));
         }
         let (control, commands) = Control::new(
             config
@@ -769,6 +782,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             commands,
             caches,
             store: store.clone(),
+            default_database,
             paths,
             tracked: watch::channel(Vec::new()).0,
             found: mpsc::unbounded_channel(),

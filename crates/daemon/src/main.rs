@@ -939,6 +939,8 @@ async fn serve(
             announced: history.announced,
             paused: history.paused,
             draining: history.draining,
+            // Without one, the next start fails unless its config names the history.
+            default_database: default_database().unwrap_or_else(|| history.store.path().to_owned()),
             paths: Paths::default(),
             build_cache,
             action_archives,

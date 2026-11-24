@@ -397,8 +397,8 @@ impl Writer<'_> {
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
-            Write::Draining { repositories, done } => {
-                let _ = done.send(self.draining(&repositories));
+            Write::Drains { began, ended, done } => {
+                let _ = done.send(self.drains(&began, &ended));
             }
             Write::SizingIntent { change, done } => {
                 let _ = done.send(self.sizing_intent(&change));
@@ -1546,16 +1546,20 @@ impl Writer<'_> {
         })
     }
 
-    /// Replaces the draining repositories, `draining:<repository>` keys of `meta`, synced to disk: a reload records the
-    /// drains it begins before the config file without the repository is written.
-    fn draining(&self, repositories: &[String]) -> bool {
+    /// Records the drains that `began` and forgets those that `ended`, as `draining:<repository>` keys of `meta`, synced
+    /// to disk: a reload records the drains it begins before the config file without their repositories is written.
+    fn drains(&self, began: &[String], ended: &[String]) -> bool {
         self.durably(|| {
             self.change("record the draining repositories", |_| {
-                self.db
-                    .execute("DELETE FROM meta WHERE key GLOB 'draining:*'", [])?;
-                for repository in repositories {
+                for repository in ended {
                     self.db.execute(
-                        "INSERT INTO meta (key, value) VALUES ('draining:' || ?1, 0)",
+                        "DELETE FROM meta WHERE key = 'draining:' || ?1",
+                        [repository],
+                    )?;
+                }
+                for repository in began {
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO meta (key, value) VALUES ('draining:' || ?1, 0)",
                         [repository],
                     )?;
                 }

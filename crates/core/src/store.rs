@@ -461,8 +461,9 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
-    Draining {
-        repositories: Vec<String>,
+    Drains {
+        began: Vec<String>,
+        ended: Vec<String>,
         /// Whether it committed, synced to disk.
         done: oneshot::Sender<bool>,
     },
@@ -565,6 +566,8 @@ pub struct AutoSizing {
 /// The job history. Cloning shares it.
 #[derive(Debug, Clone)]
 pub struct Store {
+    /// Where the database is, as it was opened.
+    path: Arc<Path>,
     writes: mpsc::UnboundedSender<Write>,
     reader: Arc<Mutex<Connection>>,
     /// Taken with `try_lock`, so one prune runs at a time; one that panicked midway left rows the next one deletes.
@@ -644,6 +647,7 @@ impl Store {
                 );
             })?;
         Ok(Store {
+            path: Arc::from(path),
             writes,
             reader: Arc::new(Mutex::new(reader)),
             pruner: Arc::new(Mutex::new(pruner)),
@@ -1029,12 +1033,18 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
-    /// Records the repositories the engine drains, all of them, in place of the ones recorded before, synced to disk:
-    /// a restart drains them again, though the config no longer lists them and no runner of theirs runs (ADR 0173).
-    /// The write is sent at once, in order with every other; the future says whether it committed.
-    pub fn draining(&self, repositories: Vec<String>) -> impl Future<Output = bool> + use<> {
+    /// Records that the repositories `began` drain and `ended` no longer do, synced to disk: a restart drains every
+    /// recorded one again that its config does not list, though no runner of it runs (ADR 0173). Only what is named
+    /// changes, so a record kept for a config that may not have lasted stays until its repository's drain ends or a
+    /// start finds it listed. The write is sent at once, in order with every other; the future says whether it
+    /// committed.
+    pub fn drains(
+        &self,
+        began: Vec<String>,
+        ended: Vec<String>,
+    ) -> impl Future<Output = bool> + use<> {
         let (done, committed) = oneshot::channel();
-        self.send(Write::Draining { repositories, done });
+        self.send(Write::Drains { began, ended, done });
         async move { committed.await.unwrap_or(false) }
     }
 
@@ -1308,7 +1318,12 @@ impl Store {
         Ok(read::paused(&lock(&self.reader))?)
     }
 
-    /// The repositories recorded draining (`Store::draining`), for the engine to start with. Blocks on the database:
+    /// Where the database is, as it was opened.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The repositories recorded draining (`Store::drains`), for the engine to start with. Blocks on the database:
     /// for startup.
     pub fn draining_repositories(&self) -> Result<Vec<String>, StoreError> {
         Ok(read::draining(&lock(&self.reader))?)

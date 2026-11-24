@@ -79,7 +79,7 @@ impl Presence {
 /// The repositories the engine knows, by name, each listed or draining and never both.
 ///
 /// On a restart the listed ones come from the config with nothing of their state, and the draining ones are those the
-/// history kept draining (`Store::draining`, which the engine rewrites whenever the draining ones change) and those the
+/// history kept draining (`Store::drains`, which the engine tells of each drain that begins or ends) and those the
 /// runners found still run for, the config listing neither, each starting its drain over (ADR 0173). A reload lists what the new config has, with a repository
 /// added back starting afresh, and drains what it lost, from the start. One listed before and after keeps its state,
 /// and one draining before and after keeps its drain.

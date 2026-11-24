@@ -29,6 +29,7 @@ fn engine_with_archives(
             announced: store.announced().unwrap(),
             paused: store.paused_repositories().unwrap(),
             draining: store.draining_repositories().unwrap(),
+            default_database: store.path().to_owned(),
             store,
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
