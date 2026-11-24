@@ -376,7 +376,8 @@ fn reason(app: &App, job: &QueuedJob, now: u64, width: usize, theme: Theme) -> S
 const CUT: &str = " …";
 
 /// `text` in lines of at most `width` cells, broken between words, and a word wider than a line broken across lines
-/// where it reaches the edge: unlike [`super::wrap`], every character is kept, as a reason is read whole.
+/// between graphemes where it reaches the edge: unlike [`super::wrap`], every character is kept, as a reason is read
+/// whole.
 pub(super) fn wrap_whole(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
@@ -390,15 +391,15 @@ pub(super) fn wrap_whole(text: &str, width: usize) -> Vec<String> {
         if !line.is_empty() {
             lines.push(std::mem::take(&mut line));
         }
-        for character in word.chars() {
-            line.push(character);
-            // The width is measured on the whole line, as a character and a selector after it take more cells
-            // together than apart; a lone character wider than the line stays, as nothing narrower holds it.
-            if line.width() > width && line.chars().count() > 1 {
-                line.pop();
+        // Broken between graphemes, as the terminal draws them: an emoji and the selector after it, or a letter
+        // and its accent, move to the next line together. The width is measured on the whole line, as a character
+        // and a selector take more cells together than apart; a lone grapheme wider than the line stays, as nothing
+        // narrower holds it.
+        for grapheme in Span::raw(word).styled_graphemes(Style::default()) {
+            if !line.is_empty() && (line.clone() + grapheme.symbol).width() > width {
                 lines.push(std::mem::take(&mut line));
-                line.push(character);
             }
+            line.push_str(grapheme.symbol);
         }
     }
     if !line.is_empty() {

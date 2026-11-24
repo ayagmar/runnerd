@@ -1312,6 +1312,37 @@ fn a_label_wider_than_the_terminal_reads_whole_with_its_end() {
 }
 
 #[test]
+fn an_emoji_with_a_selector_at_the_edge_moves_to_the_next_line_whole() {
+    // Catches a word broken between a character and the selector that makes it an emoji: `❤️` takes two cells, the
+    // heart alone one, so at the edge the selector would start the next line alone and the heart lose its look.
+    let heart = "\u{2764}\u{fe0f}";
+    let label = format!("{}{heart}tail-zz7", "x".repeat(77));
+    let mut app = first_waiting_for(Waiting::NoPool {
+        labels: vec![label],
+    });
+    let whole = |rows: Vec<String>| {
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with(&format!("{heart}tail-zz7"))),
+            "the emoji starts the next line whole, its tail after it: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| *row == "x".repeat(77)),
+            "the line before ends before the emoji: {rows:?}"
+        );
+    };
+    whole(
+        screen(&app, 80, 24, false)
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.contains("more below"))
+            .map(|line| line.trim().to_owned())
+            .collect(),
+    );
+    app.update(key(KeyCode::Enter));
+    whole(under_legend(&screen(&app, 80, 24, false)));
+}
+
+#[test]
 fn a_reason_cut_under_the_queue_keeps_its_mark_when_its_lines_fill_the_width() {
     // Catches the mark of a cut reason drawn past the edge when the last line shown is as wide as the terminal.
     let volumes = (0..6)
