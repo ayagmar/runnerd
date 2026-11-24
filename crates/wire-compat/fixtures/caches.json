@@ -1,5 +1,68 @@
 {
   "full": {
+    "actions": {
+      "bytes": 12582912,
+      "entries": 8,
+      "failures": [
+        {
+          "kind": "pins",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "download",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "rejected",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "quarantined",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "store",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "held",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "full",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "not-action",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "unreadable",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "package",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        },
+        {
+          "kind": "exposed",
+          "since": 1761399000,
+          "subject": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"
+        }
+      ],
+      "refreshed_at": 1761400000,
+      "unchecked": 2
+    },
     "build": {
       "actions_cache": true,
       "bytes": 4294967296,
