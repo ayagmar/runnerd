@@ -344,6 +344,35 @@ fn a_repository_left_out_of_the_queue_is_named_with_why_and_one_listed_or_unknow
     );
     assert_eq!(
         older.empty_queue_line(),
+        "runnerd shows no waiting job.",
+        "a queue the daemon does not say it listed is never proof that nothing waits"
+    );
+    assert_eq!(older.unlisted_line(), None);
+}
+
+/// The bug it catches: an empty queue read as nothing waiting while a repository is not listed, or not known to be.
+#[test]
+fn only_an_empty_queue_of_listed_repositories_says_nothing_waits() {
+    let listed = status(Vec::new());
+    assert_eq!(
+        listed.empty_queue_line(),
         "Nothing waiting: every queued job has a runner."
     );
+    assert_eq!(listed.unlisted_line(), None);
+    let one = shown(listed.clone(), LEDGER, QueueShown::Unlisted);
+    assert_eq!(
+        one.empty_queue_line(),
+        "No job of a listed repository waits."
+    );
+    assert_eq!(
+        one.unlisted_line().as_deref(),
+        Some("1 repository not listed")
+    );
+    let both = shown(one, STOREFRONT, QueueShown::Unlisted);
+    assert_eq!(
+        both.unlisted_line().as_deref(),
+        Some("2 repositories not listed")
+    );
+    let unknown = shown(listed, STOREFRONT, QueueShown::Unknown);
+    assert_eq!(unknown.empty_queue_line(), "runnerd shows no waiting job.");
 }

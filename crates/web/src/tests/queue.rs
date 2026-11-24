@@ -2,7 +2,8 @@
 //! whenever the overview shows fewer than wait, and kept current as jobs leave.
 
 use runnerd_core::api::{
-    Event, EventEnvelope, JobState, ListingFailure, ListingProblem, QueueShown, Waiting,
+    Event, EventEnvelope, HostSample, JobState, ListingFailure, ListingProblem, QueueShown, Step,
+    Waiting,
 };
 
 use super::{Dashboard, NOW, read_until};
@@ -11,6 +12,31 @@ use super::{Dashboard, NOW, read_until};
 const FIRST: u64 = 130_000_000_000;
 
 impl Dashboard {
+    /// Marks halyard/ledger's queue as one the status leaves out, its listing failing with a 502.
+    fn ledger_unlisted(&self) {
+        let mut fixtures = self.fake.fixtures.lock().unwrap();
+        for repository in &mut fixtures.status.repositories {
+            if repository.name == "halyard/ledger" {
+                repository.queue = QueueShown::Unlisted;
+                repository.listing = Some(ListingFailure {
+                    since: NOW - 120,
+                    problem: ListingProblem::Failed { status: 502 },
+                });
+            }
+        }
+    }
+
+    fn announce(&self, event: Event) {
+        self.fake
+            .events
+            .send(EventEnvelope {
+                id: None,
+                at: NOW,
+                event,
+            })
+            .unwrap();
+    }
+
     /// Replaces the queue with `count` jobs of halyard/storefront, oldest first, each waiting for a node slot; the
     /// history holds every one but the third, as a listing it has not recorded yet.
     fn queue_of(&self, count: u64) {
@@ -267,5 +293,124 @@ async fn a_job_that_leaves_the_queue_leaves_the_open_page_and_the_rest_stay() {
     assert!(
         after.contains(r#"<span class="queue-count-value">3</span>"#),
         "the count follows: {after}"
+    );
+}
+
+/// The bug it catches: a listing failure that leaves the overview's queue short hid the only page that names the
+/// repository left out: no row count past the cut, so no link.
+#[tokio::test]
+async fn a_short_queue_with_a_repository_left_out_links_to_the_queue_page_however_few_rows_it_has()
+{
+    for count in [0, 3] {
+        let dashboard = Dashboard::start().await;
+        dashboard.queue_of(count);
+        dashboard.ledger_unlisted();
+        let cookie = dashboard.sign_in().await;
+        let overview = dashboard.page(&cookie, "/").await.body;
+        let queue = between(&overview, "queue", r#"id="recent""#);
+        assert!(
+            queue.contains(
+                r#"<p class="queue-unlisted tone-warn"><a href="/queue">1 repository not listed</a></p>"#
+            ),
+            "{count}: the overview links to the repository left out on every screen: {queue}"
+        );
+        let page = dashboard.page(&cookie, "/queue").await.body;
+        assert!(
+            page.contains(
+                "Cannot list halyard/ledger's queued jobs: GitHub answers 502; none shows here"
+            ),
+            "{count}: {page}"
+        );
+    }
+}
+
+/// The bug it catches: a history read that failed once left every row on GitHub for as long as the page stayed open,
+/// and a job without a GitHub page unopenable, while no job event came to read it again.
+#[tokio::test]
+async fn a_failed_read_of_which_jobs_have_a_page_is_tried_again_without_a_job_event() {
+    let dashboard = Dashboard::start().await;
+    dashboard.queue_of(3);
+    dashboard.fake.fixtures.lock().unwrap().queued_list_fails = true;
+    let cookie = dashboard.sign_in().await;
+    let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
+    let page = dashboard.page(&cookie, "/queue").await.body;
+    assert!(
+        !page.contains(&local) && page.contains(&format!("job/{FIRST}\" rel=\"noopener\">")),
+        "a failed read opens GitHub: {page}"
+    );
+    let mut queue = dashboard.stream(&cookie, "/live/queue").await;
+    let mut overview = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut queue, |text| text.contains("datastar-patch-signals")).await;
+    read_until(&mut overview, |text| {
+        text.contains("datastar-patch-signals")
+    })
+    .await;
+    dashboard.fake.fixtures.lock().unwrap().queued_list_fails = false;
+    // No job event: the queue's page reads again with its status, the overview with the status a sample brings.
+    read_until(&mut queue, |text| text.contains(&local)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    dashboard.announce(Event::HostSample {
+        sample: HostSample {
+            at: NOW,
+            cpu: 1000,
+            memory: 1 << 30,
+        },
+    });
+    read_until(&mut overview, |text| text.contains(&local)).await;
+}
+
+/// The bug it catches: the queue's page read its status again only when an event came, so with no host samples a
+/// job that left, or a daemon that began to stop, stayed shown.
+#[tokio::test]
+async fn a_quiet_queue_page_still_follows_the_status() {
+    let dashboard = Dashboard::start().await;
+    dashboard.queue_of(3);
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/queue").await;
+    read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .status
+        .queued
+        .remove(0);
+    let after = read_until(&mut stream, |text| text.contains(r#"id="waiting""#)).await;
+    assert!(
+        !after.contains(&format!(r#"id="queued-{FIRST}""#))
+            && after.contains(&format!(r#"id="queued-{}""#, FIRST + 1)),
+        "the job gone from the status leaves the page with no event: {after}"
+    );
+}
+
+/// The bug it catches: every step of a running job re-read the history's queued jobs for each open overview, though
+/// no queued row changed.
+#[tokio::test]
+async fn a_step_alone_does_not_read_again_which_jobs_have_a_page() {
+    let dashboard = Dashboard::start().await;
+    dashboard.queue_of(3);
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
+    assert!(first.contains(&local), "{first}");
+    // A read now would fail and turn the row to GitHub's page.
+    dashboard.fake.fixtures.lock().unwrap().queued_list_fails = true;
+    dashboard.announce(Event::JobStep {
+        job: super::LEDGER_RUNNING,
+        step: Step {
+            name: "Build".to_owned(),
+            number: 3,
+            status: "in_progress".to_owned(),
+            conclusion: None,
+            started_at: None,
+            completed_at: None,
+        },
+    });
+    let after = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    assert!(
+        !after.contains(r#"id="queue""#),
+        "the queue is not read again or sent for a step: {after}"
     );
 }

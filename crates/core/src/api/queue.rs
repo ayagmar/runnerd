@@ -241,13 +241,30 @@ impl Status {
             .collect()
     }
 
-    /// What an empty queue says, as every client says it: that nothing waits, or, while [`Status::unlisted`] names a
-    /// repository, only that no listed job does.
+    /// What an empty queue says, as every client says it: that nothing waits only while every repository is
+    /// `QueueShown::Listed`; while [`Status::unlisted`] names one, that no listed job does; and while the daemon does
+    /// not say whether it listed one (`QueueShown::Unknown`), only that it shows none.
     pub fn empty_queue_line(&self) -> &'static str {
-        if self.unlisted().is_empty() {
+        if !self.unlisted().is_empty() {
+            "No job of a listed repository waits."
+        } else if self
+            .repositories
+            .iter()
+            .all(|repository| repository.queue == QueueShown::Listed)
+        {
             "Nothing waiting: every queued job has a runner."
         } else {
-            "No job of a listed repository waits."
+            "runnerd shows no waiting job."
+        }
+    }
+
+    /// How many repositories [`Status::unlisted`] names, as a link to the queue's page says it: `1 repository not
+    /// listed`; `None` while it names none.
+    pub fn unlisted_line(&self) -> Option<String> {
+        match self.unlisted().len() {
+            0 => None,
+            1 => Some("1 repository not listed".to_owned()),
+            count => Some(format!("{count} repositories not listed")),
         }
     }
 

@@ -205,6 +205,8 @@ fn queue_of(fake: &fake::Fake, count: u64) {
                 job.id
             ));
             job.name = format!("test ({})", n % 3 + 1);
+            // Jobs of one name whose branches differ only at their end, as a phone must still tell apart.
+            job.branch = Some(format!("feature/checkout-redesign-payments-step-{n}"));
             job.waiting = Some(Waiting::NoSlot {
                 profile: "node".to_owned(),
             });

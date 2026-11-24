@@ -8,7 +8,7 @@ import Printed from '../../../components/Printed.astro';
 
 Every queued job says what holds it, in `runnerctl status`, the dashboard's overview and the TUI. Jobs are served oldest first; each gives the first reason that holds for it.
 
-The dashboard's overview shows the oldest six, three on a phone. **All N queued** opens the queue's page, which lists every one with its reason. A repository whose queued jobs runnerd cannot list, because its listing fails, GitHub's rate limit holds it or runnerd is stopping, is named there with why. Its jobs are not in the list, though the Jobs page may still show them queued.
+The dashboard's overview shows the oldest six, three on a phone. **All N queued** opens the queue's page, which lists every one with its reason. A repository whose queued jobs runnerd cannot list, because its listing fails, GitHub's rate limit holds it or runnerd is stopping, is named there with why, and the overview links there however few jobs it shows. Its jobs are not in the list, though the Jobs page may still show them queued.
 
 <Printed command="runnerctl status" name="status" from="JOB " />
 

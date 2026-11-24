@@ -2302,6 +2302,13 @@ a.queue-main:hover .job-name {
   font-weight: 700;
 }
 
+/* The overview's link to the repositories its queue leaves out: shown however few jobs it lists. */
+.queue-unlisted {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
 .queue-back {
   margin: 0;
   font-size: 0.875rem;
@@ -2320,6 +2327,13 @@ a.queue-main:hover .job-name {
 
   .queue-page .queue-main :is(.repo, .reason) {
     grid-column: 2;
+  }
+
+  /* The page is where every row is read whole: a name or a branch wraps rather than end in an ellipsis, so two jobs
+     of one name whose branches differ at their end tell apart. */
+  .queue-page .queue-main :is(.job-name, .repo) {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
 

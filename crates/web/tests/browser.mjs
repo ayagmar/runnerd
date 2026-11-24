@@ -499,6 +499,24 @@ try {
       check(!listed.sideways && listed.out === 0, `${size.name}, ${count} queued: the queue's page fits the screen`);
       check(listed.shifted < 0.01, `${size.name}, ${count} queued: the queue's page shifts ${listed.shifted.toFixed(4)}`);
       if (count === 0) check(/^Nothing waiting/.test(listed.empty), `${size.name}: an empty queue says nothing waits`);
+      if (size.phone && count >= 7) {
+        // Every name and branch is read whole on a phone: jobs of one name differ only at their branch's end.
+        const cut = await page.evaluate(() =>
+          [...document.querySelectorAll('#waiting .queue-main :is(.job-name, .repo)')]
+            .filter((el) => el.scrollWidth > el.clientWidth + 1)
+            .map((el) => el.textContent.trim()),
+        );
+        const places = await page.evaluate(() => {
+          const named = [...document.querySelectorAll('#waiting .queue-list > li')].filter(
+            (row) => row.querySelector('.job-name')?.textContent.trim() === 'CI / test (1)',
+          );
+          return named.map((row) => row.querySelector('.repo').innerText.trim());
+        });
+        check(
+          cut.length === 0 && places.length >= 2 && new Set(places).size === places.length,
+          `${size.name}, ${count} queued: names and branches wrap whole, ${places.length} jobs of one name tell apart${cut.length ? ` (cut: ${cut[0]})` : ''}`,
+        );
+      }
       await context.close();
     }
     stopDemo(queued);
@@ -525,16 +543,24 @@ try {
     }));
     check(tabbed.row === second && tabbed.github, `${sizes[0].name}: Tab reaches the row's GitHub link`);
     await page.keyboard.press('Shift+Tab');
-    await page.waitForFunction((id) => !document.getElementById(id), firstId, { timeout: 8000 }).catch(() => {});
-    const gone = await page.evaluate((id) => !document.getElementById(id), firstId);
+    const left = (id) =>
+      page
+        .waitForFunction((gone) => !document.getElementById(gone), id, { timeout: 8000 })
+        .then(() => true, () => false);
+    const gone = await left(firstId);
     const kept = await focused();
     check(gone && kept === second, `${sizes[0].name}: an older job leaves (${gone}) and the focused row stays focused (${kept})`);
-    await page.waitForFunction((id) => !document.getElementById(id), second, { timeout: 8000 }).catch(() => {});
+    const ownGone = await left(second);
+    check(ownGone, `${sizes[0].name}: the focused row's own job leaves the page`);
     await page.keyboard.press('j');
-    const after = await focused();
+    await page.keyboard.press('j');
+    const down = await focused();
+    await page.keyboard.press('k');
+    const up = await focused();
+    const order = await page.evaluate(() => [...document.querySelectorAll('#waiting .queue-list > li')].map((row) => row.id));
     check(
-      after !== '' && after !== second,
-      `${sizes[0].name}: once the focused row's job leaves, j picks up a row still there (${after})`,
+      ownGone && down !== '' && down !== second && order.indexOf(up) === order.indexOf(down) - 1,
+      `${sizes[0].name}: once the focused row's job leaves, j picks up the rows still there (${down}) and k goes back one (${up})`,
     );
     const href = await page.evaluate(() => document.activeElement.getAttribute('href'));
     await page.keyboard.press('Enter');

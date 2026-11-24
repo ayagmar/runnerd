@@ -11,7 +11,9 @@
 //! order for reading and for the keyboard on every screen.
 
 use crate::views::Here;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+
+use super::local_pages::LocalPages;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
@@ -63,8 +65,8 @@ pub(crate) struct Overview {
     pub(crate) savings: Option<Savings>,
     /// What needs attention; `None` from a daemon that does not list it.
     pub(crate) attention: Option<Attention>,
-    /// The queued jobs the history holds, which have a page here (`read_local`).
-    pub(crate) local: BTreeSet<u64>,
+    /// The queued jobs the history holds, which have a page here.
+    pub(crate) local: LocalPages,
 }
 
 impl Overview {
@@ -94,8 +96,9 @@ impl Overview {
             },
             savings: None,
             attention: daemon.attention().await?,
-            local: read_local(daemon).await,
+            local: LocalPages::default(),
         };
+        overview.local = LocalPages::read(daemon, &overview.status).await;
         overview.reload_running(daemon).await?;
         overview.reload_day(daemon, now).await?;
         Ok(overview)
@@ -1099,6 +1102,11 @@ pub(crate) fn queue(overview: &Overview, parts: &Parts) -> Markup {
                     a class=[(more == 0).then_some("narrow-only")] href=(Page::Queue.path()) { "All " (queued.len()) " queued" }
                 }
             }
+            // A repository left out of the list is named on the queue's page, so the overview links there however
+            // few jobs it shows.
+            @if let Some(unlisted) = overview.status.unlisted_line() {
+                p.queue-unlisted.tone-warn { a href=(Page::Queue.path()) { (unlisted) } }
+            }
             @if queued.is_empty() {
                 p.muted { (overview.status.empty_queue_line()) }
             } @else {
@@ -1112,23 +1120,6 @@ pub(crate) fn queue(overview: &Overview, parts: &Parts) -> Markup {
     }
 }
 
-/// The IDs of the queued jobs the history holds, which have a page of their own here. None when the history could
-/// not be read: each row then opens the job on GitHub, never a page that is not there.
-pub(crate) async fn read_local(daemon: &Client) -> BTreeSet<u64> {
-    let page: Result<JobPage, ClientError> = daemon
-        .get_query(
-            "/v1/jobs",
-            &JobQuery {
-                state: Some(JobState::Queued),
-                limit: Some(MAX_JOBS),
-                ..JobQuery::default()
-            },
-        )
-        .await;
-    page.map(|page| page.jobs.iter().map(|job| job.id).collect())
-        .unwrap_or_default()
-}
-
 /// A queued job's row: how long it has waited, its name, where it runs and why it waits, as core words it. It opens
 /// the job's page when the history holds the job (`local`), with GitHub's page as a second link; else GitHub's page;
 /// else nothing, and the row is only read. Its wait is a part, so the time passing sends only that.
@@ -1136,7 +1127,7 @@ pub(crate) fn queued_row(
     status: &Status,
     job: &QueuedJob,
     now: u64,
-    local: &BTreeSet<u64>,
+    local: &LocalPages,
     parts: &Parts,
 ) -> Markup {
     let repository = js(&job.repository);
@@ -1168,7 +1159,7 @@ pub(crate) fn queued_row(
             data-on:pointerenter=(enter) data-on:focusin=(enter)
             data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')"
             data-on:focusout="$_repo = ''" {
-            @match (local.contains(&job.id), &job.url) {
+            @match (local.has(job.id), &job.url) {
                 (true, url) => {
                     a.queue-main href=(format!("/jobs/{}", job.id)) { (main) }
                     @if let Some(url) = url {

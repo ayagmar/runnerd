@@ -18,6 +18,7 @@ pub(crate) mod config;
 pub(crate) mod history;
 pub(crate) mod insights;
 pub(crate) mod job;
+pub(crate) mod local_pages;
 pub(crate) mod overview;
 pub(crate) mod queue;
 pub(crate) mod records;

@@ -4,13 +4,12 @@
 //! one other read is which of the jobs the history holds, so a row opens the job's page only where there is one. It
 //! never lists the history's queued jobs as waiting: the history keeps a job queued that the status leaves out.
 
-use std::collections::BTreeSet;
-
 use maud::{Markup, html};
 use runnerd_core::api::{HealthKind, Status, View};
 use runnerd_core::client::{Client, ClientError};
 
-use super::overview::{queued_row, read_local};
+use super::local_pages::LocalPages;
+use super::overview::queued_row;
 use super::{Here, Live, Page, Parts, digest, heading, page, tone_class};
 
 /// What the page shows.
@@ -19,17 +18,14 @@ pub(crate) struct QueueView {
     pub(crate) now: u64,
     pub(crate) status: Status,
     /// The queued jobs the history holds, which have a page here.
-    pub(crate) local: BTreeSet<u64>,
+    pub(crate) local: LocalPages,
 }
 
 impl QueueView {
     pub(crate) async fn load(daemon: &Client, now: u64) -> Result<QueueView, ClientError> {
         let status = daemon.get("/v1/status").await?;
-        Ok(QueueView {
-            now,
-            status,
-            local: read_local(daemon).await,
-        })
+        let local = LocalPages::read(daemon, &status).await;
+        Ok(QueueView { now, status, local })
     }
 }
 
