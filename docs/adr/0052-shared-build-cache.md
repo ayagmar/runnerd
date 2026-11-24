@@ -1,6 +1,6 @@
 # 0052. A build cache every runner shares, written only by the default branch
 
-Status: **Accepted** (2026-10-24), amended by [0053](0053-build-cache-written-by-own-pull-requests.md), [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md), [0082](0082-github-actions-cache-served-from-the-host.md), [0083](0083-turborepo-and-nx-from-the-build-cache.md). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md).
+Status: **Accepted** (2026-10-24), amended by [0053](0053-build-cache-written-by-own-pull-requests.md), [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md), [0082](0082-github-actions-cache-served-from-the-host.md), [0083](0083-turborepo-and-nx-from-the-build-cache.md), [0168](0168-the-build-cache-writes-each-byte-once.md). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md).
 
 ## Context
 
@@ -51,7 +51,7 @@ its own code into that job's build. A fork's pull request must not be able to wr
   received or held, take at most the limit together, and one undecided job's at most a quarter of it; past either,
   uploads are refused. So a fork's job can neither fill the disk before GitHub has answered nor take the room
   another job's uploads need. Entries are last used when last written, read or sent again; that
-  sets the file's time, so the order outlives a restart. `runnerctl caches clean runnerd-build-cache` empties it
+  sets the file's time, at most hourly (ADR 0168), so the order outlives a restart. `runnerctl caches clean runnerd-build-cache` empties it
   while no runner runs.
 - **Tools**, wired by the image with no change to a repository, each only where the repository configures no
   remote cache of its own:
