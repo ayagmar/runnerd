@@ -4,7 +4,7 @@
 use super::*;
 use crate::admission::pooled::{self, MOST_CREDIT};
 use crate::admission::trace::{Outside, Point, Reading, RunId, RunTrace, STEP, Trace};
-use crate::admission::{Brake, GrowthCount, GuardHold};
+use crate::admission::{Brake, GrowthCount, Guard, GuardHold};
 
 /// A slice with 1.5G left of two 3.5G reservations and the 512M mirror, under the mark with room for what the credit
 /// adds; a host with memory to spare.
@@ -957,4 +957,96 @@ fn parity_pool(name: &str, profile: &str, label: &str, first: u64) -> Repository
         warm: 0,
         idle_after: scheduler::IDLE_TIMEOUT,
     }
+}
+
+/// How long jobs of `replay` waited for `guard`, in ms.
+fn held_by(replay: &Replay, guard: Guard) -> u64 {
+    replay.guards.get(&guard).copied().unwrap_or(0)
+}
+
+#[test]
+fn a_wait_only_the_larger_margin_causes_is_charged_to_it_not_to_the_host() {
+    // report fits no margin and waits for the host until check ends at minute 30; page fits the plain margin, so only
+    // the larger one, which report holds up, keeps it waiting until the next plan lets the band down.
+    let (jobs, trace) = one_job_never_fits();
+    let replay = replay_held(&jobs, &trace, 0, 40 * G, Band::NoWaiterFits);
+    let page = page_waited(&replay) * 1000;
+    assert!(page > 0, "page waits for the larger margin");
+    assert_eq!(
+        held_by(&replay, Guard::LargerMargin),
+        page,
+        "{:?}",
+        replay.guards
+    );
+    assert_eq!(
+        held_by(&replay, Guard::Host),
+        25 * MINUTE,
+        "report, from minute 5 to 30: {:?}",
+        replay.guards
+    );
+}
+
+#[test]
+fn every_moment_a_job_waits_is_charged_to_exactly_one_guard() {
+    // Eight runners, page from minute 12, and a seventh to tenth check beyond the six jvm slots: jobs wait for a slot,
+    // for MemoryMax and for the young runners' room. However the waits fall, they add up to the guards' time, to the
+    // second each job's wait is rounded to.
+    let mut jobs = eight_and_a_page(30);
+    jobs.extend((0..4).map(|i| in_run(check(NOW, 30), 40 + i, 1)));
+    jobs.sort_by_key(|run| run.queued_at);
+    let trace = trace_of(&jobs);
+    let covered = GrowthCount {
+        growth: pooled::Growth {
+            young: pooled::Young::Covered,
+            ..TOP3.growth
+        },
+        ..TOP3
+    };
+    let mut seen = BTreeSet::new();
+    for growth in [None, Some(TOP3), Some(covered)] {
+        let replay = replay_counted(&jobs, &trace, 15 * G, growth);
+        let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
+        let guards: u64 = replay.guards.values().sum();
+        seen.extend(replay.guards.keys().copied());
+        assert!(
+            (waits * 1000..waits * 1000 + 1000 * jobs.len() as u64).contains(&guards),
+            "{guards} ms by guard for {waits} s of waits under {growth:?}: {:?}",
+            replay.guards
+        );
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from([Guard::Slot, Guard::MemoryMax, Guard::YoungRoom]),
+        "the waits this test means to add up"
+    );
+}
+
+#[test]
+fn a_burst_held_only_by_the_young_runners_room_is_charged_to_it() {
+    // Eight 3.5G runners start at once. Ranked, a start is growth the three largest already keep, so all eight fit 15G.
+    // Covered, every young runner's whole take is room kept, so those after the fourth wait for the first minute to
+    // pass: the young runners' room alone held them.
+    let jobs = eight_and_a_page(30);
+    let trace = trace_of(&jobs);
+    let ranked = replay_counted(&jobs, &trace, 15 * G, Some(TOP3));
+    assert_eq!(held_by(&ranked, Guard::YoungRoom), 0, "{:?}", ranked.guards);
+    let covered = GrowthCount {
+        growth: pooled::Growth {
+            young: pooled::Young::Covered,
+            ..TOP3.growth
+        },
+        ..TOP3
+    };
+    let covered = replay_counted(&jobs, &trace, 15 * G, Some(covered));
+    assert!(
+        held_by(&covered, Guard::YoungRoom) > 0,
+        "{:?}",
+        covered.guards
+    );
+    assert_eq!(
+        held_by(&covered, Guard::Host),
+        0,
+        "the host has room: {:?}",
+        covered.guards
+    );
 }

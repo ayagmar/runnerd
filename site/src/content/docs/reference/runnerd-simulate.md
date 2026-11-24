@@ -22,7 +22,7 @@ Reads the history database read-only; changes nothing.
 - `--cpus <CPUS>`: Replay against this many CPUs (such as 32 or 7.5) instead of reading the slice's from systemd
 - `--cpu-overcommit <CPU_OVERCOMMIT>`: Replay a CPU budget of the slice's CPUs times this; repeat it to compare factors [default: the config's `cpu_overcommit`, else 1]
 - `--priority`: Also replay the config's policy and slots, `--slots` over them, with no barrier for a starved job, a strict one and the daemon's, pool by pool and run by run
-- `--causal`: Also replay the config's policy and slots as the jobs really ran, each using its recorded samples from its replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs and hazards, beside what the same jobs waited as they ran
+- `--causal`: Also replay the config's policy and slots as the jobs really ran, each using its recorded samples from its replayed start, with the plain count and with pooled credits of 4G, 6G and 8G: waits, runs, the guard that held each wait and hazards, beside what the same jobs waited as they ran
 - `--cold`: With --causal, give every run of a job the samples of its heaviest run, placed so that the run reaches its peak: every cache cold at once
 - `--overhead <OVERHEAD>`: With --causal, what the slice holds beside its runners, as the hazards read it (such as 8G) [default: the p99 of the window's busy moments]
 - `--guard-overhead <GUARD_OVERHEAD>`: With --causal, what the guards read of that when they decide (such as 1G) [default: --overhead]: a slice that reads low at a decision and high once the job runs

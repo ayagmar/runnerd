@@ -585,6 +585,86 @@ pub struct Replay {
     pub host_waited: u64,
     /// What the replay found of a pooled count's risks; only with a trace.
     pub hazard: Hazard,
+    /// How long jobs waited, added up, in ms, by the guard that held each at each plan (`Guard`).
+    pub guards: BTreeMap<Guard, u64>,
+}
+
+/// The one admission rule that held a waiting job at a plan of a replay. A job its memory held goes to a rule of the
+/// growth count, or to the host's larger margin, when that rule alone kept it waiting: with it relaxed, the same plan
+/// would have started it. Held by two together, or by none of them, it goes to the budget that refused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Guard {
+    /// Every slot of its profile held a runner.
+    Slot,
+    /// It fitted, but a barrier for an older job stood and did not let it pass.
+    Barrier,
+    /// What the slice holds was at the high-water mark.
+    HighWater,
+    /// The CPU budget.
+    Cpu,
+    /// The slice's `MemoryMax`.
+    MemoryMax,
+    /// What the host's memory leaves the slice by the plain margin.
+    Host,
+    /// The host's larger margin (`host::HostBand::Larger`): the plain one would have started it.
+    LargerMargin,
+    /// The growth count's room for every young runner's growth (`pooled::Young::Covered`): ranking young runners with
+    /// the others would have started it.
+    YoungRoom,
+    /// The growth count's ceiling (`pooled::GROWTH_CEILING`): an unbounded credit would have started it.
+    GrowthCeiling,
+}
+
+impl Guard {
+    /// Every guard, in the order a report lists them.
+    pub const ALL: [Guard; 9] = [
+        Guard::Slot,
+        Guard::Barrier,
+        Guard::HighWater,
+        Guard::Cpu,
+        Guard::MemoryMax,
+        Guard::Host,
+        Guard::LargerMargin,
+        Guard::YoungRoom,
+        Guard::GrowthCeiling,
+    ];
+
+    /// Its name in a table's heading: `SLOT`, `BARRIER`, `MARK`, `CPU`, `MAX`, `HOST`, `+50%`, `YOUNG` or `CEIL`.
+    pub fn heading(self) -> &'static str {
+        match self {
+            Guard::Slot => "SLOT",
+            Guard::Barrier => "BARRIER",
+            Guard::HighWater => "MARK",
+            Guard::Cpu => "CPU",
+            Guard::MemoryMax => "MAX",
+            Guard::Host => "HOST",
+            Guard::LargerMargin => "+50%",
+            Guard::YoungRoom => "YOUNG",
+            Guard::GrowthCeiling => "CEIL",
+        }
+    }
+
+    /// What it means, as a report's legend says it after its heading.
+    pub fn meaning(self) -> String {
+        match self {
+            Guard::Slot => "no free slot".to_owned(),
+            Guard::Barrier => "it fitted, behind a barrier for an older job".to_owned(),
+            Guard::HighWater => format!("the slice at {HIGH_WATER}% of MemoryMax"),
+            Guard::Cpu => "the CPU budget".to_owned(),
+            Guard::MemoryMax => "MemoryMax".to_owned(),
+            Guard::Host => "the host's memory by the plain margin".to_owned(),
+            Guard::LargerMargin => {
+                "the host's larger margin alone: the plain one would have started it".to_owned()
+            }
+            Guard::YoungRoom => "the growth count's room for every young runner alone: ranking \
+                 them with the others would have started it"
+                .to_owned(),
+            Guard::GrowthCeiling => format!(
+                "the growth count's {} ceiling alone: no ceiling would have started it",
+                config::ByteSize(pooled::GROWTH_CEILING)
+            ),
+        }
+    }
 }
 
 /// What the jobs a replay runs did as they really ran, to read its figures against.

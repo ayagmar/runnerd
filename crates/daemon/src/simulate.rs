@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::admission::trace::{Episodes, Trace};
 use runnerd_core::admission::{
-    Arrivals, Band, Barriers, Brake, CreditRoom, GrowthCount, GuardHold, HostReserve, Policy,
-    PoolReplay, Recorded, Replay, Replaying, growth, pooled, recorded, simulate,
+    Arrivals, Band, Barriers, Brake, CreditRoom, GrowthCount, Guard, GuardHold, HostReserve,
+    Policy, PoolReplay, Recorded, Replay, Replaying, growth, pooled, recorded, simulate,
 };
 use runnerd_core::api;
 use runnerd_core::config::{self, Admission, ByteSize, Config};
@@ -358,7 +358,42 @@ pub(crate) fn causal(
     }
     out.push_str(&causal_profiles(counts.rows, &replays, &slots));
     out.push_str(&causal_waits(&replays, &recorded));
+    out.push_str(&causal_guards(counts.rows, &replays));
     out.push_str(&causal_hazards(counts.rows, &replays));
+    out
+}
+
+/// What held the jobs that waited in each of `replays`, in job-hours by guard (`admission::Guard`), a row a count.
+fn causal_guards(rows: &[Counting], replays: &[Replay]) -> String {
+    let width = name_width(rows);
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "\nWhat held the jobs that waited, in job-hours, at each plan by the one guard that held it:\n\n{:<width$}",
+        "COUNT"
+    );
+    for guard in Guard::ALL {
+        let _ = write!(out, " {:>8}", guard.heading());
+    }
+    let _ = writeln!(out);
+    for (counting, replay) in rows.iter().zip(replays) {
+        let _ = write!(out, "{:<width$}", counting.name());
+        for guard in Guard::ALL {
+            let waited = replay.guards.get(&guard).copied().unwrap_or(0);
+            let _ = write!(out, " {:>8}", job_hours(waited));
+        }
+        let _ = writeln!(out);
+    }
+    let legend: Vec<String> = Guard::ALL
+        .iter()
+        .map(|guard| format!("{}: {}", guard.heading(), guard.meaning()))
+        .collect();
+    let _ = writeln!(
+        out,
+        "\n{}. A job held by its memory goes to a rule only that rule kept it waiting for; held by two, it goes to the \
+         budget that refused it.",
+        legend.join("; ")
+    );
     out
 }
 
