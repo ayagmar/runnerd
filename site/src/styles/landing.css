@@ -214,6 +214,18 @@ html:not(.js) .theme {
   max-width: 34ch;
 }
 
+/* Who it is for, under the first call to act: one line, the details at #needs. */
+.fits {
+  margin-top: 1.5rem;
+  max-width: 44ch;
+  font-size: var(--step-small);
+  color: var(--muted);
+}
+
+.fits a {
+  color: var(--ink);
+}
+
 /* A setting reads as one word. */
 .lead code {
   white-space: nowrap;
