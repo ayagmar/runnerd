@@ -690,15 +690,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .iter()
                 .map(|repository| repository.name.clone()),
         );
-        // A drain recorded for a repository the config lists is of a config a crash undid, or one never written.
-        let (listed, restored): (Vec<String>, Vec<String>) = draining
-            .into_iter()
-            .partition(|name| repositories.listed(name).is_some());
-        for name in &restored {
-            repositories.drain(name);
-        }
-        if !listed.is_empty() {
-            drop(store.drains(Vec::new(), listed));
+        // A drain recorded for a repository the config lists is ignored, and kept: the file read may not have
+        // reached the disk yet, and a power loss can bring back one without the repository.
+        for name in &draining {
+            if repositories.listed(name).is_none() {
+                repositories.drain(name);
+            }
         }
         let (control, commands) = Control::new(
             config

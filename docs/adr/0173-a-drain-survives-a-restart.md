@@ -28,8 +28,9 @@ before the limit lifts.
   change is refused and the file is left as it was.
 - A config change that adds a draining repository back forgets its record only once its file is known to last. When
   the commit warns that a crash may bring back the old file, the record stays: a start under the old file drains the
-  repository again, and a start under the new one forgets the record, as it finds the repository listed. A record
-  left by a commit that failed is forgotten the same way.
+  repository again, and a start under the new one ignores the record, as it finds the repository listed, but keeps
+  it, as the file it read may not have reached the disk yet. A record left by a commit that failed is kept the same
+  way. Such a record goes when a later drain of its repository ends; until then it costs a row.
 - A config change that would have the next start open another job history (`history.database`, or the default path
   when it names none, against the path the live history was opened at) is refused while any repository drains,
   whether this change removes it or an earlier one did: the other history knows nothing of the drain.

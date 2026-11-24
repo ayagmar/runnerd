@@ -620,7 +620,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             warn!("config replaced: {line}");
                         }
                         // The drains it ends are forgotten only once its file lasts: if a crash may bring back the
-                        // old one, they stay recorded until a start finds their repositories listed (ADR 0173).
+                        // old one, they stay recorded until a later drain of their repositories ends (ADR 0173).
                         if warning.is_none() && !added_back.is_empty() {
                             drop(self.store.drains(Vec::new(), added_back));
                         }
@@ -628,7 +628,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         Ok(warning.into_iter().chain(undone).collect())
                     }
                     // Not written: a drain it recorded is of a repository the config still lists, which a start
-                    // forgets.
+                    // ignores.
                     Err(message) => Err(ControlError::Failed(message)),
                 };
                 let _ = reply.send(answer);

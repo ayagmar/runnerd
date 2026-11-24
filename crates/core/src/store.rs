@@ -1035,8 +1035,7 @@ impl Store {
 
     /// Records that the repositories `began` drain and `ended` no longer do, synced to disk: a restart drains every
     /// recorded one again that its config does not list, though no runner of it runs (ADR 0173). Only what is named
-    /// changes, so a record kept for a config that may not have lasted stays until its repository's drain ends or a
-    /// start finds it listed. The write is sent at once, in order with every other; the future says whether it
+    /// changes, so a record kept for a config that may not have lasted stays until a drain of its repository ends. The write is sent at once, in order with every other; the future says whether it
     /// committed.
     pub fn drains(
         &self,

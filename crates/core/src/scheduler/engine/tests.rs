@@ -5828,6 +5828,42 @@ async fn a_drain_outlives_a_config_adding_its_repository_back_that_a_crash_undid
     );
 }
 
+/// As above, with a restart between that reads the new file before it reached the disk: a start that finds `o/s`
+/// listed keeps its recorded drain, so a power loss that brings back the old file still drains it.
+#[tokio::test]
+async fn a_start_under_a_config_a_crash_may_undo_keeps_the_drains_of_what_it_lists() {
+    const LEFT: u64 = 79;
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    left_registered_under_the_limit(&github, LEFT, "o/s");
+    assert_eq!(
+        replace_config(&mut engine, CONFIG, written()).await,
+        Ok(Vec::new())
+    );
+    engine.tick(Shutdown::No).await;
+    let unsure = Commit::new(|| Ok(Some("flushing its directory failed".to_owned())));
+    let added_back = replace_config(&mut engine, &two_repositories(), unsure).await;
+    assert_eq!(added_back.map(|warnings| warnings.len()), Ok(1));
+    drop(engine);
+
+    let (mut under_new, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    under_new.recover().await.unwrap();
+    handle.store.flush().await;
+    drop(under_new);
+    let (mut under_old, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    under_old.recover().await.unwrap();
+    github.unblock();
+    under_old.tick(Shutdown::No).await;
+
+    assert!(
+        github.calls().contains(&format!("delete {LEFT}")),
+        "the start under the old file drains o/s and deletes runner {LEFT}"
+    );
+}
+
 /// A config that would have the next start open another history is refused unwritten while a repository drains,
 /// one it removes or one an earlier config removed, as that history knows nothing of the drain. With nothing to
 /// drain, the move is taken.
