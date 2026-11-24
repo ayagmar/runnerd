@@ -135,6 +135,18 @@ impl ClientError {
                 if *status == StatusCode::NOT_FOUND && message == NO_SUCH_ENDPOINT
         )
     }
+
+    /// Whether the daemon is away, as while it restarts, or the connection to it dropped: the same request may
+    /// answer once it is back. An answer the daemon gave, an error or one that is not the API type, is not.
+    pub fn is_outage(&self) -> bool {
+        matches!(
+            self,
+            ClientError::NotRunning(_)
+                | ClientError::Unreachable { .. }
+                | ClientError::Transport(_)
+                | ClientError::Timeout(_)
+        )
+    }
 }
 
 fn transport(error: impl fmt::Display) -> ClientError {
@@ -976,6 +988,60 @@ mod tests {
             "resumed after 7, and says it was opened again"
         );
         assert_eq!(*seen.lock().unwrap(), [None, Some("7".to_owned())]);
+    }
+
+    /// A live page retries an outage and ends on an answer: a read whose connection drops mid-body, or a socket no
+    /// daemon listens on, is an outage; the daemon's own error, a 404 or a 500, is not.
+    #[tokio::test]
+    async fn a_read_cut_off_mid_body_is_an_outage_and_an_error_the_daemon_answers_is_not() {
+        let fake = Fake::serve(
+            Router::new()
+                .route(
+                    "/v1/status",
+                    get(|| async {
+                        Body::from_stream(stream::iter([
+                            Ok(Bytes::from_static(b"{\"budget\":")),
+                            Err(std::io::Error::other("the daemon went away")),
+                        ]))
+                    }),
+                )
+                .route(
+                    "/v1/attention",
+                    get(|| async {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(crate::api::ErrorResponse {
+                                message: "the history cannot be read".to_owned(),
+                            }),
+                        )
+                    }),
+                ),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        let cut = fake.client.get::<crate::api::Status>("/v1/status").await;
+        assert!(
+            cut.as_ref().is_err_and(ClientError::is_outage),
+            "a dropped read is an outage: {cut:?}"
+        );
+        let refused = fake.client.get::<crate::api::Status>("/v1/attention").await;
+        assert!(
+            refused.as_ref().is_err_and(|error| !error.is_outage()),
+            "the daemon's 500 is an answer: {refused:?}"
+        );
+        let missing = fake.client.get::<crate::api::Status>("/v1/nothing").await;
+        assert!(
+            missing.as_ref().is_err_and(|error| !error.is_outage()),
+            "a 404 is an answer: {missing:?}"
+        );
+        let dir = TestDir::new("client-away");
+        let away = Client::new(dir.0.join("runnerd.sock"))
+            .get::<crate::api::Status>("/v1/status")
+            .await;
+        assert!(
+            away.as_ref().is_err_and(ClientError::is_outage),
+            "no daemon on the socket is an outage: {away:?}"
+        );
     }
 
     #[tokio::test]

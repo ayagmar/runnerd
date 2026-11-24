@@ -4,12 +4,16 @@
 //! lacks is sent: a region whose HTML differs, or when only some of its parts (`views::Parts`) do, those parts. On
 //! connecting, the stream skips the regions the page already has, which the page names by digest in its `shown`
 //! signal; after each update the stream sets that signal to what the page shows now, and the time, which live
-//! charts follow. The stream ends when the page closes, its job finishes, the daemon answers with an error (shown as
-//! a notice), every device is signed out (also a notice), or the dashboard stops. When the daemon's events end or have a gap, it fails instead, so the page
-//! connects again and reads the daemon afresh.
+//! charts follow. A read that fails as the daemon is away is tried again with a growing wait, the page keeping what
+//! it shows, and the page's feed (`feed`, ADR 0177) says so; each delivery of the daemon's data, never a keep-alive,
+//! sets when the page's data is from. The stream ends when the page closes, its job finishes, the daemon answers with
+//! an error (shown as a notice), every device is signed out (also a notice), or the dashboard stops; the feed says
+//! which, so the page never claims to retry a stream that ended. When the daemon's events end or have a gap, it
+//! fails instead, so the page connects again and reads the daemon afresh.
+
+pub(crate) mod feed;
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +28,8 @@ use futures_util::{Stream, StreamExt, stream};
 use maud::Markup;
 use runnerd_core::api::{Event, EventEnvelope, EventQuery, Job};
 use runnerd_core::client::{ClientError, Events};
+
+use self::feed::{Ending, Feed};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
@@ -47,15 +53,26 @@ const STATUS_AGE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 }
 /// event, and jobs age out of them. A second in tests, which wait for that.
 const DAY_AGE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
 
+/// How often a page's stream sends a keep-alive comment, which keeps the connection open and delivers nothing. A
+/// second in tests, which wait for one.
+const KEEP_ALIVE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 15 });
+
 type Patches = mpsc::Sender<SseEvent>;
 
-/// How a page's stream ended.
+/// How a page's stream ended. A page's run returns only these, as its `Err`.
 enum End {
-    /// As it should: the page closed, its job finished, or the dashboard is stopping.
-    Done,
+    /// The page closed.
+    Closed,
+    /// For good, as the feed says: the job finished or the dashboard is stopping.
+    Ended(Ending),
+    /// The daemon answered a read with an error, which the page shows; a retry would most likely fail the same way.
+    Refused(ClientError),
     /// The daemon's events stopped or have a gap: the page must connect again and read the daemon afresh.
     Lost,
 }
+
+/// A page's run: it ends only by an `End`.
+type Run = Result<std::convert::Infallible, End>;
 
 /// The page's SSE response. Unless the task marked it done, the body ends in an error rather than cleanly: Datastar
 /// retries a stream that fails, not one that finishes, and so the page connects again.
@@ -74,37 +91,134 @@ fn respond(
             }
         }
     });
-    Sse::new(events).keep_alive(KeepAlive::default())
+    Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
-/// Runs a page's stream for `session` and says how it ended, for `respond`. Signing every device out ends it with
-/// a notice, as a retry would be refused.
+/// A live page.
+#[derive(Debug, Clone, Copy)]
+enum LivePage {
+    Overview,
+    Queue,
+    Job(u64),
+}
+
+impl LivePage {
+    fn name(self) -> &'static str {
+        match self {
+            LivePage::Overview => "overview",
+            LivePage::Queue => "queue",
+            LivePage::Job(_) => "job",
+        }
+    }
+}
+
+/// Runs `page`'s stream for `session`, with the feed of a page whose data is from `shown`, and says how it ended, for
+/// `respond`. Signing every device out ends it with a notice, as a retry would be refused.
 async fn run_page(
+    app: App,
     patches: Patches,
     done: Arc<AtomicBool>,
-    what: &str,
     session: SignedIn,
-    run: impl Future<Output = Result<End, ClientError>>,
+    page: LivePage,
+    shown: Option<Shown>,
 ) {
-    let ended = tokio::select! {
-        ended = run => ended,
-        () = session.signed_out() => {
+    let what = page.name();
+    let mut feed = Feed::connecting(shown.as_ref().map(|shown| shown.at));
+    if send_feed(&patches, &feed).await.is_err() {
+        done.store(true, Ordering::Release);
+        return;
+    }
+    let ended = {
+        let feed = &mut feed;
+        let run = async {
+            let Err(end) = match page {
+                LivePage::Overview => run_overview(&app, &patches, feed, shown).await,
+                LivePage::Queue => run_queue(&app, &patches, feed, shown).await,
+                LivePage::Job(id) => run_job(&app, &patches, feed, id, shown).await,
+            };
+            end
+        };
+        tokio::select! {
+            end = run => Some(end),
+            () = session.signed_out() => None,
+        }
+    };
+    let ending = match ended {
+        None => {
             debug!("{what} stream ended: every device was signed out");
             let notice = views::notice("This browser was signed out", Tone::Failed).into_string();
-            let _ = patches.send(PatchElements::new(notice).write_as_axum_sse_event()).await;
+            let _ = patches
+                .send(PatchElements::new(notice).write_as_axum_sse_event())
+                .await;
+            Ending::SignedOut
+        }
+        Some(End::Closed) => {
             done.store(true, Ordering::Release);
             return;
         }
-    };
-    match ended {
-        Ok(End::Done) => done.store(true, Ordering::Release),
-        Ok(End::Lost) => debug!("{what} stream lost the daemon's events"),
+        Some(End::Ended(why)) => why,
+        Some(End::Lost) => {
+            debug!("{what} stream lost the daemon's events");
+            return;
+        }
         // A retry would most likely fail the same way and replace the notice, so the stream ends with it shown.
-        Err(error) => {
+        Some(End::Refused(error)) => {
             debug!("{what} stream ended: {error}");
             notice(&patches, &error).await;
-            done.store(true, Ordering::Release);
+            Ending::Refused
         }
+    };
+    feed.end(ending);
+    let _ = send_feed(&patches, &feed).await;
+    done.store(true, Ordering::Release);
+}
+
+/// Tells the page what its feed is now.
+async fn send_feed(patches: &Patches, feed: &Feed) -> Result<(), End> {
+    patches
+        .send(PatchSignals::new(feed.patch()).write_as_axum_sse_event())
+        .await
+        .map_err(|_| End::Closed)
+}
+
+/// Reads the daemon with the future `$read` makes, made again for each try, until it answers. A read that fails as
+/// the daemon is away is tried again after the feed's wait (`retry`); an error the daemon answers ends the stream with
+/// it. A macro, not a function taking a closure: each read borrows the page's data, which a closure's future cannot
+/// hold across tries.
+macro_rules! read {
+    ($feed:expr, $patches:expr, $stopping:expr, $read:expr) => {
+        loop {
+            match $read.await {
+                Ok(value) => break Ok(value),
+                Err(error) => {
+                    if let Err(end) = retry($feed, $patches, $stopping, error).await {
+                        break Err(end);
+                    }
+                }
+            }
+        }
+    };
+}
+
+/// After a read failed with `error`: when the daemon is away, the feed says the page retries, keeping what it shows,
+/// and this waits the feed's wait; else the stream ends with the error. The page closing or the dashboard stopping
+/// ends the wait.
+async fn retry(
+    feed: &mut Feed,
+    patches: &Patches,
+    stopping: &mut watch::Receiver<bool>,
+    error: ClientError,
+) -> Result<(), End> {
+    if !error.is_outage() {
+        return Err(End::Refused(error));
+    }
+    debug!("a live read failed, trying again: {error}");
+    let wait = feed.failed(&error);
+    send_feed(patches, feed).await?;
+    tokio::select! {
+        () = tokio::time::sleep(wait) => Ok(()),
+        () = patches.closed() => Err(End::Closed),
+        _ = stopping.wait_for(|stopping| *stopping) => Err(End::Ended(Ending::Stopped)),
     }
 }
 
@@ -248,29 +362,32 @@ impl Sent {
     }
 
     /// Sends what the page lacks of each region, then the `shown` signal: the time, and the digest of each region
-    /// that changed.
+    /// that changed. The feed takes it as a delivery of the daemon's data at `at`, and the signal says so too.
     async fn update(
         &mut self,
         patches: &Patches,
+        feed: &mut Feed,
         at: u64,
         regions: impl IntoIterator<Item = (&'static str, Markup, Parts)>,
-    ) -> Result<(), Closed> {
+    ) -> Result<(), End> {
         let mut shown = serde_json::Map::new();
         shown.insert("at".to_owned(), at.into());
         for (id, markup, parts) in regions {
             if self
                 .region(patches, id, Rendered::new(markup, parts))
-                .await?
+                .await
+                .map_err(|Closed| End::Closed)?
             {
                 let digest = self.0.get(id).map(|sent| digest(&sent.html));
                 shown.insert(id.to_owned(), digest.unwrap_or_default().into());
             }
         }
-        let signals = serde_json::json!({ "shown": shown }).to_string();
+        feed.delivered(at);
+        let signals = serde_json::json!({ "shown": shown, "_feed": feed.json() }).to_string();
         patches
             .send(PatchSignals::new(signals).write_as_axum_sse_event())
             .await
-            .map_err(|_| Closed)
+            .map_err(|_| End::Closed)
     }
 }
 
@@ -315,8 +432,88 @@ async fn next_event(
 ) -> Result<Event, End> {
     tokio::select! {
         event = events.next() => event.map(|envelope| envelope.event).ok_or(End::Lost),
-        () = patches.closed() => Err(End::Done),
-        _ = stopping.wait_for(|stopping| *stopping) => Err(End::Done),
+        () = patches.closed() => Err(End::Closed),
+        _ = stopping.wait_for(|stopping| *stopping) => Err(End::Ended(Ending::Stopped)),
+    }
+}
+
+/// A read of the overview's that a batch of events may call for, each on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Again {
+    Status,
+    Jobs,
+    Queue,
+    Day,
+    Attention,
+}
+
+/// What the overview reads again after a batch of events.
+#[derive(Debug, Default)]
+struct Stale(std::collections::BTreeSet<Again>);
+
+impl Stale {
+    /// Adds the batch's samples to `data`, and says what to read again: what an event says changed, the status when a
+    /// host sample comes and it is `status_old`, and the day's figures when they are `day_old`.
+    fn of(
+        batch: Vec<Event>,
+        data: &mut overview::Overview,
+        status_old: bool,
+        day_old: bool,
+    ) -> Stale {
+        let mut stale = Stale::default();
+        if day_old {
+            stale.0.insert(Again::Day);
+        }
+        for event in batch {
+            match event {
+                Event::JobSample { job, sample } => data.add_job_sample(job, sample),
+                Event::HostSample { sample } => {
+                    data.add_host_sample(sample);
+                    if status_old {
+                        stale.0.insert(Again::Status);
+                    }
+                }
+                Event::AttentionChanged { .. } => {
+                    stale.0.insert(Again::Attention);
+                }
+                Event::LogLine { .. }
+                | Event::CacheReseeded { .. }
+                | Event::RecordCreated { .. }
+                | Event::RecordDeleted { .. }
+                | Event::RecordGone { .. }
+                | Event::RecordSkipped { .. }
+                | Event::SizingChanged { .. }
+                | Event::RunnerFailed { .. } => {}
+                Event::BudgetChanged { .. }
+                | Event::ProfileChanged { .. }
+                | Event::ProfileRemoved { .. }
+                | Event::RepositoryChanged { .. }
+                | Event::RepositoryRemoved { .. } => {
+                    stale.0.insert(Again::Status);
+                }
+                Event::JobStep { .. } => {
+                    stale.0.insert(Again::Jobs);
+                }
+                // The status's queue and slots follow jobs.
+                Event::SlotChanged { .. } => {
+                    stale.0.insert(Again::Jobs);
+                    stale.0.insert(Again::Queue);
+                    stale.0.insert(Again::Status);
+                }
+                // The health figures count the day's jobs too.
+                Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
+                    stale.0.insert(Again::Jobs);
+                    stale.0.insert(Again::Queue);
+                    stale.0.insert(Again::Status);
+                    stale.0.insert(Again::Day);
+                }
+            }
+        }
+        stale
+    }
+
+    fn has(&self, read: Again) -> bool {
+        self.0.contains(&read)
     }
 }
 
@@ -330,22 +527,35 @@ pub(crate) async fn overview(
     let done = Arc::new(AtomicBool::new(false));
     let ended = done.clone();
     tokio::spawn(async move {
-        let run = run_overview(&app, &patches, signals.shown());
-        run_page(patches.clone(), ended, "overview", session, run).await;
+        run_page(
+            app,
+            patches,
+            ended,
+            session,
+            LivePage::Overview,
+            signals.shown(),
+        )
+        .await;
     });
     respond(receiver, done)
 }
 
-async fn run_overview(
-    app: &App,
-    patches: &Patches,
-    shown: Option<Shown>,
-) -> Result<End, ClientError> {
-    // Subscribed before reading, so nothing that happens in between is missed.
-    let events = app.daemon.events(EventQuery::default(), None).await?;
-    let mut events = Box::pin(envelopes(events));
+async fn run_overview(app: &App, patches: &Patches, feed: &mut Feed, shown: Option<Shown>) -> Run {
     let mut stopping = app.stopping.clone();
-    let mut data = overview::Overview::load(&app.daemon, crate::now()).await?;
+    // Subscribed before reading, so nothing that happens in between is missed.
+    let events = read!(
+        feed,
+        patches,
+        &mut stopping,
+        app.daemon.events(EventQuery::default(), None)
+    )?;
+    let mut events = Box::pin(envelopes(events));
+    let mut data = read!(
+        feed,
+        patches,
+        &mut stopping,
+        overview::Overview::load(&app.daemon, crate::now())
+    )?;
     let mut status_read = Instant::now();
     let mut day_read = Instant::now();
     let mut sent = Sent::default();
@@ -355,85 +565,56 @@ async fn run_overview(
     }
     loop {
         data.now = crate::now();
-        if sent
-            .update(patches, data.now, overview::regions(&data))
-            .await
-            .is_err()
-        {
-            return Ok(End::Done);
-        }
-        let first = match next_event(&mut events, patches, &mut stopping).await {
-            Ok(event) => event,
-            Err(end) => return Ok(end),
-        };
+        sent.update(patches, feed, data.now, overview::regions(&data))
+            .await?;
+        let first = next_event(&mut events, patches, &mut stopping).await?;
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
-        let mut jobs_changed = false;
-        let mut queue_changed = false;
-        let mut status_changed = false;
-        let mut day_changed = day_read.elapsed() >= DAY_AGE;
-        let mut attention_changed = false;
-        for event in batch {
-            match event {
-                Event::JobSample { job, sample } => data.add_job_sample(job, sample),
-                Event::HostSample { sample } => {
-                    data.add_host_sample(sample);
-                    status_changed |= status_read.elapsed() >= STATUS_AGE;
-                }
-                Event::AttentionChanged { .. } => attention_changed = true,
-                Event::LogLine { .. }
-                | Event::CacheReseeded { .. }
-                | Event::RecordCreated { .. }
-                | Event::RecordDeleted { .. }
-                | Event::RecordGone { .. }
-                | Event::RecordSkipped { .. }
-                | Event::SizingChanged { .. }
-                | Event::RunnerFailed { .. } => {}
-                Event::BudgetChanged { .. }
-                | Event::ProfileChanged { .. }
-                | Event::ProfileRemoved { .. }
-                | Event::RepositoryChanged { .. }
-                | Event::RepositoryRemoved { .. } => status_changed = true,
-                Event::JobStep { .. } => jobs_changed = true,
-                // The status's queue and slots follow jobs.
-                Event::SlotChanged { .. } => {
-                    jobs_changed = true;
-                    queue_changed = true;
-                    status_changed = true;
-                }
-                // The health figures count the day's jobs too.
-                Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
-                    jobs_changed = true;
-                    queue_changed = true;
-                    status_changed = true;
-                    day_changed = true;
-                }
-            }
-        }
+        let stale = Stale::of(
+            batch,
+            &mut data,
+            status_read.elapsed() >= STATUS_AGE,
+            day_read.elapsed() >= DAY_AGE,
+        );
         // Read again only when an event says it changed, or it is `STATUS_AGE` old: with a long queue the status is
         // large, and most batches are samples.
-        if status_changed {
-            data.status = app.daemon.get("/v1/status").await?;
+        if stale.has(Again::Status) {
+            data.status = read!(feed, patches, &mut stopping, app.daemon.get("/v1/status"))?;
             status_read = Instant::now();
         }
-        if jobs_changed {
-            data.reload_running(&app.daemon).await?;
-            data.recent = overview::read_recent(&app.daemon, &data.status).await?;
+        if stale.has(Again::Jobs) {
+            read!(
+                feed,
+                patches,
+                &mut stopping,
+                data.reload_running(&app.daemon)
+            )?;
+            data.recent = read!(
+                feed,
+                patches,
+                &mut stopping,
+                overview::read_recent(&app.daemon, &data.status)
+            )?;
         }
         // Which queued jobs have a page: again when the queue may have changed, never for a step alone, and when the
         // status shows a job the last read did not ask about or that read failed.
-        if queue_changed || data.local.stale(&data.status) {
+        if stale.has(Again::Queue) || data.local.stale(&data.status) {
             data.local = LocalPages::read(&app.daemon, &data.status).await;
         }
-        if attention_changed {
-            data.attention = app.daemon.attention().await?;
+        if stale.has(Again::Attention) {
+            data.attention = read!(feed, patches, &mut stopping, app.daemon.attention())?;
         }
-        if day_changed {
-            data.reload_day(&app.daemon, crate::now()).await?;
+        if stale.has(Again::Day) {
+            read!(
+                feed,
+                patches,
+                &mut stopping,
+                data.reload_day(&app.daemon, crate::now())
+            )?;
             day_read = Instant::now();
         }
         if !open {
-            return Ok(End::Lost);
+            return Err(End::Lost);
         }
     }
 }
@@ -448,8 +629,15 @@ pub(crate) async fn queue(
     let done = Arc::new(AtomicBool::new(false));
     let ended = done.clone();
     tokio::spawn(async move {
-        let run = run_queue(&app, &patches, signals.shown());
-        run_page(patches.clone(), ended, "queue", session, run).await;
+        run_page(
+            app,
+            patches,
+            ended,
+            session,
+            LivePage::Queue,
+            signals.shown(),
+        )
+        .await;
     });
     respond(receiver, done)
 }
@@ -458,12 +646,22 @@ pub(crate) async fn queue(
 /// latest once it is `STATUS_AGE` old, event or not; every read renders the waits as they have grown. Which jobs have
 /// a page is read again with a job event, and when the status shows a job the last read did not ask about or that
 /// read failed.
-async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result<End, ClientError> {
-    // Subscribed before reading, so nothing that happens in between is missed.
-    let events = app.daemon.events(EventQuery::default(), None).await?;
-    let mut events = Box::pin(envelopes(events));
+async fn run_queue(app: &App, patches: &Patches, feed: &mut Feed, shown: Option<Shown>) -> Run {
     let mut stopping = app.stopping.clone();
-    let mut data = QueueView::load(&app.daemon, crate::now()).await?;
+    // Subscribed before reading, so nothing that happens in between is missed.
+    let events = read!(
+        feed,
+        patches,
+        &mut stopping,
+        app.daemon.events(EventQuery::default(), None)
+    )?;
+    let mut events = Box::pin(envelopes(events));
+    let mut data = read!(
+        feed,
+        patches,
+        &mut stopping,
+        QueueView::load(&app.daemon, crate::now())
+    )?;
     let mut status_read = Instant::now();
     let mut sent = Sent::default();
     if let Some(shown) = shown {
@@ -472,21 +670,13 @@ async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result
     }
     loop {
         data.now = crate::now();
-        if sent
-            .update(patches, data.now, queue::regions(&data))
-            .await
-            .is_err()
-        {
-            return Ok(End::Done);
-        }
+        sent.update(patches, feed, data.now, queue::regions(&data))
+            .await?;
         // The status is read again by `STATUS_AGE` whether or not an event comes: a host whose slice cannot be read
         // sends no samples.
         let deadline = tokio::time::sleep_until((status_read + STATUS_AGE).into());
         let first = tokio::select! {
-            event = next_event(&mut events, patches, &mut stopping) => match event {
-                Ok(event) => Some(event),
-                Err(end) => return Ok(end),
-            },
+            event = next_event(&mut events, patches, &mut stopping) => Some(event?),
             () = deadline => None,
         };
         let mut batch: Vec<Event> = first.into_iter().collect();
@@ -520,14 +710,14 @@ async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result
             }
         }
         if status_changed {
-            data.status = app.daemon.get("/v1/status").await?;
+            data.status = read!(feed, patches, &mut stopping, app.daemon.get("/v1/status"))?;
             status_read = Instant::now();
         }
         if jobs_changed || data.local.stale(&data.status) {
             data.local = LocalPages::read(&app.daemon, &data.status).await;
         }
         if !open {
-            return Ok(End::Lost);
+            return Err(End::Lost);
         }
     }
 }
@@ -543,8 +733,15 @@ pub(crate) async fn job(
     let done = Arc::new(AtomicBool::new(false));
     let ended = done.clone();
     tokio::spawn(async move {
-        let run = run_job(&app, &patches, id, signals.shown());
-        run_page(patches.clone(), ended, "job", session, run).await;
+        run_page(
+            app,
+            patches,
+            ended,
+            session,
+            LivePage::Job(id),
+            signals.shown(),
+        )
+        .await;
     });
     respond(receiver, done)
 }
@@ -592,23 +789,28 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String], shown: &m
 async fn run_job(
     app: &App,
     patches: &Patches,
+    feed: &mut Feed,
     id: u64,
     shown: Option<Shown>,
-) -> Result<End, ClientError> {
-    let events = app
-        .daemon
-        .events(
-            EventQuery {
-                job: Some(id),
-                logs: true,
-            },
-            None,
-        )
-        .await?;
-    let mut events = Box::pin(envelopes(events));
+) -> Run {
     let mut stopping = app.stopping.clone();
-    let mut data =
-        JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default()).await?;
+    let query = EventQuery {
+        job: Some(id),
+        logs: true,
+    };
+    let events = read!(
+        feed,
+        patches,
+        &mut stopping,
+        app.daemon.events(query.clone(), None)
+    )?;
+    let mut events = Box::pin(envelopes(events));
+    let mut data = read!(
+        feed,
+        patches,
+        &mut stopping,
+        JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default())
+    )?;
     let mut next_line = data.log_from + data.log.len() as u64;
     // The lines after the page's last, which the page names, so each line shows once whether the page got it from
     // its render or from an earlier connection this one retries. A page that names none, or one too far behind,
@@ -628,7 +830,7 @@ async fn run_job(
         patches.send(tail.write_as_axum_sse_event()).await.is_ok()
     };
     if !sent_log {
-        return Ok(End::Done);
+        return Err(End::Closed);
     }
     let mut sent = Sent::default();
     if let Some(shown) = shown {
@@ -637,25 +839,21 @@ async fn run_job(
     }
     loop {
         data.now = crate::now();
-        if sent
-            .update(patches, data.now, job::regions(&data))
-            .await
-            .is_err()
-        {
-            return Ok(End::Done);
-        }
+        sent.update(patches, feed, data.now, job::regions(&data))
+            .await?;
         if data.job.summary.state.is_final() {
             // The parts a running job's page lacks: its failure, its outlined log, the comparison and the record.
-            let full =
-                JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default()).await?;
+            let full = read!(
+                feed,
+                patches,
+                &mut stopping,
+                JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default())
+            )?;
             let finished = PatchElements::new(job::finished(&full).into_string());
             let _ = patches.send(finished.write_as_axum_sse_event()).await;
-            return Ok(End::Done);
+            return Err(End::Ended(Ending::Finished));
         }
-        let first = match next_event(&mut events, patches, &mut stopping).await {
-            Ok(event) => event,
-            Err(end) => return Ok(end),
-        };
+        let first = next_event(&mut events, patches, &mut stopping).await?;
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
         let mut changed = false;
@@ -665,7 +863,7 @@ async fn run_job(
             match event {
                 // A line skipped means the daemon dropped some for this stream: the page connects again and gets
                 // them from the stored log.
-                Event::LogLine { line, .. } if line > next_line => return Ok(End::Lost),
+                Event::LogLine { line, .. } if line > next_line => return Err(End::Lost),
                 Event::LogLine { line, text, .. } if line == next_line => {
                     next_line = line + 1;
                     lines.push(text);
@@ -679,14 +877,19 @@ async fn run_job(
             }
         }
         if !append_lines(patches, first_line, &lines, &mut shown_lines).await {
-            return Ok(End::Done);
+            return Err(End::Closed);
         }
         if changed {
-            let read = app.daemon.get::<Job>(&format!("/v1/jobs/{id}")).await?;
-            data.job.reread(read);
+            let job = read!(
+                feed,
+                patches,
+                &mut stopping,
+                app.daemon.get::<Job>(&format!("/v1/jobs/{id}"))
+            )?;
+            data.job.reread(job);
         }
         if !open {
-            return Ok(End::Lost);
+            return Err(End::Lost);
         }
     }
 }

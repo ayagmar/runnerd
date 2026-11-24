@@ -12,6 +12,7 @@ use runnerd_core::config::Peer;
 
 use crate::assets;
 use crate::format;
+use crate::live::feed::{self, Feed};
 
 pub(crate) mod caches;
 pub(crate) mod config;
@@ -201,6 +202,26 @@ pub(crate) struct Here<'page> {
     pub(crate) peers: &'page [Peer],
 }
 
+/// The live page's badge: what the stream says of the page's data (`live::feed`, ADR 0177), and whether the stream
+/// is connected at all, which only the page knows; an ended feed is never "connecting again". The feed and the
+/// indicator come before the init: they have to be there when the request starts.
+fn connection(live: &Live<'_>) -> Markup {
+    let feed = Feed::connecting(Some(live.at));
+    html! {
+        span.connection data-signals:_feed=(feed.json().to_string()) data-indicator:_live=""
+            data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: {}}})", live.url, feed::MAX_WAIT.as_millis()))
+            data-class:online="$_live && $_feed.state == 'current'"
+            data-attr:data-feed="$_feed.ended || $_live ? $_feed.state : 'offline'"
+            data-attr:title="$_feed.ended || $_live ? $_feed.title : $_feed.offline_title" {
+            span.dot aria-hidden="true" {}
+            span.feed-label data-text="$_feed.ended || $_live ? $_feed.label : $_feed.offline" { "Connecting" }
+            span.feed-since data-show="$_feed.since != '' && !($_live && $_feed.state == 'current')"
+                data-text="$_feed.since" {}
+            a.feed-reload href="" data-show="$_feed.reload" { "Reload" }
+        }
+    }
+}
+
 /// A full page: the navigation, `main`, and, with `live`, the event stream that keeps its regions current.
 pub(crate) fn page(
     title: &str,
@@ -259,16 +280,7 @@ pub(crate) fn page(
                         }
                     }
                     div.tools {
-                        @if let Some(live) = live {
-                            // The indicator before the init: it has to listen when the request starts.
-                            span.connection data-indicator:_live=""
-                                data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: 10000}})", live.url))
-                                data-class:online="$_live"
-                                data-attr:title="$_live ? 'Updates as it happens' : 'Not connected; retrying'" {
-                                span.dot aria-hidden="true" {}
-                                span data-text="$_live ? 'Live' : 'Offline'" { "Live" }
-                            }
-                        }
+                        @if let Some(live) = live { (connection(live)) }
                         button.tool type="button" data-open-palette aria-label="Commands" aria-keyshortcuts="Control+K" title="Commands (Ctrl K)" {
                             svg viewBox="0 0 20 20" aria-hidden="true" {
                                 circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2" {}

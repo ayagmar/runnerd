@@ -5,7 +5,8 @@
 // page, last, followed only while the reader is at its newest line, and holds the reader's line as lines above go;
 // "Jump to newest" moves nothing; reseeding a snapshot asks first; a chart card holds its labels at a laptop's
 // widths; and every queued job is a row of the queue's page, reached from the overview whenever it shows fewer, by
-// keyboard and finger, as jobs leave it.
+// keyboard and finger, as jobs leave it; and the live badge says "Retrying" while a dropped read is tried again,
+// keeping the page and its focus, and "Finished" on a finished job's page.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -584,6 +585,65 @@ try {
     );
     await phone.context.close();
     stopDemo(leaving);
+  }
+  // The live badge says what the stream says of the page's data: "Retrying" while a read is tried again, the page
+  // and its focus kept, and "Live" once it answers; a finished job's page says so, with no claim to connect again.
+  {
+    const dropping = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_DROP_EVERY: '5' });
+    const { context, page } = await signedIn(sizes[0], dropping.cookies);
+    await page.goto(new URL('/', dropping.login).href);
+    const feed = (state, timeout = 9000) =>
+      page
+        .waitForSelector(`.connection[data-feed="${state}"]`, { timeout })
+        .then(() => true, () => false);
+    check(await feed('current'), `${sizes[0].name}: the overview's badge is current once the stream delivers`);
+    // Outside the regions, which re-render with the data anyway: a recovery that reloaded the page would lose both.
+    const focused = page.locator('header nav a[href]').first();
+    await focused.focus();
+    await page.evaluate(() => {
+      window.notReloaded = true;
+    });
+    const retrying = await feed('retrying');
+    const during = await page.evaluate(() => ({
+      label: document.querySelector('.connection .feed-label').textContent,
+      since: document.querySelector('.connection .feed-since').checkVisibility()
+        ? document.querySelector('.connection .feed-since').textContent
+        : '',
+      regions: document.querySelectorAll('#main section[id]').length,
+    }));
+    check(
+      retrying && during.label === 'Retrying' && during.since.startsWith('as of ') && during.regions > 0,
+      `${sizes[0].name}: a dropped read shows "${during.label}" with the data's time (${during.since}), the page kept`,
+    );
+    const back = await feed('current');
+    const kept = await focused.evaluate((element) => element === document.activeElement && window.notReloaded === true);
+    const label = await page.locator('.connection .feed-label').textContent();
+    check(back && label === 'Live' && kept, `${sizes[0].name}: the read answers, the badge is ${label}, the page and its focus kept`);
+    await context.close();
+    stopDemo(dropping);
+
+    const finishing = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_FINISH_AFTER: '8' });
+    const job = await signedIn(sizes[0], finishing.cookies);
+    await job.page.goto(new URL('/', finishing.login).href);
+    const running = await job.page.locator('#slots a[href^="/jobs/"]').first().getAttribute('href');
+    await job.page.goto(new URL(running, finishing.login).href);
+    const live = await job.page
+      .waitForSelector('.connection[data-feed="current"]', { timeout: 9000 })
+      .then(() => true, () => false);
+    const done = await job.page
+      .waitForSelector('.connection[data-feed="finished"]', { timeout: 15000 })
+      .then(() => true, () => false);
+    const badge = await job.page.evaluate(() => ({
+      label: document.querySelector('.connection .feed-label').textContent,
+      title: document.querySelector('.connection').title,
+      reload: document.querySelector('.connection .feed-reload').checkVisibility(),
+    }));
+    check(
+      live && done && badge.label === 'Finished' && !/again/.test(badge.title) && !badge.reload,
+      `${sizes[0].name}: a job that finishes while its page is open says ${badge.label}, not that it retries ("${badge.title}")`,
+    );
+    await job.context.close();
+    stopDemo(finishing);
   }
 } finally {
   // From the spawn on, so a browser that fails to start, or a demo that never signs in, leaves no demo running.

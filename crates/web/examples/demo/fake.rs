@@ -104,6 +104,9 @@ pub struct Fixtures {
     pub older: bool,
     /// Fail a list of the history's queued jobs with a 500, as a history that cannot be read.
     pub queued_list_fails: bool,
+    /// How many of the next reads of each path, such as `/v1/status`, are cut off mid-body, as when the daemon goes
+    /// away while it answers.
+    pub drops: BTreeMap<String, u32>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -837,6 +840,7 @@ impl Fixtures {
             action_answer: None,
             older: false,
             queued_list_fails: false,
+            drops: BTreeMap::new(),
         }
     }
 
@@ -2105,6 +2109,7 @@ fn router(fake: Fake) -> Router {
         .route("/v1/events", get(events))
         .fallback(|| async { no_such_endpoint() })
         .layer(axum::middleware::from_fn_with_state(fake.clone(), as_older))
+        .layer(axum::middleware::from_fn_with_state(fake.clone(), dropping))
         .with_state(fake)
 }
 
@@ -2166,6 +2171,32 @@ async fn as_older(
         return no_such_endpoint();
     }
     next.run(request).await
+}
+
+/// While [`Fixtures::drops`] counts a path's reads, each is cut off after its first bytes.
+async fn dropping(
+    State(fake): State<Fake>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let dropped = {
+        let mut fixtures = fake.fixtures.lock().unwrap();
+        match fixtures.drops.get_mut(request.uri().path()) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !dropped {
+        return next.run(request).await;
+    }
+    let body = stream::iter([
+        Ok(axum::body::Bytes::from_static(b"{")),
+        Err(std::io::Error::other("the daemon went away")),
+    ]);
+    axum::body::Body::from_stream(body).into_response()
 }
 
 /// Serves the fake daemon on a new socket at `path` until the runtime stops.

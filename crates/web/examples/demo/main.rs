@@ -47,7 +47,11 @@ async fn main() {
     busy_desktop(&fake);
     scene(&fake);
     queue(&fake);
-    let start_every = start_every();
+    let scenes = Scenes {
+        start_every: start_every(),
+        drop_every: every("RUNNERD_DEMO_DROP_EVERY"),
+        finish_after: every("RUNNERD_DEMO_FINISH_AFTER"),
+    };
     // About what the doctor's reads of the host take with a few repositories.
     fake.fixtures.lock().unwrap().doctor_delay = Duration::from_millis(700);
     fake::serve(&socket, fake.clone());
@@ -115,9 +119,7 @@ async fn main() {
                 events.push(host_sample(&mut fixtures, n, at));
             }
         }
-        if start_every.is_some_and(|every| n.is_multiple_of(every)) {
-            events.extend(start_oldest(&fake));
-        }
+        events.extend(scenes.at_second(&fake, n, at));
         for event in events {
             let _ = fake.events.send(EventEnvelope {
                 id: None,
@@ -145,7 +147,68 @@ fn host_sample(fixtures: &mut fake::Fixtures, n: u64, at: u64) -> Event {
 
 /// `RUNNERD_DEMO_START_EVERY`, when it is a number of seconds.
 fn start_every() -> Option<u64> {
-    std::env::var("RUNNERD_DEMO_START_EVERY")
+    every("RUNNERD_DEMO_START_EVERY")
+}
+
+/// What the environment asks to happen over time, by second.
+struct Scenes {
+    start_every: Option<u64>,
+    drop_every: Option<u64>,
+    finish_after: Option<u64>,
+}
+
+impl Scenes {
+    /// What happens in second `n`, at `at`: its events.
+    fn at_second(&self, fake: &fake::Fake, n: u64, at: u64) -> Vec<Event> {
+        let mut events = Vec::new();
+        if self
+            .start_every
+            .is_some_and(|every| n.is_multiple_of(every))
+        {
+            events.extend(start_oldest(fake));
+        }
+        if self.finish_after == Some(n) {
+            events.extend(finish_running(fake, at));
+        }
+        if self.drop_every.is_some_and(|every| n.is_multiple_of(every)) {
+            events.push(drop_status(fake));
+        }
+        events
+    }
+}
+
+/// The daemon away for a moment: the next two reads of the status drop, and the budget's event, returned, asks for
+/// one.
+fn drop_status(fake: &fake::Fake) -> Event {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    fixtures.drops.insert("/v1/status".to_owned(), 2);
+    Event::BudgetChanged {
+        budget: fixtures.status.budget.clone(),
+    }
+}
+
+/// Every running job completes at `at`, successfully; their events.
+fn finish_running(fake: &fake::Fake, at: u64) -> Vec<Event> {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let mut events = Vec::new();
+    for job in &mut fixtures.jobs {
+        if job.summary.state == JobState::Running {
+            job.summary.state = JobState::Completed;
+            job.summary.conclusion = Some("success".to_owned());
+            job.summary.timeline.finished_at = Some(at);
+            events.push(Event::JobFinished {
+                job: job.summary.clone(),
+            });
+        }
+    }
+    events
+}
+
+/// The environment variable `name`, when it is a number of seconds: `RUNNERD_DEMO_START_EVERY`;
+/// `RUNNERD_DEMO_DROP_EVERY`, how often the overview's status read drops twice before it answers; and
+/// `RUNNERD_DEMO_FINISH_AFTER`, when every running job completes.
+fn every(name: &str) -> Option<u64> {
+    std::env::var(name)
         .ok()
         .and_then(|every| every.parse::<u64>().ok())
         .filter(|every| *every > 0)

@@ -351,6 +351,25 @@ html {
   animation: beat 2s var(--ease) infinite;
 }
 
+.connection[data-feed='retrying'] .dot,
+.connection[data-feed='offline'] .dot {
+  background: var(--wait);
+}
+
+.connection[data-feed='signed-out'] .dot,
+.connection[data-feed='refused'] .dot,
+.connection[data-feed='stopped'] .dot {
+  background: var(--failure-ink);
+}
+
+.connection .feed-since {
+  color: var(--muted);
+}
+
+.connection .feed-reload {
+  color: var(--ink);
+}
+
 @keyframes beat {
   50% {
     opacity: 0.35;
