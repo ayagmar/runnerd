@@ -55,6 +55,29 @@ LAST_JOB_FILE=/state/.runnerd-last-job
 # `held=<bytes> share=<GiB>`.
 STORE_REPORT_FILE=/run/runnerd-docker-store
 
+# On the slot's volume, written by job-cleanup.sh once a run of it reached its end with every step done, holding the
+# Docker budget in GB it kept the store within; the entrypoint removes it before the runner starts. A container
+# stopped before its job's cleanup ended leaves none. The slot's next container skips the cleanup only with the
+# marker, a budget no lower, and an Engine that holds no container or volume, which a process of the job's may have
+# started after the cleanup, or a container of an image from before the marker, which never removes it, may have
+# left (cleaned_up, store_clean, docs/adr/0169).
+CLEAN_MARKER=/state/.runnerd-cleaned
+
+# Whether the slot's last container cleaned its Docker store up to the end (CLEAN_MARKER) within a budget no larger
+# than DOCKER_BUDGET_GB.
+cleaned_up() {
+    local budget
+    budget=$(cat "$CLEAN_MARKER" 2> /dev/null) || return 1
+    [[ $budget =~ ^[0-9]+$ ]] && [ "$budget" -le "$DOCKER_BUDGET_GB" ]
+}
+
+# Whether the container's Docker Engine answers and holds no container and no volume.
+store_clean() {
+    local held
+    held=$(docker ps -aq && docker volume ls -q) || return 1
+    [ -z "$held" ]
+}
+
 # The runner's workspace, and the slot's own on its volume, which the entrypoint binds over it when runnerd asks for
 # the slot's own pnpm store (RUNNERD_PNPM_SLOT_STORE, docs/adr/0167). The store is in the workspace, at the root of
 # the mount, where pnpm would put it itself: one mount, so pnpm links its packages into node_modules, not copies them.

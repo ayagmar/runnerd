@@ -36,8 +36,12 @@ install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 
 start_docker
 
-# Whatever the slot's last job left in its Docker Engine, if that job's container was stopped before its cleanup.
-runnerd-job-cleanup
+# Whatever the slot's last job left in its Docker Engine, unless its cleanup ran to its end within a budget no larger
+# than this one and the Engine holds no container or volume (CLEAN_MARKER). The marker goes before any job runs.
+if ! { cleaned_up && store_clean > /dev/null 2>&1; }; then
+    runnerd-job-cleanup
+fi
+rm -f "$CLEAN_MARKER"
 
 # The config registers this runner for one job, after which GitHub removes the runner. It is read once, and the
 # file goes before any job runs.
