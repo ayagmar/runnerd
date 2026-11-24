@@ -1,9 +1,9 @@
-# 0169. A runner container skips work its job does not need
+# 0170. A runner container skips work its job does not need
 
 Status: **Accepted** (2026-11-24). Amends [0054](0054-slot-docker-stores-share-the-disk.md),
 [0089](0089-a-slots-cache-mounts-go-last.md), [0156](0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md).
-Adds the profile key `tmp_tmpfs`, `RunnerSpec::tmp_tmpfs`, `docker::tmp_tmpfs` and the slot file
-`/state/.runnerd-cleaned`.
+Adds the profile key `tmp_tmpfs`, `config::TMP_TMPFS_MIN`, `RunnerSpec::tmp_tmpfs`, `docker::tmp_tmpfs` and the
+runner container label `runnerd.tmp-tmpfs`.
 
 ## Context
 
@@ -13,10 +13,9 @@ Three things every runner container does cost more than the job needs:
   runner container and passes over `_diag` five times a second. Each pass ended in `sleep 0.2`, and each page file it
   looked at went through a command substitution: at least one process, often three, per container per pass. With 20
   runners that is over 100 processes a second that do nothing.
-- **The Docker cleanup runs twice per job.** `job-cleanup.sh` runs from the job-completed hook and again when the
-  slot's next container starts, for a container stopped before its hook. Each run makes three `docker builder prune`
-  calls, prunes volumes and networks, and walks the slot's Docker store with `du` once or twice, whether or not the
-  job used Docker. The run at start delays the runner's registration, so every job waits for it.
+- **The Docker cleanup does work the cache does not call for.** `job-cleanup.sh` runs from the job-completed hook and
+  again when the slot's next container starts. Each run makes three `docker builder prune` calls and walks the slot's
+  Docker store with `du` once or twice, whether or not the job built anything.
 - **`/tmp` is on disk.** What jobs write to `/tmp` and `/var/tmp` goes to the container's writable layer on the
   host's disk, and is deleted when the container goes. Compilers, test runners and package managers put large,
   short-lived files there.
@@ -24,30 +23,42 @@ Three things every runner container does cost more than the job needs:
 ## Decision
 
 - **The capture waits with `read -t 0.2` on a pipe it holds both ends of** (`exec {tick}<> <(:)`, once): bash's
-  builtin, no process, and never an end of file, which would turn the wait into a busy loop. A `read` that fails
-  rather than times out, as without `/dev/fd`, falls back to `sleep 0.2`. Page numbers come from a function that sets
-  a variable instead of a command substitution. The output and the resume protocol are unchanged. Not `python3`, which
-  would hold about 10 MB in every container and is not something a custom image must have.
-- **The cleanup leaves a marker when it ran to its end.** `job-cleanup.sh` writes the Docker budget it kept the store
-  within to `/state/.runnerd-cleaned` once every Docker step succeeded. The entrypoint removes the marker before the
-  runner starts. When a container starts, it skips the cleanup only if all of these hold:
-  - the marker is there, so the last container that removed it reached the end of a cleanup after its job;
-  - the marker's budget is no larger than this container's, so a store kept within it is within this one;
-  - the Engine answers and holds no container and no volume. A process of the job's that outlived the
-    job-completed hook can start one before the entrypoint kills it, and a container of an image from before this
-    change never removes the marker, so a marker alone does not say what that container's job left.
+  builtin, no process, and never an end of file, which would turn the wait into a busy loop. Where the pipe cannot be
+  opened, as without `/dev/fd`, the script chooses `sleep 0.2` once, quietly, instead of failing a `read` on every
+  pass. Page numbers come from a function that sets a variable instead of a command substitution. The output and the
+  resume protocol are unchanged. Not `python3`, which would hold about 10 MB in every container and is not something
+  a custom image must have.
+- **The cleanup still runs when a container starts.** A marker of a finished cleanup, letting the next container
+  skip its own, was weighed and dropped: the hook runs before the entrypoint ends the job's last processes, so a
+  process of the job's can change the store after the marker; a container of an older image neither writes nor
+  removes it; and a host crash can leave a marker the next container should not trust. Proving that the slot's
+  immediately preceding runner wrote it, after its processes ended, and removing it durably before the next job, is
+  more than the start-up time it saves.
 - **The cleanup prunes only what the build cache holds.** One call, `GET /system/df?type=build-cache` (Engine API
-  1.42), lists the cache's records. The cleanup prunes build contexts only when there are any, git checkouts likewise,
-  and layers to half the budget only when the records no image shares hold at least half the budget: BuildKit counts
-  the same records against `--max-used-space` and removes nothing below it (`cache/manager.go`, `prune`). When that
-  prune does not run, the store's size the job's report measured stands, and the store is not walked a second time.
-  When the Engine does not list its cache, every prune runs, as before.
+  1.42), given 10 seconds, lists the cache's records. The cleanup prunes build contexts only when some record is of
+  that type, git checkouts likewise, and layers to half the budget only when some record is a layer and the records
+  no image shares hold at least half the budget. That is what BuildKit weighs against `--max-used-space`, and below
+  it the prune removes nothing (`cache/manager.go`, `prune`); records images share still name the types, as
+  `prune -af` takes them as candidates. When that layer prune does not run, the store's size the job's report
+  measured stands, and the store is not walked a second time. When the Engine does not answer in time, or answers
+  without a list of records that each have a type and a size, every prune runs, as before.
+- **A store the cleanup cannot measure is reported unmeasured.** A failed `du` leaves no report, which the
+  entrypoint prints as `runnerd: docker store unmeasured`, instead of a size of 0 that the Docker shares would read
+  as a store holding nothing ([0156](0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)).
 - **A profile may put `/tmp` and `/var/tmp` on `tmpfs`: `tmp_tmpfs = "2G"`, off by default.** The size bounds both
-  together: three quarters to `/tmp`, a quarter to `/var/tmp`. Each is mounted `rw,exec,nosuid,nodev,mode=1777`
-  through `HostConfig.Tmpfs`, which every Docker API version takes. Docker mounts a `tmpfs` `noexec` unless told, and
-  jobs run what they build in `/tmp`, such as `go test`'s binaries. A `Mount` of type `tmpfs` can only say `exec`
-  from API 1.46 (`TmpfsOptions.Options`). The config refuses a `tmp_tmpfs` of 0, which `tmpfs` reads as no bound, and
-  one not below the profile's `memory` and `min_memory`.
+  together: a quarter to `/var/tmp` and the rest to `/tmp`, each down to whole 64 KiB, which every page size Linux
+  uses divides, so the kernel's rounding up to a page never takes the two past the bound. Each is mounted
+  `rw,exec,nosuid,nodev,mode=1777` through `HostConfig.Tmpfs`, which every Docker API version takes. Docker mounts a
+  `tmpfs` `noexec` unless told (`daemon/oci_linux.go`; a later `exec` wins in `MergeTmpfsOptions`), and jobs run what
+  they build in `/tmp`, such as `go test`'s binaries. A `Mount` of type `tmpfs` can only say `exec` from API 1.46
+  (`TmpfsOptions.Options`).
+- **`tmp_tmpfs` is at least `1M` and needs a `min_memory` above it.** Below `1M` the split would not leave whole
+  pages; 0 is refused too, as `tmpfs` reads it as no bound. `memory` is never below `min_memory`, and `min_memory` is
+  where sizing advice and auto sizing stop lowering it, so neither a hand edit nor an applied advice can leave the
+  tmpfs as large as the memory it comes out of, and no advice is one the config check then refuses.
+- **A runner keeps the bound it started with**, in its occupant and in its container's label `runnerd.tmp-tmpfs`,
+  which a restart reads back. An idle runner whose bound a reload changed, turned on, resized or off, is replaced, as
+  one whose memory or labels changed is; a running job keeps its container.
 - **Never `_diag` or `_work` on `tmpfs`.** runnerd reads a stopped runner's `Worker_*.log` from `_diag` through
   Docker's archive API, which a `tmpfs` loses when the container stops. `_work` holds the tool cache's layer mount and
   the workspace a failed job's record keeps, and a slot's own pnpm store binds over it
@@ -60,18 +71,17 @@ Three things every runner container does cost more than the job needs:
 
 - **`tmp_tmpfs` is memory.** A `tmpfs` page counts against the container's memory limit as shared memory, which the
   kernel cannot reclaim but by swapping, and runners have no swap. A job that fills `/tmp` has that much less memory
-  for its processes, and one that needs both is killed for memory instead of filling the disk. Auto sizing may lower
-  a profile's `memory` below `tmp_tmpfs` when `min_memory` is unset; set `min_memory` to keep the bound below it. This
-  is why the key is off by default: the profiles that gain are the ones whose jobs write large temporary files and
-  have the memory to spare.
+  for its processes, and one that needs both is killed for memory instead of filling the disk. This is why the key
+  is off by default: the profiles that gain are the ones whose jobs write large temporary files and have the memory
+  to spare.
 - **A job that fills `/tmp` past the bound fails with "No space left on device"**, where on disk it would have gone
   on. The runner's own temporary directory, `_work/_temp`, stays on disk.
-- **A skipped cleanup at start can leave a build cache over its budget** when the last container was one of an
-  older image and was stopped mid-job, or when a job ran `sudo runnerd-job-cleanup` itself and then built more and
-  was stopped. BuildKit's GC policy, which follows the same budget, and the next job's cleanup remove it. Containers
-  and volumes are never left: the start checks for them.
-- **Only images with this change skip anything.** The marker and the prune checks live in the image; older images
-  clean up twice and prune everything, as before. `tmp_tmpfs` needs no new image.
+- **The capture still forks for each kept page on each pass**: `stat` reads the page's size, and `tail` and `head`
+  copy what grew. Only the wait and the page numbers stopped forking.
+- **Only images with this change prune less.** The prune checks live in the image; older images prune everything,
+  as before. `tmp_tmpfs` needs no new image.
+- **A daemon before this change refuses a config with `tmp_tmpfs`**, as it refuses any key it does not know: remove
+  the key before going back to one.
 
 ## Not done
 
@@ -88,11 +98,11 @@ Three things every runner container does cost more than the job needs:
   would sit outside the GC policy written to `daemon.json` and outside `docker builder prune`. Keeping one needs the
   cleanup to spare that container and volume by name, its own prune against the budget, and a way to make
   `docker/setup-buildx-action`, which creates its own builder per job, use it. That is a change of its own.
+- **Skipping the cleanup at start**, above.
 
 ## Consequences
 
-- The capture makes no process while it waits; a running container forks for its log only when a page grew.
-- A container whose slot's last job ended cleanly starts its runner after two `docker` calls instead of a full
-  cleanup. A job-end cleanup of a job that built nothing makes one API call instead of three prunes, and walks the
-  store once.
+- The capture makes no process while it waits.
+- A cleanup in a slot whose cache holds no build contexts, no git checkouts and less than half the budget makes one
+  API call instead of three prunes, and after a job walks the store once.
 - A profile with `tmp_tmpfs` writes nothing of `/tmp` and `/var/tmp` to the host's disk.

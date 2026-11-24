@@ -676,14 +676,16 @@ always returns, so the daemon closes and flushes the history.
   and the check removes the volumes of slots past their profile's count. A store whose engine does not start is
   emptied ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md),
-  [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)). The cleanup prunes only
-  what the build cache's records hold, and one that ran to its end leaves `/state/.runnerd-cleaned` with its budget;
-  the slot's next container skips its own cleanup when that marker is there, its budget is no lower, and the engine
-  holds no container or volume ([ADR 0169](docs/adr/0169-a-runner-container-skips-work-its-job-does-not-need.md)).
-- A profile's `tmp_tmpfs` puts its runners' `/tmp` and `/var/tmp` on `tmpfs`, three quarters and a quarter of it,
-  `exec`, through `HostConfig.Tmpfs` (`docker::tmp_tmpfs`); off by default, as the pages count against the
-  container's memory. Never `_diag`, which runnerd reads from a stopped runner, nor `_work`
-  ([ADR 0169](docs/adr/0169-a-runner-container-skips-work-its-job-does-not-need.md)).
+  [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)). The cleanup, which runs
+  after every job and again when a container starts, prunes only what the build cache's records hold, and reports a
+  store it could not measure as unmeasured
+  ([ADR 0170](docs/adr/0170-a-runner-container-skips-work-its-job-does-not-need.md)).
+- A profile's `tmp_tmpfs` puts its runners' `/tmp` and `/var/tmp` on `tmpfs`, a quarter of it to `/var/tmp` and the
+  rest to `/tmp` in whole 64 KiB, `exec`, through `HostConfig.Tmpfs` (`docker::tmp_tmpfs`); off by default, as the
+  pages count against the container's memory. It needs a `min_memory` above it, where sizing stops lowering. A runner
+  carries its bound in its occupant and the label `runnerd.tmp-tmpfs`, and an idle one is replaced when a reload
+  changes it. Never `_diag`, which runnerd reads from a stopped runner, nor `_work`
+  ([ADR 0170](docs/adr/0170-a-runner-container-skips-work-its-job-does-not-need.md)).
 - A runner keeps pnpm's store where one value says, `cache::PnpmStore::of`, which both its mounts
   (`cache::runner_mounts`) and its environment follow: the slot's own when `[caches] pnpm.store` is `"slot"`, the
   default, its profile keeps no records and its image carries `runnerd.slot-pnpm-store=1`
