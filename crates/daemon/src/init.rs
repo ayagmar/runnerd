@@ -1,5 +1,7 @@
 //! `runnerd init`: writes a starter `runnerd.toml` sized for this host, or for the host as it can grow to
-//! `--memory-ceiling`, and a systemd user unit that serves it, then prints the doctor's checks and the steps left as commands. It overwrites neither file without `--force` and runs
+//! `--memory-ceiling`, and a systemd user unit that serves it, then prints the doctor's checks and the steps left as commands. With
+//! `--overflow` the config is an overflow host's (ADR 0162): `role = "overflow"`, no warm runners, sizing by hand, so
+//! core's role warnings have nothing to say. It overwrites neither file without `--force` and runs
 //! nothing as root: the steps that need root are printed for the user to run. The config, which the dashboard may
 //! later fill with notification secrets, is readable by its user only, in a directory init makes the same way.
 
@@ -12,8 +14,10 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use runnerd_core::admission::host;
-use runnerd_core::api::{Check, CheckStatus, HostMemory};
-use runnerd_core::config::{ByteSize, Config, ConfigError, PUBLISHED_RUNNER, slice_memory_max};
+use runnerd_core::api::{self, Check, CheckStatus, HostMemory};
+use runnerd_core::config::{
+    ByteSize, Config, ConfigError, PUBLISHED_RUNNER, Role, slice_memory_max,
+};
 use runnerd_core::observe::metrics::{self, Paths};
 
 use crate::{doctor, output};
@@ -152,6 +156,9 @@ pub(crate) struct Request {
     /// `--memory-ceiling` as given: the most memory the host can grow to, which the config gets as `[host]
     /// memory_ceiling` (ADR 0086).
     pub memory_ceiling: Option<String>,
+    /// `--overflow`: `Role::Overflow` writes an overflow host's config, which takes only the jobs another machine did
+    /// not take in time.
+    pub role: Role,
 }
 
 /// Writes the config and the unit for `request`, sized for `machine` as it can grow to `request.memory_ceiling`.
@@ -427,11 +434,32 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
         .map(|label| format!("{label:?}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // An overflow host keeps no warm runners whatever `warm` says; it says 0 so the config check has nothing to warn of.
+    let (role, sizing_section, warm) = match request.role {
+        Role::Primary => (
+            "",
+            "# runnerd changes each profile's memory, slots and cpus from what its jobs use and how long they wait,\n\
+             # a step at a time: https://ayagmar.github.io/runnerd/guides/sizing/#auto-sizing\n\
+             [sizing]\n\
+             auto = true\n",
+            "",
+        ),
+        Role::Overflow => (
+            "# This machine takes only the jobs no other machine on the same labels took within overflow_after, and\n\
+             # keeps no warm runners: https://ayagmar.github.io/runnerd/guides/second-machine/\n\
+             role = \"overflow\"\n",
+            "# Sized by hand: auto sizing here would read only the jobs the primary machine did not take in time, the\n\
+             # tail of the queue: https://ayagmar.github.io/runnerd/guides/sizing/#auto-sizing\n\
+             [sizing]\n\
+             auto = false\n",
+            "warm = 0\n",
+        ),
+    };
     let mut repositories = String::new();
     for name in &request.repositories {
         let _ = write!(
             repositories,
-            "\n[[repositories]]\nname = \"{name}\"\nprofile = \"default\"\nlabels = [{labels}]\n"
+            "\n[[repositories]]\nname = \"{name}\"\nprofile = \"default\"\nlabels = [{labels}]\n{warm}"
         );
     }
     // The ceiling as given, which `memory_ceiling` read as the config does: its `Display` rounds.
@@ -466,16 +494,14 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          # runner's memory cap instead: https://ayagmar.github.io/runnerd/concepts/admission/\n\
          admission = \"measured\"\n\
          {ceiling}\
+         {role}\
          \n\
          [caches]\n\
          mirror = {{ enabled = true, memory = \"{MIRROR_MEMORY}\", cpus = 1, ttl = \"168h\" }}\n\
          pnpm = {{ max_size = \"5G\" }}\n\
          maven = {{ max_size = \"5G\" }}\n\
          \n\
-         # runnerd changes each profile's memory, slots and cpus from what its jobs use and how long they wait,\n\
-         # a step at a time: https://ayagmar.github.io/runnerd/guides/sizing/#auto-sizing\n\
-         [sizing]\n\
-         auto = true\n\
+         {sizing_section}\
          \n\
          # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of {of_host}, \
          or the slice's MemoryMax if that is smaller. One runner and the mirror also fit {available}, less the \
@@ -580,7 +606,24 @@ pub(crate) fn run(request: &Request) -> ExitCode {
     }
     output::line(next_steps(&checks));
     output::line(runs_on(&labels()));
+    if config.host.is_overflow() {
+        output::line(overflow_steps(&labels(), config.host.overflow_after));
+    }
     ExitCode::SUCCESS
+}
+
+/// What an overflow host's user still sees to: the primary machine's labels, and, if they want it, the fleet view.
+fn overflow_steps(labels: &[&str], overflow_after: std::time::Duration) -> String {
+    format!(
+        "\nThis is an overflow host: it starts a runner only for a job no other machine took within {after}.\n\
+         Its repositories have the labels [{labels}]; give each the labels it has on the primary machine, or that \
+         machine's jobs never fall to this one.\n\
+         The machines coordinate only through GitHub, not with each other. To see this machine from the primary's \
+         runnerctl as well, run there:\n\
+         \x20 runnerctl machine add <name> --ssh <this host>",
+        after = api::duration(overflow_after.as_secs()),
+        labels = labels.join(", "),
+    )
 }
 
 /// The commands that hold runners to `budget`: a unit file for the slice, or a drop-in when it has one.

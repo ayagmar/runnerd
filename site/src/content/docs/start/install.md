@@ -66,6 +66,7 @@ WARN  repository: halyard/docs-site is public: anyone who opens a pull request o
 | `--config PATH` | write the config elsewhere |
 | `--force` | replace files that exist; without it `init` writes neither |
 | `--memory-ceiling SIZE` | for a VM whose memory grows on demand, such as Hyper-V Dynamic Memory: the most it can grow to, written as `memory_ceiling` ([A host whose memory grows](../../concepts/admission/#a-host-whose-memory-grows)) |
+| `--overflow` | for a second machine that takes only the jobs the first did not take in time: writes `role = "overflow"`, `warm = 0` and auto sizing off ([How do I add a second machine?](../../guides/second-machine/)) |
 
 `init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory or the slice's `MemoryMax` if smaller. A slot is also no larger than the host has available now, less the mirror's 512M, [the host's margin](../../concepts/admission/#the-hosts-memory) and 512M for what starts with runnerd. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../../reference/configuration/) lists every key; [Sizing](../../guides/sizing/) says what to change.
 

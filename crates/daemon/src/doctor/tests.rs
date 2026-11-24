@@ -1243,3 +1243,62 @@ fn many_repositories_are_read_a_few_at_a_time_and_answered_in_their_order() {
         "no repositories, no reads"
     );
 }
+
+/// The config `runnerd init --overflow` writes for `host_without_slice_limits`, with `edit` applied to its text.
+fn overflow_preset(edit: impl Fn(String) -> String) -> Config {
+    let dir = Dir::new();
+    let host = host_without_slice_limits();
+    let request = crate::init::Request {
+        repositories: vec!["halyard/ledger".to_owned(), "halyard/storefront".to_owned()],
+        slice: "runnerd.slice".to_owned(),
+        runnerd: "/home/dana/.local/bin/runnerd".into(),
+        config: dir.0.join("runnerd.toml"),
+        unit: dir.0.join("runnerd.service"),
+        overwrite: crate::init::Overwrite::Refuse,
+        memory_ceiling: None,
+        role: config::Role::Overflow,
+    };
+    let machine = crate::init::Machine {
+        memory: host.memory.unwrap(),
+        cpus: 16,
+        slice_memory_max: None,
+    };
+    crate::init::init(&request, &machine).unwrap();
+    Config::parse(&edit(std::fs::read_to_string(&request.config).unwrap())).unwrap()
+}
+
+/// Catches: doctor hiding an overflow host's role warnings while the slice has no `MemoryMax`, which is the moment a
+/// second machine is set up, so a hand-set `warm` or auto sizing shows only after the slice's fix.
+#[test]
+fn an_overflow_hosts_role_warnings_show_while_the_slice_has_no_memory_max() {
+    let config_check = |config: &Config| {
+        let checks = checks(&host_without_slice_limits(), Some(config));
+        assert_eq!(failed(&checks), ["slice"], "the slice's failure, said once");
+        checks
+            .into_iter()
+            .find(|check| check.name == "config")
+            .unwrap()
+    };
+    let clean = config_check(&overflow_preset(|text| text));
+    assert_eq!(
+        clean.status,
+        Status::Skip,
+        "the preset has no warning: {clean}"
+    );
+
+    let edited = overflow_preset(|text| {
+        text.replace("auto = false", "auto = true")
+            .replace("warm = 0", "warm = 2")
+    });
+    let warned = config_check(&edited);
+    assert_eq!(warned.status, Status::Warn, "{warned}");
+    assert!(
+        warned.detail.contains("admission = \"caps\""),
+        "keeps the slice's guidance: {warned}"
+    );
+    let expected = edited.check_against(Some(ByteSize(48 << 30))).warnings;
+    assert_eq!(expected.len(), 2, "warm and auto sizing: {expected:?}");
+    for warning in &expected {
+        assert!(warned.detail.contains(warning.as_str()), "{warned}");
+    }
+}

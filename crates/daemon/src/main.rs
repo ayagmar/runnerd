@@ -10,7 +10,7 @@ use runnerd_core::admission::trace::Trace;
 use runnerd_core::admission::{Band, Brake, GrowthCount, GuardHold, HostReserve, pooled};
 use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
-use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
+use runnerd_core::config::{ByteSize, Config, Role, parse_age, slice_cpus, slice_memory_max};
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
@@ -63,6 +63,10 @@ enum Command {
         /// grow.
         #[arg(long, value_name = "SIZE")]
         memory_ceiling: Option<String>,
+        /// Write an overflow host's config, for a machine that takes only the jobs the primary machine on the same
+        /// labels did not take in time: role = "overflow", warm = 0 and auto sizing off.
+        #[arg(long)]
+        overflow: bool,
     },
     /// Validate a config file against the slice's memory budget.
     CheckConfig {
@@ -186,7 +190,8 @@ fn main() -> ExitCode {
             config,
             force,
             memory_ceiling,
-        }) => init(repositories, slice, config, force, memory_ceiling),
+            overflow,
+        }) => init(repositories, slice, config, force, memory_ceiling, overflow),
         Some(Command::CheckConfig { path, memory_max }) => {
             config_or_default(path).map(|path| check_config(&path, memory_max))
         }
@@ -278,6 +283,7 @@ fn init(
     config: Option<PathBuf>,
     force: bool,
     memory_ceiling: Option<String>,
+    overflow: bool,
 ) -> Result<ExitCode, ExitCode> {
     let config = config_or_default(config)?;
     let config = std::path::absolute(&config).map_err(|error| {
@@ -302,6 +308,11 @@ fn init(
             init::Overwrite::Refuse
         },
         memory_ceiling,
+        role: if overflow {
+            Role::Overflow
+        } else {
+            Role::Primary
+        },
     }))
 }
 
