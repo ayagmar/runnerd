@@ -918,6 +918,7 @@ async fn serve(
         .await
         .map_err(|error| fail(&format_args!("--web {web}: {error}")))?;
     let proxies = config.web.origins.clone();
+    let peers = config.web.peers.clone();
     let build_cache = open_build_cache(&config, &socket);
     let action_archives = action_archives_directory(&config);
     let grype_database = grype_database_directory(&config);
@@ -966,8 +967,9 @@ async fn serve(
         },
     ));
     let (web_stopped, web_stop) = tokio::sync::oneshot::channel::<()>();
-    let web = web_listener
-        .map(|listener| runnerd_web::spawn(listener, socket.clone(), proxies, sessions, web_stop));
+    let web = web_listener.map(|listener| {
+        runnerd_web::spawn(listener, socket.clone(), proxies, peers, sessions, web_stop)
+    });
     let engine_done = engine.await;
     let _ = web_stopped.send(());
     let _ = stopped.send(());

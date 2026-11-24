@@ -644,7 +644,15 @@ pub struct Profile {
     /// The GitHub-hosted runner its jobs are priced at (ADR 0072); `None` for the daemon's architecture's 2-core
     /// standard runner.
     pub priced_as: Option<api::Sku>,
+    /// Memory its runners' `/tmp` and `/var/tmp` may hold together as `tmpfs` (ADR 0170), out of `memory`; `None`,
+    /// the default, keeps both on the container's disk. At least `TMP_TMPFS_MIN`, and below `min_memory`, which
+    /// it needs.
+    pub tmp_tmpfs: Option<ByteSize>,
 }
+
+/// The least `tmp_tmpfs`: enough that `docker::tmp_tmpfs` splits it into whole pages of any size the kernel uses,
+/// so the two mounts hold no more together than it says.
+pub const TMP_TMPFS_MIN: ByteSize = ByteSize(1 << 20);
 
 /// The image a profile's runners run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -681,6 +689,7 @@ struct ProfileToml {
     max_memory: Option<ByteSize>,
     max_slots: Option<u32>,
     priced_as: Option<api::Sku>,
+    tmp_tmpfs: Option<ByteSize>,
 }
 
 impl TryFrom<ProfileToml> for Profile {
@@ -714,6 +723,7 @@ impl TryFrom<ProfileToml> for Profile {
             max_memory: profile.max_memory,
             max_slots: profile.max_slots,
             priced_as: profile.priced_as,
+            tmp_tmpfs: profile.tmp_tmpfs,
         })
     }
 }
@@ -898,17 +908,55 @@ pub struct Web {
     /// The one of `origins` that `runnerctl web` opens the dashboard on, such as a tailnet's address. Default none:
     /// it opens the loopback address.
     pub open: Option<Origin>,
+    /// Other machines' dashboards, which every page links to by name (ADR 0166). Default none.
+    pub peers: Vec<Peer>,
+}
+
+/// One of `[web] peers`: another machine's dashboard, as `{ name = "skiff", origin = "https://skiff.example.ts.net" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Peer {
+    /// What the link reads: lower-case letters and digits, as `[host] name`.
+    pub name: String,
+    /// Where that machine's dashboard is, checked as `[web] origins` are.
+    pub origin: Origin,
 }
 
 impl Web {
-    /// Refuses an `open` that is not one of `origins`.
+    /// Refuses an `open` that is not one of `origins`, and a peer with a bad name, a name or origin another peer
+    /// has, or one of `origins`, which are this dashboard's own.
     fn validate(&self) -> Result<(), ConfigError> {
-        match &self.open {
-            Some(open) if !self.origins.contains(open) => {
-                Err(ConfigError::OpenNotListed { open: open.clone() })
-            }
-            _ => Ok(()),
+        if let Some(open) = &self.open
+            && !self.origins.contains(open)
+        {
+            return Err(ConfigError::OpenNotListed { open: open.clone() });
         }
+        for (at, peer) in self.peers.iter().enumerate() {
+            let refuse = |why: String| {
+                Err(ConfigError::Peer {
+                    name: peer.name.clone(),
+                    why,
+                })
+            };
+            if let Err(why) = machines::check_name(&peer.name) {
+                return refuse(why);
+            }
+            if self.origins.contains(&peer.origin) {
+                return refuse(format!(
+                    "{} is one of [web] origins, this dashboard's own address",
+                    peer.origin
+                ));
+            }
+            for other in &self.peers[..at] {
+                if other.name == peer.name {
+                    return refuse("another peer has the same name".to_owned());
+                }
+                if other.origin == peer.origin {
+                    return refuse(format!("{} is {}'s origin too", peer.origin, other.name));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1411,6 +1459,14 @@ pub enum ConfigError {
         /// The value set.
         value: f64,
     },
+    /// A peer of `[web] peers` cannot be linked to.
+    #[error("web.peers {name}: {why}")]
+    Peer {
+        /// The peer's name, as set.
+        name: String,
+        /// Why not.
+        why: String,
+    },
     /// `[web] open` is not one of `[web] origins`.
     #[error(
         "web.open is {open}, which is not one of [web] origins; add it to origins, or remove open"
@@ -1419,8 +1475,9 @@ pub enum ConfigError {
         /// The origin `open` names.
         open: Origin,
     },
-    /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, or its
-    /// `min_memory` is above its `max_memory`.
+    /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, its
+    /// `min_memory` is above its `max_memory`, or its `tmp_tmpfs` is below `TMP_TMPFS_MIN` or not below a
+    /// `min_memory`.
     #[error("profiles.{profile}: {why}")]
     SizingBounds {
         /// The profile.
@@ -1707,6 +1764,16 @@ impl Config {
                 "memory is above its max_memory"
             } else if p.max_slots.is_some_and(|max| p.slots > max) {
                 "slots are above its max_slots"
+            } else if p.tmp_tmpfs.is_some_and(|tmpfs| tmpfs < TMP_TMPFS_MIN) {
+                "tmp_tmpfs is below 1M"
+            } else if p
+                .tmp_tmpfs
+                .is_some_and(|tmpfs| p.min_memory.is_none_or(|min| tmpfs >= min))
+            {
+                // The tmpfs's pages count against the container's memory: one that could fill it leaves the job none.
+                // `min_memory`, which `memory` is never below, is also where sizing stops lowering it, so advice
+                // stays above the tmpfs too.
+                "tmp_tmpfs needs a min_memory above it"
             } else {
                 continue;
             };
@@ -1818,6 +1885,10 @@ impl Config {
                 (p.cpus == 0, format!("profiles.{name}.cpus")),
                 (p.slots == 0, format!("profiles.{name}.slots")),
                 (p.max_slots == Some(0), format!("profiles.{name}.max_slots")),
+                (
+                    p.tmp_tmpfs == Some(ByteSize(0)),
+                    format!("profiles.{name}.tmp_tmpfs"),
+                ),
             ]
         });
         let mirror = &self.caches.mirror;

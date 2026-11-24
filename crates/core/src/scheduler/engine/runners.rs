@@ -30,6 +30,10 @@ pub(super) const IMAGE: &str = "runnerd.image";
 /// environment, entrypoint) it runs: a restart after an install replaces it once it is idle.
 pub(super) const SPEC: &str = "runnerd.spec";
 
+/// The runner container's label with the bytes its `/tmp` and `/var/tmp` hold together as `tmpfs`
+/// (`tmp_tmpfs`), so a restart knows it; missing for a runner without one.
+pub(super) const TMP_TMPFS: &str = "runnerd.tmp-tmpfs";
+
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
 

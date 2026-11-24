@@ -102,6 +102,15 @@ With --machine, only --qr and --sign-out-all: the login link is a file on that m
 - `--qr`: Print a QR code of a fresh link on each of `[web] origins`, or on `--base`, that signs a phone in within 5 minutes
 - `--sign-out-all`: Sign every browser out of the dashboard, with a new session secret
 
+## `runnerctl fleet`
+
+Show every machine's status and one page of all their jobs, newest first: this machine's daemon and each one `runnerctl machine add` named, read over SSH at once. A job several machines saw shows once, from the one that ran it.
+
+A machine that cannot be read is shown with why, and the exit code is 1.
+
+- `--before <BEFORE>`: Only jobs older than this job ID: the next page
+- `--limit <LIMIT>`: At most this many jobs [default: 50, at most 500]
+
 ## Every command
 
 - `--socket <SOCKET>`: The daemon's API socket [default: `$XDG_RUNTIME_DIR/runnerd.sock`]

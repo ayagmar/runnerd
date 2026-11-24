@@ -327,6 +327,8 @@ struct Occupant {
     memory: u64,
     /// Its container's CPU limit in millicores, which a reload does not change.
     cpus: u64,
+    /// The bytes its `/tmp` and `/var/tmp` hold as `tmpfs`, which a reload does not change; `None` for none.
+    tmp_tmpfs: Option<u64>,
     /// How it was admitted, with what it reserved of the budget, kept through a restart by its record; `None` for
     /// one whose record says nothing of it, which reserves its cap.
     admission: Option<api::Admission>,
@@ -343,7 +345,7 @@ struct Occupant {
 
 impl Occupant {
     /// Whether it no longer is what `repository`'s runners in `profile` start as: other labels, or other limits than
-    /// the profile's. An unknown label set counts as the same.
+    /// the profile's, its `tmp_tmpfs` included. An unknown label set counts as the same.
     fn outdated(
         &self,
         repository: &crate::config::Repository,
@@ -358,7 +360,10 @@ impl Occupant {
             };
             set(labels) != set(&repository.labels)
         });
-        differ || self.memory != profile.memory.0 || self.cpus != u64::from(profile.cpus) * 1000
+        differ
+            || self.memory != profile.memory.0
+            || self.cpus != u64::from(profile.cpus) * 1000
+            || self.tmp_tmpfs != profile.tmp_tmpfs.map(|tmpfs| tmpfs.0)
     }
 
     /// Whether it runs another image than `profile` names. An unknown image counts as the same.

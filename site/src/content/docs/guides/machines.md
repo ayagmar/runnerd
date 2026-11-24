@@ -23,8 +23,26 @@ runnerctl --machine skiff logs 9001 --follow
 
 `runnerctl machine list` shows the machines, `runnerctl machine rm skiff` forgets one.
 
+In `runnerctl tui`, `m` lists this machine and every added one, and fills in each one's state as it is read. Enter on one reads that machine in the same TUI, without waiting for the others; its header says which machine it shows.
+
+## Every machine at once
+
+`runnerctl fleet` reads this machine's daemon and every added one together. It prints a line per machine (running, queued, slots held, version) and one page of all their jobs, newest first, with the machine whose record shows. A job both machines saw shows once, from the machine that ran it, not as `elsewhere` from the other. A machine that cannot be read gets a line saying why, and `fleet` exits 1. `--before` and `--limit` page as `runnerctl jobs` does, and `--json` prints the merged view.
+
 ## When it fails
 
 `ssh` runs with `BatchMode=yes`, so it cannot ask for a password, a key's passphrase, a new host key or Tailscale SSH's browser check. When one of those is needed, the error says so: run `ssh me@skiff.tail0b5e.ts.net` once yourself, then try again. Your `~/.ssh/config` still says how to reach the host (aliases, user, keys, port, jump host), but not how runnerctl's `ssh` behaves: its `ControlMaster`, `ForkAfterAuthentication`, `RemoteCommand`, `LocalCommand` and `LogLevel` are not used. runnerctl needs OpenSSH 8.7 or later.
 
 `runnerctl --machine skiff web` cannot open the dashboard: its login link is a file on `skiff`. `runnerctl --machine skiff web --qr` prints a fresh link to scan, and `--sign-out-all` works too. `runnerctl --machine skiff doctor` reports a daemon that is down instead of running `runnerd doctor` on this machine.
+
+## Links between dashboards
+
+Each machine serves its own dashboard. To link them, list the others under `[web] peers` in each machine's config, and every page's header links to them by name:
+
+```toml
+[web]
+origins = ["https://tern.tail0b5e.ts.net:8443"]
+peers = [{ name = "skiff", origin = "https://skiff.tail0b5e.ts.net:8443" }]
+```
+
+A peer's dashboard signs you in on its own, as it would without the link. Like `origins`, `peers` is read when runnerd starts.

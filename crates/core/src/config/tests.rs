@@ -267,6 +267,54 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
     }
 }
 
+#[test]
+fn tmp_stays_on_disk_unless_a_profile_bounds_a_tmpfs_below_its_min_memory() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert_eq!(config.profiles["app"].tmp_tmpfs, None, "off by default");
+    let with = |lines: &str| {
+        Config::parse(&MINIMAL.replace("slots = 1", &format!("slots = 1\n{lines}")))
+            .unwrap()
+            .validate(Some(size("33G")))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    };
+    // app has 4G.
+    with("tmp_tmpfs = \"1G\"\nmin_memory = \"2G\"").unwrap();
+    with("tmp_tmpfs = \"1M\"\nmin_memory = \"2G\"").unwrap();
+    let config =
+        Config::parse(&MINIMAL.replace("slots = 1", "slots = 1\ntmp_tmpfs = \"1G\"")).unwrap();
+    assert_eq!(config.profiles["app"].tmp_tmpfs, Some(size("1G")));
+    // A tmpfs as large as the memory it comes out of could leave the job none; without a min_memory above it,
+    // sizing could advise a memory the config then refuses.
+    for (refused, why) in [
+        (
+            "tmp_tmpfs = \"1G\"",
+            "tmp_tmpfs needs a min_memory above it",
+        ),
+        (
+            "tmp_tmpfs = \"3G\"\nmin_memory = \"3G\"",
+            "tmp_tmpfs needs a min_memory above it",
+        ),
+        // Two mounts of a page each would hold more than a size this small says.
+        (
+            "tmp_tmpfs = \"1K\"\nmin_memory = \"2G\"",
+            "tmp_tmpfs is below 1M",
+        ),
+    ] {
+        assert_eq!(
+            with(refused).unwrap_err(),
+            format!("profiles.app: {why}"),
+            "{refused}"
+        );
+    }
+    assert!(
+        with("tmp_tmpfs = \"0G\"\nmin_memory = \"2G\"")
+            .unwrap_err()
+            .contains("profiles.app.tmp_tmpfs"),
+        "0 would mount an unbounded tmpfs"
+    );
+}
+
 fn origins(list: &str) -> Result<Vec<String>, String> {
     Config::parse(&format!("{MINIMAL}\n[web]\norigins = [{list}]\n"))
         .map(|config| config.web.origins.iter().map(ToString::to_string).collect())
@@ -307,6 +355,62 @@ fn the_dashboard_opens_on_one_of_its_origins_or_the_config_is_refused() {
         "{error}"
     );
     web(r#"open = "https://forge.tail0b5e.ts.net:8443""#).unwrap_err();
+}
+
+/// Catches: a peer link that goes nowhere or to this dashboard itself, two links of one name, and a peer origin with a
+/// path or plain http to a remote host slipping past the check `[web] origins` gets.
+#[test]
+fn the_dashboard_links_to_peers_named_once_on_origins_that_are_not_its_own() {
+    let web = |lines: &str| {
+        Config::parse(&format!("{MINIMAL}\n[web]\n{lines}\n"))
+            .map_err(|error| error.to_string())?
+            .validate(Some(size("33G")))
+            .map_err(|error| error.to_string())
+    };
+    assert!(
+        Config::parse(MINIMAL).unwrap().web.peers.is_empty(),
+        "no peers by default"
+    );
+    let skiff = r#"{ name = "skiff", origin = "https://skiff.tail0b5e.ts.net" }"#;
+    web(&format!("peers = [{skiff}]")).unwrap();
+    let parsed = Config::parse(&format!("{MINIMAL}\n[web]\npeers = [{skiff}]\n")).unwrap();
+    assert_eq!(
+        parsed.web.peers[0].origin.to_string(),
+        "https://skiff.tail0b5e.ts.net"
+    );
+    for (lines, expected) in [
+        (
+            format!(
+                "peers = [{skiff}, {}]",
+                skiff.replace("skiff.tail", "dory.tail")
+            ),
+            "same name",
+        ),
+        (
+            format!(
+                "peers = [{skiff}, {}]",
+                skiff.replace("\"skiff\"", "\"dory\"")
+            ),
+            "skiff's origin too",
+        ),
+        (
+            format!("origins = [\"https://skiff.tail0b5e.ts.net\"]\npeers = [{skiff}]"),
+            "this dashboard's own address",
+        ),
+        (
+            r#"peers = [{ name = "Skiff-1", origin = "https://skiff.tail0b5e.ts.net" }]"#
+                .to_owned(),
+            "such as skiff1",
+        ),
+        (
+            r#"peers = [{ name = "skiff", origin = "https://skiff.tail0b5e.ts.net/x" }]"#
+                .to_owned(),
+            "path",
+        ),
+    ] {
+        let error = web(&lines).unwrap_err();
+        assert!(error.contains(expected), "{lines}: {error}");
+    }
 }
 
 /// Each input and what `new URL(input).origin` gives for it in Node 24, which follows the WHATWG URL standard as
@@ -1427,7 +1531,7 @@ fn every_default_the_configuration_reference_gives_is_the_one_the_config_uses() 
     // count.
     assert_eq!(
         rows.len(),
-        46,
+        47,
         "the reference's keys with a default to check"
     );
     let mut wrong = Vec::new();

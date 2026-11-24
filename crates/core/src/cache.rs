@@ -660,6 +660,7 @@ pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<Stri
         memory: reseed.memory,
         env: Vec::new(),
         mounts,
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         labels: BTreeMap::from([("runnerd.seed".to_owned(), String::new())]),
         entrypoint: Some(vec![
@@ -730,6 +731,7 @@ pub async fn start_layers_over(
         memory: START_OVER_MEMORY,
         env: Vec::new(),
         mounts: vec![volume(start.volume.to_owned(), "/state", false)],
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         labels: BTreeMap::from([("runnerd.seed".to_owned(), String::new())]),
         entrypoint: Some(
@@ -823,6 +825,7 @@ pub fn measure_spec(measure: &Measure<'_>) -> RunnerSpec {
             volume(names.base(measure.profile), "/base", true),
             volume(names.slot(measure.profile, 1), "/workers/1", true),
         ],
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         // As a seed container's: a restart finds it beside them (`seed`), and removes it.
         labels: BTreeMap::from([("runnerd.seed".to_owned(), String::new())]),
@@ -914,6 +917,8 @@ async fn finish_once(docker: &impl DockerApi, container: &str) -> Finished {
 
 #[cfg(test)]
 mod tests {
+    mod job_cleanup;
+
     use std::path::Path;
     use std::process::Command;
 

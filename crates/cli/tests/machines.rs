@@ -9,6 +9,7 @@
     reason = "tests fail by panicking"
 )]
 
+use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use runnerd_core::api::Status;
+use runnerd_core::api::{Fleet, JobPage, Status};
 
 /// The fake `ssh`: prints the remote runtime directory for a command, or forwards `-L local:remote` until killed,
 /// writing its pid where the test can find it.
@@ -147,7 +148,18 @@ impl Home {
 
     /// Serves a fake daemon answering `status` on the remote socket.
     fn serve(&self, status: Status) {
-        self.serve_app(Router::new(), status);
+        let page = JobPage {
+            jobs: runnerd_fixtures::daemon().summaries(),
+            next: None,
+        };
+        let jobs = Router::new().route(
+            "/v1/jobs",
+            get(move || {
+                let page = page.clone();
+                async move { axum::Json(page) }
+            }),
+        );
+        self.serve_app(jobs, status);
     }
 
     /// Serves `app` on the remote socket, with `status` as its status.
@@ -313,6 +325,58 @@ fn a_remote_daemon_that_is_down_is_named_and_doctor_runs_nothing_here() {
     assert_eq!(home.forward_left(), None);
 }
 
+/// Catches: one machine that is down failing the whole view, a job shown twice, or the exit code saying all is well
+/// when a machine could not be read.
+#[test]
+fn fleet_reads_every_machine_and_names_the_one_that_is_down() {
+    let home = Home::new();
+    home.serve(runnerd_fixtures::daemon().status);
+    let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    let file = home.0.join("config/runnerd/machines.toml");
+    let mut machines = std::fs::read_to_string(&file).unwrap();
+    let _ = write!(
+        machines,
+        "\n[[machine]]\nname = \"dory\"\nssh = \"dory\"\nsocket = \"{}\"\nid = \"0d0d0d0d\"\n",
+        home.0.join("remote/gone.sock").display()
+    );
+    std::fs::write(&file, machines).unwrap();
+
+    let read = home.runnerctl(&["fleet", "--json"]);
+    assert_eq!(read.status.code(), Some(1), "a machine could not be read");
+    let fleet: Fleet = serde_json::from_slice(&read.stdout).unwrap();
+    let names: Vec<&str> = fleet
+        .machines
+        .iter()
+        .map(|machine| machine.name.as_str())
+        .collect();
+    assert_eq!(names, ["this machine", "skiff", "dory"]);
+    assert!(
+        fleet.machines[0]
+            .summary()
+            .contains("runnerd is not running"),
+        "{}",
+        fleet.machines[0].summary()
+    );
+    assert!(
+        fleet.machines[2]
+            .summary()
+            .contains("runnerd is not running there"),
+        "{}",
+        fleet.machines[2].summary()
+    );
+    let page = runnerd_fixtures::daemon().summaries();
+    assert_eq!(fleet.jobs.len(), page.len(), "each of skiff's jobs once");
+    assert!(
+        fleet.jobs.iter().all(|job| job.machine == "skiff"),
+        "skiff's records"
+    );
+    assert_eq!(home.forward_left(), None);
+
+    let both = home.runnerctl(&["--machine", "skiff", "fleet"]);
+    assert!(!both.status.success(), "fleet reads every machine");
+}
+
 /// Catches: a command runnerctl prints to run next (`pause --force`, `cancel --confirm`, signing in again) that
 /// leaves out `--machine`, so running it acts on this machine's daemon instead of the one asked.
 #[test]
@@ -343,34 +407,41 @@ fn a_command_printed_to_run_next_asks_the_same_machine() {
     );
 }
 
-/// Catches: `runnerctl --machine skiff watch` ended by SIGTERM (a `timeout`, a service manager) leaving its `ssh`
-/// running and forwarding, and its private directory behind.
-#[test]
-fn a_terminated_runnerctl_stops_its_ssh() {
-    let home = Home::new();
-    let app = Router::new().route("/v1/events", get(std::future::pending::<String>));
-    home.serve_app(app, runnerd_fixtures::daemon().status);
-    let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
-    assert!(added.status.success(), "{}", text(&added.stderr));
+/// Ends `runnerctl args` with SIGTERM once it started an `ssh` and waits on the daemon, and checks it left nothing.
+fn terminated(home: &Home, args: &[&str]) {
     let _ = std::fs::remove_file(home.0.join("ssh.pid"));
-
-    let mut watch = home.spawn(&["--machine", "skiff", "watch"]);
+    let mut running = home.spawn(args);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !home.0.join("ssh.pid").exists() {
-        assert!(Instant::now() < deadline, "watch started no ssh");
+        assert!(Instant::now() < deadline, "{args:?} started no ssh");
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Past opening the forward, waiting on the event stream.
+    // Past opening the forward, waiting on the daemon.
     std::thread::sleep(Duration::from_millis(500));
     let killed = Command::new("kill")
-        .args(["-TERM", &watch.id().to_string()])
+        .args(["-TERM", &running.id().to_string()])
         .status()
         .unwrap();
     assert!(killed.success(), "SIGTERM sent");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while watch.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "runnerctl ended on SIGTERM");
+    while running.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "{args:?} ended on SIGTERM");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(home.forward_left(), None);
+    assert_eq!(home.forward_left(), None, "{args:?}");
+}
+
+/// Catches: `runnerctl --machine skiff watch` or `runnerctl fleet` ended by SIGTERM (a `timeout`, a service
+/// manager) leaving its `ssh` running and forwarding, and its private directory behind.
+#[test]
+fn a_terminated_runnerctl_stops_its_ssh() {
+    let home = Home::new();
+    let app = Router::new()
+        .route("/v1/events", get(std::future::pending::<String>))
+        .route("/v1/jobs", get(std::future::pending::<String>));
+    home.serve_app(app, runnerd_fixtures::daemon().status);
+    let added = home.runnerctl(&["machine", "add", "skiff", "--ssh", "skiff"]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    terminated(&home, &["--machine", "skiff", "watch"]);
+    terminated(&home, &["fleet"]);
 }

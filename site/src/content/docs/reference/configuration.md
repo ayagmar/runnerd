@@ -78,6 +78,7 @@ A key marked required must be set. Sizes take `K`, `M`, `G` or `T`, durations a 
 | `record_failures` | `false` | keep failed jobs as [records](../../guides/records/) |
 | `min_memory`, `max_memory` | unset | bounds for sizing advice and [auto sizing](../../guides/sizing/#auto-sizing); unset, what its jobs need and `MemoryMax` holds |
 | `max_slots` | unset | the most `slots` auto sizing raises to; unset, as many as `MemoryMax` holds, or under `measured` as leave each slot 2G of disk |
+| `tmp_tmpfs` | unset | memory each runner's `/tmp` and `/var/tmp` may hold together as `tmpfs`, three quarters and a quarter, instead of the disk; at least `1M`, and it counts against `memory`, so it needs a `min_memory` above it |
 | `priced_as` | `actions_linux`, `actions_linux_arm` on aarch64 | the GitHub-hosted runner its jobs are [priced at](../../guides/insights/#what-the-minutes-would-have-cost), by billing name, such as `linux_4_core` |
 
 ### `[[repositories]]`

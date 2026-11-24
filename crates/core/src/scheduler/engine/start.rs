@@ -73,6 +73,8 @@ pub(super) struct Starting {
     memory: u64,
     /// Its container's CPU limit, in millicores.
     cpus: u64,
+    /// Its container's `tmp_tmpfs` bound in bytes; `None` for none.
+    tmp_tmpfs: Option<u64>,
     /// When its start was launched: its runner's start once placed.
     launched_at: SystemTime,
     /// The labels its runner registers with.
@@ -126,6 +128,7 @@ impl Starting {
             placed_at,
             memory: self.memory,
             cpus: self.cpus,
+            tmp_tmpfs: self.tmp_tmpfs,
             admission: Some(self.admission),
             labels: Some(self.labels),
             image: Some(self.image),
@@ -154,6 +157,7 @@ impl Starting {
             admission,
             memory,
             cpus,
+            tmp_tmpfs: None,
             launched_at: SystemTime::now(),
             labels: vec!["self-hosted".to_owned(), "app".to_owned()],
             image: "runnerd-runner:app".to_owned(),
@@ -185,15 +189,14 @@ fn runner_skips(skip_syncs: bool, filter: Filter, unsynced: &mut Unsynced) -> bo
     skips
 }
 
-/// The labels of a runner container: what a restart adopts it by.
+/// The labels of a runner container of `spec`: what a restart adopts it by.
 fn container_labels(
     name: &str,
     repository: &str,
     slot: usize,
     runner_id: u64,
     labels: &[String],
-    image: &str,
-    archives: bool,
+    spec: &RunnerSpec,
 ) -> std::collections::BTreeMap<String, String> {
     let mut found = std::collections::BTreeMap::from([
         ("runnerd.job".to_owned(), name.to_owned()),
@@ -201,12 +204,19 @@ fn container_labels(
         ("runnerd.slot".to_owned(), slot.to_string()),
         ("runnerd.runner-id".to_owned(), runner_id.to_string()),
         (super::runners::LABELS.to_owned(), labels.join(",")),
-        (super::runners::IMAGE.to_owned(), image.to_owned()),
+        (super::runners::IMAGE.to_owned(), spec.image.clone()),
         (super::runners::SPEC.to_owned(), THIS_SPEC.to_owned()),
     ]);
     // What a restart counts as a runner reading the archives before its first check.
+    let archives = spec
+        .mounts
+        .iter()
+        .any(|mount| mount.target.as_deref() == Some(crate::archives::MOUNT));
     if archives {
         found.insert(crate::archives::LABEL.to_owned(), "1".to_owned());
+    }
+    if let Some(tmpfs) = spec.tmp_tmpfs {
+        found.insert(super::runners::TMP_TMPFS.to_owned(), tmpfs.0.to_string());
     }
     found
 }
@@ -296,12 +306,7 @@ async fn run<G: GithubApi, D: DockerApi>(
             request.number,
             runner.id,
             &request.labels,
-            &request.spec.image,
-            request
-                .spec
-                .mounts
-                .iter()
-                .any(|mount| mount.target.as_deref() == Some(crate::archives::MOUNT)),
+            &request.spec,
         )
         .into_iter()
         .chain(asked)
@@ -777,6 +782,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 archives.as_ref(),
                 grype.as_ref(),
             ),
+            tmp_tmpfs: profile.tmp_tmpfs,
             network: Some(self.names.network()),
             // The generation of the Grype database it mounts, which is not removed while its container is there.
             labels: grype
@@ -794,6 +800,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             admission,
             memory: spec.memory.0,
             cpus: u64::from(spec.cpus) * 1000,
+            tmp_tmpfs: spec.tmp_tmpfs.map(|tmpfs| tmpfs.0),
             launched_at: now,
             labels: labels.clone(),
             image,

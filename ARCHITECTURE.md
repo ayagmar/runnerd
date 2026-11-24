@@ -35,8 +35,8 @@ flowchart TB
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, the shared build cache's server, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper's client behind `client` and its server behind `host` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
-| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `machines` (`machine add|list|rm`, `--machine`, the `machines.toml` file), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
-| `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
+| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions, `tui/switching` the machine read and the switch under way), `machines` (`machine add|list|rm`, `--machine`, the `machines.toml` file, and reading every machine for `fleet` and the TUI's list of machines, from which `tui` switches machine, [ADR 0166](docs/adr/0166-the-tui-switches-machines-and-dashboards-link-peers.md)), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
+| `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session, links to `[web] peers` | `runnerd-core` with `client`, without `host` |
 | `runnerd-fixtures` | `crates/fixtures` | tests only: the daemon data every client's parity test draws, and the facts core computes from it ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)); not published | `runnerd-core` without `host`; clients take it as a dev-dependency only |
 | `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
 
@@ -57,7 +57,9 @@ flowchart TB
   [0139](docs/adr/0139-steps-that-share-a-second-are-told-apart-by-their-headers.md)). `api::jobs::query`,
   `api::jobs::timeline` and `api::jobs::compare` define the job list's search, sorts and pages, the slots' timeline and
   a job beside its baseline as pure functions over a history in memory, which the store answers in SQL and the demo
-  calls ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)). `api::savings` prices this machine's job minutes
+  calls ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)). `api::fleet` merges what a client read
+  from several machines into one list of machines and one page of jobs, each job once from the record that knows
+  most ([ADR 0165](docs/adr/0165-one-view-over-several-machines-is-merged-by-core.md)). `api::savings` prices this machine's job minutes
   at GitHub's per-minute rates and words the figure ([ADR 0072](docs/adr/0072-job-minutes-priced-at-github-hosted-rates.md));
   the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
   engine asks GitHub for once a day in a task of its own, off the tick.
@@ -675,7 +677,16 @@ always returns, so the daemon closes and flushes the history.
   and the check removes the volumes of slots past their profile's count. A store whose engine does not start is
   emptied ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md),
-  [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)).
+  [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)). The cleanup, which runs
+  after every job and again when a container starts, prunes only what the build cache's records hold, and reports a
+  store it could not measure as unmeasured
+  ([ADR 0170](docs/adr/0170-a-runner-container-skips-work-its-job-does-not-need.md)).
+- A profile's `tmp_tmpfs` puts its runners' `/tmp` and `/var/tmp` on `tmpfs`, a quarter of it to `/var/tmp` and the
+  rest to `/tmp` in whole 64 KiB, `exec`, through `HostConfig.Tmpfs` (`docker::tmp_tmpfs`); off by default, as the
+  pages count against the container's memory. It needs a `min_memory` above it, where sizing stops lowering. A runner
+  carries its bound in its occupant and the label `runnerd.tmp-tmpfs`, and an idle one is replaced when a reload
+  changes it. Never `_diag`, which runnerd reads from a stopped runner, nor `_work`
+  ([ADR 0170](docs/adr/0170-a-runner-container-skips-work-its-job-does-not-need.md)).
 - A runner keeps pnpm's store where one value says, `cache::PnpmStore::of`, which both its mounts
   (`cache::runner_mounts`) and its environment follow: the slot's own when `[caches] pnpm.store` is `"slot"`, the
   default, its profile keeps no records and its image carries `runnerd.slot-pnpm-store=1`
