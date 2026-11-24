@@ -2,15 +2,16 @@
 //! attention as one line beside the title that opens to the list; then the budget as lanes, which are the slots
 //! themselves: a lane per slot as wide as its share of the slice, filled to what its job uses now and carrying the
 //! job's name, step, time and sparklines when wide enough, then a lane each for the mirror, seeds, shells, what is free
-//! and what the host holds, each labelled with its figure. Under them the work: every queued job with why it waits,
-//! the latest jobs, the repositories with pause and resume, and the slice's CPU and memory over the last half hour.
+//! and what the host holds, each labelled with its figure. Under them the work: the oldest queued jobs with why each
+//! waits and a link to `/queue`, which lists every one (ADR 0174), the latest jobs, the repositories with pause and
+//! resume, and the slice's CPU and memory over the last half hour.
 //! A wide container lays the lanes side by side as one bar; a narrow one stacks them as rows, each over a strip of
 //! the slice with its block where it sits, so the blocks read down the rows as the bar reads across. Hovering,
 //! focusing or tapping a slot's lane, job row or repository lights up the others that are the same slot. That is the
 //! order for reading and for the keyboard on every screen.
 
 use crate::views::Here;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use maud::{Markup, html};
 use runnerd_core::api::{
@@ -38,7 +39,7 @@ const SPARK_WINDOW: u64 = 5 * 60;
 const RECENT: u32 = 6;
 /// The most jobs `GET /v1/jobs` lists at once.
 const MAX_JOBS: u32 = 500;
-/// Queued jobs listed, the oldest; the history lists the rest.
+/// Queued jobs listed, the oldest; the queue's page lists every one.
 const QUEUED_SHOWN: usize = 6;
 
 /// How many queued jobs a phone shows; the stylesheet hides the rest, so the two agree.
@@ -62,6 +63,8 @@ pub(crate) struct Overview {
     pub(crate) savings: Option<Savings>,
     /// What needs attention; `None` from a daemon that does not list it.
     pub(crate) attention: Option<Attention>,
+    /// The queued jobs the history holds, which have a page here (`read_local`).
+    pub(crate) local: BTreeSet<u64>,
 }
 
 impl Overview {
@@ -91,6 +94,7 @@ impl Overview {
             },
             savings: None,
             attention: daemon.attention().await?,
+            local: read_local(daemon).await,
         };
         overview.reload_running(daemon).await?;
         overview.reload_day(daemon, now).await?;
@@ -189,7 +193,7 @@ pub(crate) fn regions(overview: &Overview) -> [(&'static str, Markup, Parts); 8]
         region("budget", &|parts| budget(overview, parts)),
         region("slots", &|parts| slots(overview, parts)),
         region("host", &|parts| host(overview, parts)),
-        region("queue", &|_| queue(overview)),
+        region("queue", &|parts| queue(overview, parts)),
         region("recent", &|_| recent(overview)),
         region("repositories", &|_| {
             repositories_noting(&overview.status, overview.attention.as_ref())
@@ -1080,9 +1084,10 @@ fn wait_hours(day: &Activity) -> Markup {
     }
 }
 
-/// Every queued job, oldest first, how long it has waited and why. A row opens the job on GitHub and lights up its
-/// repository.
-pub(crate) fn queue(overview: &Overview) -> Markup {
+/// The oldest queued jobs, how long each has waited and why: `QUEUED_SHOWN` on a wide screen, `QUEUED_SHOWN_NARROW`
+/// on a phone, and while more wait than a screen shows, a link to the page of every one (ADR 0174). A row opens the
+/// job's page and lights up its repository.
+pub(crate) fn queue(overview: &Overview, parts: &Parts) -> Markup {
     let queued = &overview.status.queued;
     let more = queued.len().saturating_sub(QUEUED_SHOWN);
     html! {
@@ -1091,15 +1096,15 @@ pub(crate) fn queue(overview: &Overview) -> Markup {
                 h2 #queue-title { "Waiting" }
                 // A phone shows the first three; the link to the rest shows there whenever more wait.
                 @if queued.len() > QUEUED_SHOWN_NARROW {
-                    a.narrow-only[more == 0] href="/history?outcome=queued" { "All " (queued.len()) " queued" }
+                    a class=[(more == 0).then_some("narrow-only")] href=(Page::Queue.path()) { "All " (queued.len()) " queued" }
                 }
             }
             @if queued.is_empty() {
-                p.muted { "Nothing waiting: every queued job has a runner." }
+                p.muted { (overview.status.empty_queue_line()) }
             } @else {
                 ol.queue-list {
                     @for job in queued.iter().take(QUEUED_SHOWN) {
-                        (queued_row(overview, job))
+                        (queued_row(&overview.status, job, overview.now, &overview.local, parts))
                     }
                 }
             }
@@ -1107,31 +1112,71 @@ pub(crate) fn queue(overview: &Overview) -> Markup {
     }
 }
 
-fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
+/// The IDs of the queued jobs the history holds, which have a page of their own here. None when the history could
+/// not be read: each row then opens the job on GitHub, never a page that is not there.
+pub(crate) async fn read_local(daemon: &Client) -> BTreeSet<u64> {
+    let page: Result<JobPage, ClientError> = daemon
+        .get_query(
+            "/v1/jobs",
+            &JobQuery {
+                state: Some(JobState::Queued),
+                limit: Some(MAX_JOBS),
+                ..JobQuery::default()
+            },
+        )
+        .await;
+    page.map(|page| page.jobs.iter().map(|job| job.id).collect())
+        .unwrap_or_default()
+}
+
+/// A queued job's row: how long it has waited, its name, where it runs and why it waits, as core words it. It opens
+/// the job's page when the history holds the job (`local`), with GitHub's page as a second link; else GitHub's page;
+/// else nothing, and the row is only read. Its wait is a part, so the time passing sends only that.
+pub(crate) fn queued_row(
+    status: &Status,
+    job: &QueuedJob,
+    now: u64,
+    local: &BTreeSet<u64>,
+    parts: &Parts,
+) -> Markup {
     let repository = js(&job.repository);
     let enter = format!("$_repo = {repository}");
+    let waited = format!("waited-{}", job.id);
+    let title = job.title();
+    let main = html! {
+        (parts.html(&waited, html! {
+            span.waited #(waited) {
+                @if job.queued_at > 0 {
+                    span.visually-hidden { "Waited " }
+                    (format::duration(now.saturating_sub(job.queued_at)))
+                } @else {
+                    "–"
+                }
+            }
+        }))
+        (job_name(&title))
+        span.repo {
+            (job.place(status))
+            @if let Some(branch) = &job.branch { " · " (branch) }
+        }
+        @if let Some(waiting) = &job.waiting {
+            span class=(format!("reason {}", reason_class(waiting.kind()))) { (waiting.reason(job, status, now)) }
+        }
+    };
     html! {
-        li data-row data-class:linked=(format!("$_repo == {repository}"))
+        li #(format!("queued-{}", job.id)) data-row data-class:linked=(format!("$_repo == {repository}"))
             data-on:pointerenter=(enter) data-on:focusin=(enter)
             data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')"
             data-on:focusout="$_repo = ''" {
-            a href=(job.url.clone().unwrap_or_else(|| format!("/jobs/{}", job.id))) {
-                span.waited {
-                    @if job.queued_at > 0 {
-                        span.visually-hidden { "Waited " }
-                        (format::duration(overview.now.saturating_sub(job.queued_at)))
-                    } @else {
-                        "–"
+            @match (local.contains(&job.id), &job.url) {
+                (true, url) => {
+                    a.queue-main href=(format!("/jobs/{}", job.id)) { (main) }
+                    @if let Some(url) = url {
+                        a.queue-github href=(url) rel="noopener" aria-label=(format!("{} on GitHub", title.name)) { "GitHub" }
                     }
                 }
-                (job_name(&job.title()))
-                span.repo {
-                    (job.place(&overview.status))
-                    @if let Some(branch) = &job.branch { " · " (branch) }
-                }
-                @if let Some(waiting) = &job.waiting {
-                    span class=(format!("reason {}", reason_class(waiting.kind()))) { (waiting.reason(job, &overview.status, overview.now)) }
-                }
+                (false, Some(url)) => { a.queue-main href=(url) rel="noopener" { (main) } }
+                (false, None) => { div.queue-main tabindex="-1" { (main) } }
             }
         }
     }

@@ -294,3 +294,56 @@ fn every_small_queue_is_answered_and_clear_only_when_it_shows_everything_asked_a
     }
     assert_eq!(answers, 8 * 8 * 8 * 3 * 3 * 2 * 3);
 }
+
+/// The bug it catches: a list of every queued job that silently leaves out a repository it cannot list reads as that
+/// repository having nothing queued, while the history still holds its jobs queued.
+#[test]
+fn a_repository_left_out_of_the_queue_is_named_with_why_and_one_listed_or_unknown_is_not() {
+    use crate::api::{ListingFailure, ListingProblem};
+    let mut status = shown(
+        status(vec![queued(1, STOREFRONT, None)]),
+        LEDGER,
+        QueueShown::Unlisted,
+    );
+    assert_eq!(
+        status.unlisted()[0].line,
+        "halyard/ledger's queued jobs are not listed yet; none shows here"
+    );
+    status.github_limited_until = Some(10);
+    assert_eq!(
+        status.unlisted()[0].line,
+        "GitHub's rate limit stops runnerd listing halyard/ledger's queued jobs; none shows here"
+    );
+    status.shutting_down = true;
+    assert_eq!(
+        status.unlisted()[0].line,
+        "runnerd is stopping, so it lists halyard/ledger's queued jobs no more; none shows here"
+    );
+    // A listing's own failure says more than what else holds the daemon.
+    status.repositories[0].listing = Some(ListingFailure {
+        since: 5,
+        problem: ListingProblem::Failed { status: 502 },
+    });
+    let unlisted = status.unlisted();
+    assert_eq!(unlisted.len(), 1, "storefront is listed: {unlisted:?}");
+    assert_eq!(unlisted[0].repository, LEDGER);
+    assert_eq!(
+        unlisted[0].line,
+        "Cannot list halyard/ledger's queued jobs: GitHub answers 502; none shows here"
+    );
+    assert_eq!(
+        status.empty_queue_line(),
+        "No job of a listed repository waits.",
+        "an empty queue with a repository left out never says nothing waits"
+    );
+    // A daemon that does not say whether it listed a repository names none: nothing is known of it.
+    let older = shown(status, LEDGER, QueueShown::Unknown);
+    assert!(
+        older.unlisted().is_empty(),
+        "an unknown queue names no repository"
+    );
+    assert_eq!(
+        older.empty_queue_line(),
+        "Nothing waiting: every queued job has a runner."
+    );
+}

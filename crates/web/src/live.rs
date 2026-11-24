@@ -31,6 +31,7 @@ use tracing::debug;
 use crate::App;
 use crate::auth::SignedIn;
 use crate::views::job::{self, JobView};
+use crate::views::queue::{self, QueueView};
 use crate::views::{self, Part, Parts, Tone, digest, overview};
 
 /// How long to collect events before rendering: a burst (a slot and the budget change together) renders once.
@@ -413,6 +414,7 @@ async fn run_overview(
         if jobs_changed {
             data.reload_running(&app.daemon).await?;
             data.recent = overview::read_recent(&app.daemon, &data.status).await?;
+            data.local = overview::read_local(&app.daemon).await;
         }
         if attention_changed {
             data.attention = app.daemon.attention().await?;
@@ -420,6 +422,92 @@ async fn run_overview(
         if day_changed {
             data.reload_day(&app.daemon, crate::now()).await?;
             day_read = Instant::now();
+        }
+        if !open {
+            return Ok(End::Lost);
+        }
+    }
+}
+
+/// `GET /live/queue`.
+pub(crate) async fn queue(
+    State(app): State<App>,
+    Extension(session): Extension<SignedIn>,
+    Query(signals): Query<Signals>,
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
+    let (patches, receiver) = mpsc::channel(16);
+    let done = Arc::new(AtomicBool::new(false));
+    let ended = done.clone();
+    tokio::spawn(async move {
+        let run = run_queue(&app, &patches, signals.shown());
+        run_page(patches.clone(), ended, "queue", session, run).await;
+    });
+    respond(receiver, done)
+}
+
+/// The queue's page: the status is read again when an event says the queue or what it waits on changed, or it is
+/// `STATUS_AGE` old, and every batch renders the waits as they have grown.
+async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result<End, ClientError> {
+    // Subscribed before reading, so nothing that happens in between is missed.
+    let events = app.daemon.events(EventQuery::default(), None).await?;
+    let mut events = Box::pin(envelopes(events));
+    let mut stopping = app.stopping.clone();
+    let mut data = QueueView::load(&app.daemon, crate::now()).await?;
+    let mut status_read = Instant::now();
+    let mut sent = Sent::default();
+    if let Some(shown) = shown {
+        data.now = shown.at;
+        sent.seed(queue::regions(&data), &shown);
+    }
+    loop {
+        data.now = crate::now();
+        if sent
+            .update(patches, data.now, queue::regions(&data))
+            .await
+            .is_err()
+        {
+            return Ok(End::Done);
+        }
+        let first = match next_event(&mut events, patches, &mut stopping).await {
+            Ok(event) => event,
+            Err(end) => return Ok(end),
+        };
+        let mut batch = vec![first];
+        let open = settle(&mut events, &mut batch).await;
+        let mut status_changed = status_read.elapsed() >= STATUS_AGE;
+        let mut jobs_changed = false;
+        for event in batch {
+            match event {
+                Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
+                    status_changed = true;
+                    jobs_changed = true;
+                }
+                Event::SlotChanged { .. }
+                | Event::BudgetChanged { .. }
+                | Event::ProfileChanged { .. }
+                | Event::ProfileRemoved { .. }
+                | Event::RepositoryChanged { .. }
+                | Event::RepositoryRemoved { .. }
+                | Event::CacheReseeded { .. }
+                | Event::RunnerFailed { .. }
+                | Event::AttentionChanged { .. } => status_changed = true,
+                Event::JobSample { .. }
+                | Event::HostSample { .. }
+                | Event::LogLine { .. }
+                | Event::JobStep { .. }
+                | Event::RecordCreated { .. }
+                | Event::RecordDeleted { .. }
+                | Event::RecordGone { .. }
+                | Event::RecordSkipped { .. }
+                | Event::SizingChanged { .. } => {}
+            }
+        }
+        if status_changed {
+            data.status = app.daemon.get("/v1/status").await?;
+            status_read = Instant::now();
+        }
+        if jobs_changed {
+            data.local = overview::read_local(&app.daemon).await;
         }
         if !open {
             return Ok(End::Lost);

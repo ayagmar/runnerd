@@ -140,7 +140,7 @@ pub use jobs::{
 };
 pub use labels::{Column, Feature, JOBS_HEADING, NOT_SUPPORTED, Section, View};
 pub use machine::{Machine, OUTCOME_MAX};
-pub use queue::{HostWait, WaitCause};
+pub use queue::{HostWait, Unlisted, WaitCause};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,

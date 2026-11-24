@@ -3,8 +3,9 @@
 // a first visit to Settings, the doctor's checks included, moves nothing once painted; the jobs list's chips sit in
 // the Filters fold on a phone and beside the search on a wide screen; on a phone a running job's log is part of the
 // page, last, followed only while the reader is at its newest line, and holds the reader's line as lines above go;
-// "Jump to newest" moves nothing; reseeding a snapshot asks first; and a chart card holds its labels at a laptop's
-// widths.
+// "Jump to newest" moves nothing; reseeding a snapshot asks first; a chart card holds its labels at a laptop's
+// widths; and every queued job is a row of the queue's page, reached from the overview whenever it shows fewer, by
+// keyboard and finger, as jobs leave it.
 //
 // node crates/web/tests/browser.mjs target/debug/examples/demo
 // Uses the site's playwright-core and the Chromium at $CHROMIUM, else the one playwright-core installed.
@@ -23,8 +24,6 @@ if (!demo) {
   console.error('usage: node browser.mjs DEMO_BINARY');
   process.exit(2);
 }
-const dir = mkdtempSync(join(tmpdir(), 'runnerd-browser-'));
-const address = `127.0.0.1:${7600 + (process.pid % 300)}`;
 const failures = [];
 const fail = (what) => {
   failures.push(what);
@@ -33,42 +32,55 @@ const fail = (what) => {
 const pass = (what) => console.log(`ok   ${what}`);
 const check = (holds, what) => (holds ? pass(what) : fail(what));
 
-const server = spawn(demo, [dir, address], { stdio: 'ignore' });
+// The demos started, so each is stopped however the run ends.
+const demos = [];
 let browser;
-try {
+
+// A demo on `address` with `env` set, signed in once: its login link, and the cookies that sign in every context after.
+async function startDemo(address, env = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'runnerd-browser-'));
+  const server = spawn(demo, [dir, address], { stdio: 'ignore', env: { ...process.env, ...env } });
+  const started = { dir, server };
+  demos.push(started);
   const loginFile = join(dir, 'runnerd.web');
   for (let tries = 0; !existsSync(loginFile) || readFileSync(loginFile, 'utf8').trim() === ''; tries++) {
     if (tries > 300) throw new Error('the demo wrote no login link');
     await new Promise((done) => setTimeout(done, 100));
   }
   const login = readFileSync(loginFile, 'utf8').trim().split('\n')[0];
-  browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
-
-  // The login link signs one browser in once: its cookies sign in every context after.
-  const cookies = await (async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    for (let tries = 0; ; tries++) {
-      try {
-        await page.goto(login);
-        break;
-      } catch (error) {
-        if (tries > 50) throw error;
-        await page.waitForTimeout(100);
-      }
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  for (let tries = 0; ; tries++) {
+    try {
+      await page.goto(login);
+      break;
+    } catch (error) {
+      if (tries > 50) throw error;
+      await page.waitForTimeout(100);
     }
-    const signed = await context.cookies();
-    await context.close();
-    return signed;
-  })();
+  }
+  const cookies = await context.cookies();
+  await context.close();
+  return { ...started, login, cookies };
+}
 
-  async function signedIn(size) {
+function stopDemo(started) {
+  started.server.kill();
+  rmSync(started.dir, { recursive: true, force: true });
+}
+
+try {
+  browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
+  const main = await startDemo(`127.0.0.1:${7600 + (process.pid % 300)}`);
+  const { login, cookies } = main;
+
+  async function signedIn(size, signedCookies = cookies) {
     const context = await browser.newContext({
       viewport: { width: size.width, height: size.height },
       isMobile: !!size.phone,
       hasTouch: !!size.phone,
     });
-    await context.addCookies(cookies);
+    await context.addCookies(signedCookies);
     return { context, page: await context.newPage() };
   }
 
@@ -440,11 +452,117 @@ try {
     );
     await context.close();
   }
+
+  // The queue: the overview shows the oldest six, three on a phone, and links to every one whenever it shows fewer
+  // than wait; the queue's page lists every one with why it waits, fits the screen and moves nothing once painted.
+  for (const count of [0, 3, 4, 6, 7, 60]) {
+    const queued = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_QUEUED: String(count) });
+    for (const size of [sizes[0], sizes[1]]) {
+      const { context, page } = await signedIn(size, queued.cookies);
+      await page.addInitScript(() => {
+        window.shifted = 0;
+        new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) if (!entry.hadRecentInput) window.shifted += entry.value;
+        }).observe({ type: 'layout-shift', buffered: true });
+      });
+      await page.goto(new URL('/', queued.login).href);
+      await page.waitForSelector('#queue');
+      const shown = Math.min(count, size.phone ? 3 : 6);
+      const rows = await page.locator('#queue .queue-list > li').filter({ visible: true }).count();
+      check(rows === shown, `${size.name}, ${count} queued: the overview shows ${rows} of ${shown}`);
+      const link = page.locator('#queue a[href="/queue"]').filter({ visible: true });
+      const linked = (await link.count()) === 1;
+      check(linked === count > shown, `${size.name}, ${count} queued: the link to every one ${linked ? 'shows' : 'is absent'}`);
+      if (linked) {
+        await (size.phone ? link.tap() : link.click());
+        await page.waitForURL('**/queue');
+      } else {
+        await page.goto(new URL('/queue', queued.login).href);
+      }
+      await page.waitForSelector('#waiting');
+      await page.waitForTimeout(1500);
+      const listed = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#waiting .queue-list > li')];
+        return {
+          rows: rows.filter((row) => row.getClientRects().length > 0).length,
+          reasons: rows.filter((row) => row.querySelector('.reason')?.textContent.trim()).length,
+          out: rows.filter((row) => row.getBoundingClientRect().right > innerWidth + 0.5).length,
+          sideways: document.documentElement.scrollWidth > innerWidth + 1,
+          empty: document.querySelector('#waiting > p.muted')?.textContent ?? '',
+          shifted: window.shifted,
+        };
+      });
+      check(
+        listed.rows === count && listed.reasons === count,
+        `${size.name}, ${count} queued: the queue's page shows ${listed.rows} rows, ${listed.reasons} with why`,
+      );
+      check(!listed.sideways && listed.out === 0, `${size.name}, ${count} queued: the queue's page fits the screen`);
+      check(listed.shifted < 0.01, `${size.name}, ${count} queued: the queue's page shifts ${listed.shifted.toFixed(4)}`);
+      if (count === 0) check(/^Nothing waiting/.test(listed.empty), `${size.name}: an empty queue says nothing waits`);
+      await context.close();
+    }
+    stopDemo(queued);
+  }
+
+  // The queue's page by keyboard and by finger, while jobs leave it: j and k move between rows, Enter opens a row's
+  // page and Tab reaches its GitHub link; a focused row stays focused as an older one leaves, and once its own job
+  // leaves, j picks up the rows still there.
+  {
+    const leaving = await startDemo('127.0.0.1:0', { RUNNERD_DEMO_QUEUED: '7', RUNNERD_DEMO_START_EVERY: '3' });
+    const { context, page } = await signedIn(sizes[0], leaving.cookies);
+    await page.goto(new URL('/queue', leaving.login).href);
+    await page.waitForSelector('#waiting .queue-list > li');
+    const focused = () => page.evaluate(() => document.activeElement?.closest('[data-row]')?.id ?? '');
+    await page.keyboard.press('j');
+    await page.keyboard.press('j');
+    const second = await focused();
+    const firstId = await page.evaluate(() => document.querySelector('#waiting .queue-list > li').id);
+    check(second !== '' && second !== firstId, `${sizes[0].name}: j moves to the second row (${second})`);
+    await page.keyboard.press('Tab');
+    const tabbed = await page.evaluate(() => ({
+      row: document.activeElement?.closest('[data-row]')?.id ?? '',
+      github: document.activeElement?.classList.contains('queue-github') ?? false,
+    }));
+    check(tabbed.row === second && tabbed.github, `${sizes[0].name}: Tab reaches the row's GitHub link`);
+    await page.keyboard.press('Shift+Tab');
+    await page.waitForFunction((id) => !document.getElementById(id), firstId, { timeout: 8000 }).catch(() => {});
+    const gone = await page.evaluate((id) => !document.getElementById(id), firstId);
+    const kept = await focused();
+    check(gone && kept === second, `${sizes[0].name}: an older job leaves (${gone}) and the focused row stays focused (${kept})`);
+    await page.waitForFunction((id) => !document.getElementById(id), second, { timeout: 8000 }).catch(() => {});
+    await page.keyboard.press('j');
+    const after = await focused();
+    check(
+      after !== '' && after !== second,
+      `${sizes[0].name}: once the focused row's job leaves, j picks up a row still there (${after})`,
+    );
+    const href = await page.evaluate(() => document.activeElement.getAttribute('href'));
+    await page.keyboard.press('Enter');
+    await page.waitForURL((url) => url.pathname === href, { timeout: 5000 }).catch(() => {});
+    check(new URL(page.url()).pathname === href && href.startsWith('/jobs/'), `${sizes[0].name}: Enter opens the row's job (${href})`);
+    await context.close();
+
+    const phone = await signedIn(sizes[1], leaving.cookies);
+    await phone.page.goto(new URL('/', leaving.login).href);
+    const all = phone.page.locator('#queue a[href="/queue"]').filter({ visible: true });
+    await all.tap();
+    await phone.page.waitForURL('**/queue');
+    const row = phone.page.locator('#waiting a.queue-main[href^="/jobs/"]').first();
+    const target = await row.getAttribute('href');
+    const box = await row.boundingBox();
+    await row.tap();
+    await phone.page.waitForURL((url) => url.pathname === target, { timeout: 5000 }).catch(() => {});
+    check(
+      new URL(phone.page.url()).pathname === target && box.height >= 44,
+      `${sizes[1].name}: a tap on a ${Math.round(box.height)}px row opens its job (${target})`,
+    );
+    await phone.context.close();
+    stopDemo(leaving);
+  }
 } finally {
   // From the spawn on, so a browser that fails to start, or a demo that never signs in, leaves no demo running.
   await browser?.close();
-  server.kill();
-  rmSync(dir, { recursive: true, force: true });
+  for (const started of demos) stopDemo(started);
 }
 
 if (failures.length) {
