@@ -143,6 +143,12 @@ pub(crate) const LOG_BACKLOG: u64 = 8 << 20;
 /// sample wrote about 300 MB a day to an idle daemon's WAL. A crash loses the samples held.
 const HOST_SAMPLE_BATCH: usize = 30;
 
+/// Pages the WAL grows by between automatic checkpoints: 32 MiB of 4 KiB pages.
+const WAL_CHECKPOINT_PAGES: u32 = 8192;
+
+/// Bytes the WAL is cut back to after a checkpoint.
+const WAL_SIZE_LIMIT: i64 = 64 << 20;
+
 /// How many events a slow client may fall behind before its stream ends; it reconnects with `Last-Event-ID`.
 const EVENT_BUFFER: usize = 4096;
 
@@ -417,22 +423,13 @@ enum Write {
         job: u64,
         at: u64,
     },
-    Log {
-        job: u64,
-        lines: Vec<String>,
-        /// Where the capture resumes once these lines are stored; `None` for all but the last part of a batch.
-        position: Option<LogPosition>,
-        max_bytes: u64,
-        /// The lines' share of `LOG_BACKLOG`, given back once they are stored.
-        _backlog: OwnedSemaphorePermit,
-    },
-    Samples(Vec<SampleRecord>),
+    /// Committed with the telemetry sent next to it, in one transaction (`write::gather`).
+    Telemetry(Telemetry),
     CgroupsGone {
         runners: Vec<String>,
         at: u64,
     },
     DiskWindow(Window),
-    HostSample(api::HostSample),
     MirrorBytes {
         bytes: Vec<(String, u64)>,
         until: MirrorPosition,
@@ -486,9 +483,11 @@ enum Write {
         done: oneshot::Sender<bool>,
     },
     RunnerNamed {
+        /// The names the engine gives start with it.
+        prefix: String,
         secs: u64,
-        /// Whether it committed.
-        done: oneshot::Sender<bool>,
+        /// The second granted, if the history keeps it.
+        done: oneshot::Sender<Option<u64>>,
     },
     ClaimRerun {
         attempt: run::ClaimKey,
@@ -497,6 +496,23 @@ enum Write {
     },
     ReleaseRerun(run::ClaimKey),
     Flush(oneshot::Sender<()>),
+}
+
+/// The writes that come every few seconds while runners run: the writer commits those sent close together in one
+/// transaction, each in its own savepoint, so a busy host commits a few times a second rather than once per write.
+#[derive(Debug)]
+enum Telemetry {
+    Log {
+        job: u64,
+        lines: Vec<String>,
+        /// Where the capture resumes once these lines are stored; `None` for all but the last part of a batch.
+        position: Option<LogPosition>,
+        max_bytes: u64,
+        /// The lines' share of `LOG_BACKLOG`, given back once they are stored.
+        backlog: OwnedSemaphorePermit,
+    },
+    Samples(Vec<SampleRecord>),
+    HostSample(api::HostSample),
 }
 
 /// What the notifier records.
@@ -746,13 +762,13 @@ impl Store {
             let Ok(backlog) = self.backlog.clone().acquire_many_owned(share).await else {
                 return;
             };
-            self.send(Write::Log {
+            self.send(Write::Telemetry(Telemetry::Log {
                 job,
                 lines: part,
                 position: last.then_some(position),
                 max_bytes,
-                _backlog: backlog,
-            });
+                backlog,
+            }));
             if last {
                 return;
             }
@@ -766,7 +782,7 @@ impl Store {
             latest.insert(sample.runner.clone(), sample.clone());
         }
         drop(latest);
-        self.send(Write::Samples(samples));
+        self.send(Write::Telemetry(Telemetry::Samples(samples)));
     }
 
     /// Records a sample of the slice and sends it to every subscriber at once; it is stored with the next ones, a
@@ -774,7 +790,7 @@ impl Store {
     pub fn host_sample(&self, sample: api::HostSample) {
         *lock(&self.latest_host) = Some(sample.clone());
         lock(&self.held).push(sample.clone());
-        self.send(Write::HostSample(sample));
+        self.send(Write::Telemetry(Telemetry::HostSample(sample)));
     }
 
     /// A runner's last sample, stored or not; `None` before its first sample or once it is removed.
@@ -1008,17 +1024,24 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
-    /// Records that this machine named a runner for `secs`, the second its name ends in, before GitHub or Docker
-    /// knows the name: a restart names the next runner later even when nothing else recorded this one. Says whether
-    /// it committed.
-    pub async fn runner_named(&self, secs: u64) -> bool {
-        let (done, committed) = oneshot::channel();
-        self.send(Write::RunnerNamed { secs, done });
+    /// The second to name a runner whose name starts with `prefix` for, `secs` or later, before GitHub or Docker
+    /// knows the name: past every second the history knows was named, whatever the engine read at its start, so a
+    /// restart never names a runner the same even when nothing else recorded one. The history keeps a lease a few
+    /// minutes past it, synced to disk once, so the names in it cost no write. `None` when the history cannot keep it:
+    /// then the name must not be used.
+    pub async fn runner_named(&self, prefix: &str, secs: u64) -> Option<u64> {
+        let (done, granted) = oneshot::channel();
+        self.send(Write::RunnerNamed {
+            prefix: prefix.to_owned(),
+            secs,
+            done,
+        });
         // Waited for on a blocking thread, as a read is: the runtime then knows the start waits for the disk, and a
         // paused test clock does not run on meanwhile.
-        tokio::task::spawn_blocking(move || committed.blocking_recv().unwrap_or(false))
+        tokio::task::spawn_blocking(move || granted.blocking_recv().ok().flatten())
             .await
-            .unwrap_or(false)
+            .ok()
+            .flatten()
     }
 
     /// Records a repository's visibility as GitHub gave it at `at` (ms), in place of the one recorded before.
@@ -1599,10 +1622,18 @@ fn read_as_current(db: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.
+/// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error. SQLite tries a
+/// checkpoint once the WAL holds 8192 pages (32 MiB) rather than its default 1000: a page the writer changes again and
+/// again, as a running job's row, is copied into the database once per checkpoint, not once per 4 MiB. The file is cut
+/// back to 64 MiB when the WAL is next reset for reuse, so a burst does not leave a large file behind; neither is a
+/// cap, as a reader holding an old snapshot keeps the WAL from being reused. Temporary tables and indices, as a sort's,
+/// stay in memory.
 fn configure(db: &Connection) -> rusqlite::Result<()> {
     db.pragma_update(None, "journal_mode", "wal")?;
     db.pragma_update(None, "synchronous", "normal")?;
+    db.pragma_update(None, "temp_store", "memory")?;
+    db.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
+    db.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
     db.pragma_update(None, "foreign_keys", "on")?;
     db.busy_timeout(Duration::from_secs(5))
 }
