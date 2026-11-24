@@ -6,9 +6,11 @@
     reason = "a test helper: a fake daemon that cannot start fails the test"
 )]
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use runnerd_core::client::{Client, Forwarding, SshOutput, SshProgram, Timeouts};
@@ -97,33 +99,61 @@ impl Drop for TempDir {
     }
 }
 
-/// A fake `ssh`: its forward is a fake daemon serving `router` on the forward's local socket, and the one command it
-/// runs prints `stdout`. No test runs the real `ssh`.
+/// A fake `ssh`: its forward is a fake daemon serving a router on the forward's local socket, the one its target was
+/// given or else the one for any, and the one command it runs prints `stdout`. No test runs the real `ssh`.
 #[derive(Debug)]
 pub(crate) struct FakeSsh {
-    router: axum::Router,
+    /// By SSH target; `""` serves any target without its own.
+    routers: BTreeMap<String, axum::Router>,
     stdout: String,
+    /// Forwards started and not yet stopped or dropped.
+    forwards: Arc<AtomicUsize>,
 }
 
 impl FakeSsh {
-    pub(crate) fn serving(router: axum::Router, stdout: &str) -> std::sync::Arc<FakeSsh> {
-        std::sync::Arc::new(FakeSsh {
-            router,
+    /// Serves `router` to every target.
+    pub(crate) fn serving(router: axum::Router, stdout: &str) -> Arc<FakeSsh> {
+        FakeSsh::by_target(BTreeMap::from([(String::new(), router)]), stdout)
+    }
+
+    /// Serves each target its own router.
+    pub(crate) fn by_target(routers: BTreeMap<String, axum::Router>, stdout: &str) -> Arc<FakeSsh> {
+        Arc::new(FakeSsh {
+            routers,
             stdout: stdout.to_owned(),
+            forwards: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// How many forwards still run: an `ssh` a dropped client left behind counts.
+    pub(crate) fn forwards(&self) -> usize {
+        self.forwards.load(Ordering::SeqCst)
     }
 }
 
 #[derive(Debug)]
-struct FakeForward(tokio::task::JoinHandle<()>);
+struct FakeForward {
+    server: tokio::task::JoinHandle<()>,
+    /// Taken when it stops, so it is counted once.
+    running: Option<Arc<AtomicUsize>>,
+}
 
 impl Forwarding for FakeForward {
     fn exited(&mut self) -> std::io::Result<bool> {
-        Ok(self.0.is_finished())
+        Ok(self.server.is_finished())
     }
 
     fn stop(&mut self) {
-        self.0.abort();
+        self.server.abort();
+        if let Some(running) = self.running.take() {
+            running.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for FakeForward {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -132,7 +162,18 @@ impl SshProgram for FakeSsh {
         let at = args.iter().position(|arg| arg == "-L").unwrap() + 1;
         let forward = args[at].to_string_lossy();
         let local = PathBuf::from(forward.split_once(':').unwrap().0);
-        Ok(Box::new(FakeForward(serve(&local, self.router.clone()))))
+        let target = args.last().unwrap().to_string_lossy();
+        let router = self
+            .routers
+            .get(target.as_ref())
+            .or_else(|| self.routers.get(""))
+            .unwrap()
+            .clone();
+        self.forwards.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FakeForward {
+            server: serve(&local, router),
+            running: Some(self.forwards.clone()),
+        }))
     }
 
     fn run(&self, _: &[OsString]) -> std::io::Result<SshOutput> {

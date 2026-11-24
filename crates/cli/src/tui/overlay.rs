@@ -118,6 +118,18 @@ impl Picker {
         self.choices.get(self.at)
     }
 
+    /// Replaces the option of `choice`'s value with it, the keys staying where they are; one the list lacks is
+    /// dropped.
+    pub(crate) fn replace(&mut self, choice: Choice) {
+        if let Some(kept) = self
+            .choices
+            .iter_mut()
+            .find(|kept| kept.value == choice.value)
+        {
+            *kept = choice;
+        }
+    }
+
     /// Replaces the options with `choices`, the keys staying on the same line when there still is one.
     pub(crate) fn fill(&mut self, choices: Vec<Choice>) {
         self.choices = choices;
