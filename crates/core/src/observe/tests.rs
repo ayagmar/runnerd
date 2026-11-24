@@ -546,7 +546,12 @@ fn the_hosts_processes_are_read_for_what_holds_its_memory_only_every_holders_int
 }
 
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {
-    let mut parser = Parser::default();
+    feed_from(LogPosition { page: 1, offset: 0 }, chunks)
+}
+
+/// What a parser makes of a script's output that started at `start`.
+fn feed_from(start: LogPosition, chunks: &[&[u8]]) -> Vec<Captured> {
+    let mut parser = Parser::at(start);
     chunks.iter().flat_map(|chunk| parser.feed(chunk)).collect()
 }
 
@@ -690,7 +695,7 @@ fn a_response_logged_in_the_same_millisecond_as_the_last_one_counted_is_counted_
 #[test]
 fn a_line_larger_than_the_backlog_and_the_log_cap_is_cut_as_it_arrives() {
     let total = 3 * usize::try_from(LOG_BACKLOG).unwrap();
-    let mut parser = Parser::default();
+    let mut parser = Parser::at(LogPosition { page: 1, offset: 0 });
     let mut captured = parser.feed(format!("@@page 1 0 {}\n", total + 1).as_bytes());
     let chunk = vec![b'x'; 1 << 20];
     for _ in 0..total / chunk.len() {
@@ -717,7 +722,7 @@ fn a_line_larger_than_the_backlog_and_the_log_cap_is_cut_as_it_arrives() {
 fn many_lines_in_one_chunk_come_in_batches_each_with_where_to_resume() {
     let line = "y".repeat(999);
     let count = 3000_u64;
-    let mut parser = Parser::default();
+    let mut parser = Parser::at(LogPosition { page: 1, offset: 0 });
     let mut body = format!("@@page 1 0 {}\n", count * 1000).into_bytes();
     for _ in 0..count {
         body.extend_from_slice(line.as_bytes());
@@ -1712,20 +1717,25 @@ fn only_a_system_battery_that_discharges_puts_the_host_on_battery() {
 }
 
 /// The capture script, run by bash over the fake diagnostic directory `diag`, from `start` on, with `bin` first on its
-/// `PATH`; stdin is empty, as under `docker exec`.
+/// `PATH`; its stdin is a pipe the test writes acks to, as the daemon does through `docker exec`.
 struct Capture {
     child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
     output: std::sync::mpsc::Receiver<Vec<u8>>,
     read: Vec<u8>,
 }
 
+/// What a test's script keeps of removed pages the history has not committed, at most: more than any test writes.
+const KEEP: u64 = 1 << 20;
+
 impl Capture {
     fn start(diag: &Path, bin: &Path, start: LogPosition) -> Capture {
-        Capture::of(super::capture::SCRIPT, diag, bin, start)
+        Capture::of(super::capture::SCRIPT, diag, bin, start, KEEP)
     }
 
-    /// `script` in place of the capture script; what it prints on stderr goes to `bin/stderr`.
-    fn of(script: &str, diag: &Path, bin: &Path, start: LogPosition) -> Capture {
+    /// `script` in place of the capture script, keeping at most `keep` bytes; what it prints on stderr goes to
+    /// `bin/stderr`.
+    fn of(script: &str, diag: &Path, bin: &Path, start: LogPosition, keep: u64) -> Capture {
         let script = script.replace(super::capture::DIAG, &diag.to_string_lossy());
         let path = format!(
             "{}:{}",
@@ -1734,13 +1744,18 @@ impl Capture {
         );
         let mut child = std::process::Command::new("bash")
             .args(["-c", &script, "capture"])
-            .args([start.page.to_string(), start.offset.to_string()])
+            .args([
+                start.page.to_string(),
+                start.offset.to_string(),
+                keep.to_string(),
+            ])
             .env("PATH", path)
-            .stdin(std::process::Stdio::null())
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::fs::File::create(bin.join("stderr")).unwrap())
             .spawn()
             .unwrap();
+        let input = child.stdin.take();
         let mut stdout = child.stdout.take().unwrap();
         let (send, output) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1753,9 +1768,28 @@ impl Capture {
         });
         Capture {
             child,
+            input,
             output,
             read: Vec::new(),
         }
+    }
+
+    /// Tells the script the history committed every page before `page`, as the daemon does.
+    fn ack(&mut self, page: u64) {
+        let input = self.input.as_mut().unwrap();
+        std::io::Write::write_all(input, super::capture::ack(page).as_bytes()).unwrap();
+    }
+
+    /// Whether the script exited by `within`.
+    fn exits_within(&mut self, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if self.child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
     }
 
     /// Everything printed so far, once it holds `wanted`; fails after 10 s without it.
@@ -1828,6 +1862,29 @@ fn the_capture_script_follows_a_page_until_it_goes_and_resumes_mid_page_without_
     capture.until("@@page 1 13 6\n");
     std::fs::remove_file(&page).unwrap();
     let output = capture.until("@@end 1\n").to_vec();
+    // Its link stays until the history commits the page: a capture started again would find nothing else.
+    let kept = diag.join(".runnerd-pages/tl_abc-1_1.log");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert!(
+        kept.exists(),
+        "a page the history has not committed is kept"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&capture.read)
+            .matches("@@end 1")
+            .count(),
+        1,
+        "a kept page ends once"
+    );
+    capture.ack(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while kept.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the acked page's link never went"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     drop(capture);
     let captured = feed_all(&[&output]);
     assert_eq!(captured[0], Captured::Job { id: 7, run_id: 8 });
@@ -1846,7 +1903,10 @@ fn the_capture_script_follows_a_page_until_it_goes_and_resumes_mid_page_without_
     let mut capture = Capture::start(&diag, &bin, LogPosition { page: 2, offset: 6 });
     let output = capture.until("@@page 2 6 7\nsecond\n").to_vec();
     drop(capture);
-    assert_eq!(lines(&feed_all(&[&output])), ["second"]);
+    assert_eq!(
+        lines(&feed_from(LogPosition { page: 2, offset: 6 }, &[&output])),
+        ["second"]
+    );
     assert!(
         !diag.join(".runnerd-pages/tl_abc-1_1.log").exists(),
         "a page before the resumed one is dropped"
@@ -1884,32 +1944,83 @@ fn an_idle_capture_script_waits_between_passes_rather_than_spinning() {
     );
 }
 
-// Catches: a container whose shell cannot open the wait's pipe, as one without /dev/fd, spinning, or sending the
-// daemon an error about `read -u` five times a second.
+// Catches: a script whose daemon went on spinning on its ended stdin, or linking pages no one will ever ack, in every
+// running container, and a malformed ack that drops pages or prints errors.
 #[test]
-fn a_capture_script_that_cannot_open_its_pipe_sleeps_quietly_between_passes() {
-    let dir = TestDir::new("capture-no-pipe");
-    let (diag, bin) = diag(
-        &dir.0,
-        "Waiting to receive the job message from the channel.\n",
-    );
-    stand_in(&bin, "grep");
-    let opened = "exec {tick}<> <(:)";
+fn a_capture_script_exits_once_its_stdin_ends_and_ignores_an_ack_it_cannot_read() {
+    let dir = TestDir::new("capture-stdin-ends");
+    let (diag, bin) = diag(&dir.0, TAKEN);
+    std::fs::write(diag.join("pages/tl_abc-1_1.log"), "first\n").unwrap();
+    let mut capture = Capture::start(&diag, &bin, LogPosition { page: 1, offset: 0 });
+    capture.until("@@page 1 0 6\n");
+    std::io::Write::write_all(capture.input.as_mut().unwrap(), b"later\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
-        super::capture::SCRIPT.contains(opened),
-        "the script opens its pipe so"
+        diag.join(".runnerd-pages/tl_abc-1_1.log").exists(),
+        "a malformed ack drops nothing"
     );
-    let script = super::capture::SCRIPT.replace(opened, "exec {tick}<> /nonexistent/pipe");
-    let capture = Capture::of(&script, &diag, &bin, LogPosition { page: 1, offset: 0 });
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    drop(capture);
-    let passes = calls(&bin, "grep") / 3;
     assert!(
-        (2..=8).contains(&passes),
-        "{passes} passes in a second, about five expected"
+        !capture.exits_within(std::time::Duration::ZERO),
+        "the script runs while its stdin is open"
+    );
+    capture.input = None;
+    assert!(
+        capture.exits_within(std::time::Duration::from_secs(5)),
+        "the script exits once its stdin ends"
     );
     let stderr = std::fs::read_to_string(bin.join("stderr")).unwrap();
     assert_eq!(stderr, "", "nothing on stderr");
+}
+
+// Catches: a history that cannot store, as on a full disk, letting the container keep every page the runner removed
+// until the job ends; and the pages it could not keep stitched over silently rather than named.
+#[test]
+fn a_capture_script_keeps_removed_pages_only_up_to_its_bound_and_the_parser_names_what_it_missed() {
+    let dir = TestDir::new("capture-bound");
+    let (diag, bin) = diag(&dir.0, TAKEN);
+    let page = |n: u64| diag.join(format!("pages/tl_abc-1_{n}.log"));
+    std::fs::write(page(1), "one\ntwo\n").unwrap();
+    // Keeps 8 bytes at most: page 1 alone once it is gone.
+    let mut capture = Capture::of(
+        super::capture::SCRIPT,
+        &diag,
+        &bin,
+        LogPosition { page: 1, offset: 0 },
+        8,
+    );
+    capture.until("@@page 1 0 8\n");
+    std::fs::remove_file(page(1)).unwrap();
+    capture.until("@@end 1\n");
+    // No ack comes: page 2 comes and goes unlinked, and page 3 waits until page 1 is committed.
+    std::fs::write(page(2), "lost\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    std::fs::remove_file(page(2)).unwrap();
+    std::fs::write(page(3), "three\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert!(
+        !diag.join(".runnerd-pages/tl_abc-1_2.log").exists()
+            && !diag.join(".runnerd-pages/tl_abc-1_3.log").exists(),
+        "nothing past the bound is linked"
+    );
+    capture.ack(2);
+    let output = capture.until("@@page 3 0 6\nthree\n").to_vec();
+    drop(capture);
+    let captured = feed_all(&[&output]);
+    assert_eq!(
+        lines(&captured),
+        ["one", "two", super::capture::GAP, "three"],
+        "the gap is named, not stitched over"
+    );
+    assert!(
+        matches!(
+            captured.last(),
+            Some(Captured::Lines {
+                position: LogPosition { page: 3, offset: 6 },
+                ..
+            })
+        ),
+        "it resumes after page 3's line"
+    );
 }
 
 #[test]

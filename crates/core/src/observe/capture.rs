@@ -6,7 +6,13 @@
 //!
 //! The script's output: `@@job <id> <run id>`, then `@@page <page> <offset> <length>` followed by exactly that
 //! many bytes, and `@@end <page>` once a page is complete. `Parser` turns it into whole lines and the position to
-//! resume from, so a restarted daemon continues where the stored log ends.
+//! resume from, so a restarted daemon continues where the stored log ends, and words a gap where bytes are missing.
+//!
+//! The script's input (ADR 0176): a line `<page>` once the history committed every page before that one ([`ack`]).
+//! Only then does the script drop its links of those pages, so a capture that starts again from the stored position
+//! finds them. It keeps at most its third argument's bytes of pages the runner removed and the history has not
+//! committed: past that it links no new page, which a later read names as a gap. When its input ends, the daemon's
+//! end is gone, and the script exits.
 //!
 //! `worker_job` and `worker_run` read the same IDs from a worker log copied out of a stopped runner, which no script can
 //! run in.
@@ -15,18 +21,19 @@ use std::fmt::Write as _;
 
 use crate::store::LogPosition;
 
-/// The script; `bash -c SCRIPT capture <page> <offset>` resumes at that page and byte offset.
+/// The script; `bash -c SCRIPT capture <page> <offset> <keep>` resumes at that page and byte offset, keeping at most
+/// `keep` bytes of removed pages the history has not committed.
 pub const SCRIPT: &str = r#"
-diag=/home/runner/_diag keep=/home/runner/_diag/.runnerd-pages start_page=$1 start_offset=$2 job= record=
-declare -A off
+diag=/home/runner/_diag keep=/home/runner/_diag/.runnerd-pages start_page=$1 start_offset=$2 keep_max=$3 job= record=
+held=0
+# Each kept page's bytes printed, and whether its end was.
+declare -A off ended
 # The page number in a page's file name, in `page`: no command substitution, which forks a subshell.
 page_of() { page=${1##*_} page=${page%.log}; }
-# Waits between passes with `read`'s timeout on a pipe this shell holds both ends of, so it never sees EOF: a builtin,
-# where `sleep` would fork a process five times a second in every running container. The one fork is here. Where the
-# pipe cannot be opened, as without /dev/fd, every wait is `sleep`, chosen once; a `read` that fails rather than times
-# out (status 128 or less) sleeps too: never a busy loop.
-tick=
-{ exec {tick}<> <(:); } 2> /dev/null || tick=
+# The history committed every page before `$1`: their links go on the next pass, and none is linked again.
+acked() {
+    if [ "$1" -gt "$start_page" ] 2> /dev/null; then start_page=$1 start_offset=0; fi
+}
 while :; do
     if [ -z "$job" ]; then
         for w in "$diag"/Worker_*.log; do
@@ -46,13 +53,21 @@ while :; do
         for f in "$diag"/pages/*_"$record"_*.log; do
             [ -f "$f" ] || continue
             page_of "$f"
-            [ "$page" -ge "$start_page" ] && [ ! -e "$keep/${f##*/}" ] && ln "$f" "$keep/${f##*/}" 2> /dev/null
+            [ "$page" -ge "$start_page" ] && [ "$held" -lt "$keep_max" ] && [ ! -e "$keep/${f##*/}" ] &&
+                ln "$f" "$keep/${f##*/}" 2> /dev/null
         done
+        held=0
         for k in "$keep"/*_"$record"_*.log; do
             [ -f "$k" ] || continue
             name=${k##*/} gone=
             page_of "$k"
-            if [ "$page" -lt "$start_page" ]; then rm -f "$k"; continue; fi
+            if [ "$page" -lt "$start_page" ]; then
+                rm -f "$k"
+                unset "off[$name]" "ended[$name]"
+                continue
+            fi
+            # Printed whole and gone: kept until the history commits it.
+            if [ -n "${ended[$name]}" ]; then held=$((held + off[$name])); continue; fi
             [ -e "$diag/pages/$name" ] || gone=1
             size=$(stat -c %s "$k")
             o=${off[$name]:-0}
@@ -62,13 +77,20 @@ while :; do
                 tail -c +$((o + 1)) "$k" | head -c $((size - o))
             fi
             off[$name]=$size
-            if [ -n "$gone" ]; then echo "@@end $page"; rm -f "$k"; fi
+            if [ -n "$gone" ]; then
+                echo "@@end $page"
+                ended[$name]=1 held=$((held + size))
+            fi
         done
     fi
-    if [ -n "$tick" ]; then
-        read -rt 0.2 -u "$tick" || [ $? -gt 128 ] || sleep 0.2
-    else
-        sleep 0.2
+    # Waits for the next pass on stdin, where acks come: `read`'s timeout is a builtin, where `sleep` would fork a
+    # process five times a second in every running container. A `read` that fails rather than times out (status 128
+    # or less) read the end of stdin: the daemon's end is gone, and nothing reads what this prints.
+    if read -rt 0.2 line; then
+        acked "$line"
+        while read -rt 0 && read -r line; do acked "$line"; done
+    elif [ $? -le 128 ]; then
+        exit 0
     fi
 done
 "#;
@@ -104,8 +126,9 @@ fn worker_value(log: &str, key: &str) -> Option<u64> {
     })
 }
 
-/// The `docker exec` command line that captures a job from `position` on.
-pub fn command(position: LogPosition) -> Vec<String> {
+/// The `docker exec` command line that captures a job from `position` on, keeping at most `keep` bytes of removed
+/// pages the history has not committed.
+pub fn command(position: LogPosition, keep: u64) -> Vec<String> {
     vec![
         "bash".to_owned(),
         "-c".to_owned(),
@@ -113,8 +136,20 @@ pub fn command(position: LogPosition) -> Vec<String> {
         "capture".to_owned(),
         position.page.to_string(),
         position.offset.to_string(),
+        keep.to_string(),
     ]
 }
+
+/// What the script reads once the history committed every page before `page`: it drops its links of them.
+pub fn ack(page: u64) -> String {
+    format!("{page}\n")
+}
+
+/// The line that stands where bytes of a job's log are missing: the runner removed them before the script kept them,
+/// as when no capture ran for a while, or the script kept as much as it may. Not a cut: `log_max` cuts a log with no
+/// line of its own.
+pub const GAP: &str =
+    "[runnerd: lines are missing here: the runner removed them before runnerd kept them]";
 
 /// What the script reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,12 +171,12 @@ pub enum Captured {
 }
 
 /// Turns the script's output, in chunks of any size, into `Captured`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Parser {
     input: Vec<u8>,
     /// Bytes of the current `@@page` block still to come.
     remaining: usize,
-    /// The page being read, and the offset in it where `partial` starts.
+    /// The page being read, and the offset in it where `partial` starts: after an `@@end`, the next page at 0.
     page: u64,
     partial_offset: u64,
     /// The start of a line whose end has not arrived, at most `MAX_LINE` bytes of it.
@@ -164,6 +199,18 @@ fn text(line: &[u8]) -> String {
 }
 
 impl Parser {
+    /// A parser of the output of a script started at `start`.
+    pub fn at(start: LogPosition) -> Parser {
+        Parser {
+            input: Vec::new(),
+            remaining: 0,
+            page: start.page,
+            partial_offset: start.offset,
+            partial: Vec::new(),
+            partial_len: 0,
+        }
+    }
+
     /// Feeds output and returns what it completed.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Captured> {
         self.input.extend_from_slice(chunk);
@@ -201,33 +248,44 @@ impl Parser {
                 run_id: *run_id,
             }),
             (Some("@@page"), [page, offset, length]) => {
-                if *page != self.page || *offset != self.partial_offset + self.partial_len {
-                    // A new page, or a resumed one: whatever was pending belongs to a page now complete.
-                    self.page = *page;
+                let at = LogPosition {
+                    page: *page,
+                    offset: *offset,
+                };
+                let next = LogPosition {
+                    page: self.page,
+                    offset: self.partial_offset + self.partial_len,
+                };
+                if at > next {
+                    // Bytes from `next` on are gone: the line they cut ends here, and the gap is named.
+                    let mut lines = Vec::new();
+                    if self.partial_len > 0 {
+                        lines.push(self.take_line());
+                    }
+                    lines.push(GAP.to_owned());
+                    captured.push(Captured::Lines {
+                        lines,
+                        position: at,
+                    });
+                } else if at < next {
+                    // Read again from earlier: what was pending is read again too.
                     self.take_line();
-                    self.partial_offset = *offset;
                 }
+                self.page = *page;
+                self.partial_offset = *offset;
                 self.remaining = usize::try_from(*length).unwrap_or(usize::MAX);
             }
-            (Some("@@end"), [page]) if *page == self.page && self.partial_len > 0 => {
-                let line = self.take_line();
-                self.partial_offset = 0;
-                captured.push(Captured::Lines {
-                    lines: vec![line],
-                    position: LogPosition {
-                        page: page + 1,
-                        offset: 0,
-                    },
-                });
-            }
             (Some("@@end"), [page]) if *page == self.page => {
+                let lines = if self.partial_len > 0 {
+                    vec![self.take_line()]
+                } else {
+                    Vec::new()
+                };
+                self.page = page + 1;
                 self.partial_offset = 0;
                 captured.push(Captured::Lines {
-                    lines: Vec::new(),
-                    position: LogPosition {
-                        page: page + 1,
-                        offset: 0,
-                    },
+                    lines,
+                    position: self.position(),
                 });
             }
             // Anything else is not from the script; nothing to do with it.

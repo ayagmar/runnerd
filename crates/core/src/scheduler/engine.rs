@@ -28,6 +28,7 @@ mod ledger;
 mod leftovers;
 mod listing;
 mod listing_pace;
+mod log_cursor;
 mod mirror;
 mod open_waits;
 mod overflow;

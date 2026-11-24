@@ -15,7 +15,6 @@ use crate::scheduler::engine::open_waits::WaitFor;
 use crate::scheduler::engine::slot::{Holder, Slot};
 use crate::scheduler::engine::upkeep::Due;
 use crate::scheduler::{Hold, Key, Wait, Waits};
-use crate::store::LogPosition;
 
 /// What a pool's hold holds.
 #[derive(Debug, Clone, Copy)]
@@ -367,11 +366,6 @@ impl<G: GithubApi, D: DockerApi> Engine<G, D> {
     /// As if the runner of `job` was found gone at `ms` since the epoch.
     pub(super) fn set_closing_since(&mut self, job: u64, ms: u64) {
         self.ledger.found_gone_at(job, ms);
-    }
-
-    /// As if every broken capture last stored up to `position`, ahead of or behind what the store has.
-    pub(super) fn set_recapture_resumes(&mut self, position: LogPosition) {
-        self.watches.resume_every_break_at(position);
     }
 
     /// The runners' names this machine registers begin with this.

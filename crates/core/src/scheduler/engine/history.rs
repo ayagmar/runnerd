@@ -8,12 +8,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::ledger::{ReadFailure, Unanswered, Wait};
+use super::log_cursor::{Answer, LogCursor};
 use super::tick::CONCURRENT_REQUESTS;
-use super::{Engine, Meanwhile, Occupant, Slot, watches};
+use super::{Engine, Meanwhile, Occupant, Slot};
 use crate::admission::Key;
 use crate::archives;
 use crate::docker::{
@@ -24,7 +26,7 @@ use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
 use crate::scheduler::warm::Attempt;
 use crate::scheduler::{Pool, SlotRef};
-use crate::store::{LogPosition, RunnerRecord, Store};
+use crate::store::{LogPosition, LogSegment, RunnerRecord, Store, StoreError};
 use crate::sync::lock;
 use crate::time;
 
@@ -47,14 +49,15 @@ const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 /// Where a capture starts when nothing of its job's log is stored.
 const FIRST_PAGE: LogPosition = LogPosition { page: 1, offset: 0 };
 
-/// How a runner's log capture ended.
+/// How a runner's log capture ended, once the history answered for every line it sent (ADR 0176).
 #[derive(Debug)]
 pub(super) enum Capture {
-    /// Nothing is left to capture: the container stopped, or the job's log is stored whole or up to `log_max`.
+    /// Nothing is left to capture: the container stopped and every line read is committed, or the job's log is
+    /// stored whole or up to `log_max`.
     Done,
-    /// Docker failed the exec or broke its output off, though the container may run on: `recapture` starts it
-    /// again. `resume` is where the lines it stored end, if it stored any: the store may not have written them yet.
-    Broken { resume: Option<LogPosition> },
+    /// Docker failed the exec or broke its output off, though the container may run on, or the history did not store
+    /// what it read: `recapture` starts it again from where the history's stored log ends.
+    Broken,
 }
 
 /// A runner's log capture found its job.
@@ -119,11 +122,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// captures its job and log. If Docker fails to inspect it, `observe_again` tries on the next tick.
     pub(super) async fn observe(&mut self, slot: &SlotRef, occupant: &Occupant) {
         let inspected = self.docker.inspect(&occupant.container).await;
-        self.watch_inspected(slot, occupant, inspected).await;
+        self.watch_inspected(slot, occupant, inspected);
     }
 
     /// `observe`, from Docker's inspect of the runner's container, which a start's task made.
-    pub(super) async fn watch_inspected(
+    pub(super) fn watch_inspected(
         &mut self,
         slot: &SlotRef,
         occupant: &Occupant,
@@ -153,27 +156,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.leases
                 .start(address, &occupant.runner_name, started_at);
         }
-        // An adopted runner may have stored part of its log before the restart.
-        let position = self.stored_position(&occupant.runner_name).await;
-        self.capture(occupant, position);
+        self.capture(occupant);
     }
 
-    /// Where the stored log of a runner's job ends.
-    async fn stored_position(&self, runner: &str) -> LogPosition {
-        match self.store.runner_job(runner).await {
-            Ok(Some(job)) => self.store.log_position(job).await.unwrap_or(FIRST_PAGE),
-            _ => FIRST_PAGE,
-        }
-    }
-
-    /// Starts a runner's log capture from `position`, in place of any it had.
-    fn capture(&mut self, occupant: &Occupant, position: LogPosition) {
+    /// Starts a runner's log capture, in place of any it had, from where its job's stored log ends: an adopted runner
+    /// may have stored part of its log before the restart.
+    fn capture(&mut self, occupant: &Occupant) {
         let task = tokio::spawn(capture_job(
             self.docker.clone(),
             self.store.clone(),
             occupant.runner_name.clone(),
             occupant.container.clone(),
-            position,
             self.config.history.log_max.0,
             Told {
                 found: self.found.0.clone(),
@@ -184,28 +177,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Starts again the log captures that broke off while their container runs, each after a wait that grows with
-    /// its breaks (`capture_backoff`), from where its job's stored lines end. Without it, a runner whose capture
-    /// broke would lose its job's name, log and record.
+    /// its breaks (`capture_backoff`), from where its job's stored lines end: only a commit moves that, so no line is
+    /// skipped or stored twice. Without it, a runner whose capture broke would lose its job's name, log and record.
     pub(super) async fn recapture(&mut self) {
         let now = tokio::time::Instant::now();
         self.watches.settle(now).await;
-        let due: Vec<(Occupant, Option<LogPosition>)> = self
+        let due: Vec<Occupant> = self
             .occupied()
-            .filter_map(|(_, occupant)| {
-                let due = self.watches.due(&occupant.runner_name, now)?;
-                Some((occupant.clone(), due.resume))
-            })
+            .filter(|(_, occupant)| self.watches.is_due(&occupant.runner_name, now))
+            .map(|(_, occupant)| occupant.clone())
             .collect();
-        for (occupant, resume) in due {
+        for occupant in due {
             match self.docker.inspect(&occupant.container).await {
                 Ok(state) if state.running => {
-                    let stored = self.stored_position(&occupant.runner_name).await;
-                    let position = watches::later(resume, Some(stored)).unwrap_or(stored);
                     info!(
-                        "{}: capturing its job and log again from page {} at byte {}",
-                        occupant.runner_name, position.page, position.offset
+                        "{}: capturing its job and log again from where its history ends",
+                        occupant.runner_name
                     );
-                    self.capture(&occupant, position);
+                    self.capture(&occupant);
                 }
                 // Its log ends where the capture broke off; `collect_finished` frees its slot.
                 Ok(_) => {
@@ -694,73 +683,152 @@ struct Told {
     packages: archives::Packages,
 }
 
-/// Runs a runner's log capture until its container stops: reports the job it took, and stores the job's log.
+/// Where the history's stored log of a runner's job ends: the first page when it names no job for the runner.
+async fn committed_position(store: &Store, runner: &str) -> Result<LogPosition, StoreError> {
+    match store.runner_job(runner).await? {
+        Some(job) => store.log_position(job).await,
+        None => Ok(FIRST_PAGE),
+    }
+}
+
+/// How much of a job's log the history had when its capture found the job.
+enum Stored {
+    /// These bytes, or none it could read.
+    Bytes(u64),
+    /// All it keeps: the log is cut at `log_max`.
+    Full,
+}
+
+/// Records that `runner` took `job` of `run_id`, tells the engine, and reads how much of its log the history has,
+/// after a restart the part stored before.
+async fn claim(store: &Store, runner: &str, told: &Told, job: u64, run_id: u64) -> Stored {
+    let at = time::now_ms();
+    store.claimed(job, run_id, runner, at);
+    let _ = told.found.send(Found {
+        runner: runner.to_owned(),
+        job,
+        run_id,
+        at,
+    });
+    match store.job(job).await {
+        Ok(Some(stored)) if stored.summary.log.truncated => Stored::Full,
+        Ok(Some(stored)) => Stored::Bytes(stored.summary.log.bytes),
+        Ok(None) | Err(_) => Stored::Bytes(0),
+    }
+}
+
+/// Runs a runner's log capture until its container stops: reports the job it took, and stores the job's log. It
+/// starts where the history's stored log ends, sends what it reads in segments, each from where the last ended, and
+/// tells the script each page the history committed, which only then drops it (ADR 0176). It ends once the history
+/// answered for every segment sent: done only if each was stored, or the log is full.
 async fn capture_job<D: DockerApi>(
     docker: Arc<D>,
     store: Store,
     runner: String,
     container: String,
-    position: LogPosition,
     max_bytes: u64,
     told: Told,
 ) -> Capture {
-    let mut output = match docker.exec(&container, capture::command(position)).await {
-        Ok(output) => output,
+    let start = match committed_position(&store, &runner).await {
+        Ok(start) => start,
+        Err(error) => {
+            warn!("{runner}: cannot read where its stored log ends, to capture it: {error}");
+            return Capture::Broken;
+        }
+    };
+    let fed = match docker
+        .exec_fed(&container, capture::command(start, max_bytes))
+        .await
+    {
+        Ok(fed) => fed,
         // It stopped or is going since it was started or adopted: its release reads its log (`recapture`).
         Err(error) if is_not_running(&error) || is_log_gone(&error) => {
             debug!("{runner}: no capture, as its container stopped: {error}");
-            return Capture::Broken { resume: None };
+            return Capture::Broken;
         }
         Err(error) => {
             warn!("{runner}: cannot capture its job and log: {error}");
-            return Capture::Broken { resume: None };
+            return Capture::Broken;
         }
     };
-    let mut parser = Parser::default();
+    let (mut output, mut input) = (fed.output, fed.input);
+    let mut parser = Parser::at(start);
+    let mut cursor = LogCursor::at(start);
     let mut job = None;
-    // Bytes of the job's log stored or sent: past `max_bytes` the store keeps no more, so the capture stops.
+    // Bytes of the job's log stored or sent: past `max_bytes` the store keeps no more, so the capture stops reading.
     let mut sent = 0;
-    let mut resume = None;
-    while let Some(chunk) = output.next().await {
-        // The container stopped, or Docker dropped the exec while it runs: `recapture` tells them apart.
-        let Ok(chunk) = chunk else {
-            return Capture::Broken { resume };
-        };
-        for captured in parser.feed(&chunk) {
-            match captured {
-                Captured::Job { id, run_id } => {
-                    if job.is_none() {
-                        job = Some(id);
-                        let at = time::now_ms();
-                        store.claimed(id, run_id, &runner, at);
-                        let _ = told.found.send(Found {
-                            runner: runner.clone(),
-                            job: id,
-                            run_id,
-                            at,
-                        });
-                        // After a restart, the part stored before.
-                        if let Ok(Some(stored)) = store.job(id).await {
-                            if stored.summary.log.truncated {
-                                return Capture::Done;
+    // What ends the capture once every segment sent is answered: `None` while it reads.
+    let mut ending: Option<Capture> = None;
+    loop {
+        if ending.is_some() && cursor.is_settled() {
+            break;
+        }
+        tokio::select! {
+            answer = cursor.answer(), if !cursor.is_settled() => match answer {
+                Answer::Committed { ack: Some(page) } => {
+                    // A script that ended reads no more; its output ends too.
+                    let _ = input.write_all(capture::ack(page).as_bytes()).await;
+                    let _ = input.flush().await;
+                }
+                Answer::Committed { ack: None } => {}
+                Answer::Full => {
+                    ending.get_or_insert(Capture::Done);
+                }
+                Answer::Refused => {
+                    warn!("{runner}: the history did not store its log; capturing it again from where it ends");
+                    ending = Some(Capture::Broken);
+                }
+            },
+            chunk = output.next(), if ending.is_none() => {
+                let chunk = match chunk {
+                    Some(Ok(chunk)) => chunk,
+                    // The container stopped, or the script ended.
+                    None => {
+                        ending = Some(Capture::Done);
+                        continue;
+                    }
+                    // The container stopped, or Docker dropped the exec while it runs: `recapture` tells them apart.
+                    Some(Err(_)) => {
+                        ending = Some(Capture::Broken);
+                        continue;
+                    }
+                };
+                for captured in parser.feed(&chunk) {
+                    match captured {
+                        Captured::Job { id, run_id } if job.is_none() => {
+                            job = Some(id);
+                            match claim(&store, &runner, &told, id, run_id).await {
+                                Stored::Bytes(bytes) => sent = bytes,
+                                Stored::Full => {
+                                    ending = Some(Capture::Done);
+                                    break;
+                                }
                             }
-                            sent = stored.summary.log.bytes;
+                        }
+                        Captured::Job { .. } => {}
+                        Captured::Lines { lines, position } => {
+                            let Some(job) = job else { continue };
+                            sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
+                            told.packages.read(&lines);
+                            let appended = store
+                                .append_log(LogSegment {
+                                    job,
+                                    lines,
+                                    from: cursor.read(),
+                                    to: position,
+                                    max_bytes,
+                                })
+                                .await;
+                            cursor.sent(position, appended);
+                            if sent > max_bytes {
+                                ending = Some(Capture::Done);
+                                break;
+                            }
                         }
                     }
                 }
-                Captured::Lines { lines, position } => {
-                    if let Some(job) = job {
-                        sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
-                        told.packages.read(&lines);
-                        store.log(job, lines, position, max_bytes).await;
-                        resume = Some(position);
-                        if sent > max_bytes {
-                            return Capture::Done;
-                        }
-                    }
-                }
-            }
+            },
         }
     }
-    Capture::Done
+    ending.unwrap_or(Capture::Done)
 }

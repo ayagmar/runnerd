@@ -206,6 +206,23 @@ pub struct RunnerState {
 /// What a command run in a container prints on stdout, as it prints it.
 pub type Output = BoxStream<'static, Result<Vec<u8>, Error>>;
 
+/// A command's stdin, which `exec_fed` keeps open: the command reads end of file once it is dropped.
+pub type Input = Pin<Box<dyn tokio::io::AsyncWrite + Send>>;
+
+/// A command `exec_fed` runs: what it prints, and its stdin.
+pub struct Fed {
+    /// Its stdout.
+    pub output: Output,
+    /// Its stdin.
+    pub input: Input,
+}
+
+impl fmt::Debug for Fed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Fed")
+    }
+}
+
 /// An image `images` found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -506,6 +523,12 @@ pub trait DockerApi: Send + Sync {
         container: &str,
         command: Vec<String>,
     ) -> impl Future<Output = Result<Output, Error>> + Send;
+    /// `exec`, with the command's stdin attached and handed back to write to.
+    fn exec_fed(
+        &self,
+        container: &str,
+        command: Vec<String>,
+    ) -> impl Future<Output = Result<Fed, Error>> + Send;
     /// Whether Docker has an image.
     fn image_present(&self, image: &str) -> impl Future<Output = Result<bool, Error>> + Send;
     /// What a runner image does when asked, as its labels say (`RunnerImage::of`); the default when Docker does not
@@ -661,6 +684,46 @@ impl Docker {
             // Attestation manifests in an index carry the platform unknown/unknown.
             .filter(|platform| platform != "unknown/unknown")
             .collect())
+    }
+}
+
+impl Docker {
+    /// Runs a command as root in a running container, its stdout attached, and its stdin if `stdin`; without it, the
+    /// command's stdin is empty and the `input` handed back writes nowhere.
+    async fn attached_exec(
+        &self,
+        container: &str,
+        command: Vec<String>,
+        stdin: bool,
+    ) -> Result<Fed, Error> {
+        let options = CreateExecOptions {
+            cmd: Some(command),
+            user: Some("root".to_owned()),
+            attach_stdin: Some(stdin),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        let exec = self.api.create_exec(container, options).await?;
+        match self.api.start_exec(&exec.id, None).await? {
+            StartExecResults::Attached { output, input } => Ok(Fed {
+                output: output
+                    .try_filter_map(|output| {
+                        std::future::ready(Ok(match output {
+                            bollard::container::LogOutput::StdOut { message } => {
+                                Some(message.to_vec())
+                            }
+                            _ => None,
+                        }))
+                    })
+                    .boxed(),
+                input,
+            }),
+            StartExecResults::Detached => Ok(Fed {
+                output: futures_util::stream::empty().boxed(),
+                input: Box::pin(tokio::io::sink()),
+            }),
+        }
     }
 }
 
@@ -846,25 +909,11 @@ impl DockerApi for Docker {
     }
 
     async fn exec(&self, container: &str, command: Vec<String>) -> Result<Output, Error> {
-        let options = CreateExecOptions {
-            cmd: Some(command),
-            user: Some("root".to_owned()),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
-        let exec = self.api.create_exec(container, options).await?;
-        match self.api.start_exec(&exec.id, None).await? {
-            StartExecResults::Attached { output, .. } => Ok(output
-                .try_filter_map(|output| {
-                    std::future::ready(Ok(match output {
-                        bollard::container::LogOutput::StdOut { message } => Some(message.to_vec()),
-                        _ => None,
-                    }))
-                })
-                .boxed()),
-            StartExecResults::Detached => Ok(futures_util::stream::empty().boxed()),
-        }
+        Ok(self.attached_exec(container, command, false).await?.output)
+    }
+
+    async fn exec_fed(&self, container: &str, command: Vec<String>) -> Result<Fed, Error> {
+        self.attached_exec(container, command, true).await
     }
 
     async fn image_present(&self, image: &str) -> Result<bool, Error> {
