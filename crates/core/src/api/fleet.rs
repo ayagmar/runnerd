@@ -164,6 +164,9 @@ impl Fleet {
     }
 }
 
+/// A machine's line in a client's list of machines while its state is still being read.
+pub const BEING_READ: &str = "reading its state…";
+
 /// What this machine is called when its daemon does not say, or could not be read.
 pub const THIS_MACHINE: &str = "this machine";
 

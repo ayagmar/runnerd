@@ -40,7 +40,7 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{App, Connection, Effect, Msg, Pane, Refused, Removal, Resizing, View};
 use super::draw::{Theme, draw};
 use super::feed;
-use super::overlay::Overlay;
+use super::overlay::{Overlay, Pick};
 use crate::testing::Fake;
 use crate::watch;
 
@@ -3550,5 +3550,212 @@ fn followed_lines_are_sent_in_batches_of_bounded_size_and_age() {
         batch.wait(now + Duration::from_millis(100)),
         None,
         "a batch 100 ms old goes, though lines keep coming"
+    );
+}
+
+/// The fixtures' fleet as the list of machines receives it: this machine, then `skiff` and `dory` of
+/// `machines.toml`.
+fn machine_choices() -> Vec<super::app::MachineChoice> {
+    let fleet = runnerd_fixtures::fleet();
+    fleet
+        .machines
+        .into_iter()
+        .enumerate()
+        .map(|(at, machine)| super::app::MachineChoice {
+            target: (at > 0).then(|| machine.name.clone()),
+            name: machine.name.clone(),
+            machine: Some(machine),
+        })
+        .collect()
+}
+
+/// The machines of `machine_choices` as listed before any is read.
+fn machines_listed() -> Vec<super::app::MachineChoice> {
+    machine_choices()
+        .into_iter()
+        .map(|choice| super::app::MachineChoice {
+            machine: None,
+            ..choice
+        })
+        .collect()
+}
+
+/// Catches: `m` showing nothing until the slowest machine answers (10 to 30 s with one down), and the readings
+/// moving the cursor the person already put on a machine.
+#[test]
+fn the_list_of_machines_opens_at_once_and_fills_in_place() {
+    let mut app = app();
+    assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    assert!(
+        matches!(&app.overlay, Overlay::Pick(picker) if picker.pick == Pick::Machine),
+        "the list is open before any machine answered"
+    );
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        shown.contains(runnerd_core::api::BEING_READ),
+        "each machine is being read: {shown}"
+    );
+    app.update(key(KeyCode::Down));
+    app.update(Msg::Machines {
+        choices: machine_choices(),
+        current: None,
+    });
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        shown.contains("cannot be read"),
+        "the readings fill it: {shown}"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Switch(Some("skiff".to_owned()))],
+        "the cursor stayed on skiff"
+    );
+}
+
+/// Catches: the list of machines, arriving late, replacing a search being typed or reopening a list closed meanwhile,
+/// so the next keys act on machines.
+#[test]
+fn a_late_list_of_machines_takes_the_place_of_nothing_else() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('m')));
+    app.update(key(KeyCode::Char('h')));
+    app.update(key(KeyCode::Char('/')));
+    for choices in [machines_listed(), machine_choices()] {
+        app.update(Msg::Machines {
+            choices,
+            current: None,
+        });
+        assert!(
+            matches!(app.overlay, Overlay::Input(_)),
+            "the search stays open: {:?}",
+            app.overlay
+        );
+    }
+    app.update(key(KeyCode::Esc));
+    app.update(key(KeyCode::Char('m')));
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    app.update(key(KeyCode::Esc));
+    app.update(Msg::Machines {
+        choices: machine_choices(),
+        current: None,
+    });
+    assert_eq!(app.overlay, Overlay::None, "a list closed stays closed");
+}
+
+/// Catches: the list of machines wording a machine's state itself, a machine that is down shown in a quiet colour,
+/// and enter on another machine doing anything but asking to read it.
+#[test]
+fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_chosen() {
+    let mut app = app();
+    assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    app.update(Msg::Machines {
+        choices: machine_choices(),
+        current: None,
+    });
+    let facts = runnerd_fixtures::fleet_facts(&runnerd_fixtures::fleet());
+    let shown = screen(&app, 200, 30, false);
+    for machine in &facts.machines {
+        let line = shown
+            .lines()
+            .find(|line| line.contains(&format!(" {}  ", machine.name)))
+            .unwrap_or_else(|| panic!("{}: {shown}", machine.name));
+        let start = &machine.summary[..machine.summary.len().min(40)];
+        assert!(line.contains(start), "{line}");
+    }
+    let mut terminal = Terminal::new(TestBackend::new(200, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, &app, NOW, Theme { colour: true });
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let dory_row = (0..30)
+        .find(|y| {
+            (0..200)
+                .map(|x| buffer[(x, *y)].symbol())
+                .collect::<String>()
+                .contains("cannot be read")
+        })
+        .unwrap();
+    assert!(
+        (0..200).any(|x| buffer[(x, dory_row)].fg == Color::LightRed),
+        "a machine that is down reads in core's bad tone"
+    );
+    app.update(key(KeyCode::Down));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Switch(Some("skiff".to_owned()))]
+    );
+    assert_eq!(app.overlay, Overlay::None, "the list closes");
+    assert!(
+        app.flash
+            .as_ref()
+            .is_some_and(|flash| flash.text == "reading skiff…"),
+        "a switch under way says so: {:?}",
+        app.flash
+    );
+
+    // Enter on the machine read now, the cursor's first place, closes the list and reads nothing.
+    app.flash = None;
+    app.update(key(KeyCode::Char('m')));
+    app.update(Msg::Machines {
+        choices: machines_listed(),
+        current: None,
+    });
+    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::Switch(None)]);
+    assert_eq!(app.flash, None, "nothing is being read, so nothing says so");
+}
+
+/// Catches: a TUI reading another machine with nothing on screen to say which.
+#[test]
+fn the_header_names_the_machine_it_reads() {
+    let mut app = app();
+    assert!(
+        screen(&app, 120, 30, false)
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with(" runnerd 0.0.1"),
+        "a daemon that names no machine"
+    );
+    let mut status = app.live.status.clone();
+    status.machine = Some(runnerd_core::api::Machine {
+        id: "1a2b3c4d".to_owned(),
+        name: "skiff".to_owned(),
+    });
+    app.update(Msg::Status(status));
+    let first = screen(&app, 120, 30, false);
+    assert!(
+        first
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with(" runnerd on skiff "),
+        "{first}"
+    );
+    // A 0.1.5 daemon names no machine: the name it was chosen by says which it is.
+    let mut status = app.live.status.clone();
+    status.machine = None;
+    app.update(Msg::Status(status));
+    app.chosen = Some("dory".to_owned());
+    let first = screen(&app, 120, 30, false);
+    assert!(
+        first
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with(" runnerd on dory "),
+        "{first}"
     );
 }

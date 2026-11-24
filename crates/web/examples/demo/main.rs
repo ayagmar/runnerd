@@ -55,6 +55,7 @@ async fn main() {
         listener,
         socket.clone(),
         proxies,
+        peers(),
         sessions,
         std::future::pending::<()>(),
     );
@@ -571,4 +572,12 @@ fn empty(fixtures: &mut fake::Fixtures) {
         profile.jobs.clear();
     }
     fixtures.sizing = Some(sizing);
+}
+
+/// Another machine's dashboard, as `[web] peers` links it from every page's header.
+fn peers() -> Vec<runnerd_core::config::Peer> {
+    vec![runnerd_core::config::Peer {
+        name: "skiff".to_owned(),
+        origin: "https://skiff.tail0b5e.ts.net".parse().unwrap(),
+    }]
 }
