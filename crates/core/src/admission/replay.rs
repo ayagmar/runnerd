@@ -983,7 +983,7 @@ impl<'run> Replayer<'run> {
                     // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
                     // One the barrier would let pass does, as there (ADR 0151). One that lacks CPU too would not start
                     // by the plain margin, as `Plan::host_needs` reads it.
-                    if self.barrier.is_none() || self.may_pass(queued, &listed).is_some() {
+                    if self.gets_past_barrier(queued, &listed) {
                         let cpu_short = self
                             .cpu_budget
                             .is_some_and(|budget| self.cpu_taken() + short.cpu > budget);
@@ -1047,9 +1047,7 @@ impl<'run> Replayer<'run> {
         })
         .map(|(_, _, guard)| guard);
         match found {
-            Some(guard) if self.barrier.is_none() || self.may_pass(queued, listed).is_some() => {
-                guard
-            }
+            Some(guard) if self.gets_past_barrier(queued, listed) => guard,
             _ => refused,
         }
     }
@@ -1259,6 +1257,11 @@ impl<'run> Replayer<'run> {
             .filter(|running| running.profile == profile)
             .count();
         (slots as usize).saturating_sub(in_profile)
+    }
+
+    /// Whether `queued` gets past the barrier, if one stands, once it fits, `listed` being what the pass began with.
+    fn gets_past_barrier(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> bool {
+        self.barrier.is_none() || self.may_pass(queued, listed).is_some()
     }
 
     /// Whether `queued` may start behind the barrier once it fits, `listed` being what the pass began with: the usual
