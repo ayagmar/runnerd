@@ -974,3 +974,48 @@ async fn a_failed_start_that_leaves_its_container_is_not_counted_as_a_runner_sta
         "nothing counts from the failed start to the next plan: {causes:?} in {since_next_plan} ms"
     );
 }
+
+// Catches: the profile's `tmp_tmpfs` dropped on the way to the container, so a profile that asks for a tmpfs `/tmp`
+// still writes it to disk, or one that does not getting one.
+#[tokio::test]
+async fn a_runner_gets_its_profiles_tmp_tmpfs_and_none_unless_asked() {
+    for (case, config, wanted) in [
+        ("default", CONFIG.to_owned(), None),
+        (
+            "asked",
+            CONFIG.replace(
+                "slots = 2",
+                "slots = 2\nmin_memory = \"2G\"\ntmp_tmpfs = \"1G\"",
+            ),
+            Some(crate::config::ByteSize(1 << 30)),
+        ),
+    ] {
+        let (github, docker, dir) = (
+            FakeGithub::default(),
+            FakeDocker::default(),
+            TestDir::new("tmp-tmpfs"),
+        );
+        let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+        engine.recover().await.unwrap();
+        {
+            let mut state = github.0.lock().unwrap();
+            state.queued = vec![job(1)];
+            state.jobs.insert(1, details(1, "in_progress", None));
+        }
+        engine.tick(Shutdown::No).await;
+        let state = docker.0.lock().unwrap();
+        let started: Vec<_> = state.tmp_tmpfs.values().copied().collect();
+        assert_eq!(started, [wanted], "{case}");
+        // What a restart adopts the runner's bound by, to replace it once idle if a reload changed it.
+        let labelled: Vec<_> = state
+            .containers
+            .iter()
+            .map(|container| container.labels.get("runnerd.tmp-tmpfs").cloned())
+            .collect();
+        assert_eq!(
+            labelled,
+            [wanted.map(|tmpfs| tmpfs.0.to_string())],
+            "{case}"
+        );
+    }
+}

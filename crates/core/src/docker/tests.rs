@@ -22,6 +22,7 @@ fn spec() -> RunnerSpec {
         memory: "9G".parse().unwrap(),
         env: Vec::new(),
         mounts: Vec::new(),
+        tmp_tmpfs: None,
         network: None,
         labels: BTreeMap::new(),
         entrypoint: None,
@@ -36,6 +37,58 @@ fn the_jit_config_stays_out_of_debug_output_and_the_create_request() {
     let body = create_body(&spec, &Sysbox);
     assert!(!format!("{body:?}").contains(SECRET));
     assert!(!serde_json::to_string(&body).unwrap().contains(SECRET));
+}
+
+#[test]
+fn a_bounded_tmp_is_tmpfs_at_tmp_and_var_tmp_only_and_runs_programs() {
+    let off = create_body(&spec(), &Sysbox).host_config.unwrap();
+    assert_eq!(off.tmpfs, None, "no tmpfs unless the profile asks");
+
+    let spec = RunnerSpec {
+        tmp_tmpfs: Some("2G".parse().unwrap()),
+        ..spec()
+    };
+    let host_config = create_body(&spec, &Sysbox).host_config.unwrap();
+    let tmpfs = host_config.tmpfs.unwrap();
+    // Never _diag, read from a stopped runner, nor _work, which holds the tool cache's mount and a record.
+    let mut targets: Vec<&str> = tmpfs.keys().map(String::as_str).collect();
+    targets.sort_unstable();
+    assert_eq!(targets, ["/tmp", "/var/tmp"]);
+    assert_eq!(host_config.mounts, Some(Vec::new()), "no other mount added");
+    let size = |options: &str| -> u64 {
+        let options: Vec<&str> = options.split(',').collect();
+        // Docker mounts a tmpfs noexec unless told: jobs run what they build in /tmp.
+        assert!(options.contains(&"exec"), "{options:?}");
+        assert!(!options.contains(&"noexec"), "{options:?}");
+        assert!(options.contains(&"mode=1777"), "{options:?}");
+        options
+            .iter()
+            .find_map(|option| option.strip_prefix("size="))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(size(&tmpfs["/tmp"]), 3 << 29);
+    assert_eq!(size(&tmpfs["/var/tmp"]), 1 << 29);
+
+    // The kernel rounds a size up to its pages: in whole 64 KiB, which every page size divides, the two mounts hold
+    // no more together than the bound, down to the least one the config takes.
+    for bound in [
+        crate::config::TMP_TMPFS_MIN.0,
+        crate::config::TMP_TMPFS_MIN.0 + 1,
+        (3 << 20) + 12_345,
+        (2 << 30) + 1,
+    ] {
+        let mounts = super::tmp_tmpfs(crate::config::ByteSize(bound));
+        let sizes: Vec<u64> = mounts.values().map(|options| size(options)).collect();
+        assert!(
+            sizes
+                .iter()
+                .all(|bytes| *bytes > 0 && bytes % (64 << 10) == 0),
+            "{bound}: whole pages, never size=0: {sizes:?}"
+        );
+        assert!(sizes.iter().sum::<u64>() <= bound, "{bound}: {sizes:?}");
+    }
 }
 
 #[test]

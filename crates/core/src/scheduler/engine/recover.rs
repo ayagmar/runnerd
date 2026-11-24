@@ -165,6 +165,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             started_at: caps.started_at.unwrap_or_else(SystemTime::now),
             memory: caps.memory,
             cpus: caps.cpus,
+            // Missing for a runner without one, and for one an earlier release started, which `other_spec` replaces.
+            tmp_tmpfs: container
+                .labels
+                .get(super::runners::TMP_TMPFS)
+                .and_then(|bytes| bytes.parse().ok()),
             // What it reserved before the restart, as its record kept it; its cap if the record has none.
             admission: self
                 .store
@@ -289,6 +294,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     max_memory: None,
                     max_slots: None,
                     priced_as: None,
+                    tmp_tmpfs: None,
                 });
         }
         self.repositories.found_running(&occupant.repository);

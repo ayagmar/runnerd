@@ -164,6 +164,7 @@ mod tests {
             started_at: SystemTime::UNIX_EPOCH,
             memory: 0,
             cpus: 0,
+            tmp_tmpfs: None,
             admission: None,
             labels: None,
             image: None,

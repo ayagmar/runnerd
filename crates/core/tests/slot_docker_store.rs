@@ -73,6 +73,7 @@ async fn start_job(
         memory: "1G".parse().map_err(|e: String| e)?,
         env: env.iter().map(|&var| var.to_owned()).collect(),
         mounts: runner_mounts(names, PROFILE, 1, pnpm_store(env)),
+        tmp_tmpfs: None,
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
