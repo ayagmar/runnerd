@@ -1073,12 +1073,26 @@ async fn a_warm_runner_whose_labels_image_or_limits_a_reload_changed_makes_way_f
     );
     let more_memory = warm_config().replace("memory = \"4G\"", "memory = \"6G\"");
     let other_image = warm_config().replace("image_stage = \"app\"", "image_stage = \"app-next\"");
-    for config in [gpu, more_memory, other_image] {
+    // A tmpfs /tmp turned on, resized and off: a job queued after turning it off for a full /tmp must not get one.
+    let tmpfs = |size: &str| {
+        warm_config().replace(
+            "memory = \"4G\"",
+            &format!("memory = \"4G\"\nmin_memory = \"3G\"\ntmp_tmpfs = \"{size}\""),
+        )
+    };
+    for (from, config) in [
+        (warm_config(), gpu),
+        (warm_config(), more_memory),
+        (warm_config(), other_image),
+        (warm_config(), tmpfs("1G")),
+        (tmpfs("1G"), tmpfs("2G")),
+        (tmpfs("1G"), warm_config()),
+    ] {
         let github = FakeGithub::default();
         // Each runner gets an ID of its own: the old one is removed before the new ones register.
         github.0.lock().unwrap().strict = true;
         let docker = FakeDocker::default();
-        let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+        let (mut engine, handle, _dir) = active(&github, &docker, &from).await;
         engine.recover().await.unwrap();
         engine.tick(Shutdown::No).await;
         let before = runner_ids(&handle, &mut engine);
@@ -1102,6 +1116,18 @@ async fn a_warm_runner_whose_labels_image_or_limits_a_reload_changed_makes_way_f
         assert!(
             !after.is_empty(),
             "a runner with the new config waits for the job"
+        );
+        let wanted = Config::parse(&config).unwrap().profiles["app"].tmp_tmpfs;
+        let state = docker.0.lock().unwrap();
+        let running: Vec<_> = state
+            .containers
+            .iter()
+            .filter(|container| container.running)
+            .map(|container| state.tmp_tmpfs[&container.name])
+            .collect();
+        assert!(
+            running.iter().all(|tmpfs| *tmpfs == wanted),
+            "every runner has the reloaded tmp_tmpfs {wanted:?}: {running:?}"
         );
     }
 }

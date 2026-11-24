@@ -983,7 +983,10 @@ async fn a_runner_gets_its_profiles_tmp_tmpfs_and_none_unless_asked() {
         ("default", CONFIG.to_owned(), None),
         (
             "asked",
-            CONFIG.replace("slots = 2", "slots = 2\ntmp_tmpfs = \"1G\""),
+            CONFIG.replace(
+                "slots = 2",
+                "slots = 2\nmin_memory = \"2G\"\ntmp_tmpfs = \"1G\"",
+            ),
             Some(crate::config::ByteSize(1 << 30)),
         ),
     ] {
@@ -1003,5 +1006,16 @@ async fn a_runner_gets_its_profiles_tmp_tmpfs_and_none_unless_asked() {
         let state = docker.0.lock().unwrap();
         let started: Vec<_> = state.tmp_tmpfs.values().copied().collect();
         assert_eq!(started, [wanted], "{case}");
+        // What a restart adopts the runner's bound by, to replace it once idle if a reload changed it.
+        let labelled: Vec<_> = state
+            .containers
+            .iter()
+            .map(|container| container.labels.get("runnerd.tmp-tmpfs").cloned())
+            .collect();
+        assert_eq!(
+            labelled,
+            [wanted.map(|tmpfs| tmpfs.0.to_string())],
+            "{case}"
+        );
     }
 }
