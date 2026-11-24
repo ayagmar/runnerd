@@ -287,15 +287,20 @@ pub fn cpu_shares(cpus: u32) -> i64 {
     (i64::from(cpus) * 1024).clamp(2, 262_144)
 }
 
-/// The `tmpfs` mounts, by target, that hold a runner's `/tmp` and `/var/tmp` within `size` together (ADR 0169):
-/// three quarters for `/tmp`, where tools put their temporary files, a quarter for `/var/tmp`, each at least a byte,
-/// as `size=0` would leave it unbounded. With `exec`, as on disk: Docker mounts a `tmpfs` `noexec` unless told, and
+/// The largest page Linux uses, 64 KiB on some arm64 kernels: what `tmp_tmpfs` sizes its mounts in.
+pub const TMPFS_GRANULE: u64 = 64 << 10;
+
+/// The `tmpfs` mounts, by target, that hold a runner's `/tmp` and `/var/tmp` within `size` together (ADR 0170):
+/// a quarter for `/var/tmp` and the rest for `/tmp`, where tools put their temporary files, each down to whole
+/// `TMPFS_GRANULE`s, which the kernel's pages divide, so it rounds neither up. Each is at least one granule, as
+/// `size=0` would leave it unbounded; a `size` of `config::TMP_TMPFS_MIN` or more never needs that. With `exec`, as on disk: Docker mounts a `tmpfs` `noexec` unless told, and
 /// jobs run what they build there, such as `go test`'s binaries. Never the runner's `_diag`, which runnerd reads from a
 /// stopped container, nor `_work`, which holds the tool cache's mount and a failed job's record. These options take
 /// any Docker API version; a `Mount`'s `TmpfsOptions.Options`, the only other way to say `exec`, needs 1.46.
 pub fn tmp_tmpfs(size: ByteSize) -> HashMap<String, String> {
-    let var_tmp = (size.0 / 4).max(1);
-    let tmp = (size.0 - size.0 / 4).max(1);
+    let granules = |bytes: u64| (bytes / TMPFS_GRANULE * TMPFS_GRANULE).max(TMPFS_GRANULE);
+    let var_tmp = granules(size.0 / 4);
+    let tmp = granules(size.0.saturating_sub(var_tmp));
     [("/tmp", tmp), ("/var/tmp", var_tmp)]
         .into_iter()
         .map(|(target, bytes)| {

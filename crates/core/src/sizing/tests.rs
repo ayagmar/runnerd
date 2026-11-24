@@ -873,6 +873,28 @@ mod auto {
         );
     }
 
+    // Catches: auto sizing lowering a profile with a tmpfs /tmp to a memory the config then refuses, so the change
+    // never applies, or to one the tmpfs alone could fill.
+    #[test]
+    fn a_profile_with_a_tmpfs_tmp_is_lowered_no_further_than_a_config_that_validates() {
+        let text = CONFIG.replace(
+            "memory = \"7G\"",
+            "memory = \"7G\"\nmin_memory = \"6G\"\ntmp_tmpfs = \"5G\"",
+        );
+        let config = on(&text, "max_step = 100");
+        let enough = history(builds(10, 1000 * M, 2000 * M, 5));
+        let due = due(&config, &enough, 33 * G, &BTreeMap::new());
+        let lowered = resized(&due);
+        assert_eq!(lowered.len(), 1, "{lowered:?}");
+        let memory = lowered[0].1.memory;
+        assert_eq!(memory, 6 * G, "it stops at min_memory");
+        let applied = text.replace("memory = \"7G\"", &format!("memory = \"{}M\"", memory / M));
+        Config::parse(&applied)
+            .unwrap()
+            .validate(Some(crate::config::ByteSize(33 * G)))
+            .unwrap();
+    }
+
     #[test]
     fn waits_the_interval_between_changes() {
         let config = on(CONFIG, "interval = \"12h\"");

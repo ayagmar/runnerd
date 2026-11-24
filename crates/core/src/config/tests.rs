@@ -268,7 +268,7 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
 }
 
 #[test]
-fn tmp_stays_on_disk_unless_a_profile_bounds_a_tmpfs_below_its_memory() {
+fn tmp_stays_on_disk_unless_a_profile_bounds_a_tmpfs_below_its_min_memory() {
     let config = Config::parse(MINIMAL).unwrap();
     assert_eq!(config.profiles["app"].tmp_tmpfs, None, "off by default");
     let with = |lines: &str| {
@@ -279,23 +279,36 @@ fn tmp_stays_on_disk_unless_a_profile_bounds_a_tmpfs_below_its_memory() {
             .map_err(|error| error.to_string())
     };
     // app has 4G.
-    with("tmp_tmpfs = \"1G\"").unwrap();
+    with("tmp_tmpfs = \"1G\"\nmin_memory = \"2G\"").unwrap();
+    with("tmp_tmpfs = \"1M\"\nmin_memory = \"2G\"").unwrap();
     let config =
         Config::parse(&MINIMAL.replace("slots = 1", "slots = 1\ntmp_tmpfs = \"1G\"")).unwrap();
     assert_eq!(config.profiles["app"].tmp_tmpfs, Some(size("1G")));
-    // A tmpfs as large as the memory it comes out of could leave the job none.
-    for refused in [
-        "tmp_tmpfs = \"4G\"",
-        "tmp_tmpfs = \"3G\"\nmin_memory = \"3G\"",
+    // A tmpfs as large as the memory it comes out of could leave the job none; without a min_memory above it,
+    // sizing could advise a memory the config then refuses.
+    for (refused, why) in [
+        (
+            "tmp_tmpfs = \"1G\"",
+            "tmp_tmpfs needs a min_memory above it",
+        ),
+        (
+            "tmp_tmpfs = \"3G\"\nmin_memory = \"3G\"",
+            "tmp_tmpfs needs a min_memory above it",
+        ),
+        // Two mounts of a page each would hold more than a size this small says.
+        (
+            "tmp_tmpfs = \"1K\"\nmin_memory = \"2G\"",
+            "tmp_tmpfs is below 1M",
+        ),
     ] {
         assert_eq!(
             with(refused).unwrap_err(),
-            "profiles.app: tmp_tmpfs is not below its memory and min_memory",
+            format!("profiles.app: {why}"),
             "{refused}"
         );
     }
     assert!(
-        with("tmp_tmpfs = \"0G\"")
+        with("tmp_tmpfs = \"0G\"\nmin_memory = \"2G\"")
             .unwrap_err()
             .contains("profiles.app.tmp_tmpfs"),
         "0 would mount an unbounded tmpfs"

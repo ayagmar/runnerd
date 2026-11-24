@@ -71,9 +71,24 @@ fn a_bounded_tmp_is_tmpfs_at_tmp_and_var_tmp_only_and_runs_programs() {
     assert_eq!(size(&tmpfs["/tmp"]), 3 << 29);
     assert_eq!(size(&tmpfs["/var/tmp"]), 1 << 29);
 
-    // size=0 would be an unbounded tmpfs.
-    let tiny = super::tmp_tmpfs(crate::config::ByteSize(1));
-    assert!(tiny.values().all(|options| size(options) >= 1), "{tiny:?}");
+    // The kernel rounds a size up to its pages: in whole 64 KiB, which every page size divides, the two mounts hold
+    // no more together than the bound, down to the least one the config takes.
+    for bound in [
+        crate::config::TMP_TMPFS_MIN.0,
+        crate::config::TMP_TMPFS_MIN.0 + 1,
+        (3 << 20) + 12_345,
+        (2 << 30) + 1,
+    ] {
+        let mounts = super::tmp_tmpfs(crate::config::ByteSize(bound));
+        let sizes: Vec<u64> = mounts.values().map(|options| size(options)).collect();
+        assert!(
+            sizes
+                .iter()
+                .all(|bytes| *bytes > 0 && bytes % (64 << 10) == 0),
+            "{bound}: whole pages, never size=0: {sizes:?}"
+        );
+        assert!(sizes.iter().sum::<u64>() <= bound, "{bound}: {sizes:?}");
+    }
 }
 
 #[test]
