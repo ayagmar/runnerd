@@ -166,6 +166,8 @@ pub enum Column {
     Workflow,
     /// What became of a failed job's record.
     Record,
+    /// The machine whose record of the job is shown, in a list over several (ADR 0165).
+    Machine,
 }
 
 impl Column {
@@ -187,6 +189,7 @@ impl Column {
             Column::Size => "Size",
             Column::Workflow => "Workflow",
             Column::Record => "Record",
+            Column::Machine => "Machine",
         }
     }
 }

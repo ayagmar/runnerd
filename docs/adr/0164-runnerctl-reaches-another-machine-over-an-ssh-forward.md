@@ -59,9 +59,10 @@ accepts.
 ## Consequences
 
 - No daemon listener, no new dependency, no `runnerctl` needed on the other machine.
-- With `--machine`, SIGTERM and SIGINT end runnerctl by dropping its client, which stops `ssh` and removes the
-  directory; the TUI does the same through its own handlers, and `shell` leaves Ctrl-C to the remote shell. A
-  runnerctl killed with `SIGKILL` leaves its `ssh` and directory behind.
+- With `--machine`, and in `runnerctl fleet` (ADR 0165), SIGTERM and SIGINT end runnerctl by dropping its
+  clients, which stops `ssh` and removes the directories; the TUI does the same through its own handlers, and
+  `shell` leaves Ctrl-C to the remote shell. A runnerctl killed with `SIGKILL` leaves its `ssh` and directory
+  behind.
 - A remote login shell that cannot run `printf` with `${XDG_RUNTIME_DIR:-…}` needs `--remote-socket` at
   `machine add`.
 - The fleet view (ADR 0165) and the TUI's switcher (ADR 0166) build on `Endpoint`.

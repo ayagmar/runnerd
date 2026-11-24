@@ -56,6 +56,7 @@ mod disk;
 mod endurance;
 mod events;
 mod figure;
+mod fleet;
 mod grype;
 mod insights;
 mod jobs;
@@ -98,6 +99,7 @@ pub use disk::{
 pub use endurance::{Endurance, RateSpan, WriteRate, WrittenSince};
 pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
 pub use figure::LabelledFigure;
+pub use fleet::{Fleet, FleetJob, FleetMachine, MachineReading, Reach, THIS_MACHINE};
 pub use grype::{
     GRYPE_MAX_AGE_SECS, GrypeDatabase, GrypeFailure, GrypeFailureKind, HeldGrypeDatabase,
 };
