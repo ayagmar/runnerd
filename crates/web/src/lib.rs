@@ -43,6 +43,7 @@ use views::history::{Filter, History};
 use views::insights::InsightsView;
 use views::job::JobView;
 use views::overview::Overview;
+use views::queue::QueueView;
 use views::records::RecordsView;
 use views::sizing::SizingView;
 
@@ -195,6 +196,7 @@ fn router(
     let proxies = auth.proxies().into();
     let pages = Router::new()
         .route("/", get(overview))
+        .route("/queue", get(queue))
         .route("/history", get(history))
         .route("/records", get(records))
         .route("/caches", get(caches))
@@ -205,6 +207,7 @@ fn router(
         .route("/jobs/{id}/cancel", post(actions::cancel_job))
         .route("/jobs/{id}/rerun", post(actions::rerun_job))
         .route("/live/overview", get(live::overview))
+        .route("/live/queue", get(live::queue))
         .route("/live/jobs/{id}", get(live::job))
         .route("/config", get(config).put(actions::save_config))
         .route("/config/check", post(actions::check_config))
@@ -310,6 +313,15 @@ async fn overview(State(app): State<App>) -> Response {
         Overview::load(&app.daemon, now()).await,
         |view| Some(&view.status),
         views::overview::render,
+    )
+    .await
+}
+
+async fn queue(State(app): State<App>) -> Response {
+    app.page(
+        QueueView::load(&app.daemon, now()).await,
+        |view| Some(&view.status),
+        views::queue::render,
     )
     .await
 }

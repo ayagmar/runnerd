@@ -31,14 +31,17 @@ use tracing::debug;
 use crate::App;
 use crate::auth::SignedIn;
 use crate::views::job::{self, JobView};
+use crate::views::local_pages::LocalPages;
+use crate::views::queue::{self, QueueView};
 use crate::views::{self, Part, Parts, Tone, digest, overview};
 
 /// How long to collect events before rendering: a burst (a slot and the budget change together) renders once.
 const SETTLE: Duration = Duration::from_millis(250);
 
-/// How old the overview's status may get while host samples arrive. Some of its changes have no event of their own
-/// (`shutting_down`, a repository's queue listing failing or recovering), so it is read again this often.
-const STATUS_AGE: Duration = Duration::from_secs(10);
+/// How old the overview's status may get while host samples arrive, and the queue page's at most. Some of its
+/// changes have no event of their own (`shutting_down`, a repository's queue listing failing or recovering), so it is
+/// read again this often. A second in tests, which wait for that.
+const STATUS_AGE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
 
 /// How old the overview's health figures may get while other events arrive: their 24 hours move on without a job
 /// event, and jobs age out of them. A second in tests, which wait for that.
@@ -366,6 +369,7 @@ async fn run_overview(
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
         let mut jobs_changed = false;
+        let mut queue_changed = false;
         let mut status_changed = false;
         let mut day_changed = day_read.elapsed() >= DAY_AGE;
         let mut attention_changed = false;
@@ -394,11 +398,13 @@ async fn run_overview(
                 // The status's queue and slots follow jobs.
                 Event::SlotChanged { .. } => {
                     jobs_changed = true;
+                    queue_changed = true;
                     status_changed = true;
                 }
                 // The health figures count the day's jobs too.
                 Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
                     jobs_changed = true;
+                    queue_changed = true;
                     status_changed = true;
                     day_changed = true;
                 }
@@ -414,12 +420,111 @@ async fn run_overview(
             data.reload_running(&app.daemon).await?;
             data.recent = overview::read_recent(&app.daemon, &data.status).await?;
         }
+        // Which queued jobs have a page: again when the queue may have changed, never for a step alone, and when the
+        // status shows a job the last read did not ask about or that read failed.
+        if queue_changed || data.local.stale(&data.status) {
+            data.local = LocalPages::read(&app.daemon, &data.status).await;
+        }
         if attention_changed {
             data.attention = app.daemon.attention().await?;
         }
         if day_changed {
             data.reload_day(&app.daemon, crate::now()).await?;
             day_read = Instant::now();
+        }
+        if !open {
+            return Ok(End::Lost);
+        }
+    }
+}
+
+/// `GET /live/queue`.
+pub(crate) async fn queue(
+    State(app): State<App>,
+    Extension(session): Extension<SignedIn>,
+    Query(signals): Query<Signals>,
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
+    let (patches, receiver) = mpsc::channel(16);
+    let done = Arc::new(AtomicBool::new(false));
+    let ended = done.clone();
+    tokio::spawn(async move {
+        let run = run_queue(&app, &patches, signals.shown());
+        run_page(patches.clone(), ended, "queue", session, run).await;
+    });
+    respond(receiver, done)
+}
+
+/// The queue's page: the status is read again when an event says the queue or what it waits on changed, and at the
+/// latest once it is `STATUS_AGE` old, event or not; every read renders the waits as they have grown. Which jobs have
+/// a page is read again with a job event, and when the status shows a job the last read did not ask about or that
+/// read failed.
+async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result<End, ClientError> {
+    // Subscribed before reading, so nothing that happens in between is missed.
+    let events = app.daemon.events(EventQuery::default(), None).await?;
+    let mut events = Box::pin(envelopes(events));
+    let mut stopping = app.stopping.clone();
+    let mut data = QueueView::load(&app.daemon, crate::now()).await?;
+    let mut status_read = Instant::now();
+    let mut sent = Sent::default();
+    if let Some(shown) = shown {
+        data.now = shown.at;
+        sent.seed(queue::regions(&data), &shown);
+    }
+    loop {
+        data.now = crate::now();
+        if sent
+            .update(patches, data.now, queue::regions(&data))
+            .await
+            .is_err()
+        {
+            return Ok(End::Done);
+        }
+        // The status is read again by `STATUS_AGE` whether or not an event comes: a host whose slice cannot be read
+        // sends no samples.
+        let deadline = tokio::time::sleep_until((status_read + STATUS_AGE).into());
+        let first = tokio::select! {
+            event = next_event(&mut events, patches, &mut stopping) => match event {
+                Ok(event) => Some(event),
+                Err(end) => return Ok(end),
+            },
+            () = deadline => None,
+        };
+        let mut batch: Vec<Event> = first.into_iter().collect();
+        let open = batch.is_empty() || settle(&mut events, &mut batch).await;
+        let mut status_changed = status_read.elapsed() >= STATUS_AGE;
+        let mut jobs_changed = false;
+        for event in batch {
+            match event {
+                Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
+                    status_changed = true;
+                    jobs_changed = true;
+                }
+                Event::SlotChanged { .. }
+                | Event::BudgetChanged { .. }
+                | Event::ProfileChanged { .. }
+                | Event::ProfileRemoved { .. }
+                | Event::RepositoryChanged { .. }
+                | Event::RepositoryRemoved { .. }
+                | Event::CacheReseeded { .. }
+                | Event::RunnerFailed { .. }
+                | Event::AttentionChanged { .. } => status_changed = true,
+                Event::JobSample { .. }
+                | Event::HostSample { .. }
+                | Event::LogLine { .. }
+                | Event::JobStep { .. }
+                | Event::RecordCreated { .. }
+                | Event::RecordDeleted { .. }
+                | Event::RecordGone { .. }
+                | Event::RecordSkipped { .. }
+                | Event::SizingChanged { .. } => {}
+            }
+        }
+        if status_changed {
+            data.status = app.daemon.get("/v1/status").await?;
+            status_read = Instant::now();
+        }
+        if jobs_changed || data.local.stale(&data.status) {
+            data.local = LocalPages::read(&app.daemon, &data.status).await;
         }
         if !open {
             return Ok(End::Lost);

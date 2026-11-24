@@ -18,7 +18,9 @@ pub(crate) mod config;
 pub(crate) mod history;
 pub(crate) mod insights;
 pub(crate) mod job;
+pub(crate) mod local_pages;
 pub(crate) mod overview;
+pub(crate) mod queue;
 pub(crate) mod records;
 pub(crate) mod sizing;
 
@@ -26,6 +28,8 @@ pub(crate) mod sizing;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     Overview,
+    /// Every queued job, which the overview's queue shows the first of (ADR 0174): a page of the overview.
+    Queue,
     History,
     Records,
     Sizing,
@@ -59,7 +63,7 @@ impl Page {
     /// The view it is in.
     fn view(self) -> View {
         match self {
-            Page::Overview => View::Overview,
+            Page::Overview | Page::Queue => View::Overview,
             Page::Insights => View::Insights,
             Page::History => Section::History.view(),
             Page::Records => Section::Records.view(),
@@ -72,6 +76,7 @@ impl Page {
     pub(crate) fn path(self) -> &'static str {
         match self {
             Page::Overview => "/",
+            Page::Queue => "/queue",
             Page::History => "/history",
             Page::Records => "/records",
             Page::Sizing => "/sizing",

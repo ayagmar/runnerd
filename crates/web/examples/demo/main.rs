@@ -46,6 +46,8 @@ async fn main() {
     downtime(&fake);
     busy_desktop(&fake);
     scene(&fake);
+    queue(&fake);
+    let start_every = start_every();
     // About what the doctor's reads of the host take with a few repositories.
     fake.fixtures.lock().unwrap().doctor_delay = Duration::from_millis(700);
     fake::serve(&socket, fake.clone());
@@ -110,15 +112,11 @@ async fn main() {
                 }
             }
             if n.is_multiple_of(2) {
-                let base = 9 << 30;
-                let sample = HostSample {
-                    at,
-                    cpu: 2500 + n * 4271 % 4800,
-                    memory: base + (n * 104_729 % 89) * (base / 300),
-                };
-                fixtures.host.push(sample.clone());
-                events.push(Event::HostSample { sample });
+                events.push(host_sample(&mut fixtures, n, at));
             }
+        }
+        if start_every.is_some_and(|every| n.is_multiple_of(every)) {
+            events.extend(start_oldest(&fake));
         }
         for event in events {
             let _ = fake.events.send(EventEnvelope {
@@ -131,6 +129,26 @@ async fn main() {
             return;
         }
     }
+}
+
+/// The slice's sample of second `n`, kept and announced.
+fn host_sample(fixtures: &mut fake::Fixtures, n: u64, at: u64) -> Event {
+    let base = 9 << 30;
+    let sample = HostSample {
+        at,
+        cpu: 2500 + n * 4271 % 4800,
+        memory: base + (n * 104_729 % 89) * (base / 300),
+    };
+    fixtures.host.push(sample.clone());
+    Event::HostSample { sample }
+}
+
+/// `RUNNERD_DEMO_START_EVERY`, when it is a number of seconds.
+fn start_every() -> Option<u64> {
+    std::env::var("RUNNERD_DEMO_START_EVERY")
+        .ok()
+        .and_then(|every| every.parse::<u64>().ok())
+        .filter(|every| *every > 0)
 }
 
 /// A burst on storefront, as pushes to a pull request bring: three more jobs, which wait for a node slot behind the
@@ -158,6 +176,135 @@ fn burst(fake: &fake::Fake) {
             repository.queued_jobs = queued;
         }
     }
+}
+
+/// `RUNNERD_DEMO_QUEUED=N`: a queue of N jobs in place of the scene's, oldest first, for the overview's cut and the
+/// queue's page, and whichever the queue holds, those the history records (`record_queued`). Most are storefront's matrix shards, whose names repeat; every fourth is ledger's; every ninth asks
+/// for labels no pool serves and has no GitHub page, as a job the history does not hold.
+fn queue(fake: &fake::Fake) {
+    if let Some(count) = std::env::var("RUNNERD_DEMO_QUEUED")
+        .ok()
+        .and_then(|count| count.parse::<u64>().ok())
+    {
+        queue_of(fake, count);
+    }
+    record_queued(fake);
+}
+
+fn queue_of(fake: &fake::Fake, count: u64) {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let template = fixtures.status.queued[0].clone();
+    let at = now();
+    fixtures.status.queued = (0..count)
+        .map(|n| {
+            let mut job = template.clone();
+            job.id = 130_000_000_000 + n;
+            job.queued_at = at - 1800 + n * 20;
+            job.url = Some(format!(
+                "https://github.com/halyard/storefront/actions/runs/40018663903/job/{}",
+                job.id
+            ));
+            job.name = format!("test ({})", n % 3 + 1);
+            // Jobs of one name whose branches differ only at their end, as a phone must still tell apart.
+            job.branch = Some(format!("feature/checkout-redesign-payments-step-{n}"));
+            job.waiting = Some(Waiting::NoSlot {
+                profile: "node".to_owned(),
+            });
+            if n % 4 == 3 {
+                "halyard/ledger".clone_into(&mut job.repository);
+                job.profile = Some("jvm".to_owned());
+                "build".clone_into(&mut job.name);
+                job.waiting = Some(Waiting::NoSlot {
+                    profile: "jvm".to_owned(),
+                });
+            }
+            if n % 9 == 8 {
+                job.url = None;
+                job.profile = None;
+                "gpu-render".clone_into(&mut job.name);
+                job.waiting = Some(Waiting::NoPool {
+                    labels: vec!["self-hosted".to_owned(), "gpu".to_owned()],
+                });
+            }
+            job
+        })
+        .collect();
+    let fixtures = &mut *fixtures;
+    for repository in &mut fixtures.status.repositories {
+        repository.queued_jobs = fixtures
+            .status
+            .queued
+            .iter()
+            .filter(|job| job.repository == repository.name)
+            .count();
+    }
+}
+
+/// The history holds each queued job a pool serves, as the daemon records what its listings find; one no pool serves
+/// it lacks, so its row opens nothing here.
+fn record_queued(fake: &fake::Fake) {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let Some(template) = fixtures.jobs.first().cloned() else {
+        return;
+    };
+    let recorded: Vec<_> = fixtures
+        .status
+        .queued
+        .iter()
+        .filter(|queued| !matches!(queued.waiting, Some(Waiting::NoPool { .. })))
+        .filter(|queued| fixtures.jobs.iter().all(|job| job.summary.id != queued.id))
+        .map(|queued| {
+            let mut job = template.clone();
+            let summary = &mut job.summary;
+            summary.id = queued.id;
+            summary.repository.clone_from(&queued.repository);
+            summary.run_id = queued.run_id;
+            summary.workflow.clone_from(&queued.workflow);
+            summary.name.clone_from(&queued.name);
+            summary.branch.clone_from(&queued.branch);
+            summary.url.clone_from(&queued.url);
+            summary.state = JobState::Queued;
+            summary.conclusion = None;
+            summary.runner = None;
+            summary.timeline = runnerd_core::api::Timeline {
+                queued_at: queued.queued_at,
+                ..runnerd_core::api::Timeline::default()
+            };
+            job.steps.clear();
+            job
+        })
+        .collect();
+    fixtures.jobs.extend(recorded);
+    fixtures
+        .jobs
+        .sort_by_key(|job| std::cmp::Reverse(job.summary.id));
+}
+
+/// `RUNNERD_DEMO_START_EVERY=SECS`: every SECS seconds the oldest queued job the history holds leaves the queue as a
+/// runner takes it, with its event.
+fn start_oldest(fake: &fake::Fake) -> Option<Event> {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let fixtures = &mut *fixtures;
+    // Only a job the history holds starts: one no pool serves never does.
+    let oldest = fixtures
+        .status
+        .queued
+        .iter()
+        .position(|queued| fixtures.jobs.iter().any(|job| job.summary.id == queued.id))?;
+    let left = fixtures.status.queued.remove(oldest);
+    for repository in &mut fixtures.status.repositories {
+        if repository.name == left.repository {
+            repository.queued_jobs = repository.queued_jobs.saturating_sub(1);
+        }
+    }
+    let job = fixtures
+        .jobs
+        .iter_mut()
+        .find(|job| job.summary.id == left.id)?;
+    job.summary.state = JobState::Running;
+    Some(Event::JobStarted {
+        job: job.summary.clone(),
+    })
 }
 
 /// A warm runner in jvm's slot 2: ledger's last job there ended 10 minutes ago, and its runner waits for the next.

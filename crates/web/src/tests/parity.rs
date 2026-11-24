@@ -935,3 +935,44 @@ async fn every_page_title_names_the_machine_as_core_words_it() {
         assert!(html.contains(&want.into_string()), "{path}: {html}");
     }
 }
+
+/// The bug it catches: a page of every waiting job that words a wait its own way, or that leaves a repository out of
+/// the list without saying so, so its jobs read as not waiting.
+#[tokio::test]
+async fn the_queue_page_states_every_wait_and_each_repository_left_out_as_core_does() {
+    for (name, daemon) in [
+        ("listed", daemon()),
+        ("unlisted", runnerd_fixtures::unlisted()),
+    ] {
+        let (dashboard, cookie, _, facts) = dashboard_of(daemon).await;
+        let html = dashboard.page(&cookie, "/queue").await.body;
+        let shown = text(&html);
+        for wait in &facts.waits {
+            let row = &html[html
+                .find(&format!(r#"<li id="queued-{}""#, wait.job))
+                .unwrap_or_else(|| panic!("{name}: no row of {}: {html}", wait.job))..];
+            let reason = format!(
+                "<span class=\"reason {}\">{}</span>",
+                reason_class(wait.kind),
+                maud::html! { (wait.reason) }.into_string()
+            );
+            assert!(
+                row[..row.find("</li>").unwrap()].contains(&reason),
+                "{name}: {reason}"
+            );
+        }
+        assert_eq!(
+            html.matches(r#"<li id="queued-"#).count(),
+            facts.waits.len(),
+            "{name}: a row per queued job"
+        );
+        for line in &facts.unlisted {
+            assert!(shown.contains(line.as_str()), "{name}: {line}: {shown}");
+        }
+        assert_eq!(
+            facts.unlisted.is_empty(),
+            name == "listed",
+            "{name}: the fixture leaves a repository out or not"
+        );
+    }
+}

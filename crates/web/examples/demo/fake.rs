@@ -102,6 +102,8 @@ pub struct Fixtures {
     pub action_answer: Option<ActionAnswer>,
     /// Answer as a runnerd older than this client: the routes it lacks answer the daemon's 404 for no such endpoint.
     pub older: bool,
+    /// Fail a list of the history's queued jobs with a 500, as a history that cannot be read.
+    pub queued_list_fails: bool,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -834,6 +836,7 @@ impl Fixtures {
             doctor: None,
             action_answer: None,
             older: false,
+            queued_list_fails: false,
         }
     }
 
@@ -1809,6 +1812,10 @@ fn router(fake: Fake) -> Router {
             "/v1/jobs",
             get(|State(fake): State<Fake>, Query(mut query): Query<JobQuery>| async move {
                 let fixtures = fake.fixtures.lock().unwrap();
+                if fixtures.queued_list_fails && query.state == Some(JobState::Queued) {
+                    let message = "the history cannot be read".to_owned();
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { message })).into_response();
+                }
                 // A runnerd older than search and sorting ignores them and does not say how it read the query.
                 if fixtures.older {
                     query.q = None;
