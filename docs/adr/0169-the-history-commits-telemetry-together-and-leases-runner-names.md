@@ -1,4 +1,4 @@
-# 0165. The history commits telemetry together and leases runner names
+# 0169. The history commits telemetry together and leases runner names
 
 Status: **Accepted** (2026-11-24). Amends [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md): after a
 restart, runner names run ahead of the clock by up to five minutes. No wire or schema change.

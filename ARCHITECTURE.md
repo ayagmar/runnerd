@@ -35,7 +35,7 @@ flowchart TB
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, the shared build cache's server, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper's client behind `client` and its server behind `host` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
-| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `machines` (`machine add|list|rm`, `--machine`, the `machines.toml` file), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
+| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature, tabs in `api::View::ALL`'s order ([ADR 0137](docs/adr/0137-the-tui-follows-core-s-views.md)); `tui/app` is the reducer, `tui/draw` has a module per view and returns the frame's click targets (`tui/mouse`), `tui/log` owns the open log's folds, rows and search, `tui/overlay` the help and pick lists, `tui/reading` a read that may be unsupported by an older daemon, `tui/prompts` the footer's questions), `machines` (`machine add|list|rm`, `--machine`, the `machines.toml` file, and reading every machine for `fleet`), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 | `runnerd-fixtures` | `crates/fixtures` | tests only: the daemon data every client's parity test draws, and the facts core computes from it ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)); not published | `runnerd-core` without `host`; clients take it as a dev-dependency only |
 | `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
@@ -57,7 +57,9 @@ flowchart TB
   [0139](docs/adr/0139-steps-that-share-a-second-are-told-apart-by-their-headers.md)). `api::jobs::query`,
   `api::jobs::timeline` and `api::jobs::compare` define the job list's search, sorts and pages, the slots' timeline and
   a job beside its baseline as pure functions over a history in memory, which the store answers in SQL and the demo
-  calls ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)). `api::savings` prices this machine's job minutes
+  calls ([ADR 0135](docs/adr/0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md)). `api::fleet` merges what a client read
+  from several machines into one list of machines and one page of jobs, each job once from the record that knows
+  most ([ADR 0165](docs/adr/0165-one-view-over-several-machines-is-merged-by-core.md)). `api::savings` prices this machine's job minutes
   at GitHub's per-minute rates and words the figure ([ADR 0072](docs/adr/0072-job-minutes-priced-at-github-hosted-rates.md));
   the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
   engine asks GitHub for once a day in a task of its own, off the tick.
@@ -375,7 +377,7 @@ always returns, so the daemon closes and flushes the history.
 |---|---|
 | Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)); 0600, as `init` writes it and every save leaves it, since it holds `[notify]` secrets ([ADR 0078](docs/adr/0078-a-first-run-that-can-start-and-keeps-its-secrets.md)) |
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
-| Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
+| Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>` (layers, Docker store, and the workspace and pnpm store of a slot that keeps its own), `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>` with the scope's ref and the key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Action archives | files in `[caches.actions] directory`, default `$XDG_CACHE_HOME/runnerd/actions`: `archives/<owner>_<repo>/<sha>.tar.gz` (0644, mounted read-only into runners), `staging/`, `quarantine/` and `index.json` (each archive's SHA-256, size, when fetched and when last pinned; each served repository's pins as last read and the archives they reached when all were last known; refused archives; repositories jobs resolved as immutable packages), and `lock`, held by the one runnerd that owns the directory, kept across restarts; what failed, in memory ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)) |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
@@ -536,7 +538,7 @@ always returns, so the daemon closes and flushes the history.
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)). Telemetry sent within a second, log lines and
   samples, commits in one transaction, each write in its own savepoint; any other write ends the batch and comes next,
   and events go out after the commit. A runner's name is kept as a lease a few minutes ahead, synced once per lease
-  ([ADR 0165](docs/adr/0165-the-history-commits-telemetry-together-and-leases-runner-names.md)).
+  ([ADR 0169](docs/adr/0169-the-history-commits-telemetry-together-and-leases-runner-names.md)).
 - A job's log outline (`store::outline`) is written in the transaction that stores the lines it describes, from the
   state the last batch left, so a restart resumes it where the stored lines end; pruning deletes it after the lines.
   It is read in one read transaction. The plain log and `log.line` carry the stored text; `/log/outline`, `/log/lines`
@@ -678,6 +680,16 @@ always returns, so the daemon closes and flushes the history.
   emptied ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md),
   [ADR 0089](docs/adr/0089-a-slots-cache-mounts-go-last.md),
   [ADR 0156](docs/adr/0156-slot-docker-shares-follow-what-each-profiles-stores-hold.md)).
+- A runner keeps pnpm's store where one value says, `cache::PnpmStore::of`, which both its mounts
+  (`cache::runner_mounts`) and its environment follow: the slot's own when `[caches] pnpm.store` is `"slot"`, the
+  default, its profile keeps no records and its image carries `runnerd.slot-pnpm-store=1`
+  (`docker::SLOT_PNPM_STORE_LABEL`); the `runnerd-pnpm` volume otherwise. A runner of the slot's own store mounts no
+  shared one and gets `RUNNERD_PNPM_SLOT_STORE=<max_size in bytes>`, and the entrypoint binds `/state/work`, the
+  slot's workspace with its store at `.pnpm-store`, over `/home/runner/_work`, after emptying all but the store and
+  dropping a store over its limit: store and `node_modules` on one mount, so pnpm links instead of copying. The
+  workspace goes again when the job ends. When the bind cannot be made, pnpm copies from the slot's store as from a
+  shared one; when Docker cannot say what the image carries, the runner waits for the next plan
+  ([ADR 0167](docs/adr/0167-a-slot-keeps-its-own-pnpm-store-beside-the-jobs-workspace.md)).
 - Runners do not sync what they write: unless `[host] skip_syncs = false`, the engine gives each runner whose image
   carries the label `runnerd.skip-syncs=1` (`docker::SKIP_SYNCS_LABEL`) `RUNNERD_SKIP_SYNCS=1`
   (`docker::SKIP_SYNCS`), and the image's entrypoint installs a seccomp filter, before anything of the runner's

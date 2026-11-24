@@ -1013,6 +1013,10 @@ struct DockerState {
     holders: BTreeMap<String, Vec<Container>>,
     /// Runner images that lack `runnerd-skip-syncs`, as those before it do.
     lacking_filter: BTreeSet<String>,
+    /// Runner images that cannot keep the slot's own pnpm store, as those before it cannot.
+    lacking_slot_pnpm_store: BTreeSet<String>,
+    /// Runner images Docker fails to say anything about, as when an inspect times out.
+    unanswered_images: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -1837,10 +1841,19 @@ impl DockerApi for FakeDocker {
         Ok(!self.0.lock().unwrap().missing_images.contains(image))
     }
 
-    async fn image_skips_syncs(&self, image: &str) -> Result<bool, docker::Error> {
+    async fn runner_image(&self, image: &str) -> Result<docker::RunnerImage, docker::Error> {
         self.outage().await?;
         let state = self.0.lock().unwrap();
-        Ok(!state.missing_images.contains(image) && !state.lacking_filter.contains(image))
+        if state.unanswered_images.contains(image) {
+            return Err(docker::Error::IOError {
+                err: std::io::Error::from(std::io::ErrorKind::TimedOut),
+            });
+        }
+        let present = !state.missing_images.contains(image);
+        Ok(docker::RunnerImage {
+            skips_syncs: present && !state.lacking_filter.contains(image),
+            slot_pnpm_store: present && !state.lacking_slot_pnpm_store.contains(image),
+        })
     }
 
     async fn holders(&self, volume: &str) -> Result<Vec<Container>, docker::Error> {
@@ -4481,7 +4494,8 @@ async fn each_slots_docker_engine_keeps_its_share_of_a_quarter_of_the_disk_not_o
         envs[0].1,
         &[
             docker::SKIP_SYNCS.to_owned(),
-            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned()
+            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned(),
+            format!("{}=5368709120", docker::SLOT_PNPM_STORE_ENV),
         ],
         "{envs:?}"
     );
@@ -4551,7 +4565,8 @@ async fn a_runner_started_before_any_check_of_the_caches_gets_its_slots_docker_b
         envs[0].1,
         &[
             docker::SKIP_SYNCS.to_owned(),
-            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned()
+            "RUNNERD_DOCKER_BUDGET_GB=6".to_owned(),
+            format!("{}=5368709120", docker::SLOT_PNPM_STORE_ENV),
         ],
         "{envs:?}"
     );
@@ -7930,6 +7945,7 @@ mod occupant;
 mod open_waits;
 mod overflow;
 mod pacing;
+mod pnpm_store;
 mod pool_health;
 mod pools;
 mod presence;

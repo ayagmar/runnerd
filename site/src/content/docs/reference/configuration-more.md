@@ -13,7 +13,8 @@ The rest of `runnerd.toml`'s keys; [Configuration](../configuration/) has the ru
 | `mirror.memory`, `mirror.cpus` | required | the mirror's limits; `memory` counts in the budget |
 | `mirror.ttl` | required | how long it keeps an image no job pulls again |
 | `mirror.max_size` | `"10G"` | emptied above this when no runner runs |
-| `pnpm.max_size`, `maven.max_size` | required | the shared pnpm store and Maven repository, emptied above this when no runner runs |
+| `pnpm.max_size`, `maven.max_size` | required | the pnpm store and Maven repository, emptied above this: a shared one when no runner runs, a slot's own pnpm store when the slot's next runner starts |
+| `pnpm.store` | `"slot"` | each slot keeps its own pnpm store beside its jobs' workspace, so pnpm links packages into `node_modules` instead of copying them. `pnpm.max_size` then applies to each slot's store, so the disk holds up to that times the slots running pnpm jobs; `"shared"` keeps one store for every slot. A profile with `record_failures`, and an image without the `runnerd.slot-pnpm-store` label, keep the shared one ([Warm caches](../../guides/caches/#warm-caches)) |
 | `reseed_at` | `"2G"` | slot 1's layers become the profile's snapshot once they changed this much and it is idle ([Warm caches](../../guides/caches/#warm-caches)) |
 | `snapshot_max` | `"10G"` | a larger snapshot starts its tool cache over from the image, then its Android SDK, then all of it |
 | `build.enabled` | `true` | the shared [build cache](../../guides/caches/#build-cache) |
