@@ -2175,3 +2175,38 @@ fn captures_started_again_keep_no_more_than_the_bound_between_them() {
         );
     }
 }
+
+// Catches: runner-controlled page file names evaluated as bash arithmetic in indexed-array subscripts by the root
+// capture script, or malformed names disrupting valid page capture.
+#[test]
+fn a_capture_script_ignores_malformed_page_names_without_evaluating_them() {
+    let dir = TestDir::new("capture-malformed-names");
+    let (diag, bin) = diag(&dir.0, TAKEN);
+    let marker = std::path::PathBuf::from(format!("{}pwned", diag.display()));
+    // Uses `$diag` without a `/` in the file name so the OS allows creating it, while bash arithmetic evaluation
+    // of the suffix would expand `$diag` and create `marker`.
+    for bad in [
+        "tl_abc-1_a[$(touch \"$diag\"pwned)].log",
+        "tl_abc-1_0.log",
+        "tl_abc-1_01.log",
+        "tl_abc-1_bad.log",
+        "tl_abc-1_12345678901.log",
+    ] {
+        std::fs::write(diag.join("pages").join(bad), "ignored\n").unwrap();
+    }
+    std::fs::write(diag.join("pages/tl_abc-1_1.log"), "ok\n").unwrap();
+    let mut capture = Capture::start(&diag, &bin, LogPosition { page: 1, offset: 0 });
+    let output = capture.until("@@page 1 0 3\nok\n").to_vec();
+    drop(capture);
+    assert!(
+        !marker.exists(),
+        "page suffix must never be evaluated as a bash arithmetic expression"
+    );
+    let captured = feed_all(&[&output]);
+    assert_eq!(lines(&captured), ["ok"]);
+    let kept_names: Vec<String> = std::fs::read_dir(diag.join(".runnerd-pages"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(kept_names, ["tl_abc-1_1.log"]);
+}

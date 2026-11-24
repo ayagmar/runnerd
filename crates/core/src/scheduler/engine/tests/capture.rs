@@ -503,7 +503,7 @@ async fn a_capture_whose_script_cannot_be_told_starts_again() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     open_capture(&github, &docker);
-    docker.0.lock().unwrap().capture_input_fails = 1;
+    docker.0.lock().unwrap().capture_input_fault = CaptureInputFault::Fail(1);
     let dir = TestDir::new("capture-ack-fails");
     let (mut engine, _handle) = engine_in(&github, &docker, &dir);
     engine.recover().await.unwrap();
@@ -538,4 +538,69 @@ async fn a_capture_whose_output_ends_starts_again_only_while_its_container_runs(
         2,
         "not started again once its container stopped"
     );
+}
+
+// Catches: a confirmed gap silently hidden when a cut fragment in the same segment exceeds the remaining `log_max`.
+#[tokio::test]
+async fn a_gap_is_still_recorded_when_a_cut_fragment_hits_log_max() {
+    use crate::store::Appended;
+    let dir = TestDir::new("capture-gap-cut-fragment");
+    let store = Store::open(&dir.0.join("history.db")).unwrap();
+    store.queued("o/r", &job(1), 1);
+    let cap = 6;
+    assert_eq!(
+        send(&store, &["a1"], position(1, 0), position(1, 3), cap, false).await,
+        Appended::Stored
+    );
+    assert_eq!(
+        send(
+            &store,
+            &["too-long-fragment"],
+            position(1, 3),
+            position(3, 0),
+            cap,
+            true,
+        )
+        .await,
+        Appended::Full
+    );
+    let lines: Vec<String> = store
+        .log_lines(1, 0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(lines, ["a1", GAP]);
+    let job = store.job(1).await.unwrap().unwrap().summary;
+    assert!(job.log.truncated, "the cut fragment still hits log_max");
+}
+
+// Catches: a stalled capture stdin waiting `ACK_WITHIN` again for every queued page commit after the first timeout.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_capture_input_fails_once_and_drains_queued_commits() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let pages = "@@job 1 1\n\
+                 @@page 1 0 3\np1\n@@end 1\n\
+                 @@page 2 0 3\np2\n@@end 2\n\
+                 @@page 3 0 3\np3\n@@end 3\n\
+                 @@page 4 0 3\np4\n@@end 4\n";
+    running_runner(&github, &docker, pages);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.stuck_captures.insert("container-1".to_owned());
+        state.capture_input_fault = CaptureInputFault::Stall;
+    }
+    let dir = TestDir::new("capture-ack-stalls");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    until_capture_ends(&mut engine).await;
+    handle.store.flush().await;
+    assert_eq!(
+        docker.0.lock().unwrap().capture_input_attempts,
+        ["2\n"],
+        "after the first stalled ack times out, queued commits drain without writing to stdin again"
+    );
+    assert_eq!(until_log(&handle, 4).await, ["p1", "p2", "p3", "p4"]);
 }

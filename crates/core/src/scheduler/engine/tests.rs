@@ -972,8 +972,10 @@ struct DockerState {
     captured: Vec<(String, String, String)>,
     /// What the daemon wrote to the log captures' stdin, by container: the pages the history committed.
     capture_input: HashMap<String, String>,
-    /// How many writes to log captures' stdin fail next, as when a script is gone while Docker keeps its output open.
-    capture_input_fails: u32,
+    /// How writes to log captures' stdin fault next, as when a script is gone or stalled while its output stays open.
+    capture_input_fault: CaptureInputFault,
+    /// Distinct ack payloads the daemon attempted to write to a log capture's stdin.
+    capture_input_attempts: Vec<String>,
     /// Containers whose log capture runs the real capture script, over a diagnostic directory of the test's.
     script_captures: HashMap<String, ScriptCapture>,
     /// How many log captures fail to start next, as when the Engine does not answer.
@@ -1400,6 +1402,17 @@ fn run_script(script: &ScriptCapture, command: &[String]) -> docker::Fed {
     }
 }
 
+/// Fault injected into `CaptureInput::poll_write`.
+#[derive(Default)]
+enum CaptureInputFault {
+    #[default]
+    None,
+    /// Fail the next `n` writes with `BrokenPipe`.
+    Fail(u32),
+    /// Leave every write pending forever.
+    Stall,
+}
+
 /// A log capture's stdin, which keeps what the daemon writes in `DockerState::capture_input`.
 struct CaptureInput {
     docker: Arc<Mutex<DockerState>>,
@@ -1413,9 +1426,17 @@ impl tokio::io::AsyncWrite for CaptureInput {
         written: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let mut state = self.docker.lock().unwrap();
-        if state.capture_input_fails > 0 {
-            state.capture_input_fails -= 1;
-            return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        let payload = String::from_utf8_lossy(written).into_owned();
+        if state.capture_input_attempts.last() != Some(&payload) {
+            state.capture_input_attempts.push(payload);
+        }
+        match &mut state.capture_input_fault {
+            CaptureInputFault::Stall => return std::task::Poll::Pending,
+            CaptureInputFault::Fail(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            CaptureInputFault::Fail(_) | CaptureInputFault::None => {}
         }
         state
             .capture_input

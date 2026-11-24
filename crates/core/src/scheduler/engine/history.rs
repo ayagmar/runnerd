@@ -724,8 +724,9 @@ async fn answered(
     match answer {
         Answer::Committed { ack: Some(page) } => {
             // A script that cannot be told keeps every page and links no more once it holds its bound: one started
-            // again drops what the history has. One that ended already reads nothing more.
-            if !tell(input, page).await && ending.is_none() {
+            // again drops what the history has. Once the capture is already ending (including after a first ack
+            // failure), stop writing to stdin so queued store replies drain without waiting `ACK_WITHIN` each.
+            if ending.is_none() && !tell(input, page).await {
                 warn!(
                     "{runner}: cannot tell its capture what the history stored; capturing it again"
                 );

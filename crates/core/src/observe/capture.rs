@@ -30,10 +30,12 @@ pub const SCRIPT: &str = r#"
 diag=/home/runner/_diag keep=/home/runner/_diag/.runnerd-pages start_page=$1 start_offset=$2 keep_max=$3 job= record=
 # The latest page printed: no earlier one is linked after it.
 last=0
-# Each kept page's bytes printed, and whether its end was.
-declare -A off ended
+# Each kept page's bytes printed, and whether its end was; indexed by validated page number.
+off=() ended=()
 # The page number in a page's file name, in `page`: no command substitution, which forks a subshell.
-page_of() { page=${1##*_} page=${page%.log}; }
+# Validated as a bounded positive decimal before any numeric or array use, because the runner owns `_diag/pages` while
+# this script runs as root (bash evaluates indexed-array subscripts as arithmetic).
+page_of() { page=${1##*_} page=${page%.log}; [[ $page =~ ^[1-9][0-9]{0,9}$ ]]; }
 # The history committed every page before `$1`: their links go on the next pass, and none is linked again.
 acked() {
     if [ "$1" -gt "$start_page" ] 2> /dev/null; then start_page=$1 start_offset=0; fi
@@ -59,7 +61,7 @@ while :; do
         src=() kept=() sizes=() gone=() top=0 held=0
         for f in "$diag"/pages/*_"$record"_*.log; do
             [ -f "$f" ] || continue
-            page_of "$f"
+            page_of "$f" || continue
             src[page]=$f
             [ "$page" -gt "$top" ] && top=$page
         done
@@ -67,16 +69,16 @@ while :; do
         for k in "$keep"/*_"$record"_*.log; do
             [ -f "$k" ] || continue
             name=${k##*/}
-            page_of "$k"
+            page_of "$k" || continue
             if [ "$page" -lt "$start_page" ]; then
                 rm -f "$k"
-                unset "off[$name]" "ended[$name]"
+                unset "off[page]" "ended[page]"
                 continue
             fi
             kept[page]=$k
             [ "$page" -gt "$top" ] && top=$page
-            if [ -n "${ended[$name]}" ]; then
-                held=$((held + off[$name]))
+            if [ -n "${ended[page]}" ]; then
+                held=$((held + off[page]))
                 continue
             fi
             # Gone before its size is read: bytes the runner wrote before removing it are all there.
@@ -94,20 +96,20 @@ while :; do
             held=$((held + sizes[page]))
         done
         for page in "${!kept[@]}"; do
-            k=${kept[page]} name=${kept[page]##*/}
-            [ -z "${ended[$name]}" ] || continue
+            k=${kept[page]}
+            [ -z "${ended[page]}" ] || continue
             size=${sizes[page]}
-            o=${off[$name]:-0}
-            [ -n "${off[$name]}" ] || [ "$page" -ne "$start_page" ] || o=$start_offset
+            o=${off[page]:-0}
+            [ -n "${off[page]}" ] || [ "$page" -ne "$start_page" ] || o=$start_offset
             if [ "$size" -gt "$o" ]; then
                 echo "@@page $page $o $((size - o))"
                 tail -c +$((o + 1)) "$k" | head -c $((size - o))
             fi
-            off[$name]=$size last=$page
+            off[page]=$size last=$page
             # Whole once the runner removed it or began a later page; kept until the history commits it.
             if [ -n "${gone[page]}" ] || [ "$page" -lt "$top" ]; then
                 echo "@@end $page"
-                ended[$name]=1
+                ended[page]=1
             fi
         done
     fi

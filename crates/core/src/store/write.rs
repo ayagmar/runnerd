@@ -1513,8 +1513,8 @@ impl Writer<'_> {
             count += 1;
             bytes += size;
         }
-        // A gap's line takes none of `max_bytes`: a loss is not a cut.
-        if missing && !truncated {
+        // A gap's line takes none of `max_bytes`: a loss is not a cut, even when a partial line before it hit the cap.
+        if missing {
             self.db.execute(
                 "INSERT OR IGNORE INTO log_lines (job, line, text) VALUES (?1, ?2, ?3)",
                 params![job, count, LOG_GAP],
