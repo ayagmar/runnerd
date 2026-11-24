@@ -19,7 +19,9 @@ use super::control::Control;
 use super::runners::THIS_SPEC;
 use super::slot::Slot;
 use super::unsynced::Unsynced;
-use super::{Engagement, Engine, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs};
+use super::{
+    Engagement, Engine, FirstSample, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs,
+};
 use crate::api::{self, Basis, HoldCause};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, RunnerState};
@@ -111,13 +113,13 @@ impl Starting {
         self.behind
     }
 
-    /// The runner it became once Docker made `container` for its registration `runner_id`, placed at `placed_at` ms
-    /// by the engine's clock.
+    /// The runner it became once Docker made `container` for its registration `runner_id`, counting as `first_sample`
+    /// says until the sampler reads it.
     pub(super) fn into_occupant(
         self,
         runner_id: u64,
         container: String,
-        placed_at: u64,
+        first_sample: FirstSample,
     ) -> Occupant {
         Occupant {
             repository: self.repository,
@@ -125,7 +127,7 @@ impl Starting {
             runner_id,
             container,
             started_at: self.launched_at,
-            placed_at,
+            first_sample,
             memory: self.memory,
             cpus: self.cpus,
             tmp_tmpfs: self.tmp_tmpfs,
@@ -886,8 +888,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         Err(failure)
                     }
                 };
+                // Only a container the sampler watches from now waits for its first sample at its reservation.
+                let first_sample = match &made {
+                    Ok(Ok(state)) if state.pid.is_some() => FirstSample::Awaited {
+                        since: self.clock.now_ms(),
+                    },
+                    _ => FirstSample::Unwatched,
+                };
                 let purpose = starting.purpose;
-                let occupant = starting.into_occupant(runner.id, container, self.clock.now_ms());
+                let occupant = starting.into_occupant(runner.id, container, first_sample);
                 self.place(slot, occupant, purpose, made).await
             }
         };

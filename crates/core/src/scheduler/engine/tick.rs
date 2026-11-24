@@ -21,14 +21,13 @@ use super::presence::RunnersListing;
 use super::runners::{Collected, Removal};
 use super::slot::Holder;
 use super::start::{Carried, StartOutcome};
-use super::{Engine, Footprint, Meanwhile, Occupant, Shutdown, Stage, TICK_REST};
+use super::{Engine, FirstSample, Footprint, Meanwhile, Occupant, Shutdown, Stage, TICK_REST};
 use crate::admission::trace::Reading;
 use crate::admission::{growth, host, pooled};
 use crate::api::AdmissionPolicy;
 use crate::config::Admission;
 use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
-use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
     Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Pause, Plan, Pool,
     Preparing, Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef,
@@ -43,6 +42,10 @@ pub(super) const CONCURRENT_REQUESTS: usize = 4;
 
 /// Plans a tick makes at most: its first, and those after starts that no longer fit what ran by then.
 const MAX_PLANS: usize = 3;
+
+/// How long a sample counts as fresh, in ms: three sample intervals, as the sampler may be a little late, never
+/// minutes.
+const FRESH_MS: u64 = 3 * crate::api::SAMPLE_INTERVAL * 1000;
 
 /// A runner a pass releases, and its log once read.
 struct Ending {
@@ -1238,6 +1241,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
 
+    /// The slice's latest sample, if it is fresh: the one rule by which admission, the count and its snapshot read the
+    /// slice as measured. A sample is stamped in whole seconds, compared here in ms.
+    pub(super) fn slice_sample(&self) -> Option<crate::api::HostSample> {
+        self.store
+            .latest_host_sample()
+            .filter(|sample| sample.at.saturating_mul(1000) + FRESH_MS >= self.clock.now_ms())
+    }
+
     /// What a runner takes of the budget.
     pub(super) fn takes(&self, occupant: &Occupant) -> u64 {
         self.held_by(&occupant.footprint()).takes
@@ -1268,21 +1279,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // sampler stalls or cannot read its container.
             Admission::Measured => {
                 let now = self.clock.now_ms();
-                let fresh = 3 * u64::try_from(SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX);
-                let slice_sampled = self
-                    .store
-                    .latest_host_sample()
-                    .is_some_and(|sample| sample.at.saturating_mul(1000) + fresh >= now);
                 let own = self.store.latest_sample(occupant.runner_name);
-                // Before its first sample, a runner is as fresh as its placing: its launch may have waited for its
-                // caches, the mirror and GitHub longer than the sampler takes to read a container.
-                let placed = match occupant.stage {
-                    Stage::Placed { since } => since,
-                    // Held at its reservation above.
-                    Stage::InFlight => now,
+                // Before its first sample, a runner the sampler watches is as fresh as its placing: its launch may have
+                // waited for its caches, the mirror and GitHub longer than the sampler takes to read a container. One
+                // nothing samples is not fresh at all.
+                let awaited = match occupant.stage {
+                    Stage::Placed(FirstSample::Awaited { since }) => Some(since),
+                    Stage::Placed(FirstSample::Unwatched) | Stage::InFlight => None,
                 };
-                let sampled_at = own.as_ref().map_or(placed, |sample| sample.at);
-                if !slice_sampled || sampled_at + fresh < now {
+                let sampled_at = own.as_ref().map(|sample| sample.at).or(awaited);
+                let fresh = sampled_at.is_some_and(|at| at + FRESH_MS >= now);
+                if self.slice_sample().is_none() || !fresh {
                     Held {
                         takes: occupant.memory,
                         used: Reading::Stale,
@@ -1356,15 +1363,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         remembered: host::Remembered,
         growth: Option<pooled::Growth>,
     ) -> pooled::Snapshot<'run> {
-        let fresh = (3 * SAMPLE_INTERVAL).as_secs();
-        let slice = self
-            .store
-            .latest_host_sample()
-            .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
-            .map(|sample| pooled::Slice {
-                memory: sample.memory,
-                memory_max: self.memory_max,
-            });
+        let slice = self.slice_sample().map(|sample| pooled::Slice {
+            memory: sample.memory,
+            memory_max: self.memory_max,
+        });
         let host = self
             .host_memory()
             .map(|memory| host::pooling(&memory, remembered));

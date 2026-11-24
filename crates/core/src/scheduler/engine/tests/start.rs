@@ -286,7 +286,9 @@ async fn a_start_in_flight_counts_its_reservation_under_measured_admission_and_i
         engine.slot_mut(&slot_1()).place(starting.into_occupant(
             1,
             "container-1".to_owned(),
-            crate::time::now_ms(),
+            crate::scheduler::engine::FirstSample::Awaited {
+                since: crate::time::now_ms(),
+            },
         ));
         let placed = counted(&engine);
 

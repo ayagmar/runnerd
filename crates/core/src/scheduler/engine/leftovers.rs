@@ -162,7 +162,7 @@ mod tests {
             runner_id: 1,
             container: id.to_owned(),
             started_at: SystemTime::UNIX_EPOCH,
-            placed_at: 0,
+            first_sample: super::super::FirstSample::Unwatched,
             memory: 0,
             cpus: 0,
             tmp_tmpfs: None,

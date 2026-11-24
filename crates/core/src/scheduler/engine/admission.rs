@@ -472,13 +472,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         admitting.policy = AdmissionPolicy::Measured;
         let now = time::now_ms();
-        // A sample from the last few intervals: the sampler may be a little late, never minutes.
-        let fresh = (3 * SAMPLE_INTERVAL).as_secs();
-        admitting.slice = self
-            .store
-            .latest_host_sample()
-            .filter(|sample| sample.at + fresh >= self.clock.now_ms() / 1000)
-            .map(|sample| sample.memory);
+        admitting.slice = self.slice_sample().map(|sample| sample.memory);
         let (Some(slice), Some(memory_max)) = (admitting.slice, self.memory_max) else {
             admitting.default = Basis::Unmeasured;
             return admitting;

@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use super::leftovers::Unread;
 use super::records::Undecided;
 use super::unsynced::Recovered;
-use super::{Engagement, Engine, Occupant, Slot};
+use super::{Engagement, Engine, FirstSample, Occupant, Slot};
 use crate::api;
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerState, is_being_removed, is_not_found};
@@ -164,7 +164,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
             container: container.id.clone(),
             started_at,
-            placed_at: time::ms(started_at),
+            first_sample: caps.started_at.map_or(FirstSample::Unwatched, |at| {
+                FirstSample::Awaited {
+                    since: time::ms(at),
+                }
+            }),
             memory: caps.memory,
             cpus: caps.cpus,
             // Missing for a runner without one, and for one an earlier release started, which `other_spec` replaces.

@@ -3300,7 +3300,10 @@ impl Case {
     /// Invariant 2: a tick that starts a runner or a seed container leaves what runs within the slice's
     /// `MemoryMax`, the CPU budget under `cpu_overcommit` and what the host leaves the slice, and starts nothing
     /// while the host stalls short of memory (ADR 0055). What runs may be past it otherwise: nothing is stopped for
-    /// it.
+    /// it. A runner nothing samples counts at its cap until a sample of its own comes: the container of a start that
+    /// failed after Docker started it and that Docker kept, or one whose first inspect failed. The check counts one
+    /// this tick started at what it was admitted for (`unwatched_past_admission`), and every later start fits beside
+    /// it at its cap.
     fn starts_fit_the_budget(
         &self,
         status: &api::Status,
@@ -3344,15 +3347,16 @@ impl Case {
                 );
             }
         }
+        let kept = self.unwatched_past_admission(started);
+        let counted = budget.counted().saturating_sub(kept);
         if let Some(max) = budget.memory_max
-            && budget.counted() > max
+            && counted > max
         {
             return violation(
                 self,
                 "starts_fit_the_budget",
                 format!(
-                    "started {started:?} with {} of {max} counted, seed containers {:?}",
-                    budget.counted(),
+                    "started {started:?} with {counted} of {max} counted, seed containers {:?}",
                     budget.seed_memory
                 ),
             );
@@ -3383,7 +3387,8 @@ impl Case {
             let reserved = runners_of(status)
                 .map(|(_, runner)| runner.reserved)
                 .fold(seeds, u64::saturating_add)
-                .saturating_sub(credit);
+                .saturating_sub(credit)
+                .saturating_sub(kept);
             if reserved > limit {
                 return violation(
                     self,
@@ -3403,6 +3408,22 @@ impl Case {
             }
         }
         Ok(())
+    }
+
+    /// What the runners of `started` that nothing samples count past what each was admitted for, at their caps.
+    fn unwatched_past_admission(&self, started: &BTreeSet<String>) -> u64 {
+        self.engine
+            .occupied()
+            .filter(|(_, occupant)| {
+                started.contains(&occupant.runner_name)
+                    && occupant.first_sample == crate::scheduler::engine::FirstSample::Unwatched
+            })
+            .map(|(_, occupant)| {
+                self.engine
+                    .takes(occupant)
+                    .saturating_sub(occupant.reserved())
+            })
+            .sum()
     }
 
     /// Invariant 11 (ADR 0099, 0108, 0130): both credits stay in their bounds through restarts, reloads, stale
@@ -4141,6 +4162,12 @@ fn host_credit(budget: &api::Budget) -> u64 {
         .as_ref()
         .and_then(|host| host.credit)
         .map_or(0, |credit| credit.bytes)
+}
+
+/// Whether `container` is one a start that failed after Docker started it left behind: the fake Docker gives those
+/// an ID of their own, `late-` and their name (`LateFailure`).
+fn kept_by_a_failed_start(container: &str) -> bool {
+    container.starts_with("late-")
 }
 
 /// Every runner in the status, with its profile.
@@ -5291,4 +5318,107 @@ async fn a_runner_whose_launch_waited_counts_at_its_reservation_until_sampled() 
     );
     let started = case.docker.0.lock().unwrap().hooked_start.clone();
     assert!(started.is_some(), "the reload's tick starts o/t's runner");
+}
+
+/// Review of #353, High. o/t's start fails after Docker started its container, whose removal fails too, so it keeps
+/// its slot with nothing sampling it; o/r's job uses 4.8G. A container nothing samples counts at its 4G cap, not at
+/// its 1.25G reservation as a runner waiting for its first sample does: 8.8G of 8.5G, so o/s's job, predicted at
+/// 1.25G, waits rather than starting beside a container that may use all of its cap.
+#[tokio::test(start_paused = true)]
+async fn a_failed_start_docker_kept_counts_at_its_cap_until_sampled() {
+    let heavy = |second| Step::Queue {
+        second,
+        labels: Labels::Heavy,
+    };
+    let mut case = Case::new();
+    case.recover().await.unwrap();
+    case.tick().await.unwrap();
+    for step in [
+        Step::PastRuns,
+        Step::Reload(Change::Policy),
+        Step::Reload(Change::HeavySlots(3)),
+        heavy(false),
+        Step::Tick,
+        Step::Assign(0),
+        Step::Sample {
+            percent: 120,
+            available: 20,
+            stalled: false,
+        },
+        Step::StartFailsLate {
+            takes_job: false,
+            cleanup_fails: true,
+        },
+        Step::QueueQuiet {
+            labels: Labels::Heavy,
+        },
+        Step::Tick,
+        heavy(true),
+        Step::Tick,
+    ] {
+        case.apply(step).await.unwrap();
+    }
+    let status = case.status();
+    let kept = runners_of(&status)
+        .filter(|(_, runner)| {
+            runner.repository == "o/t" && kept_by_a_failed_start(&runner.container)
+        })
+        .count();
+    assert_eq!(kept, 1, "o/t's start fails and Docker keeps its container");
+    assert_eq!(
+        status.budget.memory_in_use,
+        4 * G / 100 * 120 + 4 * G,
+        "o/r's job at its use and o/t's kept container at its cap"
+    );
+    let o_s: Vec<_> = runners_of(&status)
+        .filter(|(_, runner)| runner.repository == "o/s")
+        .collect();
+    assert!(o_s.is_empty(), "o/s's job waits, got {o_s:?}");
+}
+
+/// Review of #353, Medium. The slice's sample is stamped in whole seconds; 6.5 s after the second it was stamped in,
+/// it is past the three intervals by the count's reading, which counts each runner at its cap. Admission must read it
+/// the same: o/t's runner reserves its 4G cap rather than its 1.25G prediction, which the count would put past it at
+/// once.
+#[tokio::test(start_paused = true)]
+async fn a_slice_sample_the_count_reads_stale_admits_by_caps() {
+    let mut case = Case::new();
+    case.recover().await.unwrap();
+    case.tick().await.unwrap();
+    for step in a_job_past_its_cap_beside_a_predicted_one(None) {
+        case.apply(step).await.unwrap();
+    }
+    let now = case.clock.now_ms();
+    let stamped = now / 1000 * 1000;
+    case.clock
+        .advance(Duration::from_millis(stamped + 6500 - now));
+    case.apply(Step::Reload(Change::LightPool)).await.unwrap();
+    let o_t: Vec<u64> = case
+        .engine
+        .occupied()
+        .filter(|(_, occupant)| occupant.repository == "o/t")
+        .map(|(_, occupant)| occupant.reserved())
+        .collect();
+    assert_eq!(o_t, vec![4 * G], "o/t's runner reserves its cap");
+}
+
+/// Review of #353, the sibling of the High finding: o/t's runner starts, and Docker fails its first inspect, so no
+/// sampler watches it until a later tick inspects it again. Nothing reads it, so it counts at its 4G cap beside o/r's
+/// 4.8G, not at its 1.25G reservation.
+#[tokio::test(start_paused = true)]
+async fn a_runner_whose_first_inspect_failed_counts_at_its_cap_until_sampled() {
+    let mut case = Case::new();
+    case.recover().await.unwrap();
+    case.tick().await.unwrap();
+    for step in a_job_past_its_cap_beside_a_predicted_one(None) {
+        case.apply(step).await.unwrap();
+    }
+    case.apply(Step::StartedInspectFails).await.unwrap();
+    case.apply(Step::Reload(Change::LightPool)).await.unwrap();
+    let status = case.status();
+    let o_t: Vec<u64> = runners_of(&status)
+        .filter(|(_, runner)| runner.repository == "o/t")
+        .map(|(_, runner)| runner.reserved)
+        .collect();
+    assert_eq!(o_t, vec![4 * G], "o/t's unwatched runner counts at its cap");
 }
