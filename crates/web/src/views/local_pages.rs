@@ -28,14 +28,17 @@ enum Known {
 }
 
 impl LocalPages {
-    /// Reads them from the history for `status`'s queued jobs, unless it lists none, which need no link.
-    pub(crate) async fn read(daemon: &Client, status: &Status) -> LocalPages {
+    /// Reads them from the history for `status`'s queued jobs, unless it lists none, which need no link. A history
+    /// the daemon cannot read, or a daemon without the route, leaves them unknown, so rows open GitHub; an outage, or
+    /// a daemon that denies the caller, is the error, so a live page keeps the links it has while it reads again, or
+    /// ends (ADR 0177).
+    pub(crate) async fn read(daemon: &Client, status: &Status) -> Result<LocalPages, ClientError> {
         let asked: BTreeSet<u64> = status.queued.iter().map(|job| job.id).collect();
         if asked.is_empty() {
-            return LocalPages(Known::Read {
+            return Ok(LocalPages(Known::Read {
                 asked,
                 local: BTreeSet::new(),
-            });
+            }));
         }
         let page: Result<JobPage, ClientError> = daemon
             .get_query(
@@ -47,10 +50,14 @@ impl LocalPages {
                 },
             )
             .await;
-        LocalPages(page.map_or(Known::Failed, |page| Known::Read {
-            asked,
-            local: page.jobs.iter().map(|job| job.id).collect(),
-        }))
+        match page {
+            Ok(page) => Ok(LocalPages(Known::Read {
+                asked,
+                local: page.jobs.iter().map(|job| job.id).collect(),
+            })),
+            Err(error) if error.is_outage() || error.is_denied() => Err(error),
+            Err(_) => Ok(LocalPages(Known::Failed)),
+        }
     }
 
     /// Whether job `id` has a page here, as far as is known.

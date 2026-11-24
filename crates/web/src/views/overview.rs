@@ -98,7 +98,7 @@ impl Overview {
             attention: daemon.attention().await?,
             local: LocalPages::default(),
         };
-        overview.local = LocalPages::read(daemon, &overview.status).await;
+        overview.local = LocalPages::read(daemon, &overview.status).await?;
         overview.reload_running(daemon).await?;
         overview.reload_day(daemon, now).await?;
         Ok(overview)
@@ -118,8 +118,13 @@ impl Overview {
                 },
             )
             .await?;
-        // The overview stands without them: savings the history could not read are left out.
-        self.savings = daemon.get("/v1/savings").await.ok();
+        // The overview stands without them: savings the history could not read are left out. An outage, or a daemon
+        // that denies the caller, is the error, so a live page keeps the savings it has while it reads again.
+        self.savings = match daemon.get("/v1/savings").await {
+            Ok(savings) => Some(savings),
+            Err(error) if error.is_outage() || error.is_denied() => return Err(error),
+            Err(_) => None,
+        };
         Ok(())
     }
 

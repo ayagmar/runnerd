@@ -6,7 +6,7 @@ use std::time::Duration;
 use http_body_util::BodyExt;
 use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Step};
 
-use super::{DELIVERED, Dashboard, LEDGER_RUNNING, NOW, ShownLog, read_until, signals_of};
+use super::{CURRENT, DELIVERED, Dashboard, LEDGER_RUNNING, NOW, ShownLog, read_until, signals_of};
 
 impl Dashboard {
     fn send_event(&self, event: Event) {
@@ -21,7 +21,7 @@ impl Dashboard {
     }
 
     /// Cuts off the next `count` reads of `path` mid-body, as when the daemon goes away while it answers.
-    fn drop_reads(&self, path: &str, count: u32) {
+    pub(super) fn drop_reads(&self, path: &str, count: u32) {
         self.fake
             .fixtures
             .lock()
@@ -46,7 +46,7 @@ fn feeds(text: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn states(text: &str) -> Vec<String> {
+pub(super) fn states(text: &str) -> Vec<String> {
     feeds(text)
         .iter()
         .map(|feed| feed["state"].as_str().unwrap_or_default().to_owned())
@@ -86,7 +86,7 @@ async fn an_overview_read_that_drops_after_an_event_is_retried_on_the_same_strea
     let delivered = feeds(&first)[1]["at"].as_u64().unwrap();
     dashboard.drop_reads("/v1/status", 2);
     dashboard.budget_changed();
-    let recovery = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    let recovery = read_until(&mut stream, |text| text.contains(CURRENT)).await;
     assert_eq!(
         states(&recovery),
         ["retrying", "retrying", "current"],
@@ -176,7 +176,7 @@ async fn a_job_read_that_drops_keeps_the_log_where_it_was_and_goes_on_from_it() 
             completed_at: None,
         },
     });
-    let recovery = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    let recovery = read_until(&mut stream, |text| text.contains(CURRENT)).await;
     assert_eq!(
         states(&recovery),
         ["retrying", "retrying", "current"],
@@ -288,4 +288,78 @@ async fn a_keep_alive_delivers_nothing_and_leaves_when_the_data_is_from() {
         feeds(&quiet).is_empty() && !quiet.contains(DELIVERED),
         "a keep-alive changes neither the feed nor the page: {quiet}"
     );
+}
+
+/// A daemon that denied the event reader's reopening made the page fail, so Datastar connected again only to be
+/// refused, instead of ending with the refusal shown.
+#[tokio::test]
+async fn an_event_stream_the_daemon_denies_on_reopening_ends_the_page_without_a_reconnect() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .denials
+        .insert("/v1/events".to_owned(), 1);
+    dashboard.fake.cut_events();
+    let (text, end) = to_end(&mut stream).await;
+    assert_eq!(
+        end, "ended",
+        "a denied reader is not connected again: {text}"
+    );
+    assert!(
+        text.contains("toast failed"),
+        "the refusal is shown: {text}"
+    );
+    assert_eq!(states(&text).last().map(String::as_str), Some("refused"));
+}
+
+/// An event the page ignores moved the time its data was from, so a later outage claimed newer data than the last
+/// read.
+#[tokio::test]
+async fn an_event_the_page_ignores_leaves_when_its_data_is_from() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    // Sent at once, before the day's figures are a second old and read again.
+    dashboard.send_event(Event::CacheReseeded {
+        profile: "jvm".to_owned(),
+        output: String::new(),
+        error: None,
+    });
+    let tick = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    assert!(
+        feeds(&tick).is_empty(),
+        "a render after an ignored event is no delivery: {tick}"
+    );
+}
+
+/// A dropped read of the savings turned them into "none" and called the page live, instead of keeping them while
+/// it read again.
+#[tokio::test]
+async fn a_dropped_read_of_the_savings_is_read_again() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    let finished = dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .jobs
+        .iter()
+        .find(|job| job.summary.state == JobState::Completed)
+        .unwrap()
+        .summary
+        .clone();
+    dashboard.drop_reads("/v1/savings", 1);
+    dashboard.send_event(Event::JobFinished { job: finished });
+    let recovery = read_until(&mut stream, |text| text.contains(CURRENT)).await;
+    assert_eq!(states(&recovery), ["retrying", "current"], "{recovery}");
 }

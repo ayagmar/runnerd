@@ -358,7 +358,8 @@ html {
 
 .connection[data-feed='signed-out'] .dot,
 .connection[data-feed='refused'] .dot,
-.connection[data-feed='stopped'] .dot {
+.connection[data-feed='stopped'] .dot,
+.connection[data-feed='failed'] .dot {
   background: var(--failure-ink);
 }
 
@@ -384,6 +385,29 @@ html {
 
 .tools .connection {
   margin-right: 0.5rem;
+}
+
+/* Off the live state a narrow header's badge says more, the time its data is from and Reload: it takes a row of its
+   own under the tools, wrapping there, so the header never grows wider than the screen. */
+@media (max-width: 60rem) {
+  .top {
+    flex-wrap: wrap;
+  }
+
+  .tools {
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .tools .connection:not([data-feed='current'], [data-feed='connecting'], [data-feed='awaiting']) {
+    order: 1;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 0.2rem;
+    margin: 0 0 0.4rem;
+  }
 }
 
 .tool svg {

@@ -283,6 +283,25 @@ impl Rendered {
 /// The page is gone.
 struct Closed;
 
+/// Whether a render follows the daemon's data: a read of it, or an event's data the page takes in, such as a sample
+/// or a log line. A render after events the page ignores only moves its clock, and leaves when its data is from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    Fresh,
+    Tick,
+}
+
+impl Delivery {
+    /// `Fresh` when `fresh` holds.
+    fn of(fresh: bool) -> Delivery {
+        if fresh {
+            Delivery::Fresh
+        } else {
+            Delivery::Tick
+        }
+    }
+}
+
 /// What a page has of each region, by id, so what is unchanged is not sent again.
 #[derive(Default)]
 struct Sent(HashMap<&'static str, Rendered>);
@@ -362,11 +381,13 @@ impl Sent {
     }
 
     /// Sends what the page lacks of each region, then the `shown` signal: the time, and the digest of each region
-    /// that changed. The feed takes it as a delivery of the daemon's data at `at`, and the signal says so too.
+    /// that changed. A `Delivery::Fresh` render is the daemon's data as of `at`: the feed takes it, and the signal
+    /// carries the feed too; a `Delivery::Tick` only moves the page's clock.
     async fn update(
         &mut self,
         patches: &Patches,
         feed: &mut Feed,
+        delivery: Delivery,
         at: u64,
         regions: impl IntoIterator<Item = (&'static str, Markup, Parts)>,
     ) -> Result<(), End> {
@@ -382,8 +403,13 @@ impl Sent {
                 shown.insert(id.to_owned(), digest.unwrap_or_default().into());
             }
         }
-        feed.delivered(at);
-        let signals = serde_json::json!({ "shown": shown, "_feed": feed.json() }).to_string();
+        let mut signals = feed::connected();
+        signals.insert("shown".to_owned(), shown.into());
+        if delivery == Delivery::Fresh {
+            feed.delivered(at);
+            signals.insert("_feed".to_owned(), feed.json());
+        }
+        let signals = serde_json::Value::Object(signals).to_string();
         patches
             .send(PatchSignals::new(signals).write_as_axum_sse_event())
             .await
@@ -398,27 +424,37 @@ async fn notice(patches: &Patches, error: &ClientError) {
 }
 
 /// The daemon's events as a stream, which ends when the reader fails or opens the stream again: live events (samples,
-/// log lines) of the gap are lost even when it resumes, so the page connects again and reads the daemon afresh.
-fn envelopes(events: Events) -> impl Stream<Item = EventEnvelope> {
-    stream::unfold(events, |mut events| async move {
-        let envelope = events.next().await.ok()?;
-        (!events.reopened()).then_some((envelope, events))
+/// log lines) of the gap are lost even when it resumes, so the page connects again and reads the daemon afresh. An
+/// error the daemon answers, as when it denies the reader opening the stream again, is the stream's last item: the
+/// page ends with it rather than connecting again to be refused.
+fn envelopes(events: Events) -> impl Stream<Item = Result<EventEnvelope, ClientError>> {
+    stream::unfold(Some(events), |events| async move {
+        let mut events = events?;
+        match events.next().await {
+            Ok(envelope) => (!events.reopened()).then_some((Ok(envelope), Some(events))),
+            Err(error) if error.is_outage() => None,
+            Err(error) => Some((Err(error), None)),
+        }
     })
 }
 
-/// Waits `SETTLE` for more events, adding them to `batch`; `false` once the daemon's stream ended.
+type Envelopes = dyn Stream<Item = Result<EventEnvelope, ClientError>> + Send;
+
+/// Waits `SETTLE` for more events, adding them to `batch`; `false` once the daemon's stream ended with a gap, and
+/// the daemon's error when it refused the reader.
 async fn settle(
-    events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
+    events: &mut std::pin::Pin<Box<Envelopes>>,
     batch: &mut Vec<Event>,
-) -> bool {
+) -> Result<bool, End> {
     let deadline = tokio::time::sleep(SETTLE);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            () = &mut deadline => return true,
+            () = &mut deadline => return Ok(true),
             event = events.next() => match event {
-                Some(envelope) => batch.push(envelope.event),
-                None => return false,
+                Some(Ok(envelope)) => batch.push(envelope.event),
+                Some(Err(error)) => return Err(End::Refused(error)),
+                None => return Ok(false),
             },
         }
     }
@@ -426,12 +462,16 @@ async fn settle(
 
 /// Waits for the next event; how the stream ends when the daemon's events, the page or the dashboard ended.
 async fn next_event(
-    events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
+    events: &mut std::pin::Pin<Box<Envelopes>>,
     patches: &Patches,
     stopping: &mut watch::Receiver<bool>,
 ) -> Result<Event, End> {
     tokio::select! {
-        event = events.next() => event.map(|envelope| envelope.event).ok_or(End::Lost),
+        event = events.next() => match event {
+            Some(Ok(envelope)) => Ok(envelope.event),
+            Some(Err(error)) => Err(End::Refused(error)),
+            None => Err(End::Lost),
+        },
         () = patches.closed() => Err(End::Closed),
         _ = stopping.wait_for(|stopping| *stopping) => Err(End::Ended(Ending::Stopped)),
     }
@@ -515,6 +555,11 @@ impl Stale {
     fn has(&self, read: Again) -> bool {
         self.0.contains(&read)
     }
+
+    /// Whether anything is read again.
+    fn any(&self) -> bool {
+        !self.0.is_empty()
+    }
 }
 
 /// `GET /live/overview`.
@@ -549,7 +594,7 @@ async fn run_overview(app: &App, patches: &Patches, feed: &mut Feed, shown: Opti
         &mut stopping,
         app.daemon.events(EventQuery::default(), None)
     )?;
-    let mut events = Box::pin(envelopes(events));
+    let mut events: std::pin::Pin<Box<Envelopes>> = Box::pin(envelopes(events));
     let mut data = read!(
         feed,
         patches,
@@ -563,13 +608,17 @@ async fn run_overview(app: &App, patches: &Patches, feed: &mut Feed, shown: Opti
         data.now = shown.at;
         sent.seed(overview::regions(&data), &shown);
     }
+    let mut delivery = Delivery::Fresh;
     loop {
         data.now = crate::now();
-        sent.update(patches, feed, data.now, overview::regions(&data))
+        sent.update(patches, feed, delivery, data.now, overview::regions(&data))
             .await?;
         let first = next_event(&mut events, patches, &mut stopping).await?;
         let mut batch = vec![first];
-        let open = settle(&mut events, &mut batch).await;
+        let open = settle(&mut events, &mut batch).await?;
+        let sampled = batch
+            .iter()
+            .any(|event| matches!(event, Event::JobSample { .. } | Event::HostSample { .. }));
         let stale = Stale::of(
             batch,
             &mut data,
@@ -598,8 +647,15 @@ async fn run_overview(app: &App, patches: &Patches, feed: &mut Feed, shown: Opti
         }
         // Which queued jobs have a page: again when the queue may have changed, never for a step alone, and when the
         // status shows a job the last read did not ask about or that read failed.
-        if stale.has(Again::Queue) || data.local.stale(&data.status) {
-            data.local = LocalPages::read(&app.daemon, &data.status).await;
+        let local = stale.has(Again::Queue) || data.local.stale(&data.status);
+        delivery = Delivery::of(sampled || local || stale.any());
+        if local {
+            data.local = read!(
+                feed,
+                patches,
+                &mut stopping,
+                LocalPages::read(&app.daemon, &data.status)
+            )?;
         }
         if stale.has(Again::Attention) {
             data.attention = read!(feed, patches, &mut stopping, app.daemon.attention())?;
@@ -655,7 +711,7 @@ async fn run_queue(app: &App, patches: &Patches, feed: &mut Feed, shown: Option<
         &mut stopping,
         app.daemon.events(EventQuery::default(), None)
     )?;
-    let mut events = Box::pin(envelopes(events));
+    let mut events: std::pin::Pin<Box<Envelopes>> = Box::pin(envelopes(events));
     let mut data = read!(
         feed,
         patches,
@@ -668,9 +724,10 @@ async fn run_queue(app: &App, patches: &Patches, feed: &mut Feed, shown: Option<
         data.now = shown.at;
         sent.seed(queue::regions(&data), &shown);
     }
+    let mut delivery = Delivery::Fresh;
     loop {
         data.now = crate::now();
-        sent.update(patches, feed, data.now, queue::regions(&data))
+        sent.update(patches, feed, delivery, data.now, queue::regions(&data))
             .await?;
         // The status is read again by `STATUS_AGE` whether or not an event comes: a host whose slice cannot be read
         // sends no samples.
@@ -680,7 +737,7 @@ async fn run_queue(app: &App, patches: &Patches, feed: &mut Feed, shown: Option<
             () = deadline => None,
         };
         let mut batch: Vec<Event> = first.into_iter().collect();
-        let open = batch.is_empty() || settle(&mut events, &mut batch).await;
+        let open = batch.is_empty() || settle(&mut events, &mut batch).await?;
         let mut status_changed = status_read.elapsed() >= STATUS_AGE;
         let mut jobs_changed = false;
         for event in batch {
@@ -713,8 +770,15 @@ async fn run_queue(app: &App, patches: &Patches, feed: &mut Feed, shown: Option<
             data.status = read!(feed, patches, &mut stopping, app.daemon.get("/v1/status"))?;
             status_read = Instant::now();
         }
-        if jobs_changed || data.local.stale(&data.status) {
-            data.local = LocalPages::read(&app.daemon, &data.status).await;
+        let local = jobs_changed || data.local.stale(&data.status);
+        delivery = Delivery::of(status_changed || local);
+        if local {
+            data.local = read!(
+                feed,
+                patches,
+                &mut stopping,
+                LocalPages::read(&app.daemon, &data.status)
+            )?;
         }
         if !open {
             return Err(End::Lost);
@@ -786,6 +850,30 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String], shown: &m
     patches.send(trim).await.is_ok()
 }
 
+/// Sends the job's log as the page lacks it, and says how many lines the page shows then: the lines after the page's
+/// last, `page_end`, which the page names, so each line shows once whether the page got it from its render or from
+/// an earlier connection this one retries. A page that names none, or one too far behind, gets the log's tail as it
+/// is now in place of its own.
+async fn first_lines(patches: &Patches, data: &JobView, page_end: Option<u64>) -> Result<u64, End> {
+    let next_line = data.log_from + data.log.len() as u64;
+    let page_end = page_end.filter(|end| (data.log_from..=next_line).contains(end));
+    let mut shown_lines = data.log.len() as u64;
+    let sent = if let Some(end) = page_end {
+        shown_lines = end.min(job::LOG_TAIL);
+        let from = usize::try_from(end - data.log_from).unwrap_or(usize::MAX);
+        let lines = data.log.get(from..).unwrap_or_default();
+        append_lines(patches, end, lines, &mut shown_lines).await
+    } else {
+        let tail = PatchElements::new(job::log_lines(data).into_string());
+        patches.send(tail.write_as_axum_sse_event()).await.is_ok()
+    };
+    if sent {
+        Ok(shown_lines)
+    } else {
+        Err(End::Closed)
+    }
+}
+
 async fn run_job(
     app: &App,
     patches: &Patches,
@@ -804,7 +892,7 @@ async fn run_job(
         &mut stopping,
         app.daemon.events(query.clone(), None)
     )?;
-    let mut events = Box::pin(envelopes(events));
+    let mut events: std::pin::Pin<Box<Envelopes>> = Box::pin(envelopes(events));
     let mut data = read!(
         feed,
         patches,
@@ -812,34 +900,17 @@ async fn run_job(
         JobView::load(&app.daemon, id, crate::now(), &job::JobPageQuery::default())
     )?;
     let mut next_line = data.log_from + data.log.len() as u64;
-    // The lines after the page's last, which the page names, so each line shows once whether the page got it from
-    // its render or from an earlier connection this one retries. A page that names none, or one too far behind,
-    // gets the log's tail as it is now in place of its own.
-    let page_end = shown
-        .as_ref()
-        .and_then(|shown| shown.log)
-        .filter(|end| (data.log_from..=next_line).contains(end));
-    let mut shown_lines = data.log.len() as u64;
-    let sent_log = if let Some(end) = page_end {
-        shown_lines = end.min(job::LOG_TAIL);
-        let from = usize::try_from(end - data.log_from).unwrap_or(usize::MAX);
-        let lines = data.log.get(from..).unwrap_or_default();
-        append_lines(patches, end, lines, &mut shown_lines).await
-    } else {
-        let tail = PatchElements::new(job::log_lines(&data).into_string());
-        patches.send(tail.write_as_axum_sse_event()).await.is_ok()
-    };
-    if !sent_log {
-        return Err(End::Closed);
-    }
+    let mut shown_lines =
+        first_lines(patches, &data, shown.as_ref().and_then(|shown| shown.log)).await?;
     let mut sent = Sent::default();
     if let Some(shown) = shown {
         data.now = shown.at;
         sent.seed(job::regions(&data), &shown);
     }
+    let mut delivery = Delivery::Fresh;
     loop {
         data.now = crate::now();
-        sent.update(patches, feed, data.now, job::regions(&data))
+        sent.update(patches, feed, delivery, data.now, job::regions(&data))
             .await?;
         if data.job.summary.state.is_final() {
             // The parts a running job's page lacks: its failure, its outlined log, the comparison and the record.
@@ -855,8 +926,9 @@ async fn run_job(
         }
         let first = next_event(&mut events, patches, &mut stopping).await?;
         let mut batch = vec![first];
-        let open = settle(&mut events, &mut batch).await;
+        let open = settle(&mut events, &mut batch).await?;
         let mut changed = false;
+        let mut sampled = false;
         let first_line = next_line;
         let mut lines = Vec::new();
         for event in batch {
@@ -868,7 +940,10 @@ async fn run_job(
                     next_line = line + 1;
                     lines.push(text);
                 }
-                Event::JobSample { sample, .. } => data.add_sample(sample),
+                Event::JobSample { sample, .. } => {
+                    data.add_sample(sample);
+                    sampled = true;
+                }
                 Event::JobQueued { .. }
                 | Event::JobStarted { .. }
                 | Event::JobStep { .. }
@@ -879,6 +954,7 @@ async fn run_job(
         if !append_lines(patches, first_line, &lines, &mut shown_lines).await {
             return Err(End::Closed);
         }
+        delivery = Delivery::of(sampled || changed || !lines.is_empty());
         if changed {
             let job = read!(
                 feed,

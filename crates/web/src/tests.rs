@@ -49,9 +49,12 @@ mod live;
 mod parity;
 mod queue;
 
-/// What a live stream sends once it delivered the daemon's data: the `shown` signal, which a keep-alive or a change
-/// of the feed alone never carries.
+/// What a live stream sends with each render: the `shown` signal, which a keep-alive or a change of the feed alone
+/// never carries.
 const DELIVERED: &str = r#""shown":{"#;
+
+/// What a live stream sends once a render delivered the daemon's data: the feed, current.
+const CURRENT: &str = r#""state":"current""#;
 
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;

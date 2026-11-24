@@ -6,7 +6,7 @@ use runnerd_core::api::{
     Waiting,
 };
 
-use super::{DELIVERED, Dashboard, NOW, read_until};
+use super::{CURRENT, DELIVERED, Dashboard, NOW, read_until};
 
 /// The first of the made-up queued jobs, all of halyard/storefront.
 const FIRST: u64 = 130_000_000_000;
@@ -460,4 +460,32 @@ async fn jobs_a_recovered_listing_brings_back_open_their_page_with_no_job_event(
         let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
         read_until(&mut stream, |text| text.contains(&local)).await;
     }
+}
+
+/// The bug it catches: one dropped read of which jobs have a page turned every row's link to GitHub's page, and the
+/// page still said it was live.
+#[tokio::test]
+async fn a_dropped_read_of_which_jobs_have_a_page_keeps_the_links_while_it_is_read_again() {
+    let dashboard = Dashboard::start().await;
+    dashboard.queue_of(3);
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/queue").await;
+    let first = read_until(&mut stream, |text| text.contains(DELIVERED)).await;
+    let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
+    assert!(first.contains(&local), "{first}");
+    dashboard.drop_reads("/v1/jobs", 1);
+    let started = dashboard.fake.fixtures.lock().unwrap().jobs[0]
+        .summary
+        .clone();
+    dashboard.announce(Event::JobStarted { job: started });
+    let recovery = read_until(&mut stream, |text| text.contains(CURRENT)).await;
+    assert_eq!(
+        super::live::states(&recovery),
+        ["retrying", "current"],
+        "{recovery}"
+    );
+    assert!(
+        !recovery.contains(r#"id="waiting""#),
+        "the rows keep their links: {recovery}"
+    );
 }

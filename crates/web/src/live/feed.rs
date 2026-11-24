@@ -1,8 +1,9 @@
 //! A live page's feed (ADR 0177): whether what the page shows is current, is waiting for its first read, is kept
 //! while a read that failed is tried again, or will not be updated again and why; and when the stream last delivered
-//! the daemon's data. Owns the words of the page's live badge for each state and the wait between failed reads. It
-//! must not read the daemon, decide which failures are outages (core's `ClientError::is_outage` does), or know a
-//! page's regions.
+//! the daemon's data. Owns the words of the page's live badge for each state, those of the states only the browser
+//! sees (its request retrying, refused or given up, `_conn`), the Datastar expressions that choose between them, and
+//! the wait between failed reads. It must not read the daemon, decide which failures are outages (core's
+//! `ClientError::is_outage` does), or know a page's regions.
 
 use std::time::Duration;
 
@@ -17,9 +18,32 @@ const FIRST_WAIT: Duration = Duration::from_millis(500);
 /// The longest wait between reads, as long as Datastar waits at most before it connects a failed stream again.
 pub(crate) const MAX_WAIT: Duration = Duration::from_secs(10);
 
-/// What the badge says while the page's stream is not connected, which only the page knows: Datastar connects it
-/// again.
-const OFFLINE: &str = "Offline";
+/// The `_conn` signal once the stream sent anything: every signal patch of a stream carries it.
+const OPEN: &str = "open";
+
+/// The badge the page shows: the feed's while the stream is open or once it ended for good, else the one of the state
+/// of the browser's request, `_conn`, that only the page knows.
+pub(crate) const BADGE: &str = "$_conn == 'open' || $_feed.ended ? $_feed : $_feed.browser[$_conn]";
+
+/// What the page's request does, from Datastar's `datastar-fetch` events of its element: connecting, connecting again
+/// after its body broke or the fetch failed, refused with an HTTP error (401 and 403 are the session's), or given up.
+/// A clean end changes nothing: the stream said why before it ended.
+pub(crate) const ON_FETCH: &str = "evt.detail.el === el && ($_conn = \
+    evt.detail.type === 'started' ? 'connecting' \
+    : evt.detail.type === 'retrying' ? 'retrying' \
+    : evt.detail.type === 'retries-failed' ? 'failed' \
+    : evt.detail.type === 'error' ? (['401', '403'].includes(evt.detail.argsRaw.status) ? 'denied' : 'refused') \
+    : $_conn)";
+
+/// The `_conn` signal a page starts with.
+pub(crate) const CONNECTING: &str = "'connecting'";
+
+/// The signals every patch of a stream carries: `_conn` is open.
+pub(crate) fn connected() -> serde_json::Map<String, serde_json::Value> {
+    let mut signals = serde_json::Map::new();
+    signals.insert("_conn".to_owned(), OPEN.into());
+    signals
+}
 
 /// Why a page's stream ended for good: none of these is retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,23 +85,47 @@ pub(crate) struct Feed {
     delivered: Option<u64>,
 }
 
-/// The `_feed` signal: what the badge shows, worded here.
+/// What the badge shows for one state, worded here.
 #[derive(Debug, Serialize)]
-struct Signal {
+struct Badge {
     state: &'static str,
-    /// Whether the stream ended for good, so the page does not say it is retrying.
-    ended: bool,
     /// Whether reloading the page is the way back.
     reload: bool,
     label: &'static str,
     title: String,
-    /// The badge's label and title while the stream is not connected.
-    offline: &'static str,
-    offline_title: String,
+}
+
+/// The badges of the states of the browser's request, by `_conn`.
+#[derive(Debug, Serialize)]
+struct Browser {
+    connecting: Badge,
+    retrying: Badge,
+    denied: Badge,
+    refused: Badge,
+    failed: Badge,
+}
+
+/// The `_feed` signal.
+#[derive(Debug, Serialize)]
+struct Signal {
+    #[serde(flatten)]
+    badge: Badge,
+    /// Whether the stream ended for good, so the page does not say it is retrying.
+    ended: bool,
+    browser: Browser,
     /// When the page's data is from, beside the badge when it is not current; empty when it does not matter.
     since: String,
     /// The last delivery, in seconds since the epoch; 0 when there was none.
     at: u64,
+}
+
+fn badge(state: &'static str, label: &'static str, title: String, reload: bool) -> Badge {
+    Badge {
+        state,
+        reload,
+        label,
+        title,
+    }
 }
 
 impl Feed {
@@ -120,9 +168,11 @@ impl Feed {
         serde_json::to_value(self.signal()).unwrap_or_default()
     }
 
-    /// The `_feed` signal as a Datastar signal patch.
+    /// The `_feed` signal as a Datastar signal patch, with `connected`'s.
     pub(crate) fn patch(&self) -> String {
-        serde_json::json!({ "_feed": self.json() }).to_string()
+        let mut signals = connected();
+        signals.insert("_feed".to_owned(), self.json());
+        serde_json::Value::Object(signals).to_string()
     }
 
     fn signal(&self) -> Signal {
@@ -180,14 +230,44 @@ impl Feed {
             ),
         };
         let ended = matches!(self.state, State::Ended(_));
+        let browser = Browser {
+            connecting: badge(
+                "connecting",
+                "Connecting",
+                format!("Connecting to the dashboard.{shown}"),
+                false,
+            ),
+            retrying: badge(
+                "offline",
+                "Offline",
+                format!("Not connected; connecting again.{shown}"),
+                false,
+            ),
+            denied: badge(
+                "signed-out",
+                "Signed out",
+                format!(
+                    "The dashboard no longer takes this browser's session; reload to sign in again.{shown}"
+                ),
+                true,
+            ),
+            refused: badge(
+                "refused",
+                "Not updating",
+                format!("The dashboard refused this page's updates; reload to try again.{shown}"),
+                true,
+            ),
+            failed: badge(
+                "failed",
+                "Offline",
+                format!("Not connected, and no longer trying; reload to try again.{shown}"),
+                true,
+            ),
+        };
         Signal {
-            state,
+            badge: badge(state, label, title, reload),
             ended,
-            reload,
-            label,
-            title,
-            offline: OFFLINE,
-            offline_title: format!("Not connected; connecting again.{shown}"),
+            browser,
             since: if self.state == State::Ended(Ending::Finished) {
                 String::new()
             } else {

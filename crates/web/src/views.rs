@@ -202,22 +202,23 @@ pub(crate) struct Here<'page> {
     pub(crate) peers: &'page [Peer],
 }
 
-/// The live page's badge: what the stream says of the page's data (`live::feed`, ADR 0177), and whether the stream
-/// is connected at all, which only the page knows; an ended feed is never "connecting again". The feed and the
-/// indicator come before the init: they have to be there when the request starts.
+/// The live page's badge: what the stream says of the page's data (`live::feed`, ADR 0177), and what its request
+/// does, which only the page knows; an ended feed is never "connecting again". The signals and the listener come
+/// before the init: they have to be there when the request starts.
 fn connection(live: &Live<'_>) -> Markup {
     let feed = Feed::connecting(Some(live.at));
     html! {
-        span.connection data-signals:_feed=(feed.json().to_string()) data-indicator:_live=""
+        span.connection data-signals:_feed=(feed.json().to_string()) data-signals:_conn=(feed::CONNECTING)
+            data-computed:_badge=(feed::BADGE) data-on:datastar-fetch=(feed::ON_FETCH)
             data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: {}}})", live.url, feed::MAX_WAIT.as_millis()))
-            data-class:online="$_live && $_feed.state == 'current'"
-            data-attr:data-feed="$_feed.ended || $_live ? $_feed.state : 'offline'"
-            data-attr:title="$_feed.ended || $_live ? $_feed.title : $_feed.offline_title" {
+            data-class:online="$_badge.state == 'current'"
+            data-attr:data-feed="$_badge.state"
+            data-attr:title="$_badge.title" {
             span.dot aria-hidden="true" {}
-            span.feed-label data-text="$_feed.ended || $_live ? $_feed.label : $_feed.offline" { "Connecting" }
-            span.feed-since data-show="$_feed.since != '' && !($_live && $_feed.state == 'current')"
+            span.feed-label data-text="$_badge.label" { "Connecting" }
+            span.feed-since data-show="$_feed.since != '' && $_badge.state != 'current'"
                 data-text="$_feed.since" {}
-            a.feed-reload href="" data-show="$_feed.reload" { "Reload" }
+            a.feed-reload href="" data-show="$_badge.reload" { "Reload" }
         }
     }
 }

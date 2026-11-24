@@ -47,11 +47,7 @@ async fn main() {
     busy_desktop(&fake);
     scene(&fake);
     queue(&fake);
-    let scenes = Scenes {
-        start_every: start_every(),
-        drop_every: every("RUNNERD_DEMO_DROP_EVERY"),
-        finish_after: every("RUNNERD_DEMO_FINISH_AFTER"),
-    };
+    let scenes = Scenes::from_env();
     // About what the doctor's reads of the host take with a few repositories.
     fake.fixtures.lock().unwrap().doctor_delay = Duration::from_millis(700);
     fake::serve(&socket, fake.clone());
@@ -155,9 +151,19 @@ struct Scenes {
     start_every: Option<u64>,
     drop_every: Option<u64>,
     finish_after: Option<u64>,
+    cut_every: Option<u64>,
 }
 
 impl Scenes {
+    fn from_env() -> Scenes {
+        Scenes {
+            start_every: start_every(),
+            drop_every: every("RUNNERD_DEMO_DROP_EVERY"),
+            finish_after: every("RUNNERD_DEMO_FINISH_AFTER"),
+            cut_every: every("RUNNERD_DEMO_CUT_EVERY"),
+        }
+    }
+
     /// What happens in second `n`, at `at`: its events.
     fn at_second(&self, fake: &fake::Fake, n: u64, at: u64) -> Vec<Event> {
         let mut events = Vec::new();
@@ -172,6 +178,10 @@ impl Scenes {
         }
         if self.drop_every.is_some_and(|every| n.is_multiple_of(every)) {
             events.push(drop_status(fake));
+        }
+        // The daemon's connections drop: every page's stream breaks, and the page connects again.
+        if self.cut_every.is_some_and(|every| n.is_multiple_of(every)) {
+            fake.cut_events();
         }
         events
     }
@@ -205,8 +215,9 @@ fn finish_running(fake: &fake::Fake, at: u64) -> Vec<Event> {
 }
 
 /// The environment variable `name`, when it is a number of seconds: `RUNNERD_DEMO_START_EVERY`;
-/// `RUNNERD_DEMO_DROP_EVERY`, how often the overview's status read drops twice before it answers; and
-/// `RUNNERD_DEMO_FINISH_AFTER`, when every running job completes.
+/// `RUNNERD_DEMO_DROP_EVERY`, how often the overview's status read drops twice before it answers;
+/// `RUNNERD_DEMO_FINISH_AFTER`, when every running job completes; and `RUNNERD_DEMO_CUT_EVERY`, how often every event
+/// stream is cut.
 fn every(name: &str) -> Option<u64> {
     std::env::var(name)
         .ok()

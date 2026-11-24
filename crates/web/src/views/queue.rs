@@ -24,7 +24,7 @@ pub(crate) struct QueueView {
 impl QueueView {
     pub(crate) async fn load(daemon: &Client, now: u64) -> Result<QueueView, ClientError> {
         let status = daemon.get("/v1/status").await?;
-        let local = LocalPages::read(daemon, &status).await;
+        let local = LocalPages::read(daemon, &status).await?;
         Ok(QueueView { now, status, local })
     }
 }
