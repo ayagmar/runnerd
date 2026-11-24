@@ -18,8 +18,10 @@ use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
 mod disk;
+mod events;
 mod lens;
 mod log_outline;
+mod packs;
 mod waits;
 mod writes;
 
@@ -2020,11 +2022,14 @@ async fn a_job_another_machine_ran_says_which_machine_after_a_restart_and_on_a_d
     // not add it to a database the previous schema wrote, and a name with escapes that reaches a client as is.
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
-    // A database as schema 31 left it: the step to 32 adds the column.
+    // A database as schema 31 left it: the step to 32 adds the column, the step to 33 the rest.
     drop(Store::open(&path).unwrap());
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("ALTER TABLE jobs DROP COLUMN elsewhere_runner; PRAGMA user_version = 31;")
-        .unwrap();
+    db.execute_batch(
+        "ALTER TABLE jobs DROP COLUMN elsewhere_runner; DROP TABLE host_readings; DROP TABLE log_packs; \
+         DROP INDEX events_by_type; PRAGMA user_version = 31;",
+    )
+    .unwrap();
     drop(db);
     let store = Store::open(&path).unwrap();
     assert_eq!(user_version(&path), VERSION);

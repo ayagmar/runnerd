@@ -34,6 +34,7 @@ import Shot from '../../components/Shot.astro';
 | host memory | the host stalls for memory, or has less to spare than the smallest profile's `memory`; or `memory_ceiling` is below the memory the host has | close what uses the host's memory beside the runners (runnerd waits by itself); set `memory_ceiling` to the most the host can grow to |
 | records | records near `[records] max_total` | `runnerctl records rm --older-than 2d`, or raise `max_total` |
 | sizing | a profile's jobs need more memory than its cap, or than the slice allows | `runnerctl sizing apply <profile>`, after raising `memory_ceiling`, `max_memory` or the slice's `MemoryMax` where needed |
+| history storage | the job history's database is on btrfs with copy-on-write, which fragments it and multiplies what the drive writes; a history runnerd creates is made without it | with runnerd stopped: `chattr +C` on its directory, `sqlite3 runnerd.db "VACUUM INTO 'runnerd.db.nocow'"`, remove `runnerd.db-wal` and `runnerd.db-shm`, move the copy over `runnerd.db`, start runnerd |
 
 ## Caches
 
@@ -49,7 +50,7 @@ import Shot from '../../components/Shot.astro';
 | job actions | the token cannot [cancel or re-run](../guides/cancel-rerun/) jobs; info when `[github] job_actions = false` or a fine-grained token cannot be checked without trying | `gh auth refresh` with the `repo` scope |
 | repository | a repository is public: anyone who opens a pull request can run code on this host | serve private repositories only, or have GitHub require approval before it runs workflows from fork pull requests |
 
-Two checks only inform: **GitHub Actions' cache** says whether jobs' `actions/cache` is served here or by GitHub ([Caches](../guides/caches/#github-actions-cache)), and **/dev/kvm** whether the device is there; nothing runnerd runs today needs it.
+Three checks only inform: **Docker storage** says whether Docker's root is on btrfs, ext4 or XFS, or a file system in a file on a loop device, and on btrfs what would write less; **GitHub Actions' cache** says whether jobs' `actions/cache` is served here or by GitHub ([Caches](../guides/caches/#github-actions-cache)), and **/dev/kvm** whether the device is there; nothing runnerd runs today needs it.
 
 ## When the doctor is clean
 

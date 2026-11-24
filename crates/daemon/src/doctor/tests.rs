@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use runnerd_core::api::{self, Sizing};
 use runnerd_core::config::{self, ByteSize, Config};
+use runnerd_core::observe::storage;
 use runnerd_core::sizing;
 
 use super::{
@@ -57,6 +58,7 @@ fn ready_host(os_release: &str) -> Host {
                 "sysbox-runc".to_owned(),
             ],
             platform: "linux/amd64".to_owned(),
+            root: "/var/lib/docker".to_owned(),
         }),
         images: ["jvm", "node"]
             .map(|stage| {
@@ -109,6 +111,19 @@ fn ready_host(os_release: &str) -> Host {
             mode: 0o600,
         }),
         past_boots: config::PastBoots::Read,
+        history: storage::History {
+            path: "/home/dana/.local/state/runnerd/runnerd.db".into(),
+            found: storage::HistoryFound::Present {
+                bytes: 1 << 30,
+                file_system: storage::FileSystem::Ext4,
+                copied: None,
+            },
+        },
+        docker_root: Some(storage::DockerRoot {
+            path: "/var/lib/docker".into(),
+            file_system: Ok(storage::FileSystem::Ext4),
+            loops: None,
+        }),
     }
 }
 
@@ -148,6 +163,8 @@ fn a_ready_host_passes_every_check() {
             "image",
             "image",
             "records",
+            "history storage",
+            "Docker storage",
             "gh",
             "job actions",
             "repository",

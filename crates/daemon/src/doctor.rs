@@ -17,7 +17,9 @@ use runnerd_core::command;
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::isolation::modules_check;
+use runnerd_core::observe::disk::Disks;
 use runnerd_core::observe::metrics::{self, Paths};
+use runnerd_core::observe::storage;
 use runnerd_core::record;
 use runnerd_core::sizing::{Window, advise};
 use runnerd_core::store;
@@ -56,6 +58,10 @@ pub(crate) struct Host {
     pub config_file: Option<ConfigFile>,
     /// Whether the journal tells how a past boot ended, which the runners' crash guard reads (ADR 0141).
     pub past_boots: config::PastBoots,
+    /// The history's database and the file system it is on (ADR 0171).
+    pub history: storage::History,
+    /// Docker's root and the file system it is on; `None` without Docker.
+    pub docker_root: Option<storage::DockerRoot>,
 }
 
 /// What `gh auth status` says of the active account's token for github.com, never the token itself.
@@ -126,6 +132,8 @@ pub(crate) struct DockerFacts {
     pub runtimes: Vec<String>,
     /// The platform images must be built for, such as `linux/amd64`.
     pub platform: String,
+    /// Docker's root directory, such as `/var/lib/docker`; empty when Docker does not say.
+    pub root: String,
 }
 
 /// A profile's image as Docker has it, or where it could come from.
@@ -169,23 +177,7 @@ impl Host {
         std::thread::scope(|scope| {
             let gh = scope.spawn(read_gh);
             let visibility = scope.spawn(|| read_each(&names, |name: &&str| read_visibility(name)));
-            let docker = scope.spawn(|| {
-                let docker = read_docker();
-                let images = match (config, &docker) {
-                    (Some(config), Ok(_)) => read_images(config),
-                    _ => BTreeMap::new(),
-                };
-                let records = (config.is_some() && docker.is_ok()).then(read_records);
-                let mirror = config
-                    .filter(|config| config.caches.mirror.enabled && docker.is_ok())
-                    .map(|_| read_mirror());
-                DockerReads {
-                    docker,
-                    images,
-                    records,
-                    mirror,
-                }
-            });
+            let docker = scope.spawn(|| DockerReads::read(config));
             let config_file = path.and_then(|path| {
                 let metadata = std::fs::metadata(path).ok()?;
                 Some(ConfigFile {
@@ -229,11 +221,13 @@ impl Host {
                     ((*name).to_owned(), visibility)
                 })
                 .collect();
+            let history = storage::History::read(&history_path(config));
             let DockerReads {
                 docker,
                 images,
                 records,
                 mirror,
+                root,
             } = joined(docker);
             Host {
                 docker,
@@ -252,6 +246,8 @@ impl Host {
                 memory,
                 config_file,
                 past_boots: runnerd_core::boots::past_boots(),
+                history,
+                docker_root: root,
             }
         })
     }
@@ -263,6 +259,51 @@ struct DockerReads {
     images: BTreeMap<String, Result<ImageFound, String>>,
     records: Option<Result<u64, String>>,
     mirror: Option<cache::mirror::Found>,
+    root: Option<storage::DockerRoot>,
+}
+
+impl DockerReads {
+    /// Docker's facts, then, once it answered, what it has of `config`'s images, records and mirror, and its root.
+    fn read(config: Option<&Config>) -> DockerReads {
+        let docker = read_docker();
+        let images = match (config, &docker) {
+            (Some(config), Ok(_)) => read_images(config),
+            _ => BTreeMap::new(),
+        };
+        let records = (config.is_some() && docker.is_ok()).then(read_records);
+        let mirror = config
+            .filter(|config| config.caches.mirror.enabled && docker.is_ok())
+            .map(|_| read_mirror());
+        let root = docker
+            .as_ref()
+            .ok()
+            .filter(|docker| !docker.root.is_empty())
+            .map(|docker| read_docker_root(Path::new(&docker.root)));
+        DockerReads {
+            docker,
+            images,
+            records,
+            mirror,
+            root,
+        }
+    }
+}
+
+/// The history's database: the config's `[history] database`, or the default under `$XDG_STATE_HOME`.
+fn history_path(config: Option<&Config>) -> PathBuf {
+    config
+        .and_then(|config| config.history.database.clone())
+        .or_else(crate::default_database)
+        .unwrap_or_else(|| PathBuf::from("runnerd.db"))
+}
+
+/// The file system of Docker's root, `root`, and the loop devices it is on when it is a file system in a file.
+fn read_docker_root(root: &Path) -> storage::DockerRoot {
+    storage::DockerRoot {
+        path: root.to_owned(),
+        file_system: storage::FileSystem::of(root).map_err(|error| error.to_string()),
+        loops: Disks::resolve(&Paths::default(), root).and_then(|disks| disks.store()),
+    }
 }
 
 /// How many repositories `Host::read` reads at once: each read is a `gh` process and a request to GitHub.
@@ -413,6 +454,7 @@ fn read_docker() -> Result<DockerFacts, String> {
             .map(|d| d.to_string())
             .unwrap_or_default(),
         runtimes,
+        root: info.docker_root_dir.unwrap_or_default(),
         platform: format!(
             "{}/{}",
             info.os_type.unwrap_or_default(),
@@ -761,6 +803,12 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     if let Some(sizing) = &host.sizing {
         checks.push(sizing_check(sizing));
     }
+    checks.push(host.history.check());
+    checks.push(match (&host.docker_root, docker) {
+        (Some(root), _) => root.check(),
+        (None, None) => skip("Docker storage", "needs Docker"),
+        (None, Some(_)) => skip("Docker storage", "Docker does not say where its root is"),
+    });
     checks.push(gh_check(&host.gh));
     checks.push(job_actions_check(&host.gh, config));
     checks.extend(

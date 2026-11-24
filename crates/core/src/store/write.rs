@@ -963,6 +963,11 @@ impl Writer<'_> {
                 params![at, body],
             )?;
             let id = self.db.last_insert_rowid();
+            if matches!(event, Event::BudgetChanged { .. }) {
+                self.db
+                    .prepare_cached(concat!(host_reading!(), " AND id = ?1"))?
+                    .execute([id])?;
+            }
             let latest = match &event {
                 Event::RepositoryChanged { repository } => {
                     Some((ANNOUNCE_REPOSITORY, &repository.name))
@@ -1409,6 +1414,10 @@ impl Writer<'_> {
         max_bytes: u64,
         announced: &mut Announced,
     ) -> rusqlite::Result<()> {
+        // A packed log is final: a line that comes after it is not kept (ADR 0171).
+        if super::logs::packed(&self.db, job)? {
+            return Ok(());
+        }
         let (mut count, mut bytes, mut truncated): (u64, u64, bool) = self.db.query_row(
             "SELECT log_lines, log_bytes, log_truncated FROM jobs WHERE id = ?1",
             [job],

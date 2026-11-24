@@ -1,4 +1,4 @@
--- The job history at schema version 24, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 33, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -213,12 +213,25 @@ CREATE TABLE host_samples (
     memory INTEGER NOT NULL
 );
 
+-- A job's log lines while it may still grow. Once its record is final, pruning packs them into `log_packs` and
+-- deletes them here (ADR 0171).
 CREATE TABLE log_lines (
     job INTEGER NOT NULL,
     line INTEGER NOT NULL,
     text TEXT NOT NULL,
     PRIMARY KEY (job, line)
 ) WITHOUT ROWID;
+
+-- A final job's log, packed (`store::logs`): its lines from `first_line` to `last_line`, each its number, length and
+-- bytes, deflated. A job with packs is read from them alone and takes no more lines; rows of it left in `log_lines`
+-- are deleted by the next prune.
+CREATE TABLE log_packs (
+    job INTEGER NOT NULL,
+    first_line INTEGER NOT NULL,
+    last_line INTEGER NOT NULL,
+    data BLOB NOT NULL
+);
+CREATE INDEX log_packs_by_job ON log_packs (job, last_line);
 
 -- A job's log as structure (ADR 0133), kept by the writer as its lines are stored, in the same transaction, and
 -- pruned with them. None for a log stored before schema 22. `log_outlines` is where the outline got to
@@ -259,6 +272,24 @@ CREATE TABLE events (
     body TEXT NOT NULL
 );
 CREATE INDEX events_by_at ON events (at);
+-- Each event by its type, the expression `store::event_type!` names word for word, so a read of one type's events
+-- reads this and not every event (ADR 0171). NULL for a body that is not JSON.
+CREATE INDEX events_by_type ON events ((CASE WHEN json_valid(body) THEN json_extract(body, '$.type') END), at);
+
+-- The host's memory as each `budget.changed` event that had it read it (`store::host_reading!`), kept by the writer
+-- in the transaction that stores the event, so insights read these and not the events' bodies (ADR 0171): `MemTotal`,
+-- `MemAvailable`, `SwapFree` (NULL without swap), what the host's limit took off the plain count, and whether a
+-- runner ran. Pruned with the events.
+CREATE TABLE host_readings (
+    event INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    total INTEGER NOT NULL,
+    available INTEGER,
+    swap_free INTEGER,
+    credit INTEGER NOT NULL,
+    running INTEGER
+);
+CREATE INDEX host_readings_by_at ON host_readings (at);
 
 CREATE TABLE cache_sizes (
     at INTEGER NOT NULL,

@@ -1,6 +1,6 @@
 # 0017. Job history in SQLite, written by one thread
 
-Status: **Accepted**, amended by [0027](0027-pruning-runs-beside-the-writer.md), [0028](0028-job-records-expire.md), [0073](0073-no-compatibility-before-0-0-19.md).
+Status: **Accepted**, amended by [0027](0027-pruning-runs-beside-the-writer.md), [0028](0028-job-records-expire.md), [0073](0073-no-compatibility-before-0-0-19.md), [0171](0171-the-history-packs-final-logs-and-reads-events-by-type.md).
 
 ## Context
 
