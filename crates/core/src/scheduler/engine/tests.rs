@@ -176,6 +176,8 @@ struct GithubState {
     /// Until when GitHub's rate limit is used up, from its last refusal of a registration: every request fails at once
     /// until then, before it is sent, as `Github::send` fails them.
     blocked_until: Option<std::time::SystemTime>,
+    /// The runners whose deletes that rate limit refused, until it lifts: their registrations wait for a listing.
+    refused_deletes: BTreeSet<u64>,
     /// Registrations asked for and not answered yet, and the most there were at once.
     registering: usize,
     most_registering: usize,
@@ -469,7 +471,9 @@ impl FakeGithub {
 
     /// Lifts what a refusal blocked: its reset came, or a new daemon's client knows nothing of it.
     fn unblock(&self) {
-        self.0.lock().unwrap().blocked_until = None;
+        let mut state = self.0.lock().unwrap();
+        state.blocked_until = None;
+        state.refused_deletes.clear();
     }
 
     /// Waits as long as a request takes; not at all, not even a turn of the runtime's timers, where no test says.
@@ -708,7 +712,10 @@ impl GithubApi for FakeGithub {
     }
 
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
-        self.blocked()?;
+        if let Err(refused) = self.blocked() {
+            self.0.lock().unwrap().refused_deletes.insert(id);
+            return Err(refused);
+        }
         self.0.lock().unwrap().call(format!("delete {id}"));
         self.wait(|state| &state.held_deletes).await;
         self.latency().await;
