@@ -414,3 +414,53 @@ async fn a_step_alone_does_not_read_again_which_jobs_have_a_page() {
         "the queue is not read again or sent for a step: {after}"
     );
 }
+
+/// The bug it catches: a queue the status showed empty, as while a repository's listing failed, was taken as a read
+/// with no jobs to link; when the listing came back with only `repository.changed`, jobs the history already held
+/// came back opening GitHub, or nothing, until a job event or a reload.
+#[tokio::test]
+async fn jobs_a_recovered_listing_brings_back_open_their_page_with_no_job_event() {
+    for path in ["/live/queue", "/live/overview"] {
+        let dashboard = Dashboard::start().await;
+        dashboard.queue_of(3);
+        let (listed, storefront) = {
+            let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+            let listed = std::mem::take(&mut fixtures.status.queued);
+            let storefront = fixtures
+                .status
+                .repositories
+                .iter_mut()
+                .find(|repository| repository.name == "halyard/storefront")
+                .unwrap();
+            storefront.queue = QueueShown::Unlisted;
+            storefront.listing = Some(ListingFailure {
+                since: NOW - 60,
+                problem: ListingProblem::Unreachable,
+            });
+            (listed, storefront.clone())
+        };
+        let cookie = dashboard.sign_in().await;
+        let mut stream = dashboard.stream(&cookie, path).await;
+        let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+        assert!(
+            !first.contains("queued-"),
+            "{path}: nothing listed: {first}"
+        );
+        let repository = {
+            let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+            fixtures.status.queued = listed;
+            let back = fixtures
+                .status
+                .repositories
+                .iter_mut()
+                .find(|repository| repository.name == storefront.name)
+                .unwrap();
+            back.queue = QueueShown::Listed;
+            back.listing = None;
+            back.clone()
+        };
+        dashboard.announce(Event::RepositoryChanged { repository });
+        let local = format!(r#"<a class="queue-main" href="/jobs/{FIRST}">"#);
+        read_until(&mut stream, |text| text.contains(&local)).await;
+    }
+}

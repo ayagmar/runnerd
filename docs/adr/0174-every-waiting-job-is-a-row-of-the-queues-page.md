@@ -34,8 +34,9 @@ the job.
 - A row opens the job's page when the history holds the job, with GitHub's page as a second link; else GitHub's page;
   else it is a row the keys reach that opens nothing. Which jobs the history holds is one read of its queued jobs per
   page load and per queued, started or finished job, never a read per row, none for a step alone, and none while
-  nothing is queued. When that read fails, every row opens GitHub and the read is tried again with each read of the
-  status until it answers. Rows are keyed by job ID, so jobs of one name are each their own row, and a row whose job
+  nothing is queued. It is read again too when a status read shows a queued job the last read did not ask about, as a
+  repository's listing coming back with no event of its own does. When that read fails, every row opens GitHub and
+  the read is tried again with each read of the status until it answers. Rows are keyed by job ID, so jobs of one name are each their own row, and a row whose job
   leaves goes without moving focus off another. On a phone the page wraps a row's name and branch rather than cut
   them; the overview keeps its rows to one line each.
 - Peer machines' queues are not merged here; each machine's dashboard lists its own.

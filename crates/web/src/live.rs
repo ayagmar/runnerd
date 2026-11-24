@@ -420,9 +420,9 @@ async fn run_overview(
             data.reload_running(&app.daemon).await?;
             data.recent = overview::read_recent(&app.daemon, &data.status).await?;
         }
-        // Which queued jobs have a page: again when the queue may have changed, never for a step alone, and with
-        // the status while the last read failed.
-        if queue_changed || (status_changed && data.local.failed()) {
+        // Which queued jobs have a page: again when the queue may have changed, never for a step alone, and when the
+        // status shows a job the last read did not ask about or that read failed.
+        if queue_changed || data.local.stale(&data.status) {
             data.local = LocalPages::read(&app.daemon, &data.status).await;
         }
         if attention_changed {
@@ -456,7 +456,8 @@ pub(crate) async fn queue(
 
 /// The queue's page: the status is read again when an event says the queue or what it waits on changed, and at the
 /// latest once it is `STATUS_AGE` old, event or not; every read renders the waits as they have grown. Which jobs have
-/// a page is read again with a job event, and with the status while the last read failed.
+/// a page is read again with a job event, and when the status shows a job the last read did not ask about or that
+/// read failed.
 async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result<End, ClientError> {
     // Subscribed before reading, so nothing that happens in between is missed.
     let events = app.daemon.events(EventQuery::default(), None).await?;
@@ -522,7 +523,7 @@ async fn run_queue(app: &App, patches: &Patches, shown: Option<Shown>) -> Result
             data.status = app.daemon.get("/v1/status").await?;
             status_read = Instant::now();
         }
-        if jobs_changed || (status_changed && data.local.failed()) {
+        if jobs_changed || data.local.stale(&data.status) {
             data.local = LocalPages::read(&app.daemon, &data.status).await;
         }
         if !open {

@@ -16,18 +16,26 @@ pub(crate) struct LocalPages(Known);
 
 #[derive(Debug, Clone, Default)]
 enum Known {
-    /// The read failed: every row opens GitHub, and the read is tried again when the status is.
+    /// The read failed: every row opens GitHub, and the read is tried again with the next status.
     #[default]
     Failed,
-    /// The history's queued jobs, newest 500, as last read; none when the status listed nothing queued.
-    Read(BTreeSet<u64>),
+    /// Read for the queued jobs of a status: `asked`, its queued IDs then, and `local`, those of the history's queued
+    /// jobs (newest 500). A status that lists none is not read, and asks about none.
+    Read {
+        asked: BTreeSet<u64>,
+        local: BTreeSet<u64>,
+    },
 }
 
 impl LocalPages {
-    /// Reads them from the history, unless `status` lists no queued job, which needs no link.
+    /// Reads them from the history for `status`'s queued jobs, unless it lists none, which need no link.
     pub(crate) async fn read(daemon: &Client, status: &Status) -> LocalPages {
-        if status.queued.is_empty() {
-            return LocalPages(Known::Read(BTreeSet::new()));
+        let asked: BTreeSet<u64> = status.queued.iter().map(|job| job.id).collect();
+        if asked.is_empty() {
+            return LocalPages(Known::Read {
+                asked,
+                local: BTreeSet::new(),
+            });
         }
         let page: Result<JobPage, ClientError> = daemon
             .get_query(
@@ -39,18 +47,23 @@ impl LocalPages {
                 },
             )
             .await;
-        LocalPages(page.map_or(Known::Failed, |page| {
-            Known::Read(page.jobs.iter().map(|job| job.id).collect())
+        LocalPages(page.map_or(Known::Failed, |page| Known::Read {
+            asked,
+            local: page.jobs.iter().map(|job| job.id).collect(),
         }))
     }
 
     /// Whether job `id` has a page here, as far as is known.
     pub(crate) fn has(&self, id: u64) -> bool {
-        matches!(&self.0, Known::Read(ids) if ids.contains(&id))
+        matches!(&self.0, Known::Read { local, .. } if local.contains(&id))
     }
 
-    /// Whether the last read failed, so a page asks again with the status.
-    pub(crate) fn failed(&self) -> bool {
-        matches!(self.0, Known::Failed)
+    /// Whether `status` needs them read again: the last read failed, or `status` lists a queued job it did not ask
+    /// about, such as one a repository's listing brings back with no event of its own.
+    pub(crate) fn stale(&self, status: &Status) -> bool {
+        match &self.0 {
+            Known::Failed => true,
+            Known::Read { asked, .. } => status.queued.iter().any(|job| !asked.contains(&job.id)),
+        }
     }
 }
