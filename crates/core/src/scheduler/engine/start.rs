@@ -674,13 +674,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return Launch::Failed(launched);
         };
         let number = slot.index + 1;
-        let secs = unix_secs(now).max(self.named + 1);
-        self.named = secs;
+        let proposed = unix_secs(now).max(self.named + 1);
+        self.named = proposed;
         // GitHub and Docker learn the name only once the history keeps its second, which a restart names later than.
-        if !self.store.runner_named(secs).await {
+        // The history grants a later one than proposed when it knows of one named since: the engine's read at its
+        // start may have failed.
+        let Some(secs) = self.store.runner_named(&self.runner_prefix, proposed).await else {
             warn!("{repository}: no runner starts until the history records its name");
             return Launch::Failed(launched);
-        }
+        };
+        self.named = self.named.max(secs);
         let name = self.identity.runner_name(&slot.profile, number, secs);
         self.start_mirror().await;
         Launch::Readied(Readied {

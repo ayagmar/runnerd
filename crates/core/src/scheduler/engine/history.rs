@@ -24,7 +24,7 @@ use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
 use crate::scheduler::warm::Attempt;
 use crate::scheduler::{Pool, SlotRef};
-use crate::store::{LogPosition, RunnerRecord, Store};
+use crate::store::{LogChain, LogPosition, RunnerRecord, Store};
 use crate::sync::lock;
 use crate::time;
 
@@ -721,10 +721,15 @@ async fn capture_job<D: DockerApi>(
     // Bytes of the job's log stored or sent: past `max_bytes` the store keeps no more, so the capture stops.
     let mut sent = 0;
     let mut resume = None;
+    // Its lines start where the engine chose: where the job's stored log ends, or where a capture before it sent up to.
+    let mut chain = LogChain::starting_at(Some(position));
     while let Some(chunk) = output.next().await {
-        // The container stopped, or Docker dropped the exec while it runs: `recapture` tells them apart.
+        // The container stopped, or Docker dropped the exec while it runs: `recapture` tells them apart. Once the
+        // history refused a line, it resumes from where the stored log ends, not past what was refused.
         let Ok(chunk) = chunk else {
-            return Capture::Broken { resume };
+            return Capture::Broken {
+                resume: resume.filter(|_| !chain.refused()),
+            };
         };
         for captured in parser.feed(&chunk) {
             match captured {
@@ -749,14 +754,25 @@ async fn capture_job<D: DockerApi>(
                     }
                 }
                 Captured::Lines { lines, position } => {
-                    if let Some(job) = job {
-                        sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
-                        told.packages.read(&lines);
-                        store.log(job, lines, position, max_bytes).await;
-                        resume = Some(position);
-                        if sent > max_bytes {
-                            return Capture::Done;
-                        }
+                    let Some(job) = job else {
+                        // Lines before the job are not stored: the next ones start somewhere the history does not know.
+                        chain.lose_place();
+                        continue;
+                    };
+                    sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
+                    told.packages.read(&lines);
+                    store
+                        .log_chained(job, lines, position, max_bytes, &mut chain)
+                        .await;
+                    if chain.refused() {
+                        warn!(
+                            "{runner}: the job history refused part of its log; capturing it again from what it holds"
+                        );
+                        return Capture::Broken { resume: None };
+                    }
+                    resume = Some(position);
+                    if sent > max_bytes {
+                        return Capture::Done;
                     }
                 }
             }

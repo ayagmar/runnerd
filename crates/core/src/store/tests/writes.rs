@@ -6,10 +6,10 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 use super::{queued, runner, sample};
-use crate::api::Event;
+use crate::api::{Event, HostSample};
 use crate::observe::metrics::{CpuHeld, Events};
 use crate::store::write::NAME_LEASE_SECS;
-use crate::store::{LogPosition, SampleRecord, Store};
+use crate::store::{LogChain, LogPosition, SampleRecord, Store};
 use crate::testdir::TestDir;
 
 /// A trigger on `path` that counts each update of a runner's memory and socket counters in `counted`: an update that
@@ -126,6 +126,8 @@ fn stored_lease(db: &Connection) -> Option<u64> {
     .ok()
 }
 
+const PREFIX: &str = "runnerd-0000abcd-";
+
 /// The bug it catches: every runner start switching the database to `synchronous = FULL` for a write of its own, or a
 /// lease that lets a name past what the history keeps go unwritten.
 #[tokio::test]
@@ -133,70 +135,81 @@ async fn names_inside_a_lease_need_no_write_and_the_first_past_it_takes_a_new_on
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    assert!(
-        store.runner_named(1_000).await,
-        "the first name takes a lease"
-    );
+    assert_eq!(store.runner_named(PREFIX, 1_000).await, Some(1_000));
     let fault = refuse_names(&path);
     assert_eq!(stored_lease(&fault), Some(1_000 + NAME_LEASE_SECS));
 
     // The history refuses writes now: every name inside the lease still goes, none past it.
     for secs in [1_001, 1_100, 1_000 + NAME_LEASE_SECS - 1] {
-        assert!(store.runner_named(secs).await, "{secs} is inside the lease");
+        assert_eq!(store.runner_named(PREFIX, secs).await, Some(secs));
     }
-    assert!(
-        !store.runner_named(1_000 + NAME_LEASE_SECS).await,
+    assert_eq!(
+        store.runner_named(PREFIX, 1_000 + NAME_LEASE_SECS).await,
+        None,
         "the lease's end itself needs a new lease"
     );
     fault.execute_batch("DROP TRIGGER no_name").unwrap();
-    assert!(store.runner_named(1_000 + NAME_LEASE_SECS).await);
+    assert_eq!(
+        store.runner_named(PREFIX, 1_000 + NAME_LEASE_SECS).await,
+        Some(1_000 + NAME_LEASE_SECS)
+    );
     assert_eq!(stored_lease(&fault), Some(1_000 + 2 * NAME_LEASE_SECS));
 }
 
-/// The bug it catches: a restart, or a clock stepped back, naming a runner with a second a lease from before already
-/// covered, which a runner may hold, as the history knew it only by the lease.
+/// The bug it catches: a restart whose engine could not read the history, or a clock stepped back, naming a runner
+/// with a second a lease from before covered or a runner's row carries, which GitHub may still hold.
 #[tokio::test]
-async fn a_restart_names_past_the_lease_and_a_clock_stepped_back_never_lowers_it() {
+async fn the_history_grants_a_second_past_every_name_it_knows_whatever_the_engine_proposes() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
-    let prefix = "runnerd-0000abcd-".to_owned();
     {
         let store = Store::open(&path).unwrap();
-        assert!(store.runner_named(5_000).await);
-        assert!(store.runner_named(5_001).await);
+        assert_eq!(store.runner_named(PREFIX, 5_000).await, Some(5_000));
+        assert_eq!(store.runner_named(PREFIX, 5_001).await, Some(5_001));
         store.flush().await;
     }
-    let store = Store::open(&path).unwrap();
     let ceiling = 5_000 + NAME_LEASE_SECS;
+    let store = Store::open(&path).unwrap();
     assert_eq!(
-        store.last_runner_second(prefix.clone()).await.unwrap(),
+        store.last_runner_second(PREFIX.to_owned()).await.unwrap(),
         Some(ceiling),
-        "a restart, this build or 0.1.5, names past the whole lease"
+        "a restart, of this build or 0.1.5, reads the whole lease as named"
     );
-    // A writer after a restart takes a lease of its own on its first name, even one the clock put before the stored
-    // one; what is stored never goes back.
+    // The engine proposes a second inside the old lease, as one whose read of the history failed, behind a clock
+    // stepped back, would.
     let fault = refuse_names(&path);
-    assert!(
-        !store.runner_named(4_000).await,
+    assert_eq!(
+        store.runner_named(PREFIX, 4_000).await,
+        None,
         "a new writer writes before its first name"
     );
     fault.execute_batch("DROP TRIGGER no_name").unwrap();
-    assert!(store.runner_named(4_000).await);
+    assert_eq!(store.runner_named(PREFIX, 4_000).await, Some(ceiling + 1));
     assert_eq!(
-        store.last_runner_second(prefix).await.unwrap(),
-        Some(ceiling)
+        store.runner_named(PREFIX, 4_001).await,
+        Some(ceiling + 2),
+        "a clock behind the last grant gets the next second"
     );
+    assert_eq!(stored_lease(&fault), Some(ceiling + 1 + NAME_LEASE_SECS));
+    drop(store);
 
-    // 0.1.5 wrote the second it named, past the lease it read; this build reads it as the latest and leases past it.
+    // A runner whose row names a later second than the lease, as one a clock ahead named.
+    let store = Store::open(&path).unwrap();
+    store.runner_started(runner(&format!("{PREFIX}box-app-1-9000"), 1));
+    store.flush().await;
+    assert_eq!(store.runner_named(PREFIX, 4_000).await, Some(9_001));
+
+    // 0.1.5 wrote the second it named, past the lease it read; this build grants past it.
+    drop(store);
     fault
         .execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('runner_named', ?1)",
-            [ceiling + 10],
+            [20_000],
         )
         .unwrap();
     let store = Store::open(&path).unwrap();
-    assert!(store.runner_named(ceiling + 11).await);
-    assert_eq!(stored_lease(&fault), Some(ceiling + 11 + NAME_LEASE_SECS));
+    assert_eq!(store.runner_named(PREFIX, 1).await, Some(20_001));
+    assert_eq!(stored_lease(&fault), Some(20_001 + NAME_LEASE_SECS));
 }
 
 fn lines(job: u64, from: u64) -> Vec<String> {
@@ -299,4 +312,204 @@ async fn telemetry_is_announced_only_once_it_commits() {
     let first = events.try_recv().unwrap();
     assert!(matches!(first.event, Event::LogLine { line: 0, .. }));
     assert_eq!(store.job(1).await.unwrap().unwrap().summary.log.lines, 3);
+}
+
+/// Events received so far: each log line as (job, line), each job sample as (job, `u64::MAX`), each host sample as
+/// (0, its time).
+fn received(
+    events: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<crate::api::EventEnvelope>>,
+) -> Vec<(u64, u64)> {
+    let mut seen = Vec::new();
+    while let Ok(envelope) = events.try_recv() {
+        match &envelope.event {
+            Event::LogLine { job, line, .. } => seen.push((*job, *line)),
+            Event::JobSample { job, .. } => seen.push((*job, u64::MAX)),
+            Event::HostSample { sample } => seen.push((0, sample.at)),
+            _ => {}
+        }
+    }
+    seen
+}
+
+/// The bug it catches: a write that makes SQLite roll the whole batch back, as a full disk does, taking the writes
+/// before it with it and leaving those after it untried, or the batch's events going out for writes not kept.
+#[tokio::test]
+async fn a_write_that_rolls_the_whole_batch_back_costs_the_others_nothing() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    for (id, name) in [(1, "r1"), (2, "boom")] {
+        store.queued("o/r", &queued(id), crate::time::now_ms());
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+    }
+    store.flush().await;
+    let fault = Connection::open(&path).unwrap();
+    // RAISE(ROLLBACK) ends the whole transaction, savepoints and all, as SQLITE_FULL does.
+    fault
+        .execute_batch(
+            "CREATE TRIGGER full BEFORE INSERT ON samples WHEN NEW.runner = 'boom' \
+             BEGIN SELECT RAISE(ROLLBACK, 'database or disk is full'); END;",
+        )
+        .unwrap();
+    let mut events = store.subscribe();
+    let position = |offset| LogPosition { page: 1, offset };
+    store.log(1, lines(1, 0), position(10), u64::MAX).await;
+    store.samples(vec![sample("boom", 1_000_300, 0, 0)]);
+    store.log(1, lines(1, 3), position(20), u64::MAX).await;
+    store.samples(vec![sample("r1", 1_000_300, 0, 0)]);
+    store.flush().await;
+
+    assert_eq!(store.job(1).await.unwrap().unwrap().summary.log.lines, 6);
+    assert_eq!(store.log_position(1).await.unwrap(), position(20));
+    assert_eq!(
+        received(&mut events),
+        [
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (1, u64::MAX)
+        ],
+        "every write kept is announced in order, none of the one that failed"
+    );
+}
+
+/// The bug it catches: a host sample's live event waiting on the database, which another connection may hold, though
+/// it stores nothing; or lost with a batch that failed.
+#[tokio::test]
+async fn host_samples_go_out_while_the_database_is_held_and_when_their_batch_fails() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1), crate::time::now_ms());
+    store.flush().await;
+    let mut events = store.subscribe();
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let host = |at| HostSample {
+        at,
+        cpu: 100,
+        memory: 1 << 30,
+    };
+    store.host_sample(host(1));
+    // Past the telemetry window, well inside the writer's 5 s wait for the lock.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        received(&mut events),
+        [(0, 1)],
+        "a batch of host samples alone takes no lock"
+    );
+
+    // With log lines, the batch waits for the lock and gives up; the host sample still goes out, after them.
+    store
+        .log(1, lines(1, 0), LogPosition { page: 1, offset: 5 }, u64::MAX)
+        .await;
+    store.host_sample(host(2));
+    tokio::time::sleep(Duration::from_millis(7000)).await;
+    holder.execute_batch("COMMIT").unwrap();
+    store.flush().await;
+    assert_eq!(received(&mut events), [(0, 2)]);
+    assert_eq!(store.job(1).await.unwrap().unwrap().summary.log.lines, 0);
+}
+
+/// The bug it catches: a capture's later lines stored after part of its log failed to be, moving the job's stored
+/// position past lines it does not hold, so a capture that starts again from it never stores them.
+#[tokio::test]
+async fn a_log_chain_stops_at_lines_not_stored_and_a_capture_from_the_stored_position_fills_the_gap()
+ {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1), crate::time::now_ms());
+    store.flush().await;
+    let start = store.log_position(1).await.unwrap();
+    let fault = Connection::open(&path).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_opener BEFORE INSERT ON log_lines WHEN NEW.text LIKE '%opener%' \
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let position = |offset| LogPosition { page: 1, offset };
+    let mut chain = LogChain::starting_at(Some(start));
+    store
+        .log_chained(1, vec!["a".to_owned()], position(10), u64::MAX, &mut chain)
+        .await;
+    store
+        .log_chained(
+            1,
+            vec!["opener".to_owned()],
+            position(20),
+            u64::MAX,
+            &mut chain,
+        )
+        .await;
+    store
+        .log_chained(
+            1,
+            vec!["closer".to_owned()],
+            position(30),
+            u64::MAX,
+            &mut chain,
+        )
+        .await;
+    store.flush().await;
+    assert!(chain.refused(), "the capture is told to start again");
+    assert_eq!(
+        store.log_position(1).await.unwrap(),
+        position(10),
+        "the stored position stays before the lines not stored"
+    );
+    assert_eq!(
+        store.log_lines(1, 0, 10).await.unwrap(),
+        [(0, "a".to_owned())]
+    );
+
+    // A capture that starts from where its last one sent up to, past the gap, is refused too.
+    let mut stale = LogChain::starting_at(Some(position(30)));
+    store
+        .log_chained(
+            1,
+            vec!["late".to_owned()],
+            position(40),
+            u64::MAX,
+            &mut stale,
+        )
+        .await;
+    store.flush().await;
+    assert!(
+        stale.refused(),
+        "lines that do not start where the stored log ends are refused"
+    );
+
+    fault.execute_batch("DROP TRIGGER no_opener").unwrap();
+    let mut again = LogChain::starting_at(Some(store.log_position(1).await.unwrap()));
+    for (text, offset) in [("opener", 20), ("closer", 30)] {
+        store
+            .log_chained(
+                1,
+                vec![text.to_owned()],
+                position(offset),
+                u64::MAX,
+                &mut again,
+            )
+            .await;
+    }
+    store.flush().await;
+    assert!(
+        !again.refused(),
+        "the capture from the stored position is kept"
+    );
+    assert_eq!(
+        store.log_lines(1, 0, 10).await.unwrap(),
+        [
+            (0, "a".to_owned()),
+            (1, "opener".to_owned()),
+            (2, "closer".to_owned())
+        ]
+    );
+    assert_eq!(store.log_position(1).await.unwrap(), position(30));
 }

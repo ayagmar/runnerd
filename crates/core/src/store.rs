@@ -331,6 +331,37 @@ pub struct LogPosition {
     pub offset: u64,
 }
 
+/// One capture's run through a job's log: where its next lines start, and whether the history refused any of them. Once
+/// it did, as a write failed or the job's stored log does not end where the lines start, it refuses every later line
+/// of the chain, so the stored position never moves past lines it does not hold; the capture then starts again from
+/// the stored position.
+#[derive(Debug, Clone, Default)]
+pub struct LogChain {
+    /// Where the next lines start; `None` while unknown, as for lines a capture sent before it knew its job.
+    next: Option<LogPosition>,
+    refused: Arc<AtomicBool>,
+}
+
+impl LogChain {
+    /// A chain whose first lines start at `from`, if known.
+    pub fn starting_at(from: Option<LogPosition>) -> LogChain {
+        LogChain {
+            next: from,
+            refused: Arc::default(),
+        }
+    }
+
+    /// Forgets where the next lines start: lines were dropped before them.
+    pub fn lose_place(&mut self) {
+        self.next = None;
+    }
+
+    /// Whether the history refused a line of this chain: the capture should start again from the stored position.
+    pub fn refused(&self) -> bool {
+        self.refused.load(Ordering::Acquire)
+    }
+}
+
 /// How far the mirror's log was counted: the time of the last response counted, in nanoseconds since the epoch as
 /// Docker logs it, and how many responses logged at exactly that time were counted, so the next read counts the
 /// ones it was too early to see.
@@ -483,9 +514,11 @@ enum Write {
         done: oneshot::Sender<bool>,
     },
     RunnerNamed {
+        /// The names the engine gives start with it.
+        prefix: String,
         secs: u64,
-        /// Whether it committed.
-        done: oneshot::Sender<bool>,
+        /// The second granted, if the history keeps it.
+        done: oneshot::Sender<Option<u64>>,
     },
     ClaimRerun {
         attempt: run::ClaimKey,
@@ -503,9 +536,14 @@ enum Telemetry {
     Log {
         job: u64,
         lines: Vec<String>,
+        /// Where these lines start in the runner's log, when the capture knows: the history's position for the job
+        /// must be this, or the lines are refused.
+        from: Option<LogPosition>,
         /// Where the capture resumes once these lines are stored; `None` for all but the last part of a batch.
         position: Option<LogPosition>,
         max_bytes: u64,
+        /// The capture's `LogChain::refused`, set once one of its lines was not stored: the rest are refused.
+        refused: Arc<AtomicBool>,
         /// The lines' share of `LOG_BACKLOG`, given back once they are stored.
         backlog: OwnedSemaphorePermit,
     },
@@ -733,7 +771,23 @@ impl Store {
 
     /// Appends log lines to a job, up to `max_bytes` per job, and records where the capture continues. Waits while
     /// `LOG_BACKLOG` bytes of lines are waiting to be stored; a larger batch goes in parts, each waiting its turn.
+    /// Wherever the job's stored log ends: [`Store::log_chained`] checks.
     pub async fn log(&self, job: u64, lines: Vec<String>, position: LogPosition, max_bytes: u64) {
+        let mut chain = LogChain::default();
+        self.log_chained(job, lines, position, max_bytes, &mut chain)
+            .await;
+    }
+
+    /// [`Store::log`] as part of `chain`: the lines are stored only if the job's stored log ends where the chain says
+    /// they start, and no earlier line of the chain was refused. Moves the chain on to `position`.
+    pub async fn log_chained(
+        &self,
+        job: u64,
+        lines: Vec<String>,
+        position: LogPosition,
+        max_bytes: u64,
+        chain: &mut LogChain,
+    ) {
         let size = |line: &String| line.len() as u64 + 1;
         let mut lines = lines.into_iter().map(|mut line| {
             // No line takes the whole backlog; the capture already cuts lines far shorter.
@@ -763,11 +817,15 @@ impl Store {
             self.send(Write::Telemetry(Telemetry::Log {
                 job,
                 lines: part,
+                // Every part starts where the batch does: the parts before store lines and leave the position.
+                from: chain.next,
                 position: last.then_some(position),
                 max_bytes,
+                refused: chain.refused.clone(),
                 backlog,
             }));
             if last {
+                chain.next = Some(position);
                 return;
             }
         }
@@ -1022,18 +1080,24 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
-    /// Records that this machine named a runner for `secs`, the second its name ends in, before GitHub or Docker
-    /// knows the name: a restart names the next runner later even when nothing else recorded this one. The history
-    /// keeps a lease a few minutes past it, synced to disk once, so the names in it cost no write. Says whether the
-    /// history keeps it.
-    pub async fn runner_named(&self, secs: u64) -> bool {
-        let (done, committed) = oneshot::channel();
-        self.send(Write::RunnerNamed { secs, done });
+    /// The second to name a runner whose name starts with `prefix` for, `secs` or later, before GitHub or Docker
+    /// knows the name: past every second the history knows was named, whatever the engine read at its start, so a
+    /// restart never names a runner the same even when nothing else recorded one. The history keeps a lease a few
+    /// minutes past it, synced to disk once, so the names in it cost no write. `None` when the history cannot keep it:
+    /// then the name must not be used.
+    pub async fn runner_named(&self, prefix: &str, secs: u64) -> Option<u64> {
+        let (done, granted) = oneshot::channel();
+        self.send(Write::RunnerNamed {
+            prefix: prefix.to_owned(),
+            secs,
+            done,
+        });
         // Waited for on a blocking thread, as a read is: the runtime then knows the start waits for the disk, and a
         // paused test clock does not run on meanwhile.
-        tokio::task::spawn_blocking(move || committed.blocking_recv().unwrap_or(false))
+        tokio::task::spawn_blocking(move || granted.blocking_recv().ok().flatten())
             .await
-            .unwrap_or(false)
+            .ok()
+            .flatten()
     }
 
     /// Records a repository's visibility as GitHub gave it at `at` (ms), in place of the one recorded before.
@@ -1617,7 +1681,8 @@ fn read_as_current(db: &Connection) -> Result<(), StoreError> {
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error. The WAL is
 /// checkpointed every 8192 pages (32 MiB) rather than SQLite's 1000: a page the writer changes again and again, as a
 /// running job's row, is copied into the database once per checkpoint, not once per 4 MiB. It is cut back to 64 MiB
-/// after a checkpoint, so a burst does not leave a large file behind. Temporary tables and indices, as a sort's, stay
+/// after a checkpoint, so a burst does not leave a large file behind; neither is a cap, as a reader holding an old
+/// snapshot keeps the WAL from being reused. Temporary tables and indices, as a sort's, stay
 /// in memory.
 fn configure(db: &Connection) -> rusqlite::Result<()> {
     db.pragma_update(None, "journal_mode", "wal")?;
