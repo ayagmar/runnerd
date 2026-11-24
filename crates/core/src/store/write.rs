@@ -1,10 +1,13 @@
 //! The writer thread: applies writes in the order they were sent, closes job records once both GitHub and the
 //! engine are done with them, and announces what changed. A change and the durable events it announces commit in
 //! one transaction and are broadcast only after, so a subscriber that reads the stored events after subscribing
-//! misses none, and a crash never keeps a change without its event.
+//! misses none, and a crash never keeps a change without its event. Telemetry sent close together, log lines and
+//! samples, commits in one transaction, each write in its own savepoint, in the order it was sent among every other
+//! write.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -12,14 +15,15 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::outline::Outlining;
 use super::read::{self, secs};
 use super::{
-    Downtime, Downtimes, HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord,
-    SampleRecord, Write, logged,
+    Downtime, Downtimes, HOST_SAMPLE_BATCH, LOG_BACKLOG, LogPosition, MirrorPosition, Resolution,
+    RunnerRecord, SampleRecord, Telemetry, Write, logged,
 };
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, NamedRun, QueuedJob};
 use crate::record;
 use crate::sync::lock;
 use crate::time;
+use tracing::warn;
 
 /// How long after the host woke GitHub may still fail a job for its sleep, in ms (ADR 0159): it fails a job whose
 /// runner went silent while the host slept, or once the runner reconnects to a session that has ended. A job that
@@ -32,6 +36,24 @@ const ANNOUNCE_REPOSITORY: &str =
 /// Makes an event its profile's latest in `announced_profiles`.
 const ANNOUNCE_PROFILE: &str =
     "INSERT OR REPLACE INTO announced_profiles (profile, event) VALUES (?1, ?2)";
+
+/// How long the writer gathers telemetry after the first of a batch before it commits them: a noisy runner's log
+/// comes every 200 ms and every runner's samples every 2 s, each once a transaction of its own that rewrote the same
+/// pages of `jobs`, `runners` and the indices. Live views see log lines and samples about this much later. Any
+/// other write ends the wait at once, so nothing else waits for it.
+const TELEMETRY_WINDOW: Duration = Duration::from_secs(1);
+
+/// Telemetry writes one transaction holds at most.
+const TELEMETRY_MAX: usize = 256;
+
+/// Log bytes a batch holds at most, unless its first write alone holds more: half of what may wait, so a batch never
+/// holds the whole backlog. A target, not a bound on waiting: a capture that waits for a larger share than is free may
+/// still wait out the window.
+const TELEMETRY_LOG_BYTES: u64 = LOG_BACKLOG / 2;
+
+/// How far ahead of the second a runner is named for a lease of names reaches (seconds): the history keeps the lease's
+/// end, synced to disk, once, and names runners up to it with no write. A restart names past it.
+pub(super) const NAME_LEASE_SECS: u64 = 300;
 
 /// What `Store::open` hands its writer.
 pub(super) struct Started {
@@ -62,11 +84,97 @@ pub(super) fn run(
         session: started.session,
         events,
         held,
+        names: Names::Unread,
     };
-    while let Some(write) = queue.blocking_recv() {
-        writer.apply(write);
+    // The window's clock: the writer thread runs no runtime of its own. Without one, it commits what is already sent.
+    let clock = logged_io(
+        "time the telemetry window",
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build(),
+    );
+    let mut next = None;
+    while let Some(write) = next.take().or_else(|| queue.blocking_recv()) {
+        match write {
+            Write::Telemetry(first) => {
+                let gathered = gather(&mut queue, first, clock.as_ref());
+                next = gathered.next;
+                writer.telemetry(gathered.batch);
+            }
+            write => writer.apply(write),
+        }
     }
     writer.store_host_samples();
+}
+
+/// Logs an I/O error; `None` then.
+fn logged_io<T>(what: &str, result: std::io::Result<T>) -> Option<T> {
+    result
+        .map_err(|error| warn!("job history: cannot {what}: {error}"))
+        .ok()
+}
+
+/// A batch of telemetry, and the write after it that ended it, if one did.
+struct Gathered {
+    batch: Vec<Telemetry>,
+    next: Option<Write>,
+}
+
+/// The telemetry sent after `first` within [`TELEMETRY_WINDOW`], up to [`TELEMETRY_MAX`] writes and
+/// [`TELEMETRY_LOG_BYTES`] of log: the first other write ends it, and is the next one applied, so every write keeps its
+/// place in the order they were sent. Without `clock`, only what is already sent.
+fn gather(
+    queue: &mut mpsc::UnboundedReceiver<Write>,
+    first: Telemetry,
+    clock: Option<&tokio::runtime::Runtime>,
+) -> Gathered {
+    let until = Instant::now() + TELEMETRY_WINDOW;
+    let mut log_bytes = first.log_bytes();
+    let mut batch = vec![first];
+    while batch.len() < TELEMETRY_MAX {
+        let received = match queue.try_recv() {
+            Ok(write) => Some(write),
+            Err(mpsc::error::TryRecvError::Disconnected) => None,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                let left = until.saturating_duration_since(Instant::now());
+                match clock {
+                    // The timer is made inside the runtime, which drives it.
+                    Some(clock) if !left.is_zero() => clock
+                        .block_on(async { tokio::time::timeout(left, queue.recv()).await })
+                        .ok()
+                        .flatten(),
+                    _ => None,
+                }
+            }
+        };
+        match received {
+            // Past the bound, it starts the next batch.
+            Some(Write::Telemetry(telemetry))
+                if log_bytes + telemetry.log_bytes() > TELEMETRY_LOG_BYTES =>
+            {
+                return Gathered {
+                    batch,
+                    next: Some(Write::Telemetry(telemetry)),
+                };
+            }
+            Some(Write::Telemetry(telemetry)) => {
+                log_bytes += telemetry.log_bytes();
+                batch.push(telemetry);
+            }
+            next => return Gathered { batch, next },
+        }
+    }
+    Gathered { batch, next: None }
+}
+
+impl Telemetry {
+    /// The bytes of log it stores.
+    fn log_bytes(&self) -> u64 {
+        match self {
+            Telemetry::Log { lines, .. } => lines.iter().map(|line| line.len() as u64 + 1).sum(),
+            Telemetry::Samples(_) | Telemetry::HostSample(_) => 0,
+        }
+    }
 }
 
 struct Writer<'store> {
@@ -79,6 +187,55 @@ struct Writer<'store> {
     events: &'store broadcast::Sender<Arc<EventEnvelope>>,
     /// `Store::held`.
     held: &'store Mutex<Vec<api::HostSample>>,
+    /// The runner names this writer granted (`runner_named`).
+    names: Names,
+}
+
+/// The runner names a writer granted. Kept in memory: a restart reads the history again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Names {
+    /// None yet: the first grant reads the latest second the history knows was named.
+    Unread,
+    /// `last` was the last second granted; the history keeps `leased`, synced to disk, so a second before it needs
+    /// no write.
+    Granted { last: u64, leased: u64 },
+}
+
+/// Where a batch of telemetry's events come from, in the order its writes were sent.
+enum Slot {
+    /// A host sample's, which is not stored: sent whatever becomes of the batch.
+    Live(api::HostSample),
+    /// The events of this write of the batch's `Stored`, sent if it was kept.
+    Stored(usize),
+}
+
+/// A telemetry write the history stores.
+enum Stored {
+    Log {
+        job: u64,
+        lines: Vec<String>,
+        position: Option<LogPosition>,
+        max_bytes: u64,
+    },
+    Samples(Vec<SampleRecord>),
+}
+
+impl Stored {
+    /// What it does, for the log.
+    fn what(&self) -> &'static str {
+        match self {
+            Stored::Log { .. } => "store log lines",
+            Stored::Samples(_) => "record samples",
+        }
+    }
+}
+
+/// Why a batch's transaction kept nothing.
+enum Undone {
+    /// It never began, or its commit failed, which may have kept it: nothing is tried again.
+    Abandoned(rusqlite::Error),
+    /// SQLite rolled it back, or a savepoint could not be used, so it is rolled back: nothing of it was kept.
+    RolledBack(rusqlite::Error),
 }
 
 /// The events a change announces once it commits.
@@ -174,22 +331,7 @@ impl Writer<'_> {
                     self.close(job, "lost", Some(at), announced)
                 });
             }
-            Write::Log {
-                job,
-                lines,
-                position,
-                max_bytes,
-                _backlog,
-            } => {
-                self.change("store log lines", |announced| {
-                    self.log(job, lines, position, max_bytes, announced)
-                });
-            }
-            Write::Samples(samples) => {
-                self.change("record samples", |announced| {
-                    self.samples(&samples, announced)
-                });
-            }
+            Write::Telemetry(telemetry) => self.telemetry(vec![telemetry]),
             Write::CgroupsGone { runners, at } => {
                 self.change("record runners' cgroups gone", |_| {
                     for runner in &runners {
@@ -223,17 +365,6 @@ impl Writer<'_> {
                     )?;
                     Ok(())
                 });
-            }
-            Write::HostSample(sample) => {
-                // Live: no ID to wait for.
-                let _ = self.events.send(Arc::new(EventEnvelope {
-                    id: None,
-                    at: secs(time::now_ms()),
-                    event: Event::HostSample { sample },
-                }));
-                if lock(self.held).len() >= HOST_SAMPLE_BATCH {
-                    self.store_host_samples();
-                }
             }
             Write::MirrorBytes { bytes, until, done } => {
                 let _ = done.send(self.mirror_bytes(&bytes, until));
@@ -275,8 +406,8 @@ impl Writer<'_> {
                 done,
             } => self.sizing_resolved(id, resolution, done),
             Write::Notify { change, done } => self.notify(change, done),
-            Write::RunnerNamed { secs, done } => {
-                let _ = done.send(self.runner_named(secs));
+            Write::RunnerNamed { prefix, secs, done } => {
+                let _ = done.send(self.runner_named(&prefix, secs));
             }
             Write::ClaimRerun { attempt, at, done } => {
                 let _ = done.send(self.claim_rerun(&attempt, at));
@@ -462,16 +593,17 @@ impl Writer<'_> {
         );
     }
 
+    /// One measurement of every volume, in one transaction: all of it or none.
     fn cache_sizes(&self, at: u64, sizes: BTreeMap<String, u64>) {
-        for (name, bytes) in sizes {
-            logged(
-                "record a cache size",
+        self.change("record cache sizes", |_| {
+            for (name, bytes) in sizes {
                 self.db.execute(
                     "INSERT OR REPLACE INTO cache_sizes (at, name, bytes) VALUES (?1, ?2, ?3)",
                     params![at, name, bytes],
-                ),
-            );
-        }
+                )?;
+            }
+            Ok(())
+        });
     }
 
     fn admission(&self, runner: &str, admission: api::Admission) {
@@ -537,28 +669,29 @@ impl Writer<'_> {
         );
     }
 
+    /// In one transaction, as every multi-row write: one commit, not one per job.
     fn host_waited(&self, jobs: &[u64], ms: u64) {
-        for job in jobs {
-            logged(
-                "record a wait for the host's memory",
+        self.change("record a wait for the host's memory", |_| {
+            for job in jobs {
                 self.db.execute(
                     "UPDATE jobs SET host_waited = host_waited + ?2 WHERE id = ?1",
                     params![job, ms],
-                ),
-            );
-        }
+                )?;
+            }
+            Ok(())
+        });
     }
 
     fn slot_waited(&self, jobs: &[u64], ms: u64) {
-        for job in jobs {
-            logged(
-                "record a wait for a slot",
+        self.change("record a wait for a slot", |_| {
+            for job in jobs {
                 self.db.execute(
                     "UPDATE jobs SET slot_waited = slot_waited + ?2 WHERE id = ?1",
                     params![job, ms],
-                ),
-            );
-        }
+                )?;
+            }
+            Ok(())
+        });
     }
 
     /// Adds `waits` to their jobs' `wait_causes`: one read and one write of each job's row.
@@ -595,15 +728,15 @@ impl Writer<'_> {
     }
 
     fn reran(&self, jobs: &[u64], at: u64) {
-        for job in jobs {
-            logged(
-                "record an automatic re-run",
+        self.change("record an automatic re-run", |_| {
+            for job in jobs {
                 self.db.execute(
                     "UPDATE jobs SET rerun_at = ?2 WHERE id = ?1 AND rerun_at IS NULL",
                     params![job, at],
-                ),
-            );
-        }
+                )?;
+            }
+            Ok(())
+        });
     }
 
     fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {
@@ -629,6 +762,156 @@ impl Writer<'_> {
         );
     }
 
+    /// Applies a batch of telemetry, then sends the events it announced in the order its writes were sent. The host
+    /// samples' live events are not stored and go out whatever becomes of the rest; a batch of host samples alone
+    /// opens no transaction. The held host samples are stored after, a minute's worth at a time.
+    fn telemetry(&self, batch: Vec<Telemetry>) {
+        let mut slots = Vec::new();
+        let mut stored = Vec::new();
+        let mut backlogs = Vec::new();
+        let mut store_host = false;
+        for telemetry in batch {
+            match telemetry {
+                Telemetry::HostSample(sample) => {
+                    slots.push(Slot::Live(sample));
+                    store_host |= lock(self.held).len() >= HOST_SAMPLE_BATCH;
+                }
+                Telemetry::Log {
+                    job,
+                    lines,
+                    position,
+                    max_bytes,
+                    backlog,
+                } => {
+                    // Its share of the backlog is given back once its transaction is done.
+                    backlogs.push(backlog);
+                    slots.push(Slot::Stored(stored.len()));
+                    stored.push(Stored::Log {
+                        job,
+                        lines,
+                        position,
+                        max_bytes,
+                    });
+                }
+                Telemetry::Samples(samples) => {
+                    slots.push(Slot::Stored(stored.len()));
+                    stored.push(Stored::Samples(samples));
+                }
+            }
+        }
+        let mut kept = if stored.is_empty() {
+            Vec::new()
+        } else {
+            self.store_batch(&stored)
+        };
+        drop(backlogs);
+        for slot in slots {
+            let envelopes = match slot {
+                // Live: no ID to wait for.
+                Slot::Live(sample) => vec![EventEnvelope {
+                    id: None,
+                    at: secs(time::now_ms()),
+                    event: Event::HostSample { sample },
+                }],
+                Slot::Stored(index) => kept
+                    .get_mut(index)
+                    .and_then(Option::take)
+                    .unwrap_or_default(),
+            };
+            for envelope in envelopes {
+                // No subscriber is not an error.
+                let _ = self.events.send(Arc::new(envelope));
+            }
+        }
+        if store_host {
+            self.store_host_samples();
+        }
+    }
+
+    /// Stores a batch's writes in one transaction, each in a savepoint of its own: one that fails is rolled back and
+    /// logged, and the others are kept. Returns each write's events, `None` for one not kept. When SQLite rolled the
+    /// whole transaction back, as on a full disk, nothing of it was kept, and each write is tried once more in a
+    /// transaction of its own. When it never began, or its commit failed, nothing is tried again: a commit that failed
+    /// may have kept it.
+    fn store_batch(&self, stored: &[Stored]) -> Vec<Option<Vec<EventEnvelope>>> {
+        let attempt = (|| {
+            // Immediate, so a busy database is waited for: a deferred transaction that read first fails at once.
+            let transaction = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)
+                .map_err(Undone::Abandoned)?;
+            let mut kept = Vec::with_capacity(stored.len());
+            for write in stored {
+                kept.push(self.savepoint(write)?);
+            }
+            transaction.commit().map_err(Undone::Abandoned)?;
+            Ok(kept)
+        })();
+        match attempt {
+            Ok(kept) => kept,
+            Err(Undone::Abandoned(error)) => {
+                warn!("job history: cannot record telemetry: {error}");
+                stored.iter().map(|_| None).collect()
+            }
+            Err(Undone::RolledBack(error)) => {
+                warn!(
+                    "job history: cannot record telemetry together, storing each write alone: {error}"
+                );
+                stored
+                    .iter()
+                    .map(|write| {
+                        self.transact(write.what(), |announced| self.store_write(write, announced))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Stores one write of a batch in a savepoint of the open transaction, with the durable events it announces.
+    /// `Ok(None)` when it failed, logged and rolled back alone; [`Undone::RolledBack`] when the transaction is gone
+    /// or a savepoint cannot be used, which leaves the whole transaction to roll back.
+    fn savepoint(&self, write: &Stored) -> Result<Option<Vec<EventEnvelope>>, Undone> {
+        self.db
+            .execute_batch("SAVEPOINT telemetry")
+            .map_err(Undone::RolledBack)?;
+        let made = (|| {
+            let mut announced = Vec::new();
+            self.store_write(write, &mut announced)?;
+            announced
+                .into_iter()
+                .map(|event| self.store_event(event))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })();
+        match made {
+            Ok(envelopes) => {
+                self.db
+                    .execute_batch("RELEASE telemetry")
+                    .map_err(Undone::RolledBack)?;
+                Ok(Some(envelopes))
+            }
+            // SQLite rolled the transaction back itself, savepoints and all, as it does on a full disk.
+            Err(error) if self.db.is_autocommit() => Err(Undone::RolledBack(error)),
+            Err(error) => {
+                logged::<()>(write.what(), Err(error));
+                self.db
+                    .execute_batch("ROLLBACK TO telemetry; RELEASE telemetry")
+                    .map_err(Undone::RolledBack)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Stores one telemetry write.
+    fn store_write(&self, write: &Stored, announced: &mut Announced) -> rusqlite::Result<()> {
+        match write {
+            Stored::Samples(samples) => self.samples(samples, announced),
+            Stored::Log {
+                job,
+                lines,
+                position,
+                max_bytes,
+            } => self.log(*job, lines, *position, *max_bytes, announced),
+        }
+    }
+
     /// Makes a change and stores the durable events it announces in one transaction, then sends them, with their
     /// IDs, to every subscriber. On any error nothing is kept or sent. Returns whether it committed.
     fn change(
@@ -636,6 +919,23 @@ impl Writer<'_> {
         what: &str,
         change: impl FnOnce(&mut Announced) -> rusqlite::Result<()>,
     ) -> bool {
+        let Some(envelopes) = self.transact(what, change) else {
+            return false;
+        };
+        for envelope in envelopes {
+            // No subscriber is not an error.
+            let _ = self.events.send(Arc::new(envelope));
+        }
+        true
+    }
+
+    /// Makes a change and stores the durable events it announces in one transaction; returns them, with their IDs,
+    /// once it committed. On any error nothing is kept, and it is logged.
+    fn transact(
+        &self,
+        what: &str,
+        change: impl FnOnce(&mut Announced) -> rusqlite::Result<()>,
+    ) -> Option<Vec<EventEnvelope>> {
         let result = (|| {
             // Immediate, so a busy database is waited for: a deferred transaction that read first fails at once.
             let transaction = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -648,14 +948,7 @@ impl Writer<'_> {
             transaction.commit()?;
             Ok(envelopes)
         })();
-        let Some(envelopes) = logged(what, result) else {
-            return false;
-        };
-        for envelope in envelopes {
-            // No subscriber is not an error.
-            let _ = self.events.send(Arc::new(envelope));
-        }
-        true
+        logged(what, result)
     }
 
     /// Stores an event if it is durable, giving it its ID. A repository's or profile's event becomes
@@ -1111,7 +1404,7 @@ impl Writer<'_> {
     fn log(
         &self,
         job: u64,
-        lines: Vec<String>,
+        lines: &[String],
         position: Option<LogPosition>,
         max_bytes: u64,
         announced: &mut Announced,
@@ -1139,11 +1432,11 @@ impl Writer<'_> {
                 Some(outlining) => outlining,
                 None => outlining.insert(Outlining::load(&self.db, job, count)?),
             };
-            outlining.line(count, &line)?;
+            outlining.line(count, line)?;
             announced.push(Event::LogLine {
                 job,
                 line: count,
-                text: line,
+                text: line.clone(),
             });
             count += 1;
             bytes += size;
@@ -1188,27 +1481,29 @@ impl Writer<'_> {
                     sample.dirty,
                 ],
             )?;
+            // Each counter only rises, and a row is written only when it does: an unknown one (NULL) becomes the first
+            // count read, 0 included, which says the kernel counts it; the same count again writes nothing.
             if let Some(ooms) = sample.events.oom {
                 self.db.execute(
-                    "UPDATE runners SET ooms = max(coalesce(ooms, 0), ?2) WHERE name = ?1",
+                    "UPDATE runners SET ooms = ?2 WHERE name = ?1 AND coalesce(ooms, -1) < ?2",
                     params![sample.runner, ooms],
                 )?;
             }
             if let Some(ooms) = sample.events.local_oom {
                 self.db.execute(
-                    "UPDATE runners SET local_ooms = max(coalesce(local_ooms, 0), ?2) WHERE name = ?1",
+                    "UPDATE runners SET local_ooms = ?2 WHERE name = ?1 AND coalesce(local_ooms, -1) < ?2",
                     params![sample.runner, ooms],
                 )?;
             }
             if let Some(throttled) = sample.events.sock_throttled {
                 self.db.execute(
-                    "UPDATE runners SET sock_throttled = max(coalesce(sock_throttled, 0), ?2) WHERE name = ?1",
+                    "UPDATE runners SET sock_throttled = ?2 WHERE name = ?1 AND coalesce(sock_throttled, -1) < ?2",
                     params![sample.runner, throttled],
                 )?;
             }
             if let Some(kills) = sample.events.oom_kill.filter(|kills| *kills > 0) {
                 self.db.execute(
-                    "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), ?2) WHERE name = ?1",
+                    "UPDATE runners SET oom_kills = ?2 WHERE name = ?1 AND coalesce(oom_kills, 0) < ?2",
                     params![sample.runner, kills],
                 )?;
             }
@@ -1369,18 +1664,52 @@ impl Writer<'_> {
         })
     }
 
-    /// Synced to disk: a name a power failure took back would be given again after it.
-    fn runner_named(&self, secs: u64) -> bool {
-        self.durably(|| {
-            self.change("record a runner's name", |_| {
-                self.db.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('runner_named', ?1)",
-                    [secs],
+    /// The second to name a runner whose name starts with `prefix` for: `secs`, or later, past every second the
+    /// history knows was named (`read::last_runner_second`, which it reads on its first grant) and every one it granted
+    /// since, so a name is never given twice whatever the engine read at its start. A second before the end of the
+    /// lease needs no write; one at or past it takes a new lease, [`NAME_LEASE_SECS`] past it, as `runner_named` in
+    /// `meta`, synced to disk, which never goes back: a name a power failure took back would be given again after it.
+    /// That is the latest second named as every runnerd reads it, so a restart names past the lease. `None` when the
+    /// history cannot keep it.
+    fn runner_named(&mut self, prefix: &str, secs: u64) -> Option<u64> {
+        let (floor, leased) = match self.names {
+            Names::Granted { last, leased } => (last.saturating_add(1), leased),
+            Names::Unread => {
+                let latest = logged(
+                    "read the latest runner name",
+                    read::last_runner_second(&self.db, prefix),
                 )?;
-                Ok(())
+                (latest.map_or(0, |latest| latest.saturating_add(1)), 0)
+            }
+        };
+        let granted = secs.max(floor);
+        if granted < leased {
+            self.names = Names::Granted {
+                last: granted,
+                leased,
+            };
+            return Some(granted);
+        }
+        let until = granted.saturating_add(NAME_LEASE_SECS);
+        let kept = self
+            .durably(|| {
+                self.change("lease runner names", |_| {
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('runner_named', \
+                         max(?1, coalesce((SELECT value FROM meta WHERE key = 'runner_named'), 0)))",
+                        [until],
+                    )?;
+                    Ok(())
+                })
             })
+            .unwrap_or(false);
+        kept.then(|| {
+            self.names = Names::Granted {
+                last: granted,
+                leased: until,
+            };
+            granted
         })
-        .unwrap_or(false)
     }
 
     /// Claims an automatic re-run's attempt, synced to disk, and drops claims older than a day.
@@ -1454,12 +1783,96 @@ fn visibility_text(visibility: api::Visibility) -> &'static str {
 )]
 mod tests {
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use rusqlite::Connection;
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc, oneshot};
 
-    use super::{Downtimes, Writer};
+    use super::{Downtimes, TELEMETRY_MAX, TELEMETRY_WINDOW, Telemetry, Write, Writer, gather};
     use crate::testdir::TestDir;
+
+    fn telemetry() -> Write {
+        Write::Telemetry(Telemetry::Samples(Vec::new()))
+    }
+
+    fn clock() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    /// The bug it catches: a batch of telemetry gathering past a write sent between its parts, as a flush or a
+    /// durable change, which would then be applied out of the order it was sent in.
+    #[test]
+    fn a_batch_of_telemetry_ends_at_the_first_other_write_and_that_write_comes_next() {
+        let (sender, mut queue) = mpsc::unbounded_channel();
+        let (done, _) = oneshot::channel();
+        for write in [telemetry(), telemetry(), Write::Flush(done), telemetry()] {
+            sender.send(write).unwrap();
+        }
+        let Some(Write::Telemetry(first)) = queue.try_recv().ok() else {
+            unreachable!("the first write is telemetry");
+        };
+        let gathered = gather(&mut queue, first, Some(&clock()));
+        assert_eq!(gathered.batch.len(), 2);
+        assert!(
+            matches!(gathered.next, Some(Write::Flush(_))),
+            "the flush is applied next"
+        );
+        assert!(
+            matches!(queue.try_recv(), Ok(Write::Telemetry(_))),
+            "the telemetry after the flush waits its turn"
+        );
+    }
+
+    /// The bug it catches: a flush, a runner's name or a durable change waiting out the telemetry window behind log
+    /// lines sent just before it.
+    #[test]
+    fn another_write_ends_the_window_at_once() {
+        let (sender, mut queue) = mpsc::unbounded_channel();
+        let sent = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let (done, _) = oneshot::channel();
+            sender.send(telemetry()).unwrap();
+            sender.send(Write::Flush(done)).unwrap();
+        });
+        let started = Instant::now();
+        let gathered = gather(&mut queue, Telemetry::Samples(Vec::new()), Some(&clock()));
+        sent.join().unwrap();
+        assert_eq!(
+            gathered.batch.len(),
+            2,
+            "the telemetry sent in the window joins"
+        );
+        assert!(matches!(gathered.next, Some(Write::Flush(_))));
+        assert!(
+            started.elapsed() < TELEMETRY_WINDOW,
+            "the flush did not wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The bug it catches: a batch that never ends while telemetry keeps coming, or one past its bounds.
+    #[test]
+    fn a_batch_ends_at_its_size_or_when_nothing_else_comes() {
+        let (sender, mut queue) = mpsc::unbounded_channel();
+        for _ in 0..TELEMETRY_MAX + 5 {
+            sender.send(telemetry()).unwrap();
+        }
+        let gathered = gather(&mut queue, Telemetry::Samples(Vec::new()), None);
+        assert_eq!(gathered.batch.len(), TELEMETRY_MAX);
+        assert!(gathered.next.is_none(), "the rest stays queued");
+
+        let (_sender, mut queue) = mpsc::unbounded_channel::<Write>();
+        let started = Instant::now();
+        let gathered = gather(&mut queue, Telemetry::Samples(Vec::new()), Some(&clock()));
+        assert_eq!(gathered.batch.len(), 1);
+        assert!(
+            started.elapsed() >= TELEMETRY_WINDOW,
+            "a lone write waits the window for company"
+        );
+    }
 
     fn synchronous(db: &Connection) -> u8 {
         db.pragma_query_value(None, "synchronous", |row| row.get(0))
@@ -1479,6 +1892,7 @@ mod tests {
             session: 0,
             events: &events,
             held: &held,
+            names: super::Names::Unread,
         };
         // 2 is FULL, 1 NORMAL.
         assert_eq!(writer.durably(|| synchronous(&writer.db)), Some(2));

@@ -2470,6 +2470,33 @@ async fn no_runner_starts_under_a_name_the_history_could_not_keep() {
     );
 }
 
+/// The bug it catches: an engine whose read of the history at its start failed, behind a clock that stepped back,
+/// naming a runner with a second a lease before it covered, which a runner GitHub still holds may carry.
+#[tokio::test]
+async fn a_runner_is_named_past_the_historys_lease_though_the_engine_never_read_it() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    let leased = crate::time::now_ms() / 1000 + 3600;
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('runner_named', ?1)",
+            [leased],
+        )
+        .unwrap();
+    // As if the read at the start failed.
+    engine.named = 0;
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    let seconds: Vec<u64> = registered(&github.calls())
+        .iter()
+        .map(|call| call.rsplit_once('-').unwrap().1.parse().unwrap())
+        .collect();
+    assert_eq!(seconds, [leased + 1]);
+}
+
 /// One slot. Runner A, named an hour ahead of the clock, runs job 1 and gets its history row. Runner B, named a second
 /// after A, takes job 2 while Docker answers none of its inspects, so only job 2's record names it; it ends, and a
 /// restart finds no container. The bug it catches: the restarted engine naming its next runner after A, which gave

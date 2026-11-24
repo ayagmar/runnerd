@@ -270,8 +270,8 @@ CREATE TABLE cache_sizes (
 -- mirror_log_until: the Docker timestamp (ns) of the last mirror log line counted; mirror_log_seen: how many lines
 -- logged at exactly that time were counted; opened_at: when a daemon last opened the history or saw the host wake, a
 -- sign of life that ends a downtime (ADR 0081, 0159); slept_from: when the host's last sleep began (ADR 0159), so a
--- daemon that starts knows the runners it adopts that lived through it; runner_named: the latest second a runner's name ends in, kept before GitHub or Docker
--- knows the name, so a restart never names a runner the same.
+-- daemon that starts knows the runners it adopts that lived through it; runner_named: a second at or past the latest one a runner's name ends in, kept before GitHub
+-- or Docker knows the name, a lease a few minutes ahead, so a restart never names a runner the same.
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
