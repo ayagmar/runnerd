@@ -205,7 +205,7 @@ enum Names {
 /// Where a batch of telemetry's events come from, in the order its writes were sent.
 enum Slot {
     /// A host sample's, which is not stored: sent whatever becomes of the batch.
-    Live(EventEnvelope),
+    Live(api::HostSample),
     /// The events of this write of the batch's `Stored`, sent if it was kept.
     Stored(usize),
 }
@@ -791,12 +791,7 @@ impl Writer<'_> {
         for telemetry in batch {
             match telemetry {
                 Telemetry::HostSample(sample) => {
-                    // Live: no ID to wait for.
-                    slots.push(Slot::Live(EventEnvelope {
-                        id: None,
-                        at: secs(time::now_ms()),
-                        event: Event::HostSample { sample },
-                    }));
+                    slots.push(Slot::Live(sample));
                     store_host |= lock(self.held).len() >= HOST_SAMPLE_BATCH;
                 }
                 Telemetry::Log {
@@ -834,7 +829,12 @@ impl Writer<'_> {
         drop(backlogs);
         for slot in slots {
             let envelopes = match slot {
-                Slot::Live(envelope) => vec![envelope],
+                // Live: no ID to wait for.
+                Slot::Live(sample) => vec![EventEnvelope {
+                    id: None,
+                    at: secs(time::now_ms()),
+                    event: Event::HostSample { sample },
+                }],
                 Slot::Stored(index) => kept
                     .get_mut(index)
                     .and_then(Option::take)
