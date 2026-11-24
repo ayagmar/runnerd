@@ -80,13 +80,7 @@ const ACCEPTED: &[Accepted] = &[
         item: "waiting/overflow",
         adr: "0162",
     },
-    // An older client shows the queue's time on battery as `other` waits, and a downgraded daemon reads a stored
-    // `battery` wait as `other`.
-    Accepted {
-        reader: Reader::Previous,
-        item: "insights/full",
-        adr: "0161",
-    },
+    // A downgraded daemon reads a stored `battery` wait as `other`.
     Accepted {
         reader: Reader::Previous,
         item: "wait-cause/battery",
@@ -99,6 +93,84 @@ const ACCEPTED: &[Accepted] = &[
         adr: "0162",
     },
 ];
+
+/// A value inside an item that a reader reads as its fallback, a loss an ADR accepts. The rest of the item must still
+/// read unchanged, so the item stays checked.
+#[derive(Debug)]
+struct Substitution {
+    reader: Reader,
+    /// The document and item, `document/item`.
+    item: &'static str,
+    /// Where in the item, with array indices left out: `queue[].causes[].cause`.
+    path: &'static str,
+    sent: &'static str,
+    read: &'static str,
+    adr: &'static str,
+}
+
+const SUBSTITUTED: &[Substitution] = &[
+    // An older client shows the queue's time on battery among its `other` waits.
+    Substitution {
+        reader: Reader::Previous,
+        item: "insights/full",
+        path: "queue[].causes[].cause",
+        sent: "battery",
+        read: "other",
+        adr: "0161",
+    },
+    // An older client shows the queue's time left to other machines among its `other` waits.
+    Substitution {
+        reader: Reader::Previous,
+        item: "insights/full",
+        path: "queue[].causes[].cause",
+        sent: "overflow",
+        read: "other",
+        adr: "0162",
+    },
+];
+
+/// Whether `path` in `item`, read as `read` when sent `sent`, is a substitution [`SUBSTITUTED`] accepts for `reader`;
+/// notes the ones it used in `used`, by index.
+fn substituted(
+    reader: Reader,
+    item: &str,
+    path: &str,
+    sent: &Value,
+    read: &Value,
+    used: &mut BTreeSet<usize>,
+) -> bool {
+    let mut pattern = String::new();
+    let mut in_index = false;
+    for character in path.chars() {
+        match character {
+            '[' => {
+                in_index = true;
+                pattern.push('[');
+            }
+            ']' => {
+                in_index = false;
+                pattern.push(']');
+            }
+            _ if in_index => {}
+            _ => pattern.push(character),
+        }
+    }
+    let found = SUBSTITUTED.iter().position(|substitution| {
+        substitution.reader == reader
+            && substitution.item == item
+            && substitution.path == pattern
+            && sent.as_str() == Some(substitution.sent)
+            && read.as_str() == Some(substitution.read)
+    });
+    if let Some(index) = found {
+        used.insert(index);
+    }
+    found.is_some()
+}
+
+/// What `difference` lets pass: a value at a path, read as `right` when the reader was sent `left`, or the other way
+/// round.
+type Allowed<'check> = &'check mut dyn FnMut(&str, &Value, &Value) -> bool;
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -153,7 +225,13 @@ enum Difference {
     },
 }
 
-fn difference(left: &Value, right: &Value, keys: Keys, path: &str) -> Option<Difference> {
+fn difference(
+    left: &Value,
+    right: &Value,
+    keys: Keys,
+    path: &str,
+    allowed: Allowed<'_>,
+) -> Option<Difference> {
     match (left, right) {
         (Value::Object(left), Value::Object(right)) => left.iter().find_map(|(key, value)| {
             let path = if path.is_empty() {
@@ -162,7 +240,7 @@ fn difference(left: &Value, right: &Value, keys: Keys, path: &str) -> Option<Dif
                 format!("{path}.{key}")
             };
             match right.get(key) {
-                Some(right) => difference(value, right, keys, &path),
+                Some(right) => difference(value, right, keys, &path, allowed),
                 None if keys == Keys::Every => Some(Difference::Missing(path)),
                 None => None,
             }
@@ -172,9 +250,9 @@ fn difference(left: &Value, right: &Value, keys: Keys, path: &str) -> Option<Dif
             .zip(right)
             .enumerate()
             .find_map(|(index, (left, right))| {
-                difference(left, right, keys, &format!("{path}[{index}]"))
+                difference(left, right, keys, &format!("{path}[{index}]"), allowed)
             }),
-        _ if left == right => None,
+        _ if left == right || allowed(path, left, right) => None,
         _ => Some(Difference::Value {
             path: path.to_owned(),
             left: left.clone(),
@@ -183,10 +261,18 @@ fn difference(left: &Value, right: &Value, keys: Keys, path: &str) -> Option<Dif
     }
 }
 
-/// Whether `reader` reads `sent` and sees what it says, with the keys `expect` asks for.
-fn check(reader: Reads, sent: &Value, expect: Expect) -> Result<(), String> {
+/// Whether `reader` reads `sent` and sees what it says, with the keys `expect` asks for, but for the values
+/// `substituted(path, sent, read)` accepts.
+fn check(
+    reader: Reads,
+    sent: &Value,
+    expect: Expect,
+    substituted: &mut dyn FnMut(&str, &Value, &Value) -> bool,
+) -> Result<(), String> {
     let read = reader(sent)?;
-    if let Some(difference) = difference(&read, sent, expect.read, "") {
+    if let Some(difference) = difference(&read, sent, expect.read, "", &mut |path, read, sent| {
+        substituted(path, sent, read)
+    }) {
         return Err(match difference {
             Difference::Missing(path) => format!("reads `{path}`, which it was not sent"),
             Difference::Value { path, left, right } => {
@@ -194,7 +280,7 @@ fn check(reader: Reads, sent: &Value, expect: Expect) -> Result<(), String> {
             }
         });
     }
-    match difference(sent, &read, expect.sent, "") {
+    match difference(sent, &read, expect.sent, "", substituted) {
         None => Ok(()),
         Some(Difference::Missing(path)) => Err(format!("drops `{path}`, which it was sent")),
         Some(Difference::Value { path, left, right }) => {
@@ -414,6 +500,7 @@ fn the_previous_release_reads_what_this_one_writes() {
     // skip what they cannot read. One it has must still read, renamed or not.
     let known_events = fixture("events");
     let mut failures = BTreeMap::new();
+    let mut used = BTreeSet::new();
     for document in documents() {
         let Some(previous) = document.previous else {
             continue;
@@ -431,9 +518,24 @@ fn the_previous_release_reads_what_this_one_writes() {
                 read,
                 sent: Keys::Shared,
             };
-            if let Err(error) = check(previous, value, expect) {
-                failures.insert(format!("{}/{label}", document.name), error);
+            let item = format!("{}/{label}", document.name);
+            let mut accepts = |path: &str, sent: &Value, read: &Value| {
+                substituted(Reader::Previous, &item, path, sent, read, &mut used)
+            };
+            if let Err(error) = check(previous, value, expect, &mut accepts) {
+                failures.insert(item, error);
             }
+        }
+    }
+    for (index, substitution) in SUBSTITUTED.iter().enumerate() {
+        if substitution.reader == Reader::Previous && !used.contains(&index) {
+            failures.insert(
+                format!("{} {}", substitution.item, substitution.path),
+                format!(
+                    "reads {} unchanged or not at all, so the substitution ADR {} accepts is gone: remove its entry",
+                    substitution.sent, substitution.adr
+                ),
+            );
         }
     }
     assert_reads(Reader::Previous, &failures);
@@ -467,7 +569,7 @@ fn this_version_reads_what_the_previous_release_wrote() {
                 read: Keys::Shared,
                 sent,
             };
-            if let Err(error) = check(document.current, value, expect) {
+            if let Err(error) = check(document.current, value, expect, &mut |_, _, _| false) {
                 failures.insert(format!("{name}/{label}"), error);
             }
         }
@@ -482,7 +584,7 @@ fn this_version_reads_what_the_previous_release_wrote() {
                 read: Keys::Every,
                 sent: Keys::Every,
             };
-            if let Err(error) = check(document.current, value, expect) {
+            if let Err(error) = check(document.current, value, expect, &mut |_, _, _| false) {
                 failures.insert(format!("{}/{label}", document.name), error);
             }
         }
