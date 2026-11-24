@@ -1,11 +1,11 @@
 //! Predictions and replays over synthetic histories: two profiles of a 33G slice, jobs of fictional repositories.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Arrivals, Band, Barriers, Basis, Copies, CreditRoom, HIGH_WATER, HostReserve, JobPeak, Key,
-    Policy, Predictor, Replay, Replaying, UNPREDICTABLE_FOR, simulate,
+    Arrivals, Band, Barriers, Basis, Copies, CreditRoom, Guard, HIGH_WATER, HostReserve, JobPeak,
+    Key, Policy, Predictor, Replay, Replaying, UNPREDICTABLE_FOR, simulate,
 };
 use crate::config::Config;
 use crate::github::QueuedJob;
@@ -889,7 +889,66 @@ fn a_replay_starts_a_starved_job_where_younger_jobs_would_take_all_the_room_befo
     assert!(with.withheld > 0, "and held free memory back");
 }
 
-/// A replay that moves only on arrivals and ends never sees a quiet queue reach the limit.
+#[test]
+fn a_job_that_never_starts_is_charged_to_no_guard_and_the_guards_add_up_to_the_unrounded_waits() {
+    // In an 8G slice the jvm job's 9G cap never fits, so it never starts. The second node job arrives 1.5 s past a
+    // minute and waits for the first, which ends at minute 8: 418.5 s. The guards and the waits both count that, to the
+    // millisecond, and none of the jvm job's; the pool's wait is rounded down to the second.
+    let mut late = run("halyard/storefront", "site", "node", NOW + MINUTE, 8, G);
+    late.queued_at += 1500;
+    late.runner_started_at += 1500;
+    let jobs = [
+        run("halyard/ledger", "check", "jvm", NOW, 10, G),
+        run("halyard/storefront", "site", "node", NOW, 8, G),
+        late,
+    ];
+    let replay = replayed(&jobs, 8 * G, Barriers::Off);
+    assert_eq!(replay.never_started, 1);
+    assert_eq!(replay.waited, 418_500, "unrounded");
+    assert_eq!(
+        replay.guards.values().sum::<u64>(),
+        418_500,
+        "{:?}",
+        replay.guards
+    );
+    let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
+    assert_eq!(waits, 418, "rounded down to the second");
+}
+
+#[test]
+fn a_job_that_fits_behind_a_barrier_waits_for_the_barrier() {
+    // The node jobs that fit the room the jvm job's barrier keeps free wait for it alone; the jvm job waits for
+    // MemoryMax. Every second of every wait goes to one guard.
+    let jobs = a_stream_of_node_jobs_and_a_large_jvm_one();
+    let replay = replayed(&jobs, 16 * G, Barriers::On);
+    let held = |guard| replay.guards.get(&guard).copied().unwrap_or(0);
+    let waits: u64 = replay.pools.values().flat_map(|pool| &pool.waits).sum();
+    let ledger: u64 = replay.pools[&pool("halyard/ledger", "jvm")]
+        .waits
+        .iter()
+        .sum();
+    assert!(held(Guard::Barrier) > 0, "{:?}", replay.guards);
+    assert!(
+        held(Guard::MemoryMax) >= 1000 * ledger,
+        "{:?}",
+        replay.guards
+    );
+    assert_eq!(1000 * waits, replay.waited, "whole minutes");
+    assert_eq!(
+        replay.guards.values().sum::<u64>(),
+        replay.waited,
+        "{:?}",
+        replay.guards
+    );
+    let without = replayed(&jobs, 16 * G, Barriers::Off);
+    assert_eq!(
+        without.guards.get(&Guard::Barrier),
+        None,
+        "{:?}",
+        without.guards
+    );
+}
+
 #[test]
 fn a_replay_puts_up_a_barrier_at_the_limit_with_no_job_arriving_then() {
     let jobs = [

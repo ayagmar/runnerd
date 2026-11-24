@@ -16,7 +16,7 @@ use crate::sizing::{Measure, Ran};
 use crate::time;
 
 use super::{
-    Arrivals, Backfilled, Band, Barriers, Brake, Copies, CreditRoom, GrowthCount, GuardHold,
+    Arrivals, Backfilled, Band, Barriers, Brake, Copies, CreditRoom, GrowthCount, Guard, GuardHold,
     HIGH_WATER, Hazard, HostReserve, Key, OOMD_UNDER, Policy, PoolReplay, Predictor, Reading,
     Recorded, Replay, Replaying, RunId, RunKey, RunReplay, RunTrace, STEP, THROTTLES_UNDER, Trace,
     growth, host, pooled, spread,
@@ -112,6 +112,9 @@ impl Running<'_> {
 /// overhead. It looks every `trace::STEP` and plans every `[host] poll_interval` and at each arrival and end. With
 /// `Replaying::growth`, both budgets read the growth count instead (`pooled::Snapshot::growth`), each start judged by
 /// the count with it added, and its brake, if on, looks at every plan.
+///
+/// Every plan charges each job it leaves waiting, until the next, to the one `Guard` that held it; a job's time goes into
+/// `Replay::guards` when it starts, so the guards add up to the waits of the jobs that started.
 pub fn simulate<'known>(
     config: &Config,
     memory_max: Option<u64>,
@@ -207,6 +210,10 @@ pub fn simulate<'known>(
         cohorts: Vec::new(),
         growth: growth.filter(|_| trace.is_some() && policy == Policy::Measured),
         brake: growth::Growth::default(),
+        held: BTreeMap::new(),
+        guards: BTreeMap::new(),
+        waited: 0,
+        relaxed: RefCell::new(None),
     };
     replayer.play(&queue)
 }
@@ -385,6 +392,28 @@ enum Refused {
     HighWater(Short),
 }
 
+/// A job a pass left waiting: what held it then, and how long each guard has held it so far. Every pass holds again or
+/// starts each job still waiting, so the guard is always the last pass's.
+struct HeldJob {
+    /// The guard the last pass held it for.
+    guard: Guard,
+    /// How long each guard held it, in ms: it goes into `Replayer::guards` when the job starts.
+    waited: BTreeMap<Guard, u64>,
+}
+
+/// What a runner lacks to start, by the checks `Replayer::admits` makes in their order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lack {
+    /// Room in the slice's memory budget.
+    Budget,
+    /// Room under the high-water mark.
+    HighWater,
+    /// Room in what the host's memory leaves the slice.
+    Host,
+    /// Room in the CPU budget.
+    Cpu,
+}
+
 /// A replay's state between two moments.
 struct Replayer<'run> {
     config: &'run Config,
@@ -456,6 +485,25 @@ struct Replayer<'run> {
     growth: Option<GrowthCount>,
     /// Its brake, by the jobs replayed; never engaged without `Brake::On`.
     brake: growth::Growth<u64>,
+    /// Each job a pass left waiting and not started since, by the job.
+    held: BTreeMap<u64, HeldJob>,
+    /// How long the jobs that started waited by each guard, added up, in ms.
+    guards: BTreeMap<Guard, u64>,
+    /// How long the jobs that started waited, added up, in ms.
+    waited: u64,
+    /// The counts this pass reads with one rule relaxed, to tell which guard held a job: read once a start, as `needs`.
+    relaxed: RefCell<Option<Relaxed>>,
+}
+
+/// The count of what runs with one rule relaxed at a time (`Guard`): `None` where that rule does not count now.
+#[derive(Clone, Copy)]
+struct Relaxed {
+    /// Young runners ranked with the others (`pooled::Young::Ranked`).
+    young: Option<pooled::Count>,
+    /// No ceiling on the growth count's credits.
+    ceiling: Option<pooled::Count>,
+    /// The host's plain margin, while the larger one stands.
+    plain_band: Option<pooled::Count>,
 }
 
 /// What a pool's next runner takes of the budgets before its job is known.
@@ -548,6 +596,9 @@ impl<'run> Replayer<'run> {
     fn account(&mut self, now: u64) {
         let span = now.saturating_sub(self.moment);
         self.look(span);
+        for job in self.held.values_mut() {
+            *job.waited.entry(job.guard).or_default() += span;
+        }
         let taken = self.taken();
         self.charged += u128::from(taken) * u128::from(span);
         if let Some(budget) = self.budget {
@@ -744,6 +795,17 @@ impl<'run> Replayer<'run> {
         hold: pooled::Hold,
         band: host::HostBand,
     ) -> pooled::Count {
+        self.count_of_growth(runners, hold, band, self.growth)
+    }
+
+    /// `count_of` by `growth` in place of the replay's own growth count.
+    fn count_of_growth(
+        &self,
+        runners: &[pooled::Runner<'_>],
+        hold: pooled::Hold,
+        band: host::HostBand,
+        growth: Option<GrowthCount>,
+    ) -> pooled::Count {
         let host = self.host_memory();
         let measured = self.trace.is_some() && self.policy == Policy::Measured;
         pooled::count(&pooled::Snapshot {
@@ -761,7 +823,7 @@ impl<'run> Replayer<'run> {
             }),
             most: if measured { self.most_credit } else { 0 },
             host_reserve: measured && self.host_reserve == HostReserve::Top2,
-            growth: self.growth.map(|growth| pooled::Growth {
+            growth: growth.map(|growth| pooled::Growth {
                 hold,
                 ..growth.growth
             }),
@@ -849,11 +911,6 @@ impl<'run> Replayer<'run> {
         self.brake.look(instant(self.moment), used, room, guard);
     }
 
-    /// What the host leaves beside `count`; `None` without a trace of it.
-    fn host_left_with(&self, count: pooled::Count) -> Option<i64> {
-        self.host_left_by(count, self.host_band)
-    }
-
     /// What the host leaves beside `count` under its `band`; `None` without a trace of it.
     fn host_left_by(&self, count: pooled::Count, band: host::HostBand) -> Option<i64> {
         let memory = self.host_memory()?;
@@ -876,6 +933,7 @@ impl<'run> Replayer<'run> {
         self.needs.borrow_mut().clear();
         self.held_for_slice = 0;
         self.held_for_host = 0;
+        self.relaxed.replace(None);
         self.host_needs.clear();
         let listed = waiting.clone();
         let mut index = 0;
@@ -885,18 +943,33 @@ impl<'run> Replayer<'run> {
                     waiting.remove(index);
                     self.start(queued, &admitted, None, now);
                 }
-                Ok(admitted) => match self.passes(queued, &listed) {
-                    Some(usual) => {
+                Ok(admitted) => {
+                    if let Some(usual) = self.passes(queued, &listed) {
                         waiting.remove(index);
                         self.start(queued, &admitted, Some(usual), now);
+                    } else {
+                        self.note_held(queued.job, Guard::Barrier);
+                        index += 1;
                     }
-                    None => index += 1,
-                },
-                Err(Refused::Slot) => index += 1,
+                }
+                Err(Refused::Slot) => {
+                    // A job of no configured profile never starts and waits for nothing the replay has.
+                    if self.config.profiles.contains_key(&queued.run.profile) {
+                        self.note_held(queued.job, Guard::Slot);
+                    }
+                    index += 1;
+                }
                 Err(Refused::Budget(short)) => {
                     if self.barrier.is_none() && short.scarce == Scarce::Cpu {
                         self.cpu_held += 1;
                     }
+                    let guard = match short.scarce {
+                        Scarce::Cpu => Guard::Cpu,
+                        Scarce::Memory => {
+                            self.memory_guard(Guard::MemoryMax, queued, &listed, short)
+                        }
+                    };
+                    self.note_held(queued.job, guard);
                     self.held_for_slice += u64::from(short.scarce == Scarce::Memory);
                     let first = self.barrier.is_none();
                     self.hold(queued.run, short, at);
@@ -907,10 +980,12 @@ impl<'run> Replayer<'run> {
                 }
                 Err(Refused::Host(short)) => {
                     self.held_for_host += 1;
+                    let guard = self.memory_guard(Guard::Host, queued, &listed, short);
+                    self.note_held(queued.job, guard);
                     // A job behind a barrier does not wait for the host, as the daemon's `Turn::behind`: the owner does.
                     // One the barrier would let pass does, as there (ADR 0151). One that lacks CPU too would not start
                     // by the plain margin, as `Plan::host_needs` reads it.
-                    if self.barrier.is_none() || self.may_pass(queued, &listed).is_some() {
+                    if self.gets_past_barrier(queued, &listed) {
                         let cpu_short = self
                             .cpu_budget
                             .is_some_and(|budget| self.cpu_taken() + short.cpu > budget);
@@ -925,6 +1000,7 @@ impl<'run> Replayer<'run> {
                     index += 1;
                 }
                 Err(Refused::HighWater(short)) => {
+                    self.note_held(queued.job, Guard::HighWater);
                     if self.barrier.is_none() {
                         self.held_back += 1;
                     }
@@ -935,6 +1011,126 @@ impl<'run> Replayer<'run> {
         }
         self.host_band = self.next_band();
         self.settle_waits(waiting);
+    }
+
+    /// Notes that this pass left `job` waiting for `guard`.
+    fn note_held(&mut self, job: u64, guard: Guard) {
+        self.held
+            .entry(job)
+            .and_modify(|held| held.guard = guard)
+            .or_insert_with(|| HeldJob {
+                guard,
+                waited: BTreeMap::new(),
+            });
+    }
+
+    /// The guard that held `queued`, whose runner lacks what `short` says, which `refused` refused, `listed` being what
+    /// the pass began with: a rule of the growth count, or the host's larger margin, with which alone relaxed it would
+    /// start at its turn, every other check of `admits` and the barrier as they stand; else `refused`. Where more than
+    /// one would, the first of the young runners' room, the ceiling and the larger margin.
+    fn memory_guard(
+        &mut self,
+        refused: Guard,
+        queued: Queued<'run>,
+        listed: &[Queued<'run>],
+        short: Short,
+    ) -> Guard {
+        let relaxed = *self
+            .relaxed
+            .borrow_mut()
+            .get_or_insert_with(|| self.relax());
+        let band = self.host_band;
+        let found = [
+            (relaxed.young, band, Guard::YoungRoom),
+            (relaxed.ceiling, band, Guard::GrowthCeiling),
+            (
+                relaxed.plain_band,
+                host::HostBand::Plain,
+                Guard::LargerMargin,
+            ),
+        ]
+        .into_iter()
+        .find(|(count, band, _)| {
+            count.is_some_and(|count| self.lacks(count, *band, short.memory, short.cpu).is_none())
+        })
+        .map(|(_, _, guard)| guard);
+        match found {
+            Some(guard) if self.gets_past_barrier(queued, listed) => guard,
+            _ => refused,
+        }
+    }
+
+    /// The count now with each rule `Guard` names relaxed alone, where it counts.
+    fn relax(&self) -> Relaxed {
+        let runners = self.held();
+        let hold = if self.braked() {
+            pooled::Hold::Held
+        } else {
+            pooled::Hold::Free
+        };
+        let with =
+            |growth: Option<GrowthCount>, band| self.count_of_growth(&runners, hold, band, growth);
+        let growth = self.growth.filter(|_| hold == pooled::Hold::Free);
+        let young = growth
+            .filter(|count| count.growth.young == pooled::Young::Covered)
+            .map(|count| GrowthCount {
+                growth: pooled::Growth {
+                    young: pooled::Young::Ranked,
+                    ..count.growth
+                },
+                ..count
+            });
+        let ceiling = growth
+            .filter(|count| count.growth.ceiling.is_some())
+            .map(|count| GrowthCount {
+                growth: pooled::Growth {
+                    ceiling: None,
+                    ..count.growth
+                },
+                ..count
+            });
+        Relaxed {
+            young: young.map(|young| with(Some(young), self.host_band)),
+            ceiling: ceiling.map(|ceiling| with(Some(ceiling), self.host_band)),
+            plain_band: (self
+                .host_band
+                .short(host::Occupancy::of(!self.running.is_empty())))
+            .then(|| with(self.growth, host::HostBand::Plain)),
+        }
+    }
+
+    /// What a runner that takes `memory` and `cpu` millicores lacks to start beside `count` under the host's `band`, by
+    /// the checks `admits` makes in their order; `None` if it fits.
+    fn lacks(
+        &self,
+        count: pooled::Count,
+        band: host::HostBand,
+        memory: u64,
+        cpu: u64,
+    ) -> Option<Lack> {
+        let needs = signed(memory);
+        if let Some(budget) = self.budget {
+            let taken = count.pooled().saturating_sub(self.mirror);
+            if signed(budget).saturating_sub(signed(taken)) < needs {
+                return Some(Lack::Budget);
+            }
+            if self.at_high_water() {
+                return Some(Lack::HighWater);
+            }
+        }
+        if self
+            .host_left_by(count, band)
+            .is_some_and(|left| left < needs)
+        {
+            return Some(Lack::Host);
+        }
+        if self
+            .cpu_budget
+            .is_some_and(|budget| self.cpu_taken() + cpu > budget)
+        {
+            return Some(Lack::Cpu);
+        }
+        None
     }
 
     /// The band that stands for the next pass; a replay does not model stalls.
@@ -1071,6 +1267,11 @@ impl<'run> Replayer<'run> {
         (slots as usize).saturating_sub(in_profile)
     }
 
+    /// Whether `queued` gets past the barrier, if one stands, once it fits, `listed` being what the pass began with.
+    fn gets_past_barrier(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> bool {
+        self.barrier.is_none() || self.may_pass(queued, listed).is_some()
+    }
+
     /// Whether `queued` may start behind the barrier once it fits, `listed` being what the pass began with: the usual
     /// run time it passes by, if so.
     fn may_pass(&mut self, queued: Queued<'run>, listed: &[Queued<'run>]) -> Option<Duration> {
@@ -1194,6 +1395,8 @@ impl<'run> Replayer<'run> {
             slice_waited: self.slice_waited,
             host_waited: self.host_waited,
             hazard: self.hazard,
+            guards: self.guards,
+            waited: self.waited,
         }
     }
 
@@ -1364,25 +1567,16 @@ impl<'run> Replayer<'run> {
             cpu: starting.cpu,
         };
         // As the daemon's plan: the room before the start fits the runner, and the count is read again after it.
-        let count = self.count();
-        let needs = signed(starting.memory);
-        if let Some(budget) = self.budget {
-            let taken = count.pooled().saturating_sub(self.mirror);
-            if signed(budget).saturating_sub(signed(taken)) < needs {
+        match self.lacks(self.count(), self.host_band, starting.memory, starting.cpu) {
+            Some(Lack::Budget) => {
                 return Err(Refused::Budget(short(Scarce::Memory, Held::ByBudget)));
             }
-            if self.at_high_water() {
+            Some(Lack::HighWater) => {
                 return Err(Refused::HighWater(short(Scarce::Memory, Held::ByBudget)));
             }
-        }
-        if self.host_left_with(count).is_some_and(|left| left < needs) {
-            return Err(Refused::Host(short(Scarce::Memory, Held::ByHost)));
-        }
-        if let Some(cpu_budget) = self.cpu_budget {
-            let taken = self.cpu_taken();
-            if taken + starting.cpu > cpu_budget {
-                return Err(Refused::Budget(short(Scarce::Cpu, Held::ByBudget)));
-            }
+            Some(Lack::Host) => return Err(Refused::Host(short(Scarce::Memory, Held::ByHost))),
+            Some(Lack::Cpu) => return Err(Refused::Budget(short(Scarce::Cpu, Held::ByBudget))),
+            None => {}
         }
         Ok(Admitted {
             reserved: starting.reserved,
@@ -1486,7 +1680,8 @@ impl<'run> Replayer<'run> {
             .started_at
             .unwrap_or_default()
             .saturating_sub(run.runner_started_at.max(run.queued_at));
-        let waited = now.saturating_sub(queued.arrived) / 1000;
+        let waited_ms = now.saturating_sub(queued.arrived);
+        let waited = waited_ms / 1000;
         let span = self.runs.entry(run_key(run)).or_insert(RunSpan {
             first_arrival: queued.arrived,
             last_end: now,
@@ -1495,6 +1690,15 @@ impl<'run> Replayer<'run> {
         span.first_arrival = span.first_arrival.min(queued.arrived);
         span.profiles.insert(run.profile.clone());
         self.started.push(queued.job);
+        self.waited += waited_ms;
+        for (guard, waited) in self
+            .held
+            .remove(&queued.job)
+            .map(|held| held.waited)
+            .unwrap_or_default()
+        {
+            *self.guards.entry(guard).or_default() += waited;
+        }
         self.backfilled.jobs += u64::from(usual.is_some());
         let pool = pool_of(run);
         if let Some(waits) = self.pool_waits.get_mut(&pool) {
@@ -1522,6 +1726,7 @@ impl<'run> Replayer<'run> {
             boot,
         });
         self.needs.borrow_mut().clear();
+        self.relaxed.replace(None);
         if self.trace.is_some() {
             self.cohorts.push(Cohort {
                 jobs: self.running.iter().map(|running| running.job).collect(),

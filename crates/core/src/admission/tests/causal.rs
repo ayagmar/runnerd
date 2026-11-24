@@ -4,7 +4,7 @@
 use super::*;
 use crate::admission::pooled::{self, MOST_CREDIT};
 use crate::admission::trace::{Outside, Point, Reading, RunId, RunTrace, STEP, Trace};
-use crate::admission::{Brake, GrowthCount, GuardHold};
+use crate::admission::{Brake, GrowthCount, Guard, GuardHold};
 
 /// A slice with 1.5G left of two 3.5G reservations and the 512M mirror, under the mark with room for what the credit
 /// adds; a host with memory to spare.
@@ -957,4 +957,280 @@ fn parity_pool(name: &str, profile: &str, label: &str, first: u64) -> Repository
         warm: 0,
         idle_after: scheduler::IDLE_TIMEOUT,
     }
+}
+
+/// How long jobs of `replay` waited for `guard`, in ms.
+fn held_by(replay: &Replay, guard: Guard) -> u64 {
+    replay.guards.get(&guard).copied().unwrap_or(0)
+}
+
+#[test]
+fn a_wait_only_the_larger_margin_causes_is_charged_to_it_not_to_the_host() {
+    // report fits no margin and waits for the host until check ends at minute 30; page fits the plain margin, so only
+    // the larger one, which report holds up, keeps it waiting until the next plan lets the band down.
+    let (jobs, trace) = one_job_never_fits();
+    let replay = replay_held(&jobs, &trace, 0, 40 * G, Band::NoWaiterFits);
+    let page = page_waited(&replay) * 1000;
+    assert!(page > 0, "page waits for the larger margin");
+    assert_eq!(
+        held_by(&replay, Guard::LargerMargin),
+        page,
+        "{:?}",
+        replay.guards
+    );
+    assert_eq!(
+        held_by(&replay, Guard::Host),
+        25 * MINUTE,
+        "report, from minute 5 to 30: {:?}",
+        replay.guards
+    );
+}
+
+#[test]
+fn every_moment_a_job_waits_is_charged_to_exactly_one_guard() {
+    // Eight runners, page from minute 12, and a seventh to tenth check beyond the six jvm slots: jobs wait for a slot,
+    // for MemoryMax and for the young runners' room. However the waits fall, they add up to the guards' time, to the
+    // millisecond.
+    let mut jobs = eight_and_a_page(30);
+    jobs.extend((0..4).map(|i| in_run(check(NOW, 30), 40 + i, 1)));
+    jobs.sort_by_key(|run| run.queued_at);
+    let trace = trace_of(&jobs);
+    let mut seen = BTreeSet::new();
+    for growth in [None, Some(TOP3), Some(COVERED)] {
+        let replay = replay_counted(&jobs, &trace, 15 * G, growth);
+        let guards: u64 = replay.guards.values().sum();
+        seen.extend(replay.guards.keys().copied());
+        assert!(replay.waited > 0, "jobs waited under {growth:?}");
+        assert_eq!(
+            guards, replay.waited,
+            "under {growth:?}: {:?}",
+            replay.guards
+        );
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from([Guard::Slot, Guard::MemoryMax, Guard::YoungRoom]),
+        "the waits this test means to add up"
+    );
+}
+
+#[test]
+fn a_burst_held_only_by_the_young_runners_room_is_charged_to_it() {
+    // Eight 3.5G runners start at once. Ranked, a start is growth the three largest already keep, so all eight fit 15G.
+    // Covered, every young runner's whole take is room kept, so those after the fourth wait for the first minute to
+    // pass: the young runners' room alone held them.
+    let jobs = eight_and_a_page(30);
+    let trace = trace_of(&jobs);
+    let ranked = replay_counted(&jobs, &trace, 15 * G, Some(TOP3));
+    assert_eq!(held_by(&ranked, Guard::YoungRoom), 0, "{:?}", ranked.guards);
+    let covered = replay_counted(&jobs, &trace, 15 * G, Some(COVERED));
+    assert!(
+        held_by(&covered, Guard::YoungRoom) > 0,
+        "{:?}",
+        covered.guards
+    );
+    assert_eq!(
+        held_by(&covered, Guard::Host),
+        0,
+        "the host has room: {:?}",
+        covered.guards
+    );
+}
+
+/// A replay of `jobs` as `trace` says they ran under `memory_max`, with `cpu_budget` millicores, `barriers` and `growth`,
+/// six slots a profile.
+fn replay_how(
+    jobs: &[Ran],
+    trace: &Trace,
+    memory_max: u64,
+    cpu_budget: Option<u64>,
+    barriers: Barriers,
+    growth: Option<GrowthCount>,
+) -> Replay {
+    let known = known();
+    let slots = BTreeMap::from([("jvm".to_owned(), 6), ("node".to_owned(), 6)]);
+    simulate(
+        &config(),
+        Some(memory_max),
+        cpu_budget,
+        jobs,
+        Policy::Measured,
+        &slots,
+        Replaying {
+            barriers,
+            arrivals: Arrivals::AsQueued,
+            known: Some(&known),
+            trace: Some(trace),
+            most_credit: 0,
+            host_reserve: HostReserve::Plain,
+            credit_room: CreditRoom::Counted,
+            band: Band::NoWaiterFits,
+            growth,
+        },
+    )
+}
+
+const COVERED: GrowthCount = GrowthCount {
+    growth: pooled::Growth {
+        young: pooled::Young::Covered,
+        ..TOP3.growth
+    },
+    ..TOP3
+};
+
+#[test]
+fn a_job_the_plain_margin_fits_but_the_cpu_budget_does_not_is_not_charged_to_the_larger_margin() {
+    // page fits the plain margin, but beside check's 1 CPU its own does not fit 1.5: the plain margin alone would not
+    // have started it, so its whole wait is the host's refusal.
+    let (jobs, trace) = one_job_never_fits();
+    let replay = replay_how(&jobs, &trace, 40 * G, Some(1500), Barriers::On, None);
+    let page = page_waited(&replay) * 1000;
+    assert_eq!(page, 50 * MINUTE, "until report, then check, end");
+    assert_eq!(
+        held_by(&replay, Guard::LargerMargin),
+        0,
+        "{:?}",
+        replay.guards
+    );
+    assert_eq!(
+        held_by(&replay, Guard::Host),
+        25 * MINUTE + page,
+        "{:?}",
+        replay.guards
+    );
+}
+
+#[test]
+fn a_job_behind_a_strict_barrier_is_not_charged_to_the_margin_it_would_fit() {
+    // report puts up a barrier at minute 15 and page arrives behind it at minute 16. It fits the plain margin, but the
+    // barrier does not let it pass, so the larger margin alone did not hold it; only the plan after check ends, with
+    // the barrier down, does.
+    let jobs = vec![
+        in_run(check(NOW, 30), 1, 1),
+        in_run(report(NOW + 5 * MINUTE), 2, 1),
+        in_run(page(NOW + 16 * MINUTE, 5), 3, 1),
+    ];
+    let trace = host_limited(&jobs, 7 * G);
+    let replay = replay_how(&jobs, &trace, 40 * G, None, Barriers::Strict, None);
+    assert!(replay.barrier_for > 0, "a barrier stood");
+    let page = page_waited(&replay) * 1000;
+    assert!(page > 10 * MINUTE, "page waited out the barrier, {page} ms");
+    assert!(
+        held_by(&replay, Guard::LargerMargin) <= 10_000,
+        "a plan at most: {:?}",
+        replay.guards
+    );
+}
+
+#[test]
+fn a_young_burst_at_the_high_water_mark_is_not_charged_to_the_young_runners_room() {
+    // As the burst below, but the slice reads 11.6G beside its runners: with the young runners ranked, the count would
+    // fit the rest, but the slice is at its mark, which still holds them.
+    let jobs = eight_and_a_page(30);
+    let mut trace = trace_of(&jobs);
+    let open = replay_how(&jobs, &trace, 15 * G, None, Barriers::On, Some(COVERED));
+    assert!(held_by(&open, Guard::YoungRoom) > 0, "{:?}", open.guards);
+    trace.guard_overhead = 11 * G + 600 * M;
+    let marked = replay_how(&jobs, &trace, 15 * G, None, Barriers::On, Some(COVERED));
+    assert_eq!(held_by(&marked, Guard::YoungRoom), 0, "{:?}", marked.guards);
+    assert!(
+        held_by(&marked, Guard::HighWater) > 0,
+        "{:?}",
+        marked.guards
+    );
+}
+
+#[test]
+fn a_wait_either_the_young_room_or_the_plain_margin_alone_would_end_goes_to_the_young_room() {
+    // Six 3.5G runners start into a host that leaves 22.5G by the plain margin, the young runners' room counting each
+    // whole take; the seventh, site, waits. At the next plans the larger margin stands. Ranking the young runners would
+    // start it. Once the short check ends at 30 s, the plain margin would start it too, and the young runners' room
+    // goes first; the plan after lets the margin down and starts it.
+    let mut jobs: Vec<Ran> = (0..3).map(|i| in_run(check(NOW, 30), 10 + i, 1)).collect();
+    jobs.extend((0..2).map(|i| in_run(site(NOW, 30), 20 + i, 1)));
+    let mut short = in_run(check(NOW, 1), 15, 1);
+    short.finished_at = Some(NOW + 30_000);
+    jobs.push(short);
+    jobs.push(in_run(site(NOW, 30), 29, 1));
+    let trace = host_limited(&jobs, 22 * G + G / 2);
+    let replay = replay_how(&jobs, &trace, 60 * G, None, Barriers::On, Some(COVERED));
+    let site = last_waited(&replay, "halyard/storefront", "node") * 1000;
+    assert!(site > 30_000, "past the short check's end, {site} ms");
+    assert!(replay.hazard.in_band > 0, "the larger margin stood");
+    assert_eq!(
+        held_by(&replay, Guard::YoungRoom),
+        site,
+        "{:?}",
+        replay.guards
+    );
+    assert_eq!(
+        held_by(&replay, Guard::LargerMargin),
+        0,
+        "{:?}",
+        replay.guards
+    );
+}
+
+#[test]
+fn a_wait_only_two_rules_relaxed_together_would_end_goes_to_the_budget_that_refused_it() {
+    // Six 3.5G runners start into 19G under the young runners' room and a 2G ceiling, and the last site waits. In the
+    // first minute, ranking the young runners alone leaves the ceiling's count too high, and lifting the ceiling alone
+    // leaves the young runners' room: only both together would start it, so MemoryMax has it. After the minute the
+    // ceiling alone holds it.
+    let mut jobs: Vec<Ran> = (0..3).map(|i| in_run(check(NOW, 30), 10 + i, 1)).collect();
+    jobs.extend((0..3).map(|i| in_run(site(NOW, 30), 20 + i, 1)));
+    let trace = trace_of(&jobs);
+    let count = |young, ceiling| GrowthCount {
+        growth: pooled::Growth {
+            young,
+            ceiling,
+            ..TOP3.growth
+        },
+        ..TOP3
+    };
+    let waited = |young, ceiling| {
+        let replay = replay_how(
+            &jobs,
+            &trace,
+            19 * G,
+            None,
+            Barriers::On,
+            Some(count(young, ceiling)),
+        );
+        last_waited(&replay, "halyard/storefront", "node")
+    };
+    assert_eq!(
+        waited(pooled::Young::Ranked, None),
+        0,
+        "both relaxed start it at once"
+    );
+    assert!(
+        waited(pooled::Young::Ranked, Some(2 * G)) > 60,
+        "the ceiling still holds it"
+    );
+    assert!(
+        waited(pooled::Young::Covered, None) > 0,
+        "the young runners' room still holds it"
+    );
+    let replay = replay_how(
+        &jobs,
+        &trace,
+        19 * G,
+        None,
+        Barriers::On,
+        Some(count(pooled::Young::Covered, Some(2 * G))),
+    );
+    let young_minute = waited(pooled::Young::Covered, None) * 1000;
+    assert_eq!(
+        held_by(&replay, Guard::MemoryMax),
+        young_minute,
+        "{:?}",
+        replay.guards
+    );
+    assert_eq!(held_by(&replay, Guard::YoungRoom), 0, "{:?}", replay.guards);
+    assert!(
+        held_by(&replay, Guard::GrowthCeiling) > 0,
+        "{:?}",
+        replay.guards
+    );
 }

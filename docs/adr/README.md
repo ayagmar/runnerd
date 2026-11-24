@@ -177,3 +177,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0168](0168-the-build-cache-writes-each-byte-once.md) | The build cache writes each byte once | Accepted |
 | [0169](0169-the-history-commits-telemetry-together-and-leases-runner-names.md) | The history commits telemetry together and leases runner names | Accepted |
 | [0170](0170-a-runner-container-skips-work-its-job-does-not-need.md) | A runner container skips work its job does not need | Accepted |
+| [0172](0172-simulate-names-the-guard-that-held-each-wait.md) | `simulate` names the guard that held each wait | Accepted |
