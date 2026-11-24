@@ -1040,6 +1040,174 @@ fn a_queued_job_left_open_shows_what_its_runner_reserved_once_it_starts() {
     }
 }
 
+/// Labels no pool serves, some of them not ASCII: core's reason names each, longer than a queue row has room for at
+/// 80 columns.
+fn unserved_labels() -> Waiting {
+    Waiting::NoPool {
+        labels: [
+            "self-hosted",
+            "linux",
+            "arm64",
+            "gpu-ünïcødé-✓",
+            "large-memory-64g",
+            "région-eu-ouest",
+            "構築-キャッシュ",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    }
+}
+
+/// Fourteen slots, and twenty queued jobs `job-00` to `job-19` that alternate between labels no pool serves and a
+/// busy slot.
+fn crowded_queue() -> App {
+    let mut app = app();
+    app.live.status.profiles = vec![profile("jvm", 8, 9 << 30), profile("node", 6, 7 << 30)];
+    app.live.status.queued = (0..20)
+        .map(|at| QueuedJob {
+            waiting: Some(if at % 2 == 0 {
+                unserved_labels()
+            } else {
+                Waiting::NoSlot {
+                    profile: "node".to_owned(),
+                }
+            }),
+            ..queued(
+                60 + at,
+                "halyard/ledger",
+                &format!("job-{at:02}"),
+                1000 + at,
+            )
+        })
+        .collect();
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    app
+}
+
+/// Why the selected queued job waits, as core words it.
+fn selected_reason(app: &App) -> String {
+    let job = &app.live.status.queued[app.queued];
+    job.waiting
+        .as_ref()
+        .unwrap()
+        .reason(job, &app.live.status, NOW)
+}
+
+#[test]
+fn the_selected_queued_job_and_its_whole_reason_are_in_sight_at_80_by_24_however_many_slots_and_jobs()
+ {
+    // Catches a queue starved of rows by the lanes, whose selected row or reason is then out of sight, and a reason
+    // cut to what is left of its row.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.pane, Pane::Queue);
+    for at in 0..20 {
+        assert_eq!(app.queued, at);
+        let shown = screen(&app, 80, 24, false);
+        let name = format!("job-{at:02}");
+        assert!(
+            shown.contains(&name),
+            "the selected {name}'s row is in sight: {shown}"
+        );
+        let reason = selected_reason(&app);
+        assert!(
+            reads(&shown, &reason),
+            "{name}'s reason reads whole, not only its start: {reason}\n{shown}"
+        );
+        app.update(key(KeyCode::Down));
+    }
+    let shown = screen(&app, 80, 24, false);
+    let heading = shown
+        .lines()
+        .find(|line| line.starts_with("Waiting "))
+        .unwrap_or_default();
+    assert!(
+        heading.contains("17 above") && !heading.contains("below"),
+        "the last job selected, the heading counts the rows scrolled past: {shown}"
+    );
+}
+
+#[test]
+fn a_queued_job_s_page_shows_its_whole_reason_at_80_by_24() {
+    // Catches the page fitting the reason into what the timeline's legend leaves of one line.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    let reason = selected_reason(&app);
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [60]);
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        reads(&shown, &reason),
+        "its page says why it waits in full: {reason}\n{shown}"
+    );
+    assert!(
+        shown.contains("Waiting for a runner"),
+        "the timeline still shows: {shown}"
+    );
+}
+
+#[test]
+fn a_crowded_queue_on_a_short_terminal_keeps_the_selected_row_and_never_panics() {
+    // Catches a layout that subtracts past zero or hands the queue no row on a short or narrow terminal.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    for _ in 0..19 {
+        app.update(key(KeyCode::Down));
+    }
+    for (width, height) in [(80, 14), (80, 10), (40, 14), (80, 6), (20, 4)] {
+        screen(&app, width, height, false);
+    }
+    let shown = screen(&app, 80, 14, false);
+    assert!(
+        shown.contains("job-19"),
+        "the selected row stays at 80 by 14: {shown}"
+    );
+    assert!(
+        reads(&shown, "All 6 node slots are busy"),
+        "a reason that fits under the row reads whole: {shown}"
+    );
+    app.update(key(KeyCode::Up));
+    let shown = screen(&app, 80, 14, false);
+    assert!(
+        shown.contains("job-18") && shown.contains("No profile serves the labels"),
+        "a reason longer than the rows left starts under the selected row: {shown}"
+    );
+    app.update(key(KeyCode::Enter));
+    for (width, height) in [(80, 14), (80, 10), (40, 14), (80, 6), (20, 4)] {
+        screen(&app, width, height, false);
+    }
+}
+
+#[test]
+fn the_selected_queued_job_starting_moves_the_selection_to_a_job_still_waiting() {
+    // Catches a selection left past the end of the queue, or a reason drawn for a job no longer in it.
+    let mut app = crowded_queue();
+    app.update(key(KeyCode::Tab));
+    for _ in 0..19 {
+        app.update(key(KeyCode::Down));
+    }
+    app.update(event(
+        Some(9),
+        Event::JobStarted {
+            job: summary(79, JobState::Running),
+        },
+    ));
+    assert_eq!(app.pane, Pane::Queue);
+    assert_eq!(
+        app.live.status.queued.get(app.queued).map(|job| job.id),
+        Some(78),
+        "the selection moves to the last job still waiting"
+    );
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        shown.contains("job-18") && !shown.contains("job-19"),
+        "{shown}"
+    );
+    assert!(
+        !reads(&shown, "No profile serves"),
+        "a start may change every reason: none shows until read again: {shown}"
+    );
+}
+
 #[test]
 fn the_selected_job_stays_selected_when_jobs_above_it_start_or_finish() {
     let mut app = app();

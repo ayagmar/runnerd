@@ -16,7 +16,7 @@ use super::Theme;
 use super::budget::scale;
 use super::compare::compare;
 use super::log::{log, styled_line};
-use super::overview::{badge, reason};
+use super::overview::{badge, reason_lines, why};
 use super::resources::{job_charts, job_spark};
 use super::steps::steps;
 use super::{bold, centred, fit, heading, length, spark, wrap};
@@ -66,7 +66,13 @@ pub(super) fn job(
     } else {
         0
     };
-    let fixed = 3 + failure_height + 2 + runs_height;
+    let most = area
+        .height
+        .saturating_sub(3 + failure_height + 2 + runs_height + 1);
+    let WaitingReason { beside, under } =
+        WaitingReason::of(app, summary, now, width, usize::from(most.max(1)), theme);
+    let timeline_height = 2 + length(under.len());
+    let fixed = 3 + failure_height + timeline_height + runs_height;
     // Until a runner has it there is nothing to chart.
     let charted = summary.runner.is_some() || !open.samples.is_empty();
     // What held its CPU back takes a row of its own under the figures.
@@ -93,7 +99,7 @@ pub(super) fn job(
     ] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(failure_height),
-        Constraint::Length(2),
+        Constraint::Length(timeline_height),
         Constraint::Length(steps_height),
         Constraint::Length(charts_height),
         Constraint::Length(runs_height),
@@ -103,15 +109,10 @@ pub(super) fn job(
 
     head_lines(frame, head, app, job, now, theme);
     frame.render_widget(Paragraph::new(failure_lines), failure_area);
-    let waiting = app
-        .live
-        .status
-        .queued
-        .iter()
-        .find(|queued| queued.id == summary.id)
-        .filter(|_| summary.timeline.started_at.is_none());
-    let reason = waiting.map(|queued| reason(app, queued, now, width, theme));
-    timeline(frame, timeline_area, summary, reason.as_ref(), now, theme);
+    timeline(frame, timeline_area, summary, beside.as_ref(), now, theme);
+    let [_, under_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(timeline_area);
+    frame.render_widget(Paragraph::new(under), under_area);
     steps(frame, steps_area, job, now, theme);
     let cpu_held = cpu_held.as_deref();
     if charts_height > 0 {
@@ -135,6 +136,51 @@ pub(super) fn job(
     match open.panel {
         Panel::Log => log(frame, log_area, open, now, theme, hits),
         Panel::Compare => compare(frame, log_area, open, now, theme),
+    }
+}
+
+/// Why a queued job waits, as the page draws it.
+struct WaitingReason {
+    /// After the timeline's legend, where it fits whole.
+    beside: Option<Span<'static>>,
+    /// Wrapped under the legend, where it does not.
+    under: Vec<Line<'static>>,
+}
+
+impl WaitingReason {
+    /// `summary`'s reason while it waits for a runner, in `width` cells and at most `most` lines under the legend;
+    /// nothing once a runner has it or from a daemon that does not say.
+    fn of(
+        app: &App,
+        summary: &JobSummary,
+        now: u64,
+        width: usize,
+        most: usize,
+        theme: Theme,
+    ) -> WaitingReason {
+        let why = app
+            .live
+            .status
+            .queued
+            .iter()
+            .find(|queued| queued.id == summary.id)
+            .filter(|_| summary.timeline.started_at.is_none())
+            .and_then(|queued| why(app, queued, now, theme));
+        let room = width.saturating_sub(Line::from(legend(summary, now, theme)).width());
+        match why {
+            Some(why) if why.width() <= room => WaitingReason {
+                beside: Some(why),
+                under: Vec::new(),
+            },
+            Some(why) => WaitingReason {
+                beside: None,
+                under: reason_lines(&why, width, most, theme),
+            },
+            None => WaitingReason {
+                beside: None,
+                under: Vec::new(),
+            },
+        }
     }
 }
 
@@ -380,8 +426,44 @@ pub(super) fn drop_least<T>(items: &mut Vec<(u8, T)>, kept: u8, fit: impl Fn(&[(
     }
 }
 
-/// Waiting for a runner, the runner starting, and running, as one bar; while it waits, why. Cleaning up is left
-/// out: the bar is the job's way to its finish.
+/// The phases the timeline draws: waiting for a runner, the runner starting, and running. Cleaning up is left out:
+/// the bar is the job's way to its finish.
+fn phases(job: &JobSummary) -> Vec<Phase> {
+    job.phases()
+        .into_iter()
+        .filter(|phase| phase.kind != PhaseKind::CleaningUp)
+        .collect()
+}
+
+/// A phase's glyph and style in the bar and its legend.
+fn look(kind: PhaseKind, theme: Theme) -> (&'static str, Style) {
+    match kind {
+        PhaseKind::Waiting => ("░", theme.wait()),
+        PhaseKind::Starting => ("▒", theme.cpu()),
+        PhaseKind::Running | PhaseKind::CleaningUp => ("█", theme.memory()),
+    }
+}
+
+/// The timeline's legend: each phase's glyph, name and how long it took.
+fn legend(job: &JobSummary, now: u64, theme: Theme) -> Vec<Span<'static>> {
+    phases(job)
+        .iter()
+        .flat_map(|phase| {
+            let (glyph, style) = look(phase.kind, theme);
+            let still = if phase.to.is_none() { "…" } else { "" };
+            [
+                Span::styled(format!("{glyph} "), style),
+                Span::raw(format!(
+                    "{} {}{still}  ",
+                    phase.kind.label(),
+                    duration(phase.seconds(now))
+                )),
+            ]
+        })
+        .collect()
+}
+
+/// The phases as one bar over the legend; while it waits, `reason` after the legend, which fits there whole.
 pub(super) fn timeline(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -390,17 +472,8 @@ pub(super) fn timeline(
     now: u64,
     theme: Theme,
 ) {
-    let phases: Vec<Phase> = job
-        .phases()
-        .into_iter()
-        .filter(|phase| phase.kind != PhaseKind::CleaningUp)
-        .collect();
+    let phases = phases(job);
     let whole: u64 = phases.iter().map(|phase| phase.seconds(now)).sum();
-    let look = |kind: PhaseKind| match kind {
-        PhaseKind::Waiting => ("░", theme.wait()),
-        PhaseKind::Starting => ("▒", theme.cpu()),
-        PhaseKind::Running | PhaseKind::CleaningUp => ("█", theme.memory()),
-    };
     let width = area.width;
     let mut used = 0;
     let mut bar = Vec::new();
@@ -415,32 +488,16 @@ pub(super) fn timeline(
                 .min(width.saturating_sub(used))
         };
         used += cells;
-        let (glyph, style) = look(phase.kind);
+        let (glyph, style) = look(phase.kind, theme);
         bar.push(Span::styled(glyph.repeat(usize::from(cells)), style));
     }
-    let [bar_area, legend] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+    let [bar_area, legend_area] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
     frame.render_widget(Line::from(bar), bar_area);
-    let mut spans = vec![];
-    for phase in &phases {
-        let (glyph, style) = look(phase.kind);
-        let still = if phase.to.is_none() { "…" } else { "" };
-        spans.extend([
-            Span::styled(format!("{glyph} "), style),
-            Span::raw(format!(
-                "{} {}{still}  ",
-                phase.kind.label(),
-                duration(phase.seconds(now))
-            )),
-        ]);
-        if phase.kind == PhaseKind::Waiting
-            && let Some(reason) = reason
-        {
-            let room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width());
-            let text = fit(&reason.content, room).trim_end().to_owned();
-            spans.push(Span::styled(text, reason.style));
-        }
+    let mut spans = legend(job, now, theme);
+    if let Some(reason) = reason {
+        spans.push(reason.clone());
     }
-    frame.render_widget(Line::from(spans), legend);
+    frame.render_widget(Line::from(spans), legend_area);
 }
 
 /// The same job's latest runs, oldest first, as the dashboard's job page compares them: a heading with the median
