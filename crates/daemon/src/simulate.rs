@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::admission::trace::{Episodes, Trace};
 use runnerd_core::admission::{
-    Arrivals, Band, Barriers, Brake, CreditRoom, GrowthCount, GuardHold, HostReserve, Policy,
-    PoolReplay, Recorded, Replay, Replaying, growth, pooled, recorded, simulate,
+    Arrivals, Band, Barriers, Brake, CreditRoom, GrowthCount, Guard, GuardHold, HostReserve,
+    Policy, PoolReplay, Recorded, Replay, Replaying, growth, pooled, recorded, simulate,
 };
 use runnerd_core::api;
 use runnerd_core::config::{self, Admission, ByteSize, Config};
@@ -358,7 +358,38 @@ pub(crate) fn causal(
     }
     out.push_str(&causal_profiles(counts.rows, &replays, &slots));
     out.push_str(&causal_waits(&replays, &recorded));
+    out.push_str(&causal_guards(counts.rows, &replays));
     out.push_str(&causal_hazards(counts.rows, &replays));
+    out
+}
+
+/// What held the jobs that waited in each of `replays`, in job-hours by guard (`admission::Guard`), a row a count.
+fn causal_guards(rows: &[Counting], replays: &[Replay]) -> String {
+    let width = name_width(rows);
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "\nWhat held the jobs that waited, in job-hours, at each plan by the one guard that held it:\n\n{:<width$}",
+        "COUNT"
+    );
+    for guard in Guard::ALL {
+        let _ = write!(out, " {:>8}", guard.heading());
+    }
+    let _ = writeln!(out);
+    for (counting, replay) in rows.iter().zip(replays) {
+        let _ = write!(out, "{:<width$}", counting.name());
+        for guard in Guard::ALL {
+            let waited = replay.guards.get(&guard).copied().unwrap_or(0);
+            let _ = write!(out, " {:>8}", job_hours(waited));
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(
+        out,
+        "\n{} Each row adds up to its WAIT H above; each cell is rounded down to a tenth on its own, so the cells may add \
+         up to a little less.",
+        Guard::legend()
+    );
     out
 }
 
@@ -421,17 +452,18 @@ fn causal_intro(
 /// `replay` as a row of `causal`'s first table, its waits against those `recorded`.
 fn causal_line(name: &str, width: usize, replay: &Replay, recorded: &Recorded) -> String {
     let runs = runs_of(replay, None);
-    let waited = all_waits(replay);
+    // Unrounded, as the guard table adds it up.
+    let waited = replay.waited;
     format!(
         "{name:<width$} {:>9} {:>9} {:>10} {:>9} {:>9} {:>9} {:>7} {:>7}",
         duration(mean(&runs)),
         duration(runs.iter().copied().max().unwrap_or(0)),
         replay.never_started,
-        job_hours(1000 * waited),
+        job_hours(waited),
         job_hours(replay.host_waited),
         job_hours(replay.slice_waited),
         replay.backfilled.jobs,
-        against(waited, recorded.waited()),
+        against(waited / 1000, recorded.waited()),
     )
 }
 
@@ -460,15 +492,6 @@ fn against(replayed: u64, recorded: u64) -> String {
     }
     let percent = i128::from(replayed) * 100 / i128::from(recorded) - 100;
     format!("{percent:+}%")
-}
-
-/// What every job of `replay` waited, in seconds.
-fn all_waits(replay: &Replay) -> u64 {
-    replay
-        .pools
-        .values()
-        .flat_map(|pool| &pool.waits)
-        .sum::<u64>()
 }
 
 /// The runs with a job of each profile of `slots` in `replays`, mean / worst, a column a count.
@@ -948,4 +971,64 @@ pub(crate) fn overcommit(text: &str) -> Result<f64, String> {
                 config::MAX_CPU_OVERCOMMIT
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_row_with_its_own_ceiling_is_not_told_it_is_the_daemons() {
+        // Catches the legend naming the daemon's 14G ceiling under a row that replayed another: the row's name says
+        // which ceiling it had.
+        let config = Config::parse(
+            r#"
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles.jvm]
+image_stage = "jvm"
+cpus = 8
+memory = "9G"
+slots = 2
+
+[[repositories]]
+name = "halyard/ledger"
+profile = "jvm"
+labels = ["jvm"]
+"#,
+        )
+        .unwrap();
+        let mut replay = simulate(
+            &config,
+            None,
+            None,
+            &[],
+            Policy::Measured,
+            &BTreeMap::new(),
+            Barriers::On,
+        );
+        replay.guards.insert(Guard::GrowthCeiling, 3_600_000);
+        let ceiling = Counting::Growth(GrowthCount {
+            growth: pooled::Growth {
+                ceiling: Some(10 << 30),
+                ..pooled::Growth::top(3)
+            },
+            brake: Brake::Off,
+            guard: GuardHold::Off,
+        });
+        let table = causal_guards(&[ceiling], &[replay]);
+        assert!(table.contains("top3+ceil10G"), "{table}");
+        assert!(
+            table.contains("CEIL: that count's ceiling alone"),
+            "{table}"
+        );
+        assert!(!table.contains("14G"), "{table}");
+    }
 }
