@@ -3737,19 +3737,91 @@ fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_c
     assert_eq!(app.flash, None, "nothing is being read, so nothing says so");
 }
 
-/// Catches: a machine held on battery listed like any other, so the person switches to it expecting runners.
+/// Catches: a machine held on battery listed like any other, so the person switches to it expecting runners; and
+/// the hold cut off the end of its line on an 80-column terminal without colour, where a 20-character alias leaves
+/// little room for the notes.
 #[test]
-fn the_list_of_machines_shows_a_battery_hold_as_core_words_it() {
+fn the_list_of_machines_shows_a_battery_hold_as_core_words_it_even_at_80_columns() {
     let mut app = app();
     app.update(key(KeyCode::Char('m')));
-    list_machines(&mut app);
+    let mut listed = machines_listed();
+    // The longest name `machine add` takes.
+    "abcdefghijklmnopqrst".clone_into(&mut listed[2].name);
+    app.update(Msg::Machines {
+        choices: listed,
+        current: None,
+    });
     machines_land(&mut app, &[0]);
     let tern = &runnerd_fixtures::fleet_facts(&runnerd_fixtures::fleet()).machines[0];
-    let at = tern.summary.find("on battery").unwrap();
-    let shown = screen(&app, 220, 30, false);
     assert!(
-        machine_line(&shown, "tern").contains(&tern.summary[at..]),
+        tern.summary.starts_with(runnerd_core::api::ON_BATTERY),
+        "{}",
+        tern.summary
+    );
+    let shown = screen(&app, 80, 30, false);
+    assert!(
+        machine_line(&shown, "abcdefghijklmnopqrst").contains(runnerd_core::api::BEING_READ),
         "{shown}"
+    );
+    assert!(
+        machine_line(&shown, "tern").contains(runnerd_core::api::ON_BATTERY.trim_end()),
+        "tern's battery hold is on screen: {shown}"
+    );
+}
+
+/// Catches: the loop taking a machine's late answer from a list closed and opened again, so the first opening's
+/// read fills the second's line, as a sleeping laptop's stale "cannot be read" would.
+#[tokio::test]
+async fn a_late_answer_from_a_list_opened_before_does_not_fill_the_one_open_now() {
+    let client =
+        runnerd_core::client::Client::new(std::path::PathBuf::from("/nonexistent/runnerd.sock"));
+    let (mut switcher, _answers) = super::Switcher::new(&client);
+    let (mut requests, mut daemon) = super::Requests::new(client.clone());
+    let mut feeding = tokio::spawn(async {});
+    let mut tickets = Vec::new();
+    let mut app = app();
+    for _ in 0..2 {
+        app.update(key(KeyCode::Char('m')));
+        list_machines(&mut app);
+        switcher.listing.open(|ticket| {
+            tickets.push(ticket);
+            tokio::spawn(std::future::pending::<()>())
+        });
+        if tickets.len() == 1 {
+            app.update(key(KeyCode::Esc));
+            switcher.keep_listing(&app);
+        }
+    }
+    let tern = machines_read()[0].clone();
+    let mut take = |ticket, app: &mut App| {
+        switcher.take(
+            super::Answer::Listed {
+                ticket,
+                listed: tern.clone(),
+            },
+            app,
+            &mut requests,
+            &mut feeding,
+            &mut daemon,
+        )
+    };
+    assert!(
+        !take(tickets[0], &mut app),
+        "the first opening's answer is dropped"
+    );
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        machine_line(&shown, "tern").contains(runnerd_core::api::BEING_READ),
+        "tern is still being read: {shown}"
+    );
+    assert!(
+        take(tickets[1], &mut app),
+        "the open list's answer is taken"
+    );
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        machine_line(&shown, "tern").contains(runnerd_core::api::ON_BATTERY.trim_end()),
+        "tern is filled: {shown}"
     );
 }
 

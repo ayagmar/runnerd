@@ -3,8 +3,10 @@
 Status: **Accepted** (2026-11-24). Amends [0165](0165-one-view-over-several-machines-is-merged-by-core.md) and
 [0166](0166-the-tui-switches-machines-and-dashboards-link-peers.md): the TUI's list of machines reads each machine's
 status alone and fills its line as it lands, and a machine's line says when its battery holds every start. Adds
-`FleetMachine::of_status`, `FleetMachine::this_machine`, `FleetMachine::unasked`, `Reach::Read`'s `on_battery` and
-`tui::listing::Listing`. No wire change: `on_battery` is absent from `runnerctl fleet --json` while it is false.
+`FleetMachine::of_status`, `FleetMachine::this_machine`, `FleetMachine::unasked`, `api::ON_BATTERY`, `Reach::Read`'s
+`on_battery` and `tui::listing::Listing`. The daemon's API is unchanged. `runnerctl fleet --json` gains one field,
+`on_battery: true` on a machine its battery holds, left out while it is false; a reader that does not know it, as
+0.1.6's `Fleet` does not, ignores it, and one that does reads it as false when absent.
 
 ## Context
 
@@ -31,8 +33,10 @@ machine's line in the fleet and in the list did not: it looked like any idle mac
 - **Core words the line from a status alone.** `FleetMachine::of_status` builds the same line the fleet's merge does
   from a status, without calling its jobs unread, since none were asked; `this_machine` names this machine as
   `MachineReading::this_machine` does.
-- **The battery hold is on the line.** `Reach::Read` keeps `Status::on_battery`; `FleetMachine::summary` adds
-  `, on battery: no runner starts` and `tone` warns, in the fleet and the list alike. The counts stay the machine's
+- **The battery hold is on the line, first.** `Reach::Read` keeps `Status::on_battery`; `FleetMachine::summary`
+  starts with `api::ON_BATTERY`, `on battery, no runner starts; `, before the counts, so a list that cuts the end of
+  a line (an 80-column terminal beside a 20-character name) still shows it, colour or not; `tone` warns, in the fleet
+  and the list alike. The counts stay the machine's
   own: no fleet-wide queue, no guess of a machine's role from its waits.
 
 ## Consequences

@@ -8,9 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use runnerd_core::api::{FleetMachine, JobPage, JobQuery, MachineReading, Status};
+#[cfg(any(feature = "tui", test))]
+use runnerd_core::api::FleetMachine;
+use runnerd_core::api::{JobPage, JobQuery, MachineReading, Status};
 use runnerd_core::client::{Client, ClientError, Endpoint, OpenSsh, SshProgram, remote_socket};
 use runnerd_core::config::machines::{Machine, Machines, SshTarget, check_name, check_socket};
+#[cfg(any(feature = "tui", test))]
 use tokio::task::JoinSet;
 
 use crate::{Error, output, print_json};
@@ -145,6 +148,7 @@ pub(crate) async fn readings(
 }
 
 /// One machine's line in the TUI's list of machines, and which machine it is.
+#[cfg(any(feature = "tui", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Listed {
     /// What choosing it reads: its name in `machines.toml`, or `None` for this machine's daemon.
@@ -156,6 +160,7 @@ pub(crate) struct Listed {
 /// Reads this machine's daemon's status and every added machine's at once, each landing in the set as it answers,
 /// so one that is slow to reach holds back none of the others. Only `/v1/status` is asked. Dropping the set stops
 /// every read still under way and its `ssh`. `local` is `None` without a socket to ask.
+#[cfg(any(feature = "tui", test))]
 pub(crate) fn statuses(
     local: Option<Client>,
     machines: &Machines,
@@ -192,6 +197,7 @@ pub(crate) fn statuses(
     reads
 }
 
+#[cfg(any(feature = "tui", test))]
 async fn status(client: &Client) -> Result<Status, String> {
     client
         .get::<Status>("/v1/status")

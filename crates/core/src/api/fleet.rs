@@ -168,6 +168,9 @@ impl Fleet {
     }
 }
 
+/// What a machine's line starts with while its host runs on battery and holds every start.
+pub const ON_BATTERY: &str = "on battery, no runner starts; ";
+
 /// A machine's line in a client's list of machines while its state is still being read.
 pub const BEING_READ: &str = "reading its state…";
 
@@ -278,8 +281,8 @@ impl Reach {
 
 impl FleetMachine {
     /// What a client shows after the machine's name: `2 running, 1 queued, 3 of 8 slots held, runnerd 0.1.6`, with
-    /// what is paused, held on battery, shutting down or unread after it; or why it could not be read. The counts
-    /// are the machine's own.
+    /// what is paused, shutting down or unread after it, and [`ON_BATTERY`] before it while the battery holds every
+    /// start, so a line cut short still says so; or why it could not be read. The counts are the machine's own.
     pub fn summary(&self) -> String {
         match &self.reach {
             Reach::Unreachable { reason } => format!("cannot be read: {reason}"),
@@ -295,7 +298,14 @@ impl FleetMachine {
                 jobs_unread,
                 ..
             } => {
-                let mut text = format!(
+                // First, so a list that cuts the end of the line still shows that nothing starts there.
+                let mut text = if *on_battery {
+                    ON_BATTERY.to_owned()
+                } else {
+                    String::new()
+                };
+                let _ = write!(
+                    text,
                     "{running} running, {queued} queued, {held} of {slots} slots held, runnerd {version}"
                 );
                 if *paused > 0 {
@@ -305,9 +315,6 @@ impl FleetMachine {
                         "repositories"
                     };
                     let _ = write!(text, ", {paused} {repositories} paused");
-                }
-                if *on_battery {
-                    text.push_str(", on battery: no runner starts");
                 }
                 if *shutting_down {
                     text.push_str(", shutting down");

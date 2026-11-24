@@ -127,7 +127,7 @@ pub fn fleet() -> Fleet {
 
 #[cfg(test)]
 mod tests {
-    use runnerd_core::api::{FleetMachine, MachineReading, Reach, THIS_MACHINE, Tone};
+    use runnerd_core::api::{FleetMachine, MachineReading, ON_BATTERY, Reach, THIS_MACHINE, Tone};
 
     use super::{DORY_DOWN, FleetJobFact, SKIFF_ONLY, fleet, fleet_facts};
     use crate::ELSEWHERE;
@@ -164,13 +164,10 @@ mod tests {
         );
         assert_eq!(facts.machines[2].tone, Tone::Bad);
         assert!(
-            facts.machines[0]
-                .summary
-                .contains(", on battery: no runner starts"),
-            "tern says its battery holds every start: {}",
+            facts.machines[0].summary.starts_with(ON_BATTERY),
+            "tern says first that its battery holds every start: {}",
             facts.machines[0].summary
         );
-        assert_eq!(facts.machines[0].tone, Tone::Warn, "a held machine warns");
         assert!(
             !facts.machines[1].summary.contains("battery"),
             "{}",
@@ -190,12 +187,21 @@ mod tests {
             let alone = FleetMachine::of_status(reading.machine, reading.status);
             assert_eq!(&alone, merged, "the same line as the fleet's, jobs or not");
         }
+        // Not shutting down, so the battery alone makes the warning.
         let mut status = crate::daemon().status;
+        status.shutting_down = false;
+        let plugged = FleetMachine::this_machine(Ok(status.clone()));
+        assert_eq!(plugged.tone(), Tone::Neutral, "{}", plugged.summary());
+        assert!(
+            !plugged.summary().contains("battery"),
+            "{}",
+            plugged.summary()
+        );
         status.on_battery = true;
         let this = FleetMachine::this_machine(Ok(status));
         assert_eq!(this.name, "tern");
-        assert_eq!(this.tone(), Tone::Warn);
-        assert!(this.summary().contains("on battery"), "{}", this.summary());
+        assert_eq!(this.tone(), Tone::Warn, "a held machine warns");
+        assert!(this.summary().starts_with(ON_BATTERY), "{}", this.summary());
         let unasked = FleetMachine::unasked();
         assert_eq!(unasked.name, THIS_MACHINE);
         assert!(
