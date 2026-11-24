@@ -530,6 +530,13 @@ pub(crate) fn block_size(memory: u64) -> Markup {
     }
 }
 
+/// The id of a profile's section, the same on Capacity and on Insights, so each page links to the other's section
+/// for one profile by its name, whatever order or set of profiles either holds: `jvm` → `profile-6a766d`. Every name
+/// has its own, and a link to a profile the other page lacks lands on that page's top rather than on another profile.
+pub(crate) fn profile_id(name: &str) -> String {
+    format!("profile-{}", hex(name))
+}
+
 /// The id of a repository's row, which a pause or resume replaces: `a/b` → `repo-612f62`. Also a signal name's
 /// suffix, so it has only letters and digits after its dash.
 pub(crate) fn repository_id(name: &str) -> String {
@@ -539,6 +546,30 @@ pub(crate) fn repository_id(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches a slug that folds punctuation, case or spaces together: two profiles would share one section's id.
+    #[test]
+    fn each_profile_name_has_its_own_id_that_html_and_a_url_fragment_take_as_it_is() {
+        let names = [
+            "jvm", "JVM", "jvm-2", "jvm_2", "jvm.2", "jvm 2", "jvm2", "jvm-", "-jvm", "jvé", "jve",
+            "日本", "",
+        ];
+        let ids: std::collections::BTreeSet<String> =
+            names.iter().map(|name| profile_id(name)).collect();
+        assert_eq!(ids.len(), names.len(), "{ids:?}");
+        for id in &ids {
+            assert!(
+                id.starts_with("profile-")
+                    && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "{id} needs no escaping"
+            );
+        }
+        assert_eq!(
+            profile_id("jvm"),
+            profile_id("jvm"),
+            "the same name, the same id"
+        );
+    }
 
     #[test]
     fn a_block_reads_its_full_size_as_the_tui_does_and_the_short_one_only_when_narrow() {

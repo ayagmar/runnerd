@@ -4211,6 +4211,11 @@ th a.sort:hover {
   font-size: 0.875rem;
 }
 
+.queue-profile {
+  display: grid;
+  gap: 0.25rem;
+}
+
 .queue-figures {
   display: flex;
   flex-wrap: wrap;

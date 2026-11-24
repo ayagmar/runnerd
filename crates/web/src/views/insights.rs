@@ -10,7 +10,7 @@ use runnerd_core::api::{
 };
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Page, heading, page, time_ago};
+use super::{Page, heading, page, profile_id, time_ago};
 use crate::format;
 
 /// Everything the insights page shows.
@@ -112,6 +112,9 @@ fn card(insight: &Insight, now: u64) -> Markup {
                 p.sentence { (insight.sentence) }
                 @if let InsightKind::Slower { since: Some(since), .. } = &insight.kind {
                     p.insight-run { "Since " (run_link(since, now)) }
+                }
+                @if let Some(profile) = profile(&insight.kind) {
+                    p.insight-run { "Profile " (capacity_link(profile)) }
                 }
                 @if let Some(latest) = insight.runs.first() {
                     p.insight-run {
@@ -239,6 +242,32 @@ fn ranked(title: &str, tops: &[WriteTop]) -> Markup {
     }
 }
 
+/// The profile an insight is about, from its kind's own field; `None` for one about a job, a repository or the host,
+/// which links to no profile. Every kind is listed, so a new one decides whether it has a profile.
+fn profile(kind: &InsightKind) -> Option<&str> {
+    match kind {
+        InsightKind::NearCap { profile, .. }
+        | InsightKind::CpuHeld { profile, .. }
+        | InsightKind::StoreOverflow { profile, .. } => Some(profile),
+        InsightKind::Slower { .. }
+        | InsightKind::Flaky { .. }
+        | InsightKind::ColdCache { .. }
+        | InsightKind::Throttled { .. }
+        | InsightKind::Waits { .. }
+        | InsightKind::HostHeld { .. }
+        | InsightKind::HostLow { .. }
+        | InsightKind::DriveWear { .. }
+        | InsightKind::Unknown => None,
+    }
+}
+
+/// A profile's section on Capacity, by the id both pages give it.
+fn capacity_link(profile: &str) -> Markup {
+    html! {
+        a.hit href=(format!("/sizing#{}", profile_id(profile))) { (profile) " on " (View::Capacity.title()) }
+    }
+}
+
 /// A run in the history, with its page on GitHub.
 fn run_link(run: &RunLink, now: u64) -> Markup {
     html! {
@@ -261,8 +290,11 @@ fn queue(queue: &[ProfileQueue]) -> Markup {
                 span.muted { "From queued to started, by what each plan held the jobs for." }
             }
             @for profile in queue {
-                h3 { (profile.line()) }
-                (figure_list("queue-figures", &profile.figures()))
+                div.queue-profile id=(profile_id(&profile.profile)) {
+                    h3 { (profile.line()) }
+                    (figure_list("queue-figures", &profile.figures()))
+                    p.insight-run { (capacity_link(&profile.profile)) }
+                }
             }
         }
     }

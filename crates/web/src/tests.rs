@@ -45,7 +45,9 @@ use runnerd_core::api::{
 
 use crate::views::{repository_id, slot_id};
 
+mod links;
 mod live;
+mod log_window;
 mod parity;
 mod queue;
 
@@ -2719,7 +2721,10 @@ async fn a_profile_no_job_ran_on_stays_on_the_sizing_page_as_a_chip_not_a_lane()
     let chips = &page[page.find(r#"class="profile-chips""#).unwrap()..];
     let chips = &chips[..chips.find("</ul>").unwrap()];
     assert!(
-        chips.contains(r##"href="#sizing-1">node</a>"##) && chips.contains("too few"),
+        chips.contains(&format!(
+            r##"href="#{}">node</a>"##,
+            crate::views::profile_id("node")
+        )) && chips.contains("too few"),
         "node is a chip with core's word for its advice: {chips}"
     );
 }
