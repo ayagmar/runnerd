@@ -40,7 +40,7 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{App, Connection, Effect, Msg, Pane, Refused, Removal, Resizing, View};
 use super::draw::{Theme, draw};
 use super::feed;
-use super::overlay::{Overlay, Pick};
+use super::overlay::Overlay;
 use crate::testing::Fake;
 use crate::watch;
 
@@ -3553,45 +3553,66 @@ fn followed_lines_are_sent_in_batches_of_bounded_size_and_age() {
     );
 }
 
-/// The fixtures' fleet as the list of machines receives it: this machine, then `skiff` and `dory` of
-/// `machines.toml`.
-fn machine_choices() -> Vec<super::app::MachineChoice> {
-    let fleet = runnerd_fixtures::fleet();
-    fleet
+/// The fixtures' fleet as the list of machines reads it, a machine at a time: this machine, then `skiff` and `dory`
+/// of `machines.toml`.
+fn machines_read() -> Vec<crate::machines::Listed> {
+    runnerd_fixtures::fleet()
         .machines
         .into_iter()
         .enumerate()
-        .map(|(at, machine)| super::app::MachineChoice {
+        .map(|(at, machine)| crate::machines::Listed {
             target: (at > 0).then(|| machine.name.clone()),
-            name: machine.name.clone(),
-            machine: Some(machine),
+            machine,
         })
         .collect()
 }
 
-/// The machines of `machine_choices` as listed before any is read.
+/// The machines of `machines_read` as listed before any is read.
 fn machines_listed() -> Vec<super::app::MachineChoice> {
-    machine_choices()
+    machines_read()
         .into_iter()
-        .map(|choice| super::app::MachineChoice {
-            machine: None,
-            ..choice
+        .map(|read| super::app::MachineChoice {
+            target: read.target,
+            name: read.machine.name,
         })
         .collect()
 }
 
-/// Catches: `m` showing nothing until the slowest machine answers (10 to 30 s with one down), and the readings
-/// moving the cursor the person already put on a machine.
-#[test]
-fn the_list_of_machines_opens_at_once_and_fills_in_place() {
-    let mut app = app();
-    assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
+/// Lists the machines, none read yet, as the loop does on `m`.
+fn list_machines(app: &mut App) {
     app.update(Msg::Machines {
         choices: machines_listed(),
         current: None,
     });
+}
+
+/// Every machine's read landing, in the order given.
+fn machines_land(app: &mut App, order: &[usize]) {
+    let read = machines_read();
+    for at in order {
+        app.update(Msg::MachineRead(read[*at].clone()));
+    }
+}
+
+/// The line of the open list naming `name`.
+fn machine_line(shown: &str, name: &str) -> String {
+    shown
+        .lines()
+        .find(|line| line.contains(&format!(" {name}  ")))
+        .unwrap_or_else(|| panic!("{name}: {shown}"))
+        .to_owned()
+}
+
+/// Catches: `m` showing nothing until the slowest machine answers (up to 20 s with one asleep, ADR 0164), every
+/// machine waiting for the slowest before its line fills, and the readings moving the cursor the person already put
+/// on a machine.
+#[test]
+fn the_list_of_machines_opens_at_once_and_fills_each_machine_as_it_answers() {
+    let mut app = app();
+    assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
+    list_machines(&mut app);
     assert!(
-        matches!(&app.overlay, Overlay::Pick(picker) if picker.pick == Pick::Machine),
+        app.lists_machines(),
         "the list is open before any machine answered"
     );
     let shown = screen(&app, 200, 30, false);
@@ -3600,14 +3621,33 @@ fn the_list_of_machines_opens_at_once_and_fills_in_place() {
         "each machine is being read: {shown}"
     );
     app.update(key(KeyCode::Down));
-    app.update(Msg::Machines {
-        choices: machine_choices(),
-        current: None,
-    });
+    app.update(key(KeyCode::Down));
+    // This machine and skiff answer; dory, asleep, has not.
+    machines_land(&mut app, &[1, 0]);
+    let facts = runnerd_fixtures::fleet_facts(&runnerd_fixtures::fleet());
+    let shown = screen(&app, 200, 30, false);
+    for fact in &facts.machines[..2] {
+        let line = machine_line(&shown, &fact.name);
+        assert!(
+            line.contains(&fact.summary[..40]),
+            "{} is filled: {line}",
+            fact.name
+        );
+    }
+    assert!(
+        machine_line(&shown, "dory").contains(runnerd_core::api::BEING_READ),
+        "dory is still being read: {shown}"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Up)),
+        Vec::new(),
+        "moving while results land"
+    );
+    machines_land(&mut app, &[2]);
     let shown = screen(&app, 200, 30, false);
     assert!(
-        shown.contains("cannot be read"),
-        "the readings fill it: {shown}"
+        machine_line(&shown, "dory").contains("cannot be read"),
+        "dory fills last: {shown}"
     );
     assert_eq!(
         app.update(key(KeyCode::Enter)),
@@ -3616,7 +3656,7 @@ fn the_list_of_machines_opens_at_once_and_fills_in_place() {
     );
 }
 
-/// Catches: the list of machines, arriving late, replacing a search being typed or reopening a list closed meanwhile,
+/// Catches: a machine's reading, arriving late, replacing a search being typed or reopening a list closed meanwhile,
 /// so the next keys act on machines.
 #[test]
 fn a_late_list_of_machines_takes_the_place_of_nothing_else() {
@@ -3624,28 +3664,19 @@ fn a_late_list_of_machines_takes_the_place_of_nothing_else() {
     app.update(key(KeyCode::Char('m')));
     app.update(key(KeyCode::Char('h')));
     app.update(key(KeyCode::Char('/')));
-    for choices in [machines_listed(), machine_choices()] {
-        app.update(Msg::Machines {
-            choices,
-            current: None,
-        });
-        assert!(
-            matches!(app.overlay, Overlay::Input(_)),
-            "the search stays open: {:?}",
-            app.overlay
-        );
-    }
+    list_machines(&mut app);
+    machines_land(&mut app, &[0, 1, 2]);
+    assert!(
+        matches!(app.overlay, Overlay::Input(_)),
+        "the search stays open: {:?}",
+        app.overlay
+    );
     app.update(key(KeyCode::Esc));
     app.update(key(KeyCode::Char('m')));
-    app.update(Msg::Machines {
-        choices: machines_listed(),
-        current: None,
-    });
+    list_machines(&mut app);
     app.update(key(KeyCode::Esc));
-    app.update(Msg::Machines {
-        choices: machine_choices(),
-        current: None,
-    });
+    assert!(!app.lists_machines(), "closed, so its read is given up");
+    machines_land(&mut app, &[0, 1, 2]);
     assert_eq!(app.overlay, Overlay::None, "a list closed stays closed");
 }
 
@@ -3655,21 +3686,12 @@ fn a_late_list_of_machines_takes_the_place_of_nothing_else() {
 fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_chosen() {
     let mut app = app();
     assert_eq!(app.update(key(KeyCode::Char('m'))), vec![Effect::Machines]);
-    app.update(Msg::Machines {
-        choices: machines_listed(),
-        current: None,
-    });
-    app.update(Msg::Machines {
-        choices: machine_choices(),
-        current: None,
-    });
+    list_machines(&mut app);
+    machines_land(&mut app, &[2, 0, 1]);
     let facts = runnerd_fixtures::fleet_facts(&runnerd_fixtures::fleet());
     let shown = screen(&app, 200, 30, false);
     for machine in &facts.machines {
-        let line = shown
-            .lines()
-            .find(|line| line.contains(&format!(" {}  ", machine.name)))
-            .unwrap_or_else(|| panic!("{}: {shown}", machine.name));
+        let line = machine_line(&shown, &machine.name);
         let start = &machine.summary[..machine.summary.len().min(40)];
         assert!(line.contains(start), "{line}");
     }
@@ -3698,6 +3720,7 @@ fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_c
         vec![Effect::Switch(Some("skiff".to_owned()))]
     );
     assert_eq!(app.overlay, Overlay::None, "the list closes");
+    assert!(!app.lists_machines(), "so its read is given up");
     assert!(
         app.flash
             .as_ref()
@@ -3709,12 +3732,97 @@ fn the_list_of_machines_states_each_as_core_does_and_enter_switches_to_the_one_c
     // Enter on the machine read now, the cursor's first place, closes the list and reads nothing.
     app.flash = None;
     app.update(key(KeyCode::Char('m')));
-    app.update(Msg::Machines {
-        choices: machines_listed(),
-        current: None,
-    });
+    list_machines(&mut app);
     assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::Switch(None)]);
     assert_eq!(app.flash, None, "nothing is being read, so nothing says so");
+}
+
+/// Catches: a machine held on battery listed like any other, so the person switches to it expecting runners; and
+/// the hold cut off the end of its line on an 80-column terminal without colour, where a 20-character alias leaves
+/// little room for the notes.
+#[test]
+fn the_list_of_machines_shows_a_battery_hold_as_core_words_it_even_at_80_columns() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('m')));
+    let mut listed = machines_listed();
+    // The longest name `machine add` takes.
+    "abcdefghijklmnopqrst".clone_into(&mut listed[2].name);
+    app.update(Msg::Machines {
+        choices: listed,
+        current: None,
+    });
+    machines_land(&mut app, &[0]);
+    let tern = &runnerd_fixtures::fleet_facts(&runnerd_fixtures::fleet()).machines[0];
+    assert!(
+        tern.summary.starts_with(runnerd_core::api::ON_BATTERY),
+        "{}",
+        tern.summary
+    );
+    let shown = screen(&app, 80, 30, false);
+    assert!(
+        machine_line(&shown, "abcdefghijklmnopqrst").contains(runnerd_core::api::BEING_READ),
+        "{shown}"
+    );
+    assert!(
+        machine_line(&shown, "tern").contains(runnerd_core::api::ON_BATTERY.trim_end()),
+        "tern's battery hold is on screen: {shown}"
+    );
+}
+
+/// Catches: the loop taking a machine's late answer from a list closed and opened again, so the first opening's
+/// read fills the second's line, as a sleeping laptop's stale "cannot be read" would.
+#[tokio::test]
+async fn a_late_answer_from_a_list_opened_before_does_not_fill_the_one_open_now() {
+    let client =
+        runnerd_core::client::Client::new(std::path::PathBuf::from("/nonexistent/runnerd.sock"));
+    let (mut switcher, _answers) = super::Switcher::new(&client);
+    let (mut requests, mut daemon) = super::Requests::new(client.clone());
+    let mut feeding = tokio::spawn(async {});
+    let mut tickets = Vec::new();
+    let mut app = app();
+    for _ in 0..2 {
+        app.update(key(KeyCode::Char('m')));
+        list_machines(&mut app);
+        switcher.listing.open(|ticket| {
+            tickets.push(ticket);
+            tokio::spawn(std::future::pending::<()>())
+        });
+        if tickets.len() == 1 {
+            app.update(key(KeyCode::Esc));
+            switcher.keep_listing(&app);
+        }
+    }
+    let tern = machines_read()[0].clone();
+    let mut take = |ticket, app: &mut App| {
+        switcher.take(
+            super::Answer::Listed {
+                ticket,
+                listed: tern.clone(),
+            },
+            app,
+            &mut requests,
+            &mut feeding,
+            &mut daemon,
+        )
+    };
+    assert!(
+        !take(tickets[0], &mut app),
+        "the first opening's answer is dropped"
+    );
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        machine_line(&shown, "tern").contains(runnerd_core::api::BEING_READ),
+        "tern is still being read: {shown}"
+    );
+    assert!(
+        take(tickets[1], &mut app),
+        "the open list's answer is taken"
+    );
+    let shown = screen(&app, 200, 30, false);
+    assert!(
+        machine_line(&shown, "tern").contains(runnerd_core::api::ON_BATTERY.trim_end()),
+        "tern is filled: {shown}"
+    );
 }
 
 /// Catches: a TUI reading another machine with nothing on screen to say which.

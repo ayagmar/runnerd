@@ -180,4 +180,5 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0171](0171-the-history-packs-final-logs-and-reads-events-by-type.md) | The history packs final logs and reads events by type | Accepted |
 | [0172](0172-simulate-names-the-guard-that-held-each-wait.md) | `simulate` names the guard that held each wait | Accepted |
 | [0173](0173-a-drain-survives-a-restart.md) | A drain survives a restart | Accepted |
+| [0175](0175-the-list-of-machines-fills-each-machine-as-it-answers.md) | The list of machines fills each machine as it answers | Accepted |
 | [0176](0176-a-captured-page-goes-only-once-its-lines-commit.md) | A captured page goes only once its lines commit | Accepted |
