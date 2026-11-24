@@ -716,6 +716,85 @@ fn inodes(dir: &Path) -> Vec<u64> {
     found
 }
 
+/// Sets the time of every file under `dir` to `ago` before now.
+fn age(dir: &Path, ago: Duration) {
+    for item in std::fs::read_dir(dir).unwrap().flatten() {
+        if item.metadata().unwrap().is_dir() {
+            age(&item.path(), ago);
+        } else {
+            std::fs::File::open(item.path())
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - ago)
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_archive_from_a_block_sent_long_before_its_list_outlives_older_entries_across_a_restart()
+{
+    let dir = TestDir::new("actions-aged-block");
+    let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
+    let first = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    let main = first.attach("main", "o/app", ActionsCache::Served).unwrap();
+    first.decide("main", Writes::Allowed, branch("main"));
+    assert!(save(&main, "old", b"old").await);
+    age(&first.directory().join("o"), Duration::from_hours(1));
+    let url = reserve(&main, "new").await;
+    assert_eq!(put_block(&main, &url, "QkxPQ0sxPT0=", b"new").await, 201);
+    // BuildKit sends a layer's blocks, then its list once every layer is sent.
+    age(
+        &entries.join(super::super::UPLOADS),
+        Duration::from_hours(2),
+    );
+    assert_eq!(put_block_list(&main, &url, &["QkxPQ0sxPT0="]).await, 201);
+    assert!(finalize(&main, "new", 3).await);
+    drop(first);
+    let second = BuildCache::open(&entries, &sockets, 4 << 10).unwrap();
+    assert_eq!(second.trim().after.entries, 1);
+    let main = second
+        .attach("main", "o/app", ActionsCache::Served)
+        .unwrap();
+    second.decide("main", Writes::Allowed, branch("main"));
+    assert_eq!(
+        restore(&main, "new", &[]).await,
+        Some(("new".to_owned(), b"new".to_vec()))
+    );
+    assert_eq!(restore(&main, "old", &[]).await, None);
+}
+
+#[tokio::test]
+async fn an_entry_of_many_chunks_reads_whole_and_in_a_range_across_them() {
+    let dir = TestDir::new("actions-chunks");
+    let cache = open(&dir, 1 << 20);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    // Every byte names its place, so a chunk read twice or out of order shows.
+    let archive: Vec<u8> = (0..150_000_u32).map(|n| (n % 251) as u8).collect();
+    assert!(save(&main, "big", &archive).await);
+    assert_eq!(
+        restore(&main, "big", &[]).await,
+        Some(("big".to_owned(), archive.clone()))
+    );
+    let found = call(
+        &main,
+        "GetCacheEntryDownloadURL",
+        &serde_json::json!({ "key": "big", "restore_keys": [], "version": super::VERSION }),
+    )
+    .await;
+    let entry = path_of(&found["signed_download_url"]);
+    let part = send(
+        &main,
+        "GET",
+        &entry,
+        &[("Range", "bytes=60000-139999")],
+        b"",
+    )
+    .await;
+    assert_eq!(part.status, 206);
+    assert_eq!(part.body, archive[60_000..140_000]);
+}
+
 #[tokio::test]
 async fn an_archive_in_one_block_becomes_the_entry_without_being_copied() {
     let dir = TestDir::new("actions-one-block");

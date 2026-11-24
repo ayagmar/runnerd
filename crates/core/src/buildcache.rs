@@ -662,11 +662,14 @@ impl Inner {
         Self::give_back(state, Some(runner), upload.room);
         if stored {
             let now = crate::time::now_ms();
-            // Its file was just written: its time is about now, and a replaced entry's next touch is the new file's.
+            // What its file says, as a restart reads it: a held upload's time is when it was sent.
+            let on_disk = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .map_or(0, crate::time::ms);
             let entry = Entry {
                 bytes: upload.bytes,
                 used: now,
-                on_disk: now,
+                on_disk,
             };
             state.index(&upload.entry);
             if let Some(old) = state.entries.insert(upload.entry, entry) {
@@ -764,14 +767,32 @@ impl Inner {
             if now.saturating_sub(known.on_disk) < TOUCH_EVERY_MS {
                 return;
             }
-            known.on_disk = now;
             // Opened under the lock, as `store` renames and `trim` removes under it: the file is this entry's, and a
-            // time set after it was replaced is the replaced file's, never the new one's.
-            std::fs::File::open(self.root.join(entry))
+            // time set after it was replaced is the replaced file's, never the new one's. One that cannot be opened
+            // keeps its time, and the next hit tries again.
+            let file = std::fs::File::open(self.root.join(entry));
+            if file.is_ok() {
+                known.on_disk = now;
+            }
+            file
         };
-        if let Ok(file) = file {
-            let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now);
-            tokio::task::spawn_blocking(move || file.set_modified(at));
+        let path = entry.to_owned();
+        match file {
+            Ok(file) => {
+                let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now);
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = file.set_modified(at) {
+                        warn!(
+                            "cannot mark build cache entry {} used: {error}",
+                            path.display()
+                        );
+                    }
+                });
+            }
+            Err(error) => warn!(
+                "cannot mark build cache entry {} used: {error}",
+                path.display()
+            ),
         }
     }
 }

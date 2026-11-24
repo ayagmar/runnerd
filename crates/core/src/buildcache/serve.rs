@@ -199,9 +199,8 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
             .get(&entry)
             .is_some_and(|known| known.bytes == length)
     });
-    // An undecided job's too: kept, it would replace the entry with what it holds; dropped, it changes nothing. Either
-    // way held, it takes the room and the place among `MAX_HELD` its job's new uploads need.
-    if same && matches!(writes, Some(Writes::Allowed | Writes::Undecided)) {
+    // Not an undecided job's: held, it brings the entry back should a trim remove it before the job may write.
+    if same && writes == Some(Writes::Allowed) {
         drain(body).await;
         // Still in use, though only ever sent again: Bazel's blobs an action's result needs.
         inner.touch(&entry);

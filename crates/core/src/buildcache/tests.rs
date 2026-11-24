@@ -932,32 +932,30 @@ async fn a_hit_writes_the_file_time_of_an_entry_at_most_hourly_and_a_restart_sti
 }
 
 #[tokio::test]
-async fn an_undecided_jobs_upload_of_an_entry_the_cache_has_holds_no_room() {
+async fn an_undecided_jobs_upload_of_an_entry_brings_it_back_after_a_trim_before_the_decision() {
     let Cache { cache, _dir } = open("held-same", 4 * ENTRY as u64);
     let main = cache.attach("main", "o/app", ActionsCache::Off).unwrap();
     cache.decide("main", Writes::Allowed, Scopes::default());
-    assert_eq!(
-        request(&main, "PUT", "/bazel/cas/blob", b"blob").await.0,
-        200
-    );
-    let fork = cache.attach("fork", "o/app", ActionsCache::Off).unwrap();
-    // Bazel sends every blob of its outputs again, before GitHub has said whether the job may write.
-    for _ in 0..3 {
-        assert_eq!(
-            request(&fork, "PUT", "/bazel/cas/blob", b"evil").await.0,
-            200
-        );
+    let blob = [7; ENTRY];
+    assert_eq!(request(&main, "PUT", "/bazel/cas/blob", &blob).await.0, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Bazel sends the blob again before GitHub has said whether the job may write; the job then ends.
+    let late = cache.attach("late", "o/app", ActionsCache::Off).unwrap();
+    assert_eq!(request(&late, "PUT", "/bazel/cas/blob", &blob).await.0, 200);
+    assert_eq!(waiting(&cache), 1, "held as any upload of an undecided job");
+    assert!(cache.close("late"), "kept for its decision");
+    for key in ["a", "b", "c", "d"] {
+        let path = format!("/bazel/cas/{key}");
+        assert_eq!(request(&main, "PUT", &path, &[0; ENTRY]).await.0, 200);
     }
-    assert_eq!(waiting(&cache), 0, "nothing held for a blob the cache has");
-    assert_eq!(request(&fork, "PUT", "/bazel/cas/new", b"new").await.0, 200);
-    assert_eq!(waiting(&cache), 1, "a blob it lacks is held");
-    cache.decide("fork", Writes::Refused, Scopes::default());
+    // The idle trim runs while GitHub has not answered.
+    assert_eq!(cache.trim().after.entries, 4);
+    assert_eq!(request(&main, "GET", "/bazel/cas/blob", b"").await.0, 404);
+    cache.decide("late", Writes::Allowed, Scopes::default());
     assert_eq!(
         request(&main, "GET", "/bazel/cas/blob", b"").await,
-        (200, b"blob".to_vec())
+        (200, blob.to_vec())
     );
-    assert_eq!(request(&main, "GET", "/bazel/cas/new", b"").await.0, 404);
-    assert_eq!(cache.detach("fork").unwrap().refused, 1);
 }
 
 #[tokio::test]

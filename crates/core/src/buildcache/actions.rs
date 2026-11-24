@@ -697,12 +697,14 @@ impl Joining {
             file,
         } = self;
         let joined = (|| -> io::Result<u64> {
-            // One block is the archive already: renamed, its bytes are written once, not copied. Its data is synced
-            // as a join's is. A rename that fails falls back to the copy.
+            // One block is the archive already: renamed, its bytes are written once, not copied. It takes the join's
+            // time, as a copy would, for the order a restart reads, and its data is synced as a join's is. A rename
+            // that fails falls back to the copy.
             if let [part] = parts.as_slice()
                 && std::fs::rename(&part.file, &file).is_ok()
             {
                 let out = std::fs::File::open(&file)?;
+                out.set_modified(std::time::SystemTime::now())?;
                 out.sync_data()?;
                 return Ok(out.metadata()?.len());
             }
