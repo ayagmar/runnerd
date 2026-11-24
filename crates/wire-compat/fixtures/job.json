@@ -3,6 +3,7 @@
     "admission": null,
     "branch": "main",
     "conclusion": "success",
+    "elsewhere_runner": "runnerd-7c3e5a19-skiff-jvm-2-1763000000",
     "failure_cause": "action-archive",
     "id": 42,
     "labels": [
@@ -53,6 +54,7 @@
       "slot": 0
     },
     "runner_fault": true,
+    "slept": true,
     "state": "completed",
     "steps": [
       {
@@ -98,6 +100,7 @@
     },
     "branch": "main",
     "conclusion": "success",
+    "elsewhere_runner": "runnerd-7c3e5a19-skiff-jvm-2-1763000000",
     "failure_cause": "action-archive",
     "id": 42,
     "labels": [
@@ -159,6 +162,7 @@
       "slot": 0
     },
     "runner_fault": true,
+    "slept": true,
     "state": "completed",
     "steps": [
       {

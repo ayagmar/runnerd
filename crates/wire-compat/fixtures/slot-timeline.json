@@ -15,6 +15,7 @@
         "bars": [
           {
             "conclusion": "success",
+            "elsewhere_runner": "runnerd-7c3e5a19-skiff-jvm-2-1761400000",
             "end": {
               "at": 1761400600,
               "kind": "at"
@@ -25,6 +26,7 @@
             "repository": "tidewater/halyard",
             "runner": "jvm-1-1761400000",
             "runner_fault": true,
+            "slept": true,
             "started_at": 1761400010,
             "state": "completed",
             "workflow": "ci"
@@ -53,6 +55,7 @@
     "unassigned": [
       {
         "conclusion": "success",
+        "elsewhere_runner": "runnerd-7c3e5a19-skiff-jvm-2-1761400000",
         "end": {
           "kind": "unknown"
         },
@@ -62,6 +65,7 @@
         "repository": "tidewater/halyard",
         "runner": null,
         "runner_fault": true,
+        "slept": true,
         "started_at": null,
         "state": "completed",
         "workflow": "ci"

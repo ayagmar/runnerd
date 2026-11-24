@@ -404,6 +404,7 @@
       {
         "branch": "main",
         "conclusion": "success",
+        "elsewhere_runner": "runnerd-7c3e5a19-skiff-jvm-2-1763000000",
         "failure_cause": "action-archive",
         "id": 42,
         "labels": [
@@ -457,6 +458,7 @@
           "slot": 0
         },
         "runner_fault": true,
+        "slept": true,
         "state": "completed",
         "timeline": {
           "cleaned_at": 1761400610,
@@ -471,6 +473,10 @@
         "workflow": "ci"
       }
     ],
+    "machine": {
+      "id": "4f2a91c0",
+      "name": "tern"
+    },
     "message": "120 jobs finished",
     "priority": "default",
     "runners": [

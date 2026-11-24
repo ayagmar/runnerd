@@ -77,6 +77,20 @@
         "written_bytes": 41943040
       }
     },
+    "grype": {
+      "checked_at": 1761400000,
+      "failure": {
+        "detail": "Anchore answered 503",
+        "kind": "listing",
+        "since": 1761399000
+      },
+      "held": {
+        "built_at": 1761390000,
+        "bytes": 1363148800,
+        "schema": "v6.1.10"
+      },
+      "mounted": true
+    },
     "measured_at": 1761400000,
     "volumes": [
       {

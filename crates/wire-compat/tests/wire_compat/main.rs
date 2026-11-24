@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.1.5";
+const PREVIOUS: &str = "v0.1.6";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,50 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[
-    // An older client draws the item by its title, as for any kind it does not know.
-    Accepted {
-        reader: Reader::Previous,
-        item: "attention-kind/grype-database",
-        adr: "0160",
-    },
-    // An older client reads a new insight kind as `Unknown` and shows its sentence.
-    Accepted {
-        reader: Reader::Previous,
-        item: "insight-kind/store-overflow",
-        adr: "0156",
-    },
-    // An older client draws the insight by its sentence, as for any kind it does not know.
-    Accepted {
-        reader: Reader::Previous,
-        item: "insight-kind/drive-wear",
-        adr: "0157",
-    },
-    // An older client says the job waits for a reason it does not know yet, as for any reason it does not know.
-    Accepted {
-        reader: Reader::Previous,
-        item: "waiting/on-battery",
-        adr: "0161",
-    },
-    // An older client reads an overflow host's reason as `Unknown` and says the job waits for a reason it does not know.
-    Accepted {
-        reader: Reader::Previous,
-        item: "waiting/overflow",
-        adr: "0162",
-    },
-    // A downgraded daemon reads a stored `battery` wait as `other`.
-    Accepted {
-        reader: Reader::Previous,
-        item: "wait-cause/battery",
-        adr: "0161",
-    },
-    // An older client and a downgraded daemon read an overflow host's `overflow` wait as `other`.
-    Accepted {
-        reader: Reader::Previous,
-        item: "wait-cause/overflow",
-        adr: "0162",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A value inside an item that a reader reads as its fallback, a loss an ADR accepts. The rest of the item must still
 /// read unchanged, so the item stays checked.
@@ -108,26 +65,7 @@ struct Substitution {
     adr: &'static str,
 }
 
-const SUBSTITUTED: &[Substitution] = &[
-    // An older client shows the queue's time on battery among its `other` waits.
-    Substitution {
-        reader: Reader::Previous,
-        item: "insights/full",
-        path: "queue[].causes[].cause",
-        sent: "battery",
-        read: "other",
-        adr: "0161",
-    },
-    // An older client shows the queue's time left to other machines among its `other` waits.
-    Substitution {
-        reader: Reader::Previous,
-        item: "insights/full",
-        path: "queue[].causes[].cause",
-        sent: "overflow",
-        read: "other",
-        adr: "0162",
-    },
-];
+const SUBSTITUTED: &[Substitution] = &[];
 
 /// Whether `path` in `item`, read as `read` when sent `sent`, is a substitution [`SUBSTITUTED`] accepts for `reader`;
 /// notes the ones it used in `used`, by index.
@@ -451,9 +389,9 @@ documents! {
     "archive-failure-kind": ArchiveFailureKind => variants(samples::archive_failure_kind()),
     "wait-cause": WaitCause => variants(samples::wait_cause()),
     "runner-probe": RunnerProbe => variants(samples::runner_probe()),
+    "grype-failure-kind": GrypeFailureKind => variants(samples::grype_failure_kind()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
-    "grype-failure-kind": GrypeFailureKind => variants(samples::grype_failure_kind()),
 }
 
 /// The previous release's samples, one file per document.
