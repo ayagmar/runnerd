@@ -513,3 +513,41 @@ async fn a_log_chain_stops_at_lines_not_stored_and_a_capture_from_the_stored_pos
     );
     assert_eq!(store.log_position(1).await.unwrap(), position(30));
 }
+
+/// The bug it catches: lines of a job the history has no row for yet breaking their capture's chain, which then starts
+/// over and over while nothing can be stored; or, once the row comes, later lines stored past the ones dropped.
+#[tokio::test]
+async fn lines_of_a_job_with_no_row_are_dropped_and_the_chain_restarts_once_it_has_one() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let position = |offset| LogPosition { page: 1, offset };
+    let mut chain = LogChain::starting_at(Some(position(0)));
+    store
+        .log_chained(
+            1,
+            vec!["early".to_owned()],
+            position(10),
+            u64::MAX,
+            &mut chain,
+        )
+        .await;
+    store.flush().await;
+    assert!(!chain.refused(), "a missing row breaks no chain");
+
+    store.queued("o/r", &queued(1), crate::time::now_ms());
+    store
+        .log_chained(
+            1,
+            vec!["later".to_owned()],
+            position(20),
+            u64::MAX,
+            &mut chain,
+        )
+        .await;
+    store.flush().await;
+    assert!(
+        chain.refused(),
+        "the capture starts again from the empty log"
+    );
+    assert_eq!(store.job(1).await.unwrap().unwrap().summary.log.lines, 0);
+}

@@ -35,7 +35,9 @@ four noisy runners through `Store` wrote 85 MB in two minutes, about 61 GB a day
   writer stores them only if the job's stored position is that start, and no earlier line of the chain was refused;
   otherwise it refuses them, storing and announcing nothing, and refuses the rest of the chain. The capture then
   breaks off, and `recapture` starts it again from the stored position, so a segment that failed is captured again
-  rather than skipped. Lines a capture saw before its job are dropped, as before, and its next lines are not checked.
+  rather than skipped. Lines a capture saw before its job are dropped, as before, and its next lines are not checked. Lines of a job
+  the history has no row for are dropped, as before, without breaking the chain; once the row comes, the next lines
+  do not start where its empty log does, so the capture starts again from the start.
 - **Counters are written when they rise.** A runner's `ooms`, `local_ooms` and `sock_throttled` are written only when
   unknown (`NULL`) or lower than the sample's count. The first sample of a kernel that counts writes 0 once, so
   `hit_cap` and `own_cap` still read `Some(false)` rather than unknown.

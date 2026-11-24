@@ -24,7 +24,7 @@ use crate::github::{JobDetails, JobStep, NamedRun, QueuedJob};
 use crate::record;
 use crate::sync::lock;
 use crate::time;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// How long after the host woke GitHub may still fail a job for its sleep, in ms (ADR 0159): it fails a job whose
 /// runner went silent while the host slept, or once the runner reconnects to a session that has ended. A job that
@@ -960,6 +960,18 @@ impl Writer<'_> {
                 if refused.load(Ordering::Acquire)
                     || broken.iter().any(|chain| Arc::ptr_eq(chain, refused))
                 {
+                    return Ok(());
+                }
+                // No row to store them in, as for a job neither a listing nor its runner's record named: nothing is
+                // stored, as before, and the chain goes on. Once the row comes, the next lines do not start where its
+                // empty log does, so the capture starts again from the start.
+                let exists = self
+                    .db
+                    .query_row("SELECT 1 FROM jobs WHERE id = ?1", [job], |_| Ok(()))
+                    .optional()?
+                    .is_some();
+                if !exists {
+                    debug!("job history: no job {job} to store log lines in");
                     return Ok(());
                 }
                 if let Some(from) = from {
