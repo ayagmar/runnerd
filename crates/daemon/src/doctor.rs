@@ -968,14 +968,20 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     let config_check = match (slice.memory_max, config.host.admission) {
         (None, config::Admission::Measured) => {
             let check = config.check_against(fix_budget);
-            if check.valid {
-                skip(
-                    "config",
-                    "needs the slice's MemoryMax, which measured admission admits against: run the slice's fix, \
-                     or set [host] admission = \"caps\"",
-                )
-            } else {
+            let waits = "needs the slice's MemoryMax, which measured admission admits against: run the slice's fix, \
+                         or set [host] admission = \"caps\"";
+            if !check.valid {
                 check.doctor_check()
+            } else if check.warnings.is_empty() {
+                skip("config", waits)
+            } else {
+                // What the config should fix shows now, as it would once the slice has its MemoryMax.
+                Check {
+                    name: "config".to_owned(),
+                    status: Status::Warn,
+                    detail: format!("{waits}; until then, {}", check.warnings.join("; ")),
+                    fix: None,
+                }
             }
         }
         _ => config.check_against(slice.memory_max).doctor_check(),

@@ -4,9 +4,9 @@ use std::path::Path;
 
 use runnerd_core::admission::{host, pooled};
 use runnerd_core::api::HostMemory;
-use runnerd_core::config::{ByteSize, Config, Image};
+use runnerd_core::config::{ByteSize, Config, Image, Role};
 
-use super::{Machine, Overwrite, Request, init, labels, runs_on, size};
+use super::{Machine, Overwrite, Request, init, labels, overflow_steps, runs_on, size};
 use crate::testdir::Dir;
 
 const GIB: u64 = 1 << 30;
@@ -45,6 +45,7 @@ fn request(dir: &Path, overwrite: Overwrite) -> Request {
         unit: dir.join("systemd/user/runnerd.service"),
         overwrite,
         memory_ceiling: None,
+        role: Role::Primary,
     }
 }
 
@@ -561,4 +562,85 @@ fn the_printed_runs_on_line_asks_for_exactly_the_labels_init_wrote() {
     for repository in &config.repositories {
         assert_eq!(asked, repository.labels, "{}", repository.name);
     }
+}
+
+fn overflow(request: Request) -> Request {
+    Request {
+        role: Role::Overflow,
+        ..request
+    }
+}
+
+/// Catches: `--overflow` leaving the default `warm = 1` on each pool or auto sizing on, so the laptop's first
+/// `check-config` warns about the config init just wrote; or labels that differ from a primary's init.
+#[test]
+fn an_overflow_init_writes_an_overflow_host_the_config_check_has_no_warning_for() {
+    let dir = Dir::new();
+    let laptop = overflow(request(&dir.0, Overwrite::Refuse));
+    let sizing = init(&laptop, &machine(32, 8, None)).unwrap();
+    let text = std::fs::read_to_string(&laptop.config).unwrap();
+    let check = check(&text, Some(sizing.budget));
+    assert!(check.valid, "{}", check.message);
+    assert!(
+        check.warnings.is_empty(),
+        "no role warning: {:?}",
+        check.warnings
+    );
+    let config = Config::parse(&text).unwrap();
+    assert!(config.host.is_overflow(), "role = \"overflow\": {text}");
+    assert!(!config.sizing.auto, "an overflow host is sized by hand");
+    for repository in &config.repositories {
+        assert_eq!(repository.warm, 0, "{}", repository.name);
+        assert_eq!(
+            repository.labels,
+            labels(),
+            "{} has the labels a primary's init gives it",
+            repository.name
+        );
+    }
+    let desktop = Dir::new();
+    let desktop = request(&desktop.0, Overwrite::Refuse);
+    init(&desktop, &machine(32, 8, None)).unwrap();
+    let primary = std::fs::read_to_string(&desktop.config).unwrap();
+    assert!(
+        !primary.contains("role") && !primary.contains("warm"),
+        "a primary's init keeps core's defaults: {primary}"
+    );
+}
+
+/// Catches: `--overflow` run on a machine that already has a config, which it must not replace without `--force`.
+#[test]
+fn an_overflow_init_replaces_an_existing_config_only_with_force() {
+    let dir = Dir::new();
+    let primary = request(&dir.0, Overwrite::Refuse);
+    init(&primary, &machine(64, 16, None)).unwrap();
+    let before = std::fs::read_to_string(&primary.config).unwrap();
+
+    let refused = overflow(request(&dir.0, Overwrite::Refuse));
+    let error = init(&refused, &machine(64, 16, None)).unwrap_err();
+    assert!(error.contains("--force"), "{error}");
+    assert_eq!(std::fs::read_to_string(&refused.config).unwrap(), before);
+
+    let forced = overflow(request(&dir.0, Overwrite::Replace));
+    init(&forced, &machine(64, 16, None)).unwrap();
+    let after = Config::load(&forced.config).unwrap();
+    assert!(after.host.is_overflow(), "--force writes the overflow host");
+}
+
+/// Catches: an overflow host's steps naming another delay than the one it runs with, or leaving out that the labels
+/// must be the primary's.
+#[test]
+fn an_overflow_hosts_steps_name_its_delay_its_labels_and_the_fleet_view() {
+    let dir = Dir::new();
+    let request = overflow(request(&dir.0, Overwrite::Refuse));
+    init(&request, &machine(64, 16, None)).unwrap();
+    let config = Config::load(&request.config).unwrap();
+    let steps = overflow_steps(&labels(), config.host.overflow_after);
+    assert!(steps.contains("within 45s"), "core's default: {steps}");
+    assert!(
+        steps.contains(&format!("[{}]", labels().join(", "))),
+        "{steps}"
+    );
+    assert!(steps.contains("runnerctl machine add"), "{steps}");
+    assert!(steps.contains("only through GitHub"), "{steps}");
 }
