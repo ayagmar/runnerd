@@ -283,9 +283,13 @@ async fn a_start_in_flight_counts_its_reservation_under_measured_admission_and_i
             engine.slot_mut(&slot_1()).end_start().is_some(),
             "{case}: the start ends"
         );
-        engine
-            .slot_mut(&slot_1())
-            .place(starting.into_occupant(1, "container-1".to_owned()));
+        engine.slot_mut(&slot_1()).place(starting.into_occupant(
+            1,
+            "container-1".to_owned(),
+            crate::scheduler::engine::FirstSample::Awaited {
+                since: crate::time::now_ms(),
+            },
+        ));
         let placed = counted(&engine);
 
         // In flight, measured admission goes by its reservation, which has no container to sample; placed, by its

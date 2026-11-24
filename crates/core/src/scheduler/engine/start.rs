@@ -19,7 +19,9 @@ use super::control::Control;
 use super::runners::THIS_SPEC;
 use super::slot::Slot;
 use super::unsynced::Unsynced;
-use super::{Engagement, Engine, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs};
+use super::{
+    Engagement, Engine, FirstSample, Footprint, Occupant, Purpose, Shutdown, Stage, unix_secs,
+};
 use crate::api::{self, Basis, HoldCause};
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerSpec, RunnerState};
@@ -75,7 +77,7 @@ pub(super) struct Starting {
     cpus: u64,
     /// Its container's `tmp_tmpfs` bound in bytes; `None` for none.
     tmp_tmpfs: Option<u64>,
-    /// What `held_by` reads as a fresh runner's start, and its runner's start once placed.
+    /// When its start was launched: its runner's start once placed.
     launched_at: SystemTime,
     /// The labels its runner registers with.
     labels: Vec<String>,
@@ -91,7 +93,6 @@ impl Starting {
             reserved: self.admission.reserved,
             cpus: self.cpus,
             reserved_cpu: self.admission.cpu.map_or(self.cpus, |cpu| cpu.reserved),
-            started_at: self.launched_at,
             key: None,
             job_found_here: None,
             basis: Some(self.admission.basis),
@@ -112,14 +113,21 @@ impl Starting {
         self.behind
     }
 
-    /// The runner it became once Docker made `container` for its registration `runner_id`.
-    pub(super) fn into_occupant(self, runner_id: u64, container: String) -> Occupant {
+    /// The runner it became once Docker made `container` for its registration `runner_id`, counting as `first_sample`
+    /// says until the sampler reads it.
+    pub(super) fn into_occupant(
+        self,
+        runner_id: u64,
+        container: String,
+        first_sample: FirstSample,
+    ) -> Occupant {
         Occupant {
             repository: self.repository,
             runner_name: self.runner_name,
             runner_id,
             container,
             started_at: self.launched_at,
+            first_sample,
             memory: self.memory,
             cpus: self.cpus,
             tmp_tmpfs: self.tmp_tmpfs,
@@ -333,28 +341,59 @@ async fn run<G: GithubApi, D: DockerApi>(
 }
 
 /// The runners batches launched, by name, in launch order, for a test to tell the launches a reading taken
-/// mid-batch binds from those before it, whose registration or Docker start may come later.
+/// mid-batch binds from those before it, whose registration or Docker start may come later; and the runners placed
+/// with nothing to sample them, each with how many runners had launched when its start was folded, for a test to
+/// tell the launches that were checked against its cap from those checked before it was known.
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
-pub(super) struct Launches(Arc<std::sync::Mutex<Vec<String>>>);
+pub(super) struct Launches {
+    launched: Arc<std::sync::Mutex<Vec<String>>>,
+    unwatched: Arc<std::sync::Mutex<Vec<FoldedUnwatched>>>,
+}
+
+/// A runner placed with nothing to sample it, as `Launches` keeps it.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct FoldedUnwatched {
+    runner: String,
+    /// How many runners had launched when its start was folded.
+    launched_before: usize,
+}
 
 #[cfg(test)]
 impl Launches {
     fn note(&self, runner: &str) {
-        crate::sync::lock(&self.0).push(runner.to_owned());
+        crate::sync::lock(&self.launched).push(runner.to_owned());
+    }
+
+    fn note_unwatched(&self, runner: &str) {
+        let launched_before = self.count();
+        crate::sync::lock(&self.unwatched).push(FoldedUnwatched {
+            runner: runner.to_owned(),
+            launched_before,
+        });
     }
 
     /// How many runners were launched so far.
     pub(super) fn count(&self) -> usize {
-        crate::sync::lock(&self.0).len()
+        crate::sync::lock(&self.launched).len()
     }
 
     /// The runners launched after the first `count`, in order.
     pub(super) fn after(&self, count: usize) -> Vec<String> {
-        crate::sync::lock(&self.0)
+        crate::sync::lock(&self.launched)
             .get(count..)
             .unwrap_or_default()
             .to_vec()
+    }
+
+    /// Whether `runner` was placed with nothing to sample it after the last launch so far: no launch was checked
+    /// against its cap.
+    pub(super) fn unwatched_after_every_launch(&self, runner: &str) -> bool {
+        let count = self.count();
+        crate::sync::lock(&self.unwatched)
+            .iter()
+            .any(|folded| folded.runner == runner && folded.launched_before == count)
     }
 }
 
@@ -883,8 +922,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         Err(failure)
                     }
                 };
+                // Only a container the sampler watches from now waits for its first sample at its reservation.
+                let first_sample = match &made {
+                    Ok(Ok(state)) if state.pid.is_some() => FirstSample::Awaited {
+                        since: self.clock.now_ms(),
+                    },
+                    _ => FirstSample::Unwatched,
+                };
+                #[cfg(test)]
+                if first_sample == FirstSample::Unwatched {
+                    self.launches.note_unwatched(&starting.runner_name);
+                }
                 let purpose = starting.purpose;
-                let occupant = starting.into_occupant(runner.id, container);
+                let occupant = starting.into_occupant(runner.id, container, first_sample);
                 self.place(slot, occupant, purpose, made).await
             }
         };
