@@ -1,9 +1,9 @@
-This month: 277 job-minutes here, about $1.66 at GitHub's 2-core Linux rate before your plan's free minutes (1 job not priced)
-  277 minutes of 30 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.66
+This month: 256 job-minutes here, about $1.53 at GitHub's 2-core Linux rate before your plan's free minutes (1 job not priced)
+  256 minutes of 28 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.53
   1 job not priced: lost, so how long they ran is not known
   An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
-Last 30 days: 277 job-minutes here, about $1.66 at GitHub's 2-core Linux rate before your plan's free minutes (1 job not priced)
-  277 minutes of 30 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.66
+Last 30 days: 256 job-minutes here, about $1.53 at GitHub's 2-core Linux rate before your plan's free minutes (1 job not priced)
+  256 minutes of 28 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.53
   1 job not priced: lost, so how long they ran is not known
   An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
 
@@ -23,7 +23,7 @@ disk writes:
     btrfs committed 2.6 times a second
   Drive endurance:
     nvme0n1 is rated to write 600TB (decimal terabytes, as drive makers and SMART count; runnerd's other sizes are binary, 1T = 1.1TB)
-    It has written at least 43.5TB: 41.3TB its SMART log said on Nov 21 11:14 UTC, per [host.drive], and 2.1TB runnerd read since, over 1d 23h of the 2d 0h since; what it wrote while runnerd did not read it is not counted
+    It has written at least 43.5TB: 41.3TB its SMART log said on Nov 22 09:29 UTC, per [host.drive], and 2.1TB runnerd read since, over 1d 23h of the 2d 0h since; what it wrote while runnerd did not read it is not counted
     At the last 7 days' rate, 1.1TB a day over the 6d 20h runnerd read it: the 556.5TB left lasts 500 days
     At the last 24 hours' rate, 1.2TB a day over the 1d 0h runnerd read it: the 556.5TB left lasts 459 days
   Workflows that wrote most:
