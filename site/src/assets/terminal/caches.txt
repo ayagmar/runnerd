@@ -1,4 +1,4 @@
-measured 15m 01s ago
+measured 15m 00s ago
 VOLUME               HOLDS                      SIZE             LIMIT
 runnerd-jvm-base     jvm snapshot                14G                 -
 runnerd-jvm-slot-1   jvm slot 1 layer          1.76G                 -
@@ -14,4 +14,6 @@ build cache for Gradle, sccache, Bazel and Turborepo, and Nx where a workflow op
   18412 entries; 81% of 51085 lookups hit in 7 days, 38G served, 5G stored, 1204 uploads refused
   GitHub Actions' cache: served from the build cache on this host, in place of GitHub's, and counted with it; [caches.build] actions_cache = false turns it off
 action archives
-  23 action archives, 41M, refreshed 4m 01s ago
+  23 action archives, 41M, refreshed 4m 00s ago
+grype database
+  Grype database v6.1.10 built 9h 00m ago, 1.21G, mounted in runners, checked 2h 00m ago
