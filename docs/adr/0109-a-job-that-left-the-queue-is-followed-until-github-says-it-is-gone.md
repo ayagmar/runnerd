@@ -1,6 +1,6 @@
 # 0109. A job that left the queue is followed until GitHub says it is gone
 
-Status: **Accepted** (2026-11-08). No wire, schema or config change.
+Status: **Accepted** (2026-11-08), amended by [0180](0180-a-tick-reads-a-job-once-and-not-what-its-listing-showed.md). No wire, schema or config change.
 
 ## Context
 

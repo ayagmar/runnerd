@@ -69,6 +69,14 @@ fn client(url: &str) -> Github {
     Github::new(url, Box::new(|| Ok(Token(TOKEN.to_owned())))).unwrap()
 }
 
+/// The queued jobs of a listing that follows no job.
+async fn queued(github: &Github, repository: &str) -> Result<Vec<QueuedJob>, Error> {
+    github
+        .queued_jobs(repository, &std::collections::BTreeSet::new())
+        .await
+        .map(|listing| listing.queued)
+}
+
 fn json(body: &str) -> Response {
     ([("content-type", "application/json")], body.to_owned()).into_response()
 }
@@ -93,7 +101,7 @@ async fn queued_jobs_come_from_queued_and_started_runs() {
         _ => StatusCode::NOT_FOUND.into_response(),
     })
     .await;
-    let jobs = client(&url).queued_jobs("o/r").await.unwrap();
+    let jobs = queued(&client(&url), "o/r").await.unwrap();
     assert_eq!(
         jobs,
         [
@@ -217,9 +225,9 @@ async fn a_queued_job_on_a_later_page_of_runs_and_jobs_is_found() {
     })
     .await;
     let github = client(&url);
-    let first = github.queued_jobs("o/r").await.unwrap();
+    let first = queued(&github, "o/r").await.unwrap();
     let sent = seen.lock().unwrap().len();
-    let second = github.queued_jobs("o/r").await.unwrap();
+    let second = queued(&github, "o/r").await.unwrap();
     for jobs in [&first, &second] {
         assert_eq!(
             jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
@@ -322,7 +330,7 @@ async fn a_busy_repository_is_polled_queued_runs_first_then_the_oldest_within_th
         }
     })
     .await;
-    let jobs = client(&url).queued_jobs("o/r").await.unwrap();
+    let jobs = queued(&client(&url), "o/r").await.unwrap();
     assert_eq!(
         jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
         (1..=50).chain(301..=450).collect::<Vec<_>>(),
@@ -476,7 +484,7 @@ async fn a_used_up_rate_limit_delays_requests_until_its_reset() {
     assert_eq!(github.blocked_until(), Some(expected));
     // The next poll is not sent at all before the reset.
     assert!(matches!(
-        github.queued_jobs("o/r").await,
+        queued(&github, "o/r").await,
         Err(Error::RateLimited { .. })
     ));
     assert_eq!(seen.lock().unwrap().len(), 1);
@@ -1076,7 +1084,7 @@ async fn a_run_that_left_the_queue_is_no_longer_cached() {
     .await;
     let github = client(&url);
     for _ in 0..3 {
-        github.queued_jobs("o/r").await.unwrap();
+        queued(&github, "o/r").await.unwrap();
     }
     let jobs_requests: Vec<Seen> = seen
         .lock()
@@ -1384,8 +1392,8 @@ async fn requests_are_counted_by_class_and_by_what_github_answered() {
     let (url, _) = fake_github(counting_fake()).await;
     let github = client(&url);
     // A poll of the repository, twice: the second poll's three answers are 304s.
-    github.queued_jobs("o/r").await.unwrap();
-    github.queued_jobs("o/r").await.unwrap();
+    queued(&github, "o/r").await.unwrap();
+    queued(&github, "o/r").await.unwrap();
     github.runners("o/r").await.unwrap();
     github.job("o/r", 5).await.unwrap();
     github.job("o/r", 5).await.unwrap();
@@ -1791,7 +1799,7 @@ async fn a_jobs_workflow_is_asked_once_per_run_learnt_again_after_a_restart_and_
     let (url, seen) = run_named_github().await;
     let asked = |uri: &str| uris(&seen).iter().filter(|seen| *seen == uri).count();
     let github = client(&url);
-    let queued = github.queued_jobs("o/r").await.unwrap();
+    let queued = queued(&github, "o/r").await.unwrap();
     assert_eq!(queued[0].workflow.as_deref(), Some("CI"));
     for id in [2, 3] {
         assert_eq!(
@@ -2691,4 +2699,144 @@ async fn a_trust_read_refused_for_the_rate_limit_is_an_error_and_backs_off() {
         );
         assert!(github.blocked_until().is_some());
     }
+}
+
+/// One job as GitHub's jobs API gives it, in a run's jobs page and from `GET /actions/jobs/{id}` alike: run `run`'s
+/// attempt 2, under the run's name, with `fields` in place of its status, conclusion, end and runner.
+fn listed_job(id: u64, run: u64, fields: &str) -> String {
+    format!(
+        r#"{{"id":{id},"run_id":{run},"run_attempt":2,"name":"test {id}","workflow_name":"deploy {run}",
+        "head_branch":"main","html_url":"https://github.com/o/r/actions/runs/{run}/job/{id}",
+        "labels":["self-hosted","app"],"created_at":"2026-11-14T10:00:00Z","started_at":"2026-11-14T10:00:10Z",
+        "steps":[{{"number":1,"name":"Set up job","status":"completed","conclusion":"success",
+        "started_at":"2026-11-14T10:00:10Z","completed_at":"2026-11-14T10:00:12Z"}}],{fields}}}"#
+    )
+}
+
+const RUNNING: &str =
+    r#""status":"in_progress","conclusion":null,"completed_at":null,"runner_name":"runnerd-a""#;
+const PASSED: &str = r#""status":"completed","conclusion":"success","completed_at":"2026-11-14T10:01:00Z","runner_name":"runnerd-b""#;
+
+/// Run 20, queued, with queued job 3 and running job 2; run 30, in progress, with no queued job and completed job 4;
+/// both of workflow 7, `CI`. Each job read answers what its page shows.
+async fn pages_github() -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => {
+            json(r#"{"workflow_runs":[{"id":20,"workflow_id":7}]}"#)
+        }
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+            json(r#"{"workflow_runs":[{"id":30,"workflow_id":7}]}"#)
+        }
+        "/repos/o/r/actions/runs/20/jobs?filter=latest&per_page=100" => json(&format!(
+            r#"{{"jobs":[{},{}]}}"#,
+            listed_job(2, 20, RUNNING),
+            listed_job(
+                3,
+                20,
+                r#""status":"queued","conclusion":null,"completed_at":null,"runner_name":null"#
+            )
+        )),
+        "/repos/o/r/actions/runs/30/jobs?filter=latest&per_page=100" => {
+            json(&format!(r#"{{"jobs":[{}]}}"#, listed_job(4, 30, PASSED)))
+        }
+        "/repos/o/r/actions/jobs/2" => json(&listed_job(2, 20, RUNNING)),
+        "/repos/o/r/actions/jobs/4" => json(&listed_job(4, 30, PASSED)),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await
+}
+
+/// The bugs it catches: a listed job decoded with fewer fields than a job read gives (steps, runner, attempt, times,
+/// URL, labels), one that keeps the run's name for its workflow's, or one that costs a request more than the listing.
+#[tokio::test]
+async fn a_listing_gives_the_followed_jobs_its_pages_show_as_a_job_read_describes_them() {
+    let (url, seen) = pages_github().await;
+    let github = client(&url);
+    let plain = github
+        .queued_jobs("o/r", &std::collections::BTreeSet::new())
+        .await
+        .unwrap();
+    assert!(plain.observed.is_empty(), "no job followed, none given");
+    let asked = uris(&seen).len();
+    let listing = github
+        .queued_jobs("o/r", &[2, 3, 4, 9].into_iter().collect())
+        .await
+        .unwrap();
+    assert_eq!(
+        uris(&seen).len() - asked,
+        4,
+        "the same four pages as a listing that follows nothing: {:?}",
+        &uris(&seen)[asked..]
+    );
+    assert_eq!(
+        listing.queued.iter().map(|job| job.id).collect::<Vec<_>>(),
+        [3],
+        "a queued job is the listing's, not an observation"
+    );
+    assert_eq!(listing.queued, plain.queued);
+    let read = [
+        github.job("o/r", 2).await.unwrap(),
+        github.job("o/r", 4).await.unwrap(),
+    ];
+    assert_eq!(listing.observed, read, "each as its read describes it");
+    assert_eq!(read[0].workflow_name.as_deref(), Some("CI"));
+    assert_eq!(read[1].run_attempt, 2);
+    assert_eq!(read[0].steps.len(), 1);
+}
+
+/// The bugs it catches: a listed job given though its details lack what a read would say, or though naming its
+/// workflow would take a read, or a listing that fails for a job its own decoding cannot use.
+#[tokio::test]
+async fn a_listing_leaves_out_a_followed_job_its_page_cannot_answer_for_whole() {
+    let (url, seen) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => json(r#"{"workflow_runs":[]}"#),
+        // Run 50's workflow is not known: naming it would take a read of the run.
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => json(
+            r#"{"workflow_runs":[{"id":30,"workflow_id":7},{"id":50}]}"#,
+        ),
+        "/repos/o/r/actions/runs/30/jobs?filter=latest&per_page=100" => json(&format!(
+            r#"{{"jobs":[{},{},{},{},{}]}}"#,
+            // Queued: the listing names run 30's workflow for it.
+            listed_job(6, 30, r#""status":"queued","conclusion":null,"completed_at":null,"runner_name":null"#),
+            // In progress, but GitHub names no runner yet.
+            listed_job(1, 30, r#""status":"in_progress","conclusion":null,"completed_at":null,"runner_name":null"#),
+            // Completed without a conclusion.
+            listed_job(2, 30, r#""status":"completed","conclusion":null,"completed_at":null,"runner_name":"runnerd-a""#),
+            // A step that does not parse as a job read's.
+            r#"{"id":3,"run_id":30,"name":"odd","status":"completed","conclusion":"success","labels":[],
+               "completed_at":"2026-11-14T10:01:00Z","steps":[{"number":"one"}]}"#,
+            // Not followed.
+            listed_job(4, 30, PASSED),
+        )),
+        "/repos/o/r/actions/runs/50/jobs?filter=latest&per_page=100" => {
+            json(&format!(r#"{{"jobs":[{}]}}"#, listed_job(5, 50, PASSED)))
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let listing = client(&url)
+        .queued_jobs("o/r", &[1, 2, 3, 5].into_iter().collect())
+        .await
+        .unwrap();
+    assert_eq!(
+        listing.queued.iter().map(|job| job.id).collect::<Vec<_>>(),
+        [6]
+    );
+    assert!(
+        listing.observed.is_empty(),
+        "nothing to stand for a read: {:?}",
+        listing.observed
+    );
+    assert_eq!(
+        listing.queued[0].workflow.as_deref(),
+        Some("CI"),
+        "run 30's workflow is known"
+    );
+    assert!(
+        !uris(&seen)
+            .iter()
+            .any(|uri| uri == "/repos/o/r/actions/runs/50"),
+        "no read of run 50 for its workflow: {:?}",
+        uris(&seen)
+    );
 }

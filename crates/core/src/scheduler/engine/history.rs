@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::ledger::{ReadFailure, Unanswered, Wait};
 use super::log_cursor::{Answer, LogCursor};
+use super::observed::{Closing, Observed, Recorded};
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Meanwhile, Occupant, Slot};
 use crate::admission::Key;
@@ -98,6 +99,15 @@ pub(super) struct Described {
     details: Vec<(String, u64, JobDetails)>,
     /// Every job asked about, answered or not: each is asked once a tick.
     asked: BTreeSet<u64>,
+    /// What the tick's listings and reads said of the jobs it follows, which its later reads may stand on (ADR 0180).
+    observed: Observed,
+}
+
+/// A job of `repository` this machine's `runner` took, whose details are wanted.
+struct Wanted {
+    repository: String,
+    id: u64,
+    runner: String,
 }
 
 /// Asks GitHub for jobs, `CONCURRENT_REQUESTS` at a time; the answers come in the order asked. Owns what it needs,
@@ -442,7 +452,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// machine's runner or were cancelled; asks GitHub for the details of the running jobs admission cannot tell
     /// apart yet, which the plan needs. The other running jobs are read once the tick's starts are done
     /// (`follow_running`): reading each running job, a few requests at a time, held every start back.
-    pub(super) async fn follow_jobs(&mut self) -> Described {
+    /// A job the tick's listing showed out of the queue, or that a read this tick answered, is not read again: what
+    /// GitHub said then stands for the read (ADR 0180). A job no answer of this tick showed is read: absence from a
+    /// listing says only that the job is not queued.
+    pub(super) async fn follow_jobs(&mut self, mut observed: Observed) -> Described {
         let taken = self.taken();
         self.follow_listed(&taken);
         // A repository a reload removed lists nothing: GitHub says what became of its jobs. The clock counts failed
@@ -454,10 +467,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .listed(repository)
                     .is_none_or(|state| state.listing().no_longer_shows(id))
         });
-        for (repository, id, answer) in self
-            .serving(read_jobs(self.github.clone(), left), Meanwhile::Turnover)
-            .await
-        {
+        let (mut answers, mut unread) = (Vec::new(), Vec::new());
+        for (repository, id) in left {
+            match observed.for_queued(&repository, id) {
+                Some(details) => answers.push((repository, id, Ok(details))),
+                None => unread.push((repository, id)),
+            }
+        }
+        answers.extend(
+            self.serving(read_jobs(self.github.clone(), unread), Meanwhile::Turnover)
+                .await,
+        );
+        for (repository, id, answer) in answers {
+            if let Ok(details) = &answer {
+                observed.read(&repository, details, Recorded::No);
+            }
             // One of this machine's runners took it, and its log capture has not said so, as when Docker failed it:
             // the job is that runner's.
             let unclaimed = match &answer {
@@ -502,12 +526,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // by the history's record of it; only those no listing showed need GitHub's details before the plan.
         self.take_found();
         self.find_keys().await;
-        let unnamed: Vec<(String, u64)> = self
+        let unnamed: Vec<Wanted> = self
             .occupied()
             .filter(|(_, occupant)| !occupant.has_key())
-            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.named_job()?)))
+            .filter_map(|(_, occupant)| {
+                Some(Wanted {
+                    repository: occupant.repository.clone(),
+                    id: occupant.named_job()?,
+                    runner: occupant.runner_name.clone(),
+                })
+            })
             .collect();
-        self.describe(unnamed).await
+        self.describe(unnamed, observed).await
     }
 
     /// Stops following a job that left the queue once GitHub says it is gone, as when its run or repository was deleted
@@ -535,30 +565,39 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// once every `poll_interval` (`RunningReads`), since the tick's listing began at `anchor`; and for the jobs of
     /// ended runners whose build cache uploads wait, every tick, since an end is read once and a plan waits for
     /// nothing here. Decides the writes of the jobs described, closes the build caches of ended runners and asks
-    /// whether the jobs of removed runners completed, every tick.
+    /// whether the jobs of removed runners completed, every tick. A job the tick's listing showed taken by its runner,
+    /// or that a read this tick answered, is not read again, and a closing job a tick's answer showed completed is
+    /// neither read nor recorded twice (ADR 0180).
     pub(super) async fn follow_running(&mut self, before: Described, anchor: tokio::time::Instant) {
         let interval = self.governor.reads_every(self.config.host.poll_interval);
         let running = if self.running_reads.due(anchor, interval) {
             self.running_reads.read(anchor);
             self.occupied()
                 .filter_map(|(_, occupant)| {
-                    Some((occupant.repository.clone(), occupant.named_job()?))
+                    Some(Wanted {
+                        repository: occupant.repository.clone(),
+                        id: occupant.named_job()?,
+                        runner: occupant.runner_name.clone(),
+                    })
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let ended = self
-            .ended_uploads
-            .values()
-            .map(|ended| (ended.repository.clone(), ended.job));
-        let reads: Vec<(String, u64)> = running
+        let ended = self.ended_uploads.iter().map(|(runner, ended)| Wanted {
+            repository: ended.repository.clone(),
+            id: ended.job,
+            runner: runner.clone(),
+        });
+        let reads: Vec<Wanted> = running
             .into_iter()
             .chain(ended)
-            .filter(|(_, id)| !before.asked.contains(id))
+            .filter(|wanted| !before.asked.contains(&wanted.id))
             .collect();
         let mut described = before.details;
-        described.extend(self.describe(reads).await.details);
+        let after = self.describe(reads, before.observed).await;
+        described.extend(after.details);
+        let observed = after.observed;
         // Jobs recorded under GitHub's name for their run, as their workflow's could not be read then.
         for named in self.github.named_runs().await {
             self.store.workflow_named(named);
@@ -566,18 +605,35 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let undecided = self.undecided(&described);
         self.decide_writes(undecided).await;
         self.detach_ended();
-        self.follow_closing().await;
+        self.follow_closing(&observed).await;
     }
 
     /// Asks GitHub for the details of `jobs`, running or ended: names their runners' jobs for admission, places them
-    /// in their runs and records them.
-    async fn describe(&mut self, jobs: Vec<(String, u64)>) -> Described {
-        let asked = jobs.iter().map(|(_, id)| *id).collect();
-        let mut described = Vec::new();
-        for (repository, id, answer) in self
-            .serving(read_jobs(self.github.clone(), jobs), Meanwhile::Turnover)
-            .await
+    /// in their runs and records them. Each job once, and not at all when `observed` has details of this tick that
+    /// name its runner, which stand for the read.
+    async fn describe(&mut self, jobs: Vec<Wanted>, mut observed: Observed) -> Described {
+        let mut asked = BTreeSet::new();
+        let (mut answers, mut unread) = (Vec::new(), Vec::new());
+        for Wanted {
+            repository,
+            id,
+            runner,
+        } in jobs
         {
+            if !asked.insert(id) {
+                continue;
+            }
+            match observed.for_runner(&repository, id, &runner) {
+                Some(details) => answers.push((repository, id, Ok(details))),
+                None => unread.push((repository, id)),
+            }
+        }
+        answers.extend(
+            self.serving(read_jobs(self.github.clone(), unread), Meanwhile::Turnover)
+                .await,
+        );
+        let mut described = Vec::new();
+        for (repository, id, answer) in answers {
             match answer {
                 Ok(details) => {
                     // The attempt and workflow of a run first seen through a job a runner took.
@@ -598,6 +654,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     }
                     self.note_workflow(details.run_id, details.workflow_name.as_deref());
                     self.name_job(&repository, &details);
+                    observed.read(&repository, &details, Recorded::Yes);
                     described.push((repository, id, details.clone()));
                     self.store.details(details);
                 }
@@ -607,13 +664,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Described {
             details: described,
             asked,
+            observed,
         }
     }
 
     /// Asks GitHub whether the jobs of removed runners completed, and records them lost once it says nothing of them
-    /// for `LOST_AFTER`.
-    async fn follow_closing(&mut self) {
-        let closing = self.ledger.closing();
+    /// for `LOST_AFTER`. One this tick's answers showed completed is not asked about, and closes without its details
+    /// recorded again when the tick recorded them already.
+    async fn follow_closing(&mut self, observed: &Observed) {
+        let mut closing = Vec::new();
+        for (repository, id) in self.ledger.closing() {
+            match observed.for_closing(&repository, id) {
+                Some(Closing::Completed(details)) => {
+                    self.ledger.closed(id);
+                    self.store.details(*details);
+                }
+                Some(Closing::Recorded) => self.ledger.closed(id),
+                None => closing.push((repository, id)),
+            }
+        }
         for (repository, id, answer) in self
             .serving(read_jobs(self.github.clone(), closing), Meanwhile::Turnover)
             .await

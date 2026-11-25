@@ -158,6 +158,18 @@ impl Ledger {
         picked
     }
 
+    /// The jobs of `repository` followed, queued or closing: those a listing of it may show (ADR 0180).
+    pub(super) fn of(&self, repository: &str) -> impl Iterator<Item = u64> {
+        self.0.iter().filter_map(move |(id, stage)| match stage {
+            Stage::Queued { repository: of, .. } | Stage::Closing { repository: of, .. }
+                if of == repository =>
+            {
+                Some(*id)
+            }
+            Stage::Queued { .. } | Stage::Closing { .. } => None,
+        })
+    }
+
     /// The closing jobs, with their repositories.
     pub(super) fn closing(&self) -> Vec<(String, u64)> {
         self.0
