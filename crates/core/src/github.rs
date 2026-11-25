@@ -7,7 +7,7 @@
 //! archives need (`archives`, ADR 0147). A job action's request is read for
 //! its status and headers only: its body is never read, and what it returns is a class and a status, never text.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -225,6 +225,22 @@ pub struct QueuedJob {
     pub branch: Option<String>,
     /// The job's page on GitHub.
     pub url: Option<String>,
+}
+
+/// What one listing of a repository's queued jobs read (ADR 0180): the jobs waiting for a runner, and the followed jobs
+/// the same run pages showed in any other status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobListing {
+    /// The jobs waiting for a runner, by ID.
+    pub queued: Vec<QueuedJob>,
+    /// Those of the jobs the listing was asked to follow that a page it read showed and that were not queued, each as
+    /// [`GithubApi::job`] would describe it then: its run's latest attempt, as the pages are read with
+    /// `filter=latest`, its workflow named as a job read names it. A followed job is left out when no page read
+    /// showed it (its run ended, was left unread, or GitHub moved it between pages), when it was of an earlier
+    /// attempt, when its details lack what its status implies (a runner and a start once in progress, a conclusion
+    /// and an end once completed), and when its workflow's name would take a read the listing did not make. Its
+    /// absence says nothing of the job: only a read of it does.
+    pub observed: Vec<JobDetails>,
 }
 
 /// A job as `GET /repos/{owner}/{repo}/actions/jobs/{id}` describes it: its progress and steps.
@@ -506,11 +522,14 @@ struct Withdrawn;
 
 /// The GitHub calls the scheduler makes. `Github` is the real client; the engine's tests use a fake.
 pub trait GithubApi: crate::archives::Source + Send + Sync {
-    /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
+    /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs, and of
+    /// the jobs in `following`, those the same pages showed in another status (ADR 0180): no request more is made for
+    /// them.
     fn queued_jobs(
         &self,
         repository: &str,
-    ) -> impl Future<Output = Result<Vec<QueuedJob>, Error>> + Send;
+        following: &BTreeSet<u64>,
+    ) -> impl Future<Output = Result<JobListing, Error>> + Send;
     /// The repository's self-hosted runners.
     fn runners(&self, repository: &str) -> impl Future<Output = Result<Vec<Runner>, Error>> + Send;
     /// Registers a runner for one job and returns it with the config the runner's listener takes.
@@ -674,9 +693,11 @@ enum RunState {
     Started,
 }
 
+/// A page of a run's jobs. Each item is read twice: as the listing's `Job`, which must parse, and, for a followed job,
+/// as the `JobDetails` a job read gives, which may not.
 #[derive(Deserialize)]
 struct Jobs {
-    jobs: Vec<Job>,
+    jobs: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -964,6 +985,94 @@ impl Github {
         Err(Unresolved)
     }
 
+    /// The jobs of `repository`'s run `run`, its latest attempt's: those queued, and of those in `following`, the
+    /// others a job read would describe alike (`JobListing::observed`); and how many pages that read.
+    async fn run_jobs(
+        &self,
+        repository: &str,
+        run: u64,
+        following: &BTreeSet<u64>,
+    ) -> Result<RunJobs, Error> {
+        let path = jobs_path(repository, run);
+        let pages: Vec<Jobs> = self.get_pages(&path).await?;
+        let read = pages.len();
+        let (mut queued, mut seen, mut rejected) = (Vec::new(), Vec::new(), Vec::new());
+        for item in pages.into_iter().flat_map(|page| page.jobs) {
+            let job = Job::deserialize(&item).map_err(|source| Error::Decode {
+                path: path.clone(),
+                source,
+            })?;
+            if job.status == "queued" {
+                queued.push(job);
+            } else if following.contains(&job.id) {
+                match ListedDetails::deserialize(&item).map(JobDetails::from) {
+                    Ok(details) if is_whole(&details) => seen.push(details),
+                    // Shown in part, it says nothing, and taints whatever another page shows of it.
+                    Ok(_) | Err(_) => rejected.push(job.id),
+                }
+            }
+        }
+        // GitHub's name for a listing that cannot read the workflow's: the job is listed all the same, and its
+        // details name it once they are read. A run with no queued job is named only as far as no read is needed.
+        let named = match queued.first() {
+            Some(first) => match self.workflow_name(repository, first.run_id).await {
+                Ok(Some(name)) => Named::Workflow(name),
+                Ok(None) => Named::GitHubs,
+                Err(Unresolved) => Named::Unread(first.workflow_name.clone()),
+            },
+            None if seen.is_empty() => {
+                return Ok(RunJobs {
+                    pages: read,
+                    queued: Vec::new(),
+                    observed: Vec::new(),
+                    rejected,
+                });
+            }
+            None => match lock(&self.workflows).next(repository, run, Instant::now()) {
+                Next::Named(name) => Named::Workflow(name),
+                Next::Unnamed => Named::GitHubs,
+                Next::ReadRun | Next::ReadList(_) | Next::Waiting => Named::Unread(None),
+            },
+        };
+        // A job read names its workflow, or keeps GitHub's name when GitHub gives none; one that could not read
+        // it owes the run its name. Only the first two are what a job read would give.
+        match &named {
+            Named::Workflow(name) => {
+                for details in &mut seen {
+                    details.workflow_name = Some(name.clone());
+                }
+            }
+            Named::GitHubs => {}
+            Named::Unread(_) => seen.clear(),
+        }
+        let workflow = match named {
+            Named::Workflow(name) => Some(name),
+            Named::GitHubs => queued.first().and_then(|first| first.workflow_name.clone()),
+            Named::Unread(name) => name,
+        };
+        let queued = queued.into_iter().map(|job| QueuedJob {
+            id: job.id,
+            run_id: job.run_id,
+            name: job.name,
+            labels: job.labels,
+            created_at: job
+                .created_at
+                .as_deref()
+                .and_then(time::parse_ms)
+                .unwrap_or(0),
+            run_attempt: job.run_attempt.unwrap_or(1),
+            workflow: workflow.clone(),
+            branch: job.head_branch,
+            url: job.html_url,
+        });
+        Ok(RunJobs {
+            pages: read,
+            queued: queued.collect(),
+            observed: seen,
+            rejected,
+        })
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         self.get_page(path).await.map(|page| page.body)
     }
@@ -1204,7 +1313,11 @@ struct Answered {
 }
 
 impl GithubApi for Github {
-    async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
+    async fn queued_jobs(
+        &self,
+        repository: &str,
+        following: &BTreeSet<u64>,
+    ) -> Result<JobListing, Error> {
         // Each run once, `Started` if GitHub lists it in progress, `Waiting` if queued.
         let mut runs = Vec::new();
         for (state, status) in [
@@ -1233,44 +1346,18 @@ impl GithubApi for Github {
         runs.sort_unstable();
         let listed: HashSet<u64> = runs.iter().map(|&(_, id)| id).collect();
         let mut jobs = Vec::new();
+        let mut observed = Vec::new();
+        let mut rejected = HashSet::new();
         let mut requests = 0;
         for &(_, run) in &runs {
             if requests >= JOB_REQUESTS {
                 break;
             }
-            let pages: Vec<Jobs> = self.get_pages(&jobs_path(repository, run)).await?;
-            requests += pages.len();
-            let queued: Vec<Job> = pages
-                .into_iter()
-                .flat_map(|page| page.jobs)
-                .filter(|job| job.status == "queued")
-                .collect();
-            let Some(first) = queued.first() else {
-                continue;
-            };
-            // GitHub's name for a listing that cannot read the workflow's: the job is listed all the same, and its
-            // details name it once they are read.
-            let workflow = match self.workflow_name(repository, first.run_id).await {
-                Ok(Some(name)) => Some(name),
-                Ok(None) | Err(Unresolved) => first.workflow_name.clone(),
-            };
-            jobs.extend(queued.into_iter().map(|job| {
-                QueuedJob {
-                    id: job.id,
-                    run_id: job.run_id,
-                    name: job.name,
-                    labels: job.labels,
-                    created_at: job
-                        .created_at
-                        .as_deref()
-                        .and_then(time::parse_ms)
-                        .unwrap_or(0),
-                    run_attempt: job.run_attempt.unwrap_or(1),
-                    workflow: workflow.clone(),
-                    branch: job.head_branch,
-                    url: job.html_url,
-                }
-            }));
+            let read = self.run_jobs(repository, run, following).await?;
+            requests += read.pages;
+            jobs.extend(read.queued);
+            observed.extend(read.observed);
+            rejected.extend(read.rejected);
         }
         // The cached pages of runs that ended: nothing asks for them again.
         let runs_prefix = format!("/repos/{repository}/actions/runs/");
@@ -1285,7 +1372,20 @@ impl GithubApi for Github {
         });
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
-        Ok(jobs)
+        // A job GitHub moved between pages shows twice. Queued on either page, it is the listing's; shown otherwise
+        // on each, or in part on one, nothing says which is newer, so it is read.
+        let observed = agreed(observed)
+            .into_iter()
+            .filter(|details| !rejected.contains(&details.id))
+            .filter(|details| {
+                jobs.binary_search_by_key(&details.id, |job| job.id)
+                    .is_err()
+            })
+            .collect();
+        Ok(JobListing {
+            queued: jobs,
+            observed,
+        })
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
@@ -1568,6 +1668,165 @@ impl GithubApi for Github {
 
 fn jobs_path(repository: &str, run: u64) -> String {
     format!("/repos/{repository}/actions/runs/{run}/jobs?filter=latest&per_page={PER_PAGE}")
+}
+
+/// What a listing read of one run's jobs.
+struct RunJobs {
+    /// The pages read.
+    pages: usize,
+    queued: Vec<QueuedJob>,
+    observed: Vec<JobDetails>,
+    /// The followed jobs not queued that some page showed without the whole answer.
+    rejected: Vec<u64>,
+}
+
+/// How a run's workflow is named for its jobs a listing read.
+enum Named {
+    /// By its workflow's name.
+    Workflow(String),
+    /// By GitHub's name for the run: GitHub gives the run no workflow, or does not list it.
+    GitHubs,
+    /// Not yet: its name takes a read that failed or that the listing did not make. A queued job keeps this name,
+    /// GitHub's; no other job's details are given.
+    Unread(Option<String>),
+}
+
+/// Whether a listed job's details say all a job read would for its status, its times readable: a waiting job has none
+/// of a start, an end or a runner; a job in progress has its runner and its start and no end; a completed one its
+/// conclusion and its end, a runner and a start or neither, and every step completed, so no step is left to come. A queued
+/// job is the listing's, and a status the history does not know is not given.
+pub(crate) fn is_whole(details: &JobDetails) -> bool {
+    let readable =
+        |at: &Option<String>| at.as_deref().is_none_or(|at| time::parse_ms(at).is_some());
+    let steps_readable = details
+        .steps
+        .iter()
+        .all(|step| readable(&step.started_at) && readable(&step.completed_at));
+    if !(readable(&details.created_at)
+        && readable(&details.started_at)
+        && readable(&details.completed_at)
+        && steps_readable)
+    {
+        return false;
+    }
+    let shown = (
+        details.runner_name.is_some(),
+        details.started_at.is_some(),
+        details.completed_at.is_some(),
+    );
+    // What each status has: (runner, start, end).
+    match details.status.as_str() {
+        "waiting" => shown == (false, false, false),
+        "in_progress" => shown == (true, true, false),
+        "completed" => {
+            details.conclusion.is_some()
+                && matches!(shown, (false, false, true) | (true, true, true))
+                && details.steps.iter().all(|step| step.status == "completed")
+        }
+        _ => false,
+    }
+}
+
+/// The observed jobs by ID, each once: a job shown twice alike is kept once, and one shown twice otherwise, which a
+/// listing cannot order, is left out.
+fn agreed(mut observed: Vec<JobDetails>) -> Vec<JobDetails> {
+    observed.sort_by_key(|details| details.id);
+    let mut agreed: Vec<JobDetails> = Vec::with_capacity(observed.len());
+    let mut conflicting = HashSet::new();
+    for details in observed {
+        match agreed.last() {
+            Some(last) if last.id == details.id => {
+                if *last != details {
+                    conflicting.insert(details.id);
+                }
+            }
+            _ => agreed.push(details),
+        }
+    }
+    agreed.retain(|details| !conflicting.contains(&details.id));
+    agreed
+}
+
+/// A job as a run's jobs page shows it, read strictly: each field a job read has must be there, `null` where GitHub
+/// gives none, where `JobDetails` takes a missing one for its default. An item without one is not taken for a read.
+#[derive(Deserialize)]
+struct ListedDetails {
+    id: u64,
+    run_id: u64,
+    run_attempt: u32,
+    name: String,
+    #[serde(deserialize_with = "present")]
+    workflow_name: Option<String>,
+    #[serde(deserialize_with = "present")]
+    head_branch: Option<String>,
+    #[serde(deserialize_with = "present")]
+    html_url: Option<String>,
+    labels: Vec<String>,
+    #[serde(deserialize_with = "present")]
+    created_at: Option<String>,
+    status: String,
+    #[serde(deserialize_with = "present")]
+    conclusion: Option<String>,
+    #[serde(deserialize_with = "present")]
+    started_at: Option<String>,
+    #[serde(deserialize_with = "present")]
+    completed_at: Option<String>,
+    #[serde(deserialize_with = "present")]
+    runner_name: Option<String>,
+    steps: Vec<ListedStep>,
+}
+
+/// A step of `ListedDetails`, read as strictly.
+#[derive(Deserialize)]
+struct ListedStep {
+    number: u32,
+    name: String,
+    status: String,
+    #[serde(deserialize_with = "present")]
+    conclusion: Option<String>,
+    #[serde(deserialize_with = "present")]
+    started_at: Option<String>,
+    #[serde(deserialize_with = "present")]
+    completed_at: Option<String>,
+}
+
+/// A field that may be `null` but must be there: with `deserialize_with`, serde no longer takes a missing `Option`
+/// for `None`.
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+impl From<ListedDetails> for JobDetails {
+    fn from(listed: ListedDetails) -> JobDetails {
+        JobDetails {
+            id: listed.id,
+            run_id: listed.run_id,
+            run_attempt: listed.run_attempt,
+            name: listed.name,
+            workflow_name: listed.workflow_name,
+            head_branch: listed.head_branch,
+            html_url: listed.html_url,
+            labels: listed.labels,
+            created_at: listed.created_at,
+            status: listed.status,
+            conclusion: listed.conclusion,
+            started_at: listed.started_at,
+            completed_at: listed.completed_at,
+            runner_name: listed.runner_name,
+            steps: listed
+                .steps
+                .into_iter()
+                .map(|step| JobStep {
+                    number: step.number,
+                    name: step.name,
+                    status: step.status,
+                    conclusion: step.conclusion,
+                    started_at: step.started_at,
+                    completed_at: step.completed_at,
+                })
+                .collect(),
+        }
+    }
 }
 
 struct Response {

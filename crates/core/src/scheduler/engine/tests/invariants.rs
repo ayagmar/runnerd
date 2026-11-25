@@ -1020,7 +1020,11 @@ impl Case {
     fn new() -> Case {
         let github = FakeGithub::default();
         let docker = FakeDocker::default();
-        github.0.lock().unwrap().strict = true;
+        {
+            let mut state = github.0.lock().unwrap();
+            state.strict = true;
+            state.mirror_pages = Mirror::OddJobs;
+        }
         {
             let mut state = docker.0.lock().unwrap();
             state.captures_wait = Some(github.clone());

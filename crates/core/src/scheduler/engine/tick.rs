@@ -16,6 +16,7 @@ use super::admission::Admitting;
 use super::engagement::Mark;
 use super::history::CAPTURE_DRAIN;
 use super::listing_pace::Runners;
+use super::observed::Observed;
 use super::pool_health::PoolHealth;
 use super::presence::RunnersListing;
 use super::runners::{Collected, Removal};
@@ -27,7 +28,7 @@ use crate::admission::{growth, host, pooled};
 use crate::api::AdmissionPolicy;
 use crate::config::Admission;
 use crate::docker::{self, DockerApi};
-use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
+use crate::github::{self, Deleted, GithubApi, JobListing, QueuedJob, Runner};
 use crate::scheduler::{
     Barrier, Budget, Caps, Decision, Demand, Drained, HostLimit, Left, Pause, Plan, Pool,
     Preparing, Profile, Recount, Repository, Retired, RunTimes, RunnerSlot, Slot, SlotRef,
@@ -232,14 +233,22 @@ struct Listings {
 /// A repository's queued jobs as GitHub answered them, and those of them the history recorded.
 struct Listed {
     repository: String,
-    answer: Result<Vec<QueuedJob>, github::Error>,
+    answer: Result<JobListing, github::Error>,
     recorded: Vec<u64>,
 }
 
-/// A repository to list the queued jobs of, with the labels of each of its pools.
+/// A repository to list the queued jobs of, with the labels of each of its pools, and the jobs of it the engine
+/// follows, which the listing's pages may show (ADR 0180).
 struct ToList {
     repository: String,
     pools: Vec<Vec<String>>,
+    following: BTreeSet<u64>,
+}
+
+/// When a tick's listing began, on Tokio's clock, and what its listings showed of the jobs the engine follows.
+pub(super) struct TickListing {
+    pub(super) at: tokio::time::Instant,
+    pub(super) observed: Observed,
 }
 
 /// Lists the runners of `runners`, then the queued jobs of `queued`, `CONCURRENT_REQUESTS` at a time. Owns what it
@@ -262,25 +271,31 @@ async fn list<G: GithubApi>(
         .await;
     // Only once every runner listing is in: see `tick`.
     let queued = futures_util::stream::iter(queued)
-        .map(|ToList { repository, pools }| async move {
-            let answer = github.queued_jobs(&repository).await;
-            let at = time::now_ms();
-            let mut recorded = Vec::new();
-            for job in answer.iter().flatten() {
-                if pools
-                    .iter()
-                    .any(|labels| crate::scheduler::matches(job, labels))
-                {
-                    store.queued(&repository, job, at);
-                    recorded.push(job.id);
+        .map(
+            |ToList {
+                 repository,
+                 pools,
+                 following,
+             }| async move {
+                let answer = github.queued_jobs(&repository, &following).await;
+                let at = time::now_ms();
+                let mut recorded = Vec::new();
+                for job in answer.iter().flat_map(|listing| &listing.queued) {
+                    if pools
+                        .iter()
+                        .any(|labels| crate::scheduler::matches(job, labels))
+                    {
+                        store.queued(&repository, job, at);
+                        recorded.push(job.id);
+                    }
                 }
-            }
-            Listed {
-                repository,
-                answer,
-                recorded,
-            }
-        })
+                Listed {
+                    repository,
+                    answer,
+                    recorded,
+                }
+            },
+        )
         .buffered(CONCURRENT_REQUESTS)
         .collect()
         .await;
@@ -355,11 +370,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_shells().await;
         self.kill_cancelled().await;
         pace.lap(Phase::Collecting, self.passes_in_tick);
-        let listed_at = self.list(mode, scope, &mut pace).await;
+        let TickListing {
+            at: listed_at,
+            observed,
+        } = self.list(mode, scope, &mut pace).await;
         self.look_for_sleep();
         self.forget_unlisted();
         self.take_found();
-        let described = self.follow_jobs().await;
+        let described = self.follow_jobs(observed).await;
         self.count_mirror_bytes().await;
         if mode == Shutdown::No {
             self.follow_visibility();
@@ -596,13 +614,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Lists the runners and queued jobs of the repositories `scope` makes due, and applies what GitHub answered;
-    /// says when the listing began, on Tokio's clock.
-    async fn list(
-        &mut self,
-        mode: Shutdown,
-        scope: Scope,
-        pace: &mut Pace,
-    ) -> tokio::time::Instant {
+    /// says when the listing began, on Tokio's clock, and what the listings showed of the jobs followed.
+    async fn list(&mut self, mode: Shutdown, scope: Scope, pace: &mut Pace) -> TickListing {
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.
@@ -623,8 +636,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .await;
         pace.lap(Phase::Listing, self.passes_in_tick);
         self.apply_runners(listings.runners, listing).await;
+        let mut observed = Observed::default();
         if mode == Shutdown::No {
-            self.apply_queued(listings.queued, listing, listing_began);
+            self.apply_queued(listings.queued, listing, listing_began, &mut observed);
             self.refresh_warm().await;
             self.note_queued();
         } else {
@@ -632,7 +646,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 state.listing_mut().stop();
             }
         }
-        listed_at
+        TickListing {
+            at: listed_at,
+            observed,
+        }
     }
 
     /// What a tick in `mode` listing `scope` lists from `at`, each repository it probes noting that it did: in a stop
@@ -726,13 +743,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Each configured repository in `due` with the labels of its pools, whose queued jobs a tick lists.
+    /// Each configured repository in `due` with the labels of its pools, whose queued jobs a tick lists, and the jobs
+    /// of it the history follows (ADR 0180): queued or closing in the ledger, named by a runner here, or of an ended
+    /// runner whose uploads wait.
     fn to_list(&self, due: &BTreeSet<String>) -> Vec<ToList> {
         self.config
             .repository_names()
             .into_iter()
             .filter(|repository| due.contains(repository))
             .map(|repository| ToList {
+                following: self
+                    .ledger
+                    .of(&repository)
+                    .chain(
+                        self.occupied()
+                            .filter(|(_, occupant)| occupant.repository == repository)
+                            .filter_map(|(_, occupant)| occupant.named_job()),
+                    )
+                    .chain(
+                        self.ended_uploads
+                            .values()
+                            .filter(|ended| ended.repository == repository)
+                            .map(|ended| ended.job),
+                    )
+                    .collect(),
                 pools: self
                     .config
                     .repositories
@@ -1439,7 +1473,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// meanwhile is skipped, but the jobs its listing recorded are followed until GitHub says what became of them. A
     /// claim on a listed job made after the listing began, or less than `poll_interval` before, outlives it
     /// (`Mark::ends`).
-    fn apply_queued(&mut self, listings: Vec<Listed>, listing: Mark, began: u64) {
+    fn apply_queued(
+        &mut self,
+        listings: Vec<Listed>,
+        listing: Mark,
+        began: u64,
+        observed: &mut Observed,
+    ) {
         let floor = self.config.host.poll_interval;
         let taken = self.taken();
         let now = self.now();
@@ -1452,8 +1492,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let mut listed = false;
             let mut failed = None;
             let queued = match answer {
-                Ok(queued) => {
+                Ok(JobListing {
+                    queued,
+                    observed: shown,
+                }) => {
                     listed = true;
+                    observed.listed(&repository, shown);
                     queued
                 }
                 Err(github::Error::RateLimited { until }) => {

@@ -30,6 +30,7 @@ mod listing;
 mod listing_pace;
 mod log_cursor;
 mod mirror;
+mod observed;
 mod open_waits;
 mod overflow;
 mod pool_health;

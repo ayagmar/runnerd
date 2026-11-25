@@ -115,6 +115,13 @@ struct GithubState {
     missed_listings: BTreeSet<String>,
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
+    /// What the run pages a queued jobs listing reads show of jobs not queued (ADR 0180), of the repository
+    /// `queued_on` says, or of any: the listing gives those it is asked to follow, as complete as a read's.
+    pages: BTreeMap<u64, JobDetails>,
+    /// The jobs each queued jobs listing was asked to follow, in order.
+    following: Vec<BTreeSet<u64>>,
+    /// Whether the run pages also show jobs as `jobs` describes them.
+    mirror_pages: Mirror,
     /// What `named_runs` gives, once.
     named_runs: Vec<github::NamedRun>,
     /// What started each workflow run, by run ID.
@@ -413,6 +420,17 @@ impl FakeGithub {
     }
 }
 
+/// Which jobs of `GithubState::jobs` the fake's run pages show, besides `pages`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Mirror {
+    /// None.
+    #[default]
+    Off,
+    /// Each followed job of an odd ID whose details are whole (`github::is_whole`): the invariants' GitHub, whose
+    /// answers then come from listings and reads alike.
+    OddJobs,
+}
+
 /// A registration asked of the fake GitHub, counted while it waits for its answer.
 /// A wait counted in a fake's state while it lasts, so one dropped with its task, as an aborted batch's are, leaves
 /// the count right.
@@ -533,7 +551,11 @@ impl crate::archives::Source for FakeGithub {
 }
 
 impl GithubApi for FakeGithub {
-    async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
+    async fn queued_jobs(
+        &self,
+        repository: &str,
+        following: &BTreeSet<u64>,
+    ) -> Result<github::JobListing, github::Error> {
         if let Err(error) = self.blocked() {
             self.0
                 .lock()
@@ -575,8 +597,25 @@ impl GithubApi for FakeGithub {
             })
             .cloned()
             .collect();
+        state.following.push(following.clone());
+        let mirrored = state.jobs.values().filter(|job| {
+            state.mirror_pages == Mirror::OddJobs && job.id % 2 == 1 && github::is_whole(job)
+        });
+        let observed = state
+            .pages
+            .values()
+            .chain(mirrored)
+            .filter(|job| following.contains(&job.id))
+            .filter(|job| {
+                state
+                    .queued_on
+                    .get(&job.id)
+                    .is_none_or(|on| on == repository)
+            })
+            .cloned()
+            .collect();
         FakeGithub::polled(&mut state);
-        Ok(queued)
+        Ok(github::JobListing { queued, observed })
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
@@ -8437,6 +8476,7 @@ mod growth;
 mod grype;
 mod invariants;
 mod ledger;
+mod observed;
 mod occupant;
 mod open_waits;
 mod overflow;

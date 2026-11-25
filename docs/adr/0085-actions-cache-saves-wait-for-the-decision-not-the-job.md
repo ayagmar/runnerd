@@ -1,6 +1,6 @@
 # 0085. GitHub Actions cache saves wait for the decision, not the job
 
-Status: **Accepted** (2026-10-30). Amends [0082](0082-github-actions-cache-served-from-the-host.md).
+Status: **Accepted** (2026-10-30), amended by [0180](0180-a-tick-reads-a-job-once-and-not-what-its-listing-showed.md). Amends [0082](0082-github-actions-cache-served-from-the-host.md).
 
 ## Context
 

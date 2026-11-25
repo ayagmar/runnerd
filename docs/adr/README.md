@@ -92,7 +92,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default | Amended by 0085 |
 | [0083](0083-turborepo-and-nx-from-the-build-cache.md) | Turborepo's remote cache served from the build cache, Nx's on request | Accepted |
 | [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md) | A host whose memory grows to a ceiling counts what it can still grow by | Amended by 0086 |
-| [0085](0085-actions-cache-saves-wait-for-the-decision-not-the-job.md) | GitHub Actions cache saves wait for the decision, not the job | Accepted |
+| [0085](0085-actions-cache-saves-wait-for-the-decision-not-the-job.md) | GitHub Actions cache saves wait for the decision, not the job | Amended by 0180 |
 | [0086](0086-sizing-and-init-know-the-memory-ceiling.md) | Auto sizing and `runnerd init` know the memory ceiling | Amended by 0088 |
 | [0087](0087-an-insight-for-jobs-their-cpu-cap-holds-back.md) | An insight for jobs their CPU cap holds back | Accepted |
 | [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md) | Sizing advice keeps to a profile's memory bounds | Accepted |
@@ -116,7 +116,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0106](0106-a-tick-reads-its-running-jobs-after-its-starts.md) | A tick reads its running jobs after its starts | Accepted |
 | [0107](0107-a-warm-runner-waits-only-where-jobs-just-came.md) | A warm runner waits only where jobs just came | Accepted |
 | [0108](0108-the-host-limit-counts-what-runs-uses-and-keeps-room-for-its-two-largest-growths.md) | The host limit counts what runs uses and keeps room for its two largest growths | Proposed, amended by 0130 |
-| [0109](0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md) | A job that left the queue is followed until GitHub says it is gone | Accepted |
+| [0109](0109-a-job-that-left-the-queue-is-followed-until-github-says-it-is-gone.md) | A job that left the queue is followed until GitHub says it is gone | Amended by 0180 |
 | [0110](0110-a-jobs-wait-ends-when-its-runner-starts.md) | A job's wait for a slot or the host ends when its runner starts | Accepted |
 | [0111](0111-a-tick-is-due-an-interval-after-the-last-one-started.md) | A tick is due an interval after the last one started | Amended by 0127, 0128 |
 | [0112](0112-no-start-and-no-hold-while-githubs-rate-limit-is-used-up.md) | No start and no hold while GitHub's rate limit is used up | Accepted |
@@ -131,7 +131,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0121](0121-a-repository-keeps-its-pools-in-one-map.md) | A repository keeps its pools in one map | Accepted |
 | [0122](0122-what-admission-keeps-is-sealed.md) | What admission keeps between plans is sealed | Accepted |
 | [0123](0123-a-slots-state-is-one-sealed-value.md) | A slot's state is one sealed value | Amended by 0125 |
-| [0124](0124-running-jobs-are-read-every-poll-interval.md) | Running jobs are read every poll interval, not every tick | Amended by 0127 |
+| [0124](0124-running-jobs-are-read-every-poll-interval.md) | Running jobs are read every poll interval, not every tick | Amended by 0127, 0180 |
 | [0125](0125-a-start-runs-its-io-in-a-task-of-its-own.md) | A start runs its I/O in a task of its own | Amended by 0126 |
 | [0126](0126-up-to-four-starts-at-once-one-registration-at-a-time.md) | Up to four starts at once, one registration at a time | Accepted |
 | [0127](0127-reads-are-paced-by-the-rate-limit.md) | GitHub reads are paced by what is left of the rate limit | Amended by 0128 |
@@ -186,3 +186,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0177](0177-a-live-page-says-whether-its-data-is-current.md) | A live page says whether its data is current | Accepted |
 | [0178](0178-a-cited-log-line-is-read-where-it-is.md) | A cited log line is read where it is | Accepted |
 | [0179](0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md) | Trust reads stay conditional, and each endpoint is counted | Accepted |
+| [0180](0180-a-tick-reads-a-job-once-and-not-what-its-listing-showed.md) | A tick reads a job once, and not what its listing showed | Accepted |

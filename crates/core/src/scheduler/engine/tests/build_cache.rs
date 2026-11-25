@@ -1276,3 +1276,75 @@ async fn an_ended_jobs_actions_cache_saves_go_when_github_never_names_its_runner
         assert_eq!((counts.written_bytes, counts.refused), (0, 1), "job {job}");
     }
 }
+
+/// The finished events of `job` the history announced so far.
+fn finished_events(
+    events: &mut tokio::sync::broadcast::Receiver<Arc<api::EventEnvelope>>,
+    job: u64,
+) -> usize {
+    let mut finished = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.event.job() == Some(job) && event.event.kind() == "job.finished" {
+            finished += 1;
+        }
+    }
+    finished
+}
+
+/// The bugs it catches: a job whose runner ended with its uploads held, and so both an ended upload and closing, read
+/// twice in one tick, recorded twice, or left closing; and a listing that showed it completed not standing for those
+/// reads (ADR 0180). The held upload is still read on each tick its trust read fails.
+#[tokio::test]
+async fn an_ended_jobs_completion_is_read_once_a_tick_while_its_trust_read_fails() {
+    for shown in [false, true] {
+        let github = FakeGithub::default();
+        let docker = FakeDocker::default();
+        let dir = TestDir::new("engine-actions-cache-read-once");
+        let (mut engine, handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+        let mut events = handle.store.subscribe();
+        let pushes = [trigger("push", "main"), trigger("push", "main")];
+        let [(first, first_socket), _] = two_jobs(&github, &docker, &mut engine, pushes).await;
+        github_names_no_runner(&github, 1);
+        engine.tick(Shutdown::No).await;
+        assert!(
+            save_now(&first_socket, "deps", b"deps").await,
+            "job 1's save is answered at once"
+        );
+        jobs_end(&docker, &mut engine).await;
+        assert!(engine.is_closing(1), "job 1's runner went");
+        assert!(!engine.no_ended_uploads(), "its save waits");
+
+        // GitHub says it completed on its runner, on a tick it cannot say what started the run.
+        let failing = github.0.lock().unwrap().triggers.remove(&1).unwrap();
+        github_names(&github, 1, &first, "completed");
+        if shown {
+            let completed = github.0.lock().unwrap().jobs[&1].clone();
+            github.0.lock().unwrap().pages.insert(1, completed);
+        }
+        let before = reads_of(&github, 1);
+        engine.tick(Shutdown::No).await;
+        let reads = reads_of(&github, 1) - before;
+        assert_eq!(
+            reads,
+            usize::from(!shown),
+            "one read at most (listing shown: {shown})"
+        );
+        assert!(!engine.is_closing(1), "it closed (listing shown: {shown})");
+        assert!(cache.undecided(&first), "nothing decided its writes");
+        until_state(&handle, 1, JobState::Completed).await;
+        assert_eq!(finished_events(&mut events, 1), 1, "recorded finished once");
+
+        // The next tick reads it again for its held save, and its trust read answers.
+        github.0.lock().unwrap().triggers.insert(1, failing);
+        let before = reads_of(&github, 1);
+        engine.tick(Shutdown::No).await;
+        assert_eq!(reads_of(&github, 1) - before, usize::from(!shown));
+        let counts = counts_of(&handle, 1).await;
+        assert!(counts.writer, "job 1 wrote once GitHub answered");
+        assert_eq!(
+            finished_events(&mut events, 1),
+            0,
+            "and is not finished again"
+        );
+    }
+}
