@@ -2198,18 +2198,31 @@ impl TrustReads {
             .insert(uri.to_owned(), (status, body.to_owned()));
     }
 
-    /// Answers `request`; a body `no-etag:` starts is sent without its prefix and without an `ETag`.
+    /// Answers `request`; a body `no-etag:` starts is sent without its prefix and without an `ETag`, and one `next:`
+    /// starts without its prefix and with a `Link` to a next page.
     fn respond(&self, request: &Seen) -> Response {
         let Some((status, body)) = self.0.lock().unwrap().get(&request.uri).cloned() else {
             return StatusCode::NOT_FOUND.into_response();
         };
+        if let Some(body) = body.strip_prefix("next:") {
+            let mut response = TrustReads::respond_with(request, status, body);
+            response.headers_mut().insert(
+                "link",
+                HeaderValue::from_static(r#"<https://api.github.com/next>; rel="next""#),
+            );
+            return response;
+        }
+        TrustReads::respond_with(request, status, &body)
+    }
+
+    fn respond_with(request: &Seen, status: StatusCode, body: &str) -> Response {
         if let Some(body) = body.strip_prefix("no-etag:") {
             return (status, json(body)).into_response();
         }
         if status != StatusCode::OK {
-            return (status, json(&body)).into_response();
+            return (status, json(body)).into_response();
         }
-        let etag = etag_of(&body);
+        let etag = etag_of(body);
         if request
             .headers
             .get("if-none-match")
@@ -2217,7 +2230,7 @@ impl TrustReads {
         {
             return (StatusCode::NOT_MODIFIED, [("etag", etag)]).into_response();
         }
-        ([("etag", etag)], json(&body)).into_response()
+        ([("etag", etag)], json(body)).into_response()
     }
 }
 
@@ -2510,4 +2523,172 @@ async fn every_endpoint_is_counted_in_a_class_of_its_own() {
             (Class::Cancel, [1, 0, 0]),
         ]
     );
+}
+
+/// The bug it catches: a read nothing asks again (a commit's tree, a blob, the pages of an attempt's jobs) making room
+/// in the conditional cache as it is answered, so a large one evicts the trust answers kept for the next job and
+/// every later read of them pays the rate limit, though its own answer is dropped right after.
+#[tokio::test]
+async fn one_off_reads_never_evict_a_kept_trust_answer() {
+    use crate::archives::Source as _;
+    let reads = TrustReads::new();
+    let (mut github, seen) = trust_github(&reads).await;
+    // Room for run 1's answer and a little more; every answer may go at once.
+    let limit = RUN.len() + trusted_run(PERSON).len() + 200;
+    *github.etags.get_mut().unwrap() = Conditional::new(limit, Duration::ZERO);
+    assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+
+    // Each one-off answer, with an ETag, needs most of the cache's room.
+    let pad = "p".repeat(limit - 400);
+    reads.answer(
+        "/repos/o/r/git/trees/a1?recursive=1",
+        StatusCode::OK,
+        &format!(r#"{{"truncated":false,"pad":"{pad}","tree":[{{"path":"a.yml","type":"blob","sha":"b1","size":3}}]}}"#),
+    );
+    reads.answer(
+        "/repos/o/r/git/blobs/b1",
+        StatusCode::OK,
+        &format!(r#"{{"size":3,"encoding":"base64","content":"YWJj","pad":"{pad}"}}"#),
+    );
+    let attempt = "/repos/o/r/actions/runs/1/attempts/1/jobs?per_page=100";
+    let job = |id: u64| {
+        format!(
+            r#"{{"total_count":2,"pad":"{pad}","jobs":[{{"id":{id},"name":"j{id}","status":"completed","conclusion":"failure"}}]}}"#
+        )
+    };
+    reads.answer(attempt, StatusCode::OK, &format!("next:{}", job(1)));
+    reads.answer(&format!("{attempt}&page=2"), StatusCode::OK, &job(2));
+    let tree = github.tree("o/r", "a1").await.unwrap();
+    assert_eq!(tree.files.len(), 1);
+    assert_eq!(github.blob("o/r", "b1", 10).await.unwrap(), b"abc");
+    assert_eq!(
+        github.attempt_jobs("o/r", 1, 1).await.unwrap().len(),
+        2,
+        "both pages of the attempt, whole"
+    );
+
+    assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+    assert_eq!(
+        conditional(&seen, RUN),
+        [false, true],
+        "run 1 is still asked conditionally"
+    );
+    assert_eq!(tally_of(&github, Class::Trigger), [1, 1, 0]);
+    for (class, read) in [
+        (Class::ArchiveTree, [1, 0, 0]),
+        (Class::ArchiveBlob, [1, 0, 0]),
+        (Class::AttemptJobs, [2, 0, 0]),
+    ] {
+        assert_eq!(tally_of(&github, class), read, "{class:?} counted as sent");
+    }
+    let kept: Vec<String> = lock(&github.etags).entries.keys().cloned().collect();
+    assert_eq!(kept, [RUN], "no one-off answer is kept");
+    // Asked again, a one-off read is whole: never conditional.
+    github.tree("o/r", "a1").await.unwrap();
+    assert_eq!(
+        conditional(&seen, "/repos/o/r/git/trees/a1?recursive=1"),
+        [false, false]
+    );
+}
+
+/// A run read again after its answer was kept, while GitHub cannot be reached or its answer breaks off: the bug it
+/// catches is the kept answer served in place of the one that failed, which would let a job write on what GitHub
+/// last said rather than what it says now.
+#[tokio::test]
+async fn a_trust_read_that_fails_in_transport_is_an_error_not_the_kept_answer() {
+    let broken = Arc::new(AtomicBool::new(false));
+    let reads = TrustReads::new();
+    let (answering, breaking) = (reads.clone(), broken.clone());
+    let (url, seen) = fake_github(move |request| {
+        if breaking.load(Ordering::SeqCst) {
+            // The headers come, then the body fails.
+            let body = axum::body::Body::from_stream(futures_util::stream::iter([
+                Ok::<_, std::io::Error>("{\"event\":"),
+                Err(std::io::Error::other("connection reset")),
+            ]));
+            return ([("etag", "\"other\"")], body).into_response();
+        }
+        answering.respond(request)
+    })
+    .await;
+    let mut github = client(&url);
+    assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+    // A bot re-runs it, and the answer breaks off.
+    reads.answer(RUN, StatusCode::OK, &trusted_run(BOT));
+    broken.store(true, Ordering::SeqCst);
+    assert!(
+        matches!(github.run_trigger("o/r", 1).await, Err(Error::Http { .. })),
+        "a broken answer is an error"
+    );
+    broken.store(false, Ordering::SeqCst);
+    // GitHub cannot be reached at all.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let reachable = std::mem::replace(&mut github.base, closed);
+    assert!(
+        matches!(github.run_trigger("o/r", 1).await, Err(Error::Http { .. })),
+        "an unreachable GitHub is an error"
+    );
+    github.base = reachable;
+    assert!(
+        !github.run_trigger("o/r", 1).await.unwrap().by_user,
+        "once GitHub answers, its answer counts: the bot's re-run"
+    );
+    assert_eq!(conditional(&seen, RUN), [false, true, true]);
+}
+
+/// The bug it catches: a refusal for a used-up rate limit, which the client backs off from, answered from the run
+/// kept before it, or a read held back by the backoff answered from it without asking GitHub.
+#[tokio::test]
+async fn a_trust_read_refused_for_the_rate_limit_is_an_error_and_backs_off() {
+    for (status, headers) in [
+        (
+            StatusCode::FORBIDDEN,
+            [
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "4000000000"),
+            ],
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "600"), ("x-ratelimit-remaining", "12")],
+        ),
+    ] {
+        let limited = Arc::new(AtomicBool::new(false));
+        let reads = TrustReads::new();
+        let (answering, limiting) = (reads.clone(), limited.clone());
+        let (url, seen) = fake_github(move |request| {
+            if limiting.load(Ordering::SeqCst) {
+                return (status, headers, json(r#"{"message":"rate limit"}"#)).into_response();
+            }
+            answering.respond(request)
+        })
+        .await;
+        let github = client(&url);
+        assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+        limited.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(
+                github.run_trigger("o/r", 1).await,
+                Err(Error::RateLimited { .. })
+            ),
+            "{status} with its backoff is a rate limit"
+        );
+        let sent = seen.lock().unwrap().len();
+        limited.store(false, Ordering::SeqCst);
+        assert!(
+            matches!(
+                github.run_trigger("o/r", 1).await,
+                Err(Error::RateLimited { .. })
+            ),
+            "held back until the limit resets, not answered from the kept run"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            sent,
+            "nothing sent while backing off"
+        );
+        assert!(github.blocked_until().is_some());
+    }
 }

@@ -31,8 +31,10 @@ again, so under continuous jobs it was never asked again and a renamed default b
   Any other answer replaces it: a success with an `ETag` is kept in its place, one without an `ETag` drops it, and an
   error status (403, 404, 429, 5xx) drops it and is an error. A request that fails before GitHub answers, or that
   the rate limit holds back, is an error and serves nothing. A failed read leaves the job undecided, as before.
-- **Large or one-off answers are still dropped.** A commit's tree and a blob (ADR 0147), a completed job, and the
-  pages of an attempt's jobs read before a re-run (ADR 0134) are dropped after their read.
+- **One-off reads never touch the cache.** A commit's tree and a blob (ADR 0147) and the pages of an attempt's jobs
+  read before a re-run (ADR 0134) are read with `Retain::Once`: unconditional, never kept, so a large one makes no
+  room and evicts no answer kept for the next decision. They are counted and their statuses and the attempt's
+  completeness are checked as before. A completed job is dropped after its read, as before.
 - **A default branch is as old as its read.** The jobs of one decision batch share one read of each repository's
   default branch, made before their runs are read. A branch already known is used with the age of the read that
   learnt it, so it is read again an hour after that read however many jobs used it.

@@ -968,23 +968,37 @@ impl Github {
         self.get_page(path).await.map(|page| page.body)
     }
 
-    /// One answer, conditional on the last one kept for `path`, and whether GitHub's `Link` names a next page.
-    async fn get_page<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
-        self.get_page_as(Class::of(&Method::GET, path), path).await
+    /// One answer to a read nothing asks again, sent unconditionally and never kept: it makes no room in the
+    /// answers kept for conditional requests, so it evicts none of them.
+    async fn get_once<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        self.get_page_as(Class::of(&Method::GET, path), path, Retain::Once)
+            .await
+            .map(|page| page.body)
     }
 
-    /// As `get_page`, counted as `class`: for a path whose class depends on why it is read.
+    /// One answer, conditional on the last one kept for `path`, and whether GitHub's `Link` names a next page.
+    async fn get_page<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
+        self.get_page_as(Class::of(&Method::GET, path), path, Retain::Kept)
+            .await
+    }
+
+    /// As `get_page`, counted as `class`, and kept or not as `retain` says.
     ///
-    /// A 304 serves the answer kept for `path`, which GitHub just said is current; any other answer replaces it,
-    /// kept again only when it succeeded and carries an `ETag`. So an error, a refusal or an answer without an `ETag`
-    /// is never followed by the answer kept before it, and a request that fails before GitHub answers serves nothing.
+    /// Kept: a 304 serves the answer kept for `path`, which GitHub just said is current; any other answer replaces
+    /// it, kept again only when it succeeded and carries an `ETag`. So an error, a refusal or an answer without an
+    /// `ETag` is never followed by the answer kept before it, and a request that fails before GitHub answers serves
+    /// nothing. Once: the request is unconditional and the cache is neither read nor written.
     async fn get_page_as<T: DeserializeOwned>(
         &self,
         class: Class,
         path: &str,
+        retain: Retain,
     ) -> Result<Page<T>, Error> {
         // Taken before the request, so an answer evicted meanwhile still serves a 304.
-        let cached = lock(&self.etags).get(path, Instant::now());
+        let cached = match retain {
+            Retain::Kept => lock(&self.etags).get(path, Instant::now()),
+            Retain::Once => None,
+        };
         let etag = cached.as_ref().map(|cached| &cached.etag);
         let response = self.send(class, Method::GET, path, None, etag).await?;
         let (bytes, next) = if response.status == StatusCode::NOT_MODIFIED {
@@ -1005,11 +1019,19 @@ impl Github {
             let response = match expect_success(Method::GET, path, response) {
                 Ok(response) => response,
                 Err(error) => {
-                    lock(&self.etags).remove(path);
+                    if retain == Retain::Kept {
+                        lock(&self.etags).remove(path);
+                    }
                     return Err(error);
                 }
             };
             let body: Arc<[u8]> = response.bytes.into();
+            if retain == Retain::Once {
+                return Ok(Page {
+                    body: decode(path, &body)?,
+                    next: response.next,
+                });
+            }
             let mut etags = lock(&self.etags);
             match etag {
                 Some(etag) => etags.insert(
@@ -1053,9 +1075,13 @@ impl Github {
         Ok(pages)
     }
 
-    /// Every page of the listing at `path`, as `get_pages` reads them, or an error when a next page is still named at
-    /// `MAX_PAGES`: for a caller that must see the whole listing or nothing.
-    async fn all_pages<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
+    /// Every page of the listing at `path`, as `get_pages` reads them but kept or not as `retain` says, or an error
+    /// when a next page is still named at `MAX_PAGES`: for a caller that must see the whole listing or nothing.
+    async fn all_pages<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        retain: Retain,
+    ) -> Result<Vec<T>, Error> {
         let mut pages = Vec::new();
         for page in 1..=MAX_PAGES {
             let path = if page == 1 {
@@ -1063,7 +1089,9 @@ impl Github {
             } else {
                 format!("{path}&page={page}")
             };
-            let answer: Page<T> = self.get_page(&path).await?;
+            let answer: Page<T> = self
+                .get_page_as(Class::of(&Method::GET, &path), &path, retain)
+                .await?;
             pages.push(answer.body);
             if !answer.next {
                 return Ok(pages);
@@ -1331,7 +1359,10 @@ impl GithubApi for Github {
         // Kept for a conditional request (ADR 0179): every job of a run asks for it again, and an unchanged run is a
         // 304, which costs no rate limit. Each decision still asks GitHub: a re-run keeps the run's ID and changes
         // who triggered it.
-        let run: RunBody = self.get_page_as(Class::Trigger, &path).await?.body;
+        let run: RunBody = self
+            .get_page_as(Class::Trigger, &path, Retain::Kept)
+            .await?
+            .body;
         if let Some(workflow) = run.workflow_id {
             lock(&self.workflows).run(repository, run_id, Some(workflow));
         }
@@ -1488,9 +1519,8 @@ impl GithubApi for Github {
         let path = format!(
             "/repos/{repository}/actions/runs/{run}/attempts/{attempt}/jobs?per_page={PER_PAGE}"
         );
-        let read = self.all_pages::<AttemptJobs>(&path).await;
-        // Read once per re-run: nothing asks for these pages again.
-        lock(&self.etags).retain(|cached| !cached.starts_with(&path));
+        // Read once per re-run: nothing asks for these pages again, so none is kept.
+        let read = self.all_pages::<AttemptJobs>(&path, Retain::Once).await;
         let pages = read.map_err(|error| ActionFailure::of(&error))?;
         // Every page says how many jobs the attempt has, and they agree: a page without the count, or a count that
         // moved between pages, is no whole listing.
@@ -1546,6 +1576,15 @@ struct Response {
     /// Whether its `Link` names a next page.
     next: bool,
     bytes: Vec<u8>,
+}
+
+/// Whether a read keeps its answer for a conditional request on its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retain {
+    /// Kept: the path is asked again, and an unchanged answer is a 304.
+    Kept,
+    /// Never kept, nor asked conditionally: a read nothing asks again, which must not make room in the cache.
+    Once,
 }
 
 /// A decoded answer and whether a next page follows it.

@@ -14,7 +14,6 @@ use tokio::io::AsyncWriteExt as _;
 
 use super::{Error, Github, GithubApi as _};
 use crate::archives::{ActionRepository, Source, Tree, TreeFile};
-use crate::sync::lock;
 
 /// Where action archives are downloaded from, anonymously.
 pub(super) const CODELOAD: &str = "https://codeload.github.com";
@@ -101,10 +100,8 @@ impl Source for Github {
 
     async fn tree(&self, repository: &str, commit: &str) -> Result<Tree, Error> {
         let path = format!("/repos/{repository}/git/trees/{commit}?recursive=1");
-        let body: Result<TreeBody, Error> = self.get(&path).await;
-        // A commit's tree never changes, and a large one would crowd out the answers kept for polls.
-        lock(&self.etags).remove(&path);
-        let body = body?;
+        // A commit's tree never changes, and a large one would crowd out the answers kept for polls: never kept.
+        let body: TreeBody = self.get_once(&path).await?;
         Ok(Tree {
             truncated: body.truncated,
             files: body
@@ -122,9 +119,7 @@ impl Source for Github {
 
     async fn blob(&self, repository: &str, blob: &str, limit: u64) -> Result<Vec<u8>, Error> {
         let path = format!("/repos/{repository}/git/blobs/{blob}");
-        let body: Result<BlobBody, Error> = self.get(&path).await;
-        lock(&self.etags).remove(&path);
-        let body = body?;
+        let body: BlobBody = self.get_once(&path).await?;
         if body.size > limit {
             return Err(download_error(
                 &path,
