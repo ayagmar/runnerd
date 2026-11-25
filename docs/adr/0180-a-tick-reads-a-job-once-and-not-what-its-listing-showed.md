@@ -32,7 +32,8 @@ the queued ones: the running job read seconds later was a second request for the
   - it is of the run's latest attempt, as the pages are read with `filter=latest`;
   - its workflow is named as a job read names it, from what the client already knows;
   - GitHub did not show it twice otherwise: a job that moved between pages while they were read and shows in two
-    states is left out, since nothing in a listing orders the pages. Shown twice alike, it is one answer.
+    states, on two runners, or whole on one page and in part on another, is left out, since nothing in a listing
+    orders the pages. Shown twice alike, it is one answer. A job without labels fails the listing itself, as before.
 
   A job of a run left unread, of an earlier attempt, or of a run whose workflow name would take a read is left out, as
   is every job of a listing that failed: the listing fails whole, as before. The direct read's decoding is unchanged.

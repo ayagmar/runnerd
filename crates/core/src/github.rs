@@ -996,7 +996,7 @@ impl Github {
         let path = jobs_path(repository, run);
         let pages: Vec<Jobs> = self.get_pages(&path).await?;
         let read = pages.len();
-        let (mut queued, mut seen) = (Vec::new(), Vec::new());
+        let (mut queued, mut seen, mut rejected) = (Vec::new(), Vec::new(), Vec::new());
         for item in pages.into_iter().flat_map(|page| page.jobs) {
             let job = Job::deserialize(&item).map_err(|source| Error::Decode {
                 path: path.clone(),
@@ -1004,12 +1004,12 @@ impl Github {
             })?;
             if job.status == "queued" {
                 queued.push(job);
-            } else if following.contains(&job.id)
-                && let Ok(listed) = ListedDetails::deserialize(&item)
-                && let details = JobDetails::from(listed)
-                && is_whole(&details)
-            {
-                seen.push(details);
+            } else if following.contains(&job.id) {
+                match ListedDetails::deserialize(&item).map(JobDetails::from) {
+                    Ok(details) if is_whole(&details) => seen.push(details),
+                    // Shown in part, it says nothing, and taints whatever another page shows of it.
+                    Ok(_) | Err(_) => rejected.push(job.id),
+                }
             }
         }
         // GitHub's name for a listing that cannot read the workflow's: the job is listed all the same, and its
@@ -1025,6 +1025,7 @@ impl Github {
                     pages: read,
                     queued: Vec::new(),
                     observed: Vec::new(),
+                    rejected,
                 });
             }
             None => match lock(&self.workflows).next(repository, run, Instant::now()) {
@@ -1068,6 +1069,7 @@ impl Github {
             pages: read,
             queued: queued.collect(),
             observed: seen,
+            rejected,
         })
     }
 
@@ -1345,6 +1347,7 @@ impl GithubApi for Github {
         let listed: HashSet<u64> = runs.iter().map(|&(_, id)| id).collect();
         let mut jobs = Vec::new();
         let mut observed = Vec::new();
+        let mut rejected = HashSet::new();
         let mut requests = 0;
         for &(_, run) in &runs {
             if requests >= JOB_REQUESTS {
@@ -1354,6 +1357,7 @@ impl GithubApi for Github {
             requests += read.pages;
             jobs.extend(read.queued);
             observed.extend(read.observed);
+            rejected.extend(read.rejected);
         }
         // The cached pages of runs that ended: nothing asks for them again.
         let runs_prefix = format!("/repos/{repository}/actions/runs/");
@@ -1369,9 +1373,10 @@ impl GithubApi for Github {
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
         // A job GitHub moved between pages shows twice. Queued on either page, it is the listing's; shown otherwise
-        // on each, nothing says which is newer, so it is read.
+        // on each, or in part on one, nothing says which is newer, so it is read.
         let observed = agreed(observed)
             .into_iter()
+            .filter(|details| !rejected.contains(&details.id))
             .filter(|details| {
                 jobs.binary_search_by_key(&details.id, |job| job.id)
                     .is_err()
@@ -1671,6 +1676,8 @@ struct RunJobs {
     pages: usize,
     queued: Vec<QueuedJob>,
     observed: Vec<JobDetails>,
+    /// The followed jobs not queued that some page showed without the whole answer.
+    rejected: Vec<u64>,
 }
 
 /// How a run's workflow is named for its jobs a listing read.
@@ -1713,7 +1720,7 @@ pub(crate) fn is_whole(details: &JobDetails) -> bool {
         "in_progress" => shown == (true, true, false),
         "completed" => {
             details.conclusion.is_some()
-                && matches!(shown, (_, false, true) | (true, true, true))
+                && matches!(shown, (false, false, true) | (true, true, true))
                 && details.steps.iter().all(|step| step.status == "completed")
         }
         _ => false,
