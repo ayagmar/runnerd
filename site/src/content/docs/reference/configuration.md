@@ -20,13 +20,13 @@ pnpm = { max_size = "5G" }
 maven = { max_size = "5G" }
 
 [profiles.jvm]
-image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.1.7"
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.1.8"
 cpus = 8
 memory = "9G"
 slots = 2
 
 [profiles.node]
-image = "ghcr.io/ayagmar/runnerd-runner:node-0.1.7"
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.1.8"
 cpus = 8
 memory = "7G"
 slots = 2

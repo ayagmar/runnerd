@@ -23,7 +23,7 @@ disk writes:
     btrfs committed 2.6 times a second
   Drive endurance:
     nvme0n1 is rated to write 600TB (decimal terabytes, as drive makers and SMART count; runnerd's other sizes are binary, 1T = 1.1TB)
-    It has written at least 43.5TB: 41.3TB its SMART log said on Nov 22 20:07 UTC, per [host.drive], and 2.1TB runnerd read since, over 1d 23h of the 2d 0h since; what it wrote while runnerd did not read it is not counted
+    It has written at least 43.5TB: 41.3TB its SMART log said on Nov 23 18:47 UTC, per [host.drive], and 2.1TB runnerd read since, over 1d 23h of the 2d 0h since; what it wrote while runnerd did not read it is not counted
     At the last 7 days' rate, 1.1TB a day over the 6d 20h runnerd read it: the 556.5TB left lasts 500 days
     At the last 24 hours' rate, 1.2TB a day over the 1d 0h runnerd read it: the 556.5TB left lasts 459 days
   Workflows that wrote most:
