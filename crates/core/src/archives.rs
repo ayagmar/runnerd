@@ -117,9 +117,25 @@ pub struct TreeFile {
     pub size: u64,
 }
 
+/// Which of GitHub's budgets a read spends (ADR 0181).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Budget {
+    /// A served repository's reads: with the token, on the limit runners' registrations and the scheduler share.
+    Served,
+    /// A pinned action's repository's read: on the token's limit too, or on an anonymous budget of its own.
+    Public,
+}
+
 /// What the archives read from GitHub. `github::Github` is the real one; the token never leaves it.
 pub trait Source: Send + Sync {
-    /// A repository's canonical name, visibility and default branch.
+    /// A served repository's canonical name, visibility and default branch, read with the token: it may be private.
+    fn served_repository(
+        &self,
+        repository: &str,
+    ) -> impl Future<Output = Result<ActionRepository, Error>> + Send;
+    /// A pinned action's repository's canonical name, visibility and default branch: another's, read with the token or
+    /// anonymously. A 404 or 410 says it is not there to whoever asked; a limit used up, a refusal, an answer that does
+    /// not parse and no answer say nothing about it.
     fn action_repository(
         &self,
         repository: &str,
@@ -155,8 +171,9 @@ pub trait Source: Send + Sync {
         limit: u64,
         received: &AtomicU64,
     ) -> impl Future<Output = Result<u64, Error>> + Send;
-    /// The requests left of GitHub's rate limit before it resets, as last read; `None` when no answer said.
-    fn spare_requests(&self) -> Option<u64>;
+    /// The requests left of `budget` before it resets, as last read; `None` when no answer said, or when the budget
+    /// is one the source holds itself to.
+    fn spare_requests(&self, budget: Budget) -> Option<u64>;
 }
 
 /// What the store goes by, from the config: replaced whole at each reload.
@@ -1064,16 +1081,16 @@ async fn scan_of<S: Source>(
     repository: &str,
     last: Option<&store::Scan>,
 ) -> Result<store::Scan, PinsError> {
-    meter.ask(source)?;
-    let details = source.action_repository(repository).await?;
-    meter.ask(source)?;
+    meter.ask(source, Budget::Served)?;
+    let details = source.served_repository(repository).await?;
+    meter.ask(source, Budget::Served)?;
     let head = source
         .branch_head(repository, &details.default_branch)
         .await?;
     if let Some(last) = last.filter(|last| last.head == head) {
         return Ok(last.clone());
     }
-    meter.ask(source)?;
+    meter.ask(source, Budget::Served)?;
     let tree = source.tree(repository, &head).await?;
     if tree.truncated {
         return Err(PinsError::Truncated);
@@ -1091,7 +1108,7 @@ async fn scan_of<S: Source>(
         if file.size > PIN_FILE_BYTES {
             return Err(PinsError::Large(file.path.clone()));
         }
-        meter.ask(source)?;
+        meter.ask(source, Budget::Served)?;
         let bytes = source.blob(repository, &file.blob, PIN_FILE_BYTES).await?;
         let found = pins::file_pins(&file.path, &bytes).map_err(|why| PinsError::Unreadable {
             path: file.path.clone(),
@@ -1283,9 +1300,12 @@ impl Meter {
         }
     }
 
-    /// Lets one more request go to GitHub's API, if the refresh and the rate limit have one to spare.
-    fn ask<S: Source>(&self, source: &S) -> Result<(), Error> {
-        if source.spare_requests().is_some_and(|spare| spare < RESERVE) {
+    /// Lets one more request go to GitHub's API, if the refresh and `budget` have one to spare.
+    fn ask<S: Source>(&self, source: &S, budget: Budget) -> Result<(), Error> {
+        if source
+            .spare_requests(budget)
+            .is_some_and(|spare| spare < RESERVE)
+        {
             return Err(Error::Held(
                 "what is left of GitHub's rate limit is kept for runners",
             ));
@@ -1477,7 +1497,7 @@ impl Names {
             self.0.insert(asked, None);
             return Ok(None);
         }
-        meter.ask(source)?;
+        meter.ask(source, Budget::Public)?;
         let name = match source.action_repository(repository).await {
             Ok(found) => (found.public
                 && pins::repository(&found.full_name)

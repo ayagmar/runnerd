@@ -2,7 +2,7 @@
 
 Status: **Accepted** (2026-11-12). Adds `POST /v1/jobs/{id}/cancel` and `POST /v1/jobs/{id}/rerun`, the types in
 `api::actions`, `[github] job_actions`, `Status::job_actions`, the doctor's `job actions` check, `runnerctl cancel` and
-`runnerctl rerun`. No schema change.
+`runnerctl rerun`. No schema change. Amended by [0181](0181-credentials-and-public-reads-are-separate-domains.md).
 
 ## Context
 

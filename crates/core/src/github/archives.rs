@@ -1,8 +1,9 @@
-//! What the action archives read from GitHub (`archives::Source`, ADR 0147): a repository's canonical name and
-//! visibility, its default branch's head, its tree and files, with the token through the API, and an action's archive,
-//! downloaded from codeload.github.com without it. An archive's download never carries the token, is never asked again
-//! with it, and follows no redirect: what a private repository holds cannot reach the store, whatever its visibility
-//! was when it was looked up.
+//! What the action archives read from GitHub (`archives::Source`, ADR 0147): a served repository's canonical name and
+//! visibility, its default branch's head, its tree and files, with the token through the API; a pinned action's
+//! repository's name and visibility, with the token or anonymously as [`PublicReads`](super::PublicReads) says (ADR
+//! 0181); and an action's archive, downloaded from codeload.github.com without it. An archive's download never carries
+//! the token, is never asked again with it, and follows no redirect: what a private repository holds cannot reach the
+//! store, whatever its visibility was when it was looked up.
 
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
@@ -12,8 +13,8 @@ use reqwest::Method;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 
-use super::{Error, Github, GithubApi as _};
-use crate::archives::{ActionRepository, Source, Tree, TreeFile};
+use super::{Error, Github, GithubApi as _, Public};
+use crate::archives::{ActionRepository, Budget, Source, Tree, TreeFile};
 
 /// Where action archives are downloaded from, anonymously.
 pub(super) const CODELOAD: &str = "https://codeload.github.com";
@@ -81,14 +82,29 @@ fn download_error(path: &str, what: impl std::fmt::Display) -> Error {
     Error::Download(format!("{path}: {what}"))
 }
 
+impl RepositoryBody {
+    fn into_action(self) -> ActionRepository {
+        ActionRepository {
+            full_name: self.full_name,
+            public: self.visibility == crate::api::Visibility::Public,
+            default_branch: self.default_branch,
+        }
+    }
+}
+
 impl Source for Github {
-    async fn action_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
+    async fn served_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
         let body: RepositoryBody = self.get(&format!("/repos/{repository}")).await?;
-        Ok(ActionRepository {
-            full_name: body.full_name,
-            public: body.visibility == crate::api::Visibility::Public,
-            default_branch: body.default_branch,
-        })
+        Ok(body.into_action())
+    }
+
+    async fn action_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
+        let path = format!("/repos/{repository}");
+        let body: RepositoryBody = match &self.public {
+            Public::Authenticated => self.get(&path).await?,
+            Public::Anonymous(anonymous) => anonymous.get(&path).await?,
+        };
+        Ok(body.into_action())
     }
 
     async fn branch_head(&self, repository: &str, branch: &str) -> Result<String, Error> {
@@ -173,7 +189,11 @@ impl Source for Github {
         write_capped(response, &path, to, limit, received).await
     }
 
-    fn spare_requests(&self) -> Option<u64> {
+    fn spare_requests(&self, budget: Budget) -> Option<u64> {
+        // The anonymous reads hold themselves to their own cap and limit; the token's says nothing of them.
+        if budget == Budget::Public && matches!(self.public, Public::Anonymous(_)) {
+            return None;
+        }
         let rate_limit = self.spend().rate_limit?;
         (rate_limit.reset > std::time::SystemTime::now()).then_some(rate_limit.remaining)
     }

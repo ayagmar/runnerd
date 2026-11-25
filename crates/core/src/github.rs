@@ -1,5 +1,6 @@
 //! The GitHub REST API as the scheduler and the history need it: queued jobs, a job's steps, just-in-time runner
-//! configs, repository runners, cancelling a run, and the owner's job actions (ADR 0134). Owns the token (`token`),
+//! configs, repository runners, cancelling a run, and the owner's job actions (ADR 0134). Owns the token (`token`, a
+//! command's or an expiring one, ADR 0181), the anonymous reads of a pinned action's repository (`public`),
 //! which workflow each run is of and what it is named (`workflows`, ADR 0140),
 //! the pages of a listing, conditional requests and the answers kept for them, rate-limit backoff, and the count of
 //! what it asks and the limit it last read. It must never put the token in a log line, a `Debug` output or an error,
@@ -19,6 +20,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tracing::info;
 
+use self::public::Anonymous;
 use self::token::Tokens;
 use self::workflows::{Next, Workflows};
 use crate::api;
@@ -28,6 +30,7 @@ use crate::sync::lock;
 use crate::time;
 
 mod archives;
+mod public;
 mod requests;
 mod token;
 mod workflows;
@@ -83,6 +86,14 @@ const CONDITIONAL_FRESH: Duration = Duration::from_secs(600);
 #[derive(Clone)]
 pub struct Token(String);
 
+impl Token {
+    /// A token of `value`, for a test's fake source.
+    #[cfg(test)]
+    pub(crate) fn from_test(value: &str) -> Token {
+        Token(value.to_owned())
+    }
+}
+
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Token(<redacted>)")
@@ -91,6 +102,49 @@ impl fmt::Debug for Token {
 
 /// Where the client gets a token: at start and again when GitHub answers 401.
 pub type TokenSource = Box<dyn Fn() -> Result<Token, Error> + Send + Sync>;
+
+/// A token that GitHub stops taking at `expires_at`, as a GitHub App installation's. Its `Debug` output never shows
+/// the token.
+#[derive(Debug, Clone)]
+pub struct ExpiringToken {
+    /// The token.
+    pub token: Token,
+    /// When GitHub stops taking it.
+    pub expires_at: SystemTime,
+}
+
+/// Where the client gets a token that expires: a request of its own, run as a task on the runtime and given up after
+/// [`TOKEN_DEADLINE`]. Asked at start, shortly before the token expires, and when GitHub answers 401; after a failed
+/// read, not again before a backoff. Its error must not hold the token nor anything that mints one.
+pub type ExpiringSource =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<ExpiringToken, Error>> + Send + Sync>;
+
+/// What the client authenticates with (ADR 0181).
+pub enum Credentials {
+    /// A command's token, kept until GitHub refuses it: [`gh_token`]. Read on a thread of its own.
+    Command(TokenSource),
+    /// A token that expires, kept until shortly before it does or until GitHub refuses it.
+    Expiring(ExpiringSource),
+}
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Credentials::Command(_) => "Credentials::Command",
+            Credentials::Expiring(_) => "Credentials::Expiring",
+        })
+    }
+}
+
+/// How the action archives read a pinned action's repository, which is another's (ADR 0181).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicReads {
+    /// With the client's token, as every other read: a `gh` user's token sees every public repository.
+    Authenticated,
+    /// Without any credential, on a budget, a backoff and answers kept of their own: a token scoped to some
+    /// repositories may not say whether another is public.
+    Anonymous,
+}
 
 /// How long `gh auth token` may take, a keyring's prompt included, before its process group is killed: under a job
 /// action's deadline, so the action can still say what happened.
@@ -625,8 +679,10 @@ pub struct Github {
     base: String,
     /// Where the action archives are downloaded from, anonymously: codeload.github.com, or a test server.
     codeload: String,
-    /// The token, read on a thread of its own: `gh` may wait on a keyring for seconds.
+    /// The token, read on a thread of its own (`gh` may wait on a keyring for seconds), or minted by a task.
     tokens: Tokens,
+    /// How a pinned action's repository is read: with the token, or by a client of its own that has none.
+    public: Public,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
     etags: Mutex<Conditional>,
     workflows: Mutex<Workflows>,
@@ -843,9 +899,30 @@ struct ErrorBody {
     message: String,
 }
 
+/// How the client reads a pinned action's repository: [`PublicReads`], with the anonymous client when it has one.
+enum Public {
+    Authenticated,
+    Anonymous(Anonymous),
+}
+
 impl Github {
-    /// A client for `base` (`API_URL`, or a test server) that takes its token from `token_source`.
+    /// A client for `base` (`API_URL`, or a test server) that takes its token from `token_source` and reads pinned
+    /// actions' repositories with it.
     pub fn new(base: &str, token_source: TokenSource) -> Result<Github, Error> {
+        Github::with_credentials(
+            base,
+            Credentials::Command(token_source),
+            PublicReads::Authenticated,
+        )
+    }
+
+    /// A client for `base` that authenticates with `credentials` and reads pinned actions' repositories as `public`
+    /// says, anonymously from `base` too.
+    pub fn with_credentials(
+        base: &str,
+        credentials: Credentials,
+        public: PublicReads,
+    ) -> Result<Github, Error> {
         install_crypto_provider();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -881,7 +958,14 @@ impl Github {
             downloads,
             base: base.trim_end_matches('/').to_owned(),
             codeload: archives::CODELOAD.to_owned(),
-            tokens: Tokens::new(Arc::from(token_source)),
+            tokens: Tokens::new(match credentials {
+                Credentials::Command(source) => token::Source::Command(Arc::from(source)),
+                Credentials::Expiring(source) => token::Source::Expiring(source),
+            }),
+            public: match public {
+                PublicReads::Authenticated => Public::Authenticated,
+                PublicReads::Anonymous => Public::Anonymous(Anonymous::new(base)?),
+            },
             etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
             workflows: Mutex::new(Workflows::default()),
             resolving: tokio::sync::Mutex::new(()),
@@ -894,6 +978,13 @@ impl Github {
     #[cfg(test)]
     pub(crate) fn with_codeload(mut self, url: &str) -> Github {
         url.trim_end_matches('/').clone_into(&mut self.codeload);
+        self
+    }
+
+    /// This client with its token's expiry checked by `clock`.
+    #[cfg(test)]
+    fn with_token_clock(mut self, clock: token::Clock) -> Github {
+        self.tokens.set_clock(clock);
         self
     }
 

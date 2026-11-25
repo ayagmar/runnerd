@@ -514,6 +514,14 @@ impl FakeGithub {
 
 /// The engine's fakes hold no action archives: the archives' own tests have their fake.
 impl crate::archives::Source for FakeGithub {
+    async fn served_repository(
+        &self,
+        _: &str,
+    ) -> Result<crate::archives::ActionRepository, github::Error> {
+        self.wait(|state| &state.held_actions).await;
+        Err(github::Error::Token("the fakes read no actions".to_owned()))
+    }
+
     async fn action_repository(
         &self,
         _: &str,
@@ -545,7 +553,7 @@ impl crate::archives::Source for FakeGithub {
         Err(github::Error::Token("the fakes read no actions".to_owned()))
     }
 
-    fn spare_requests(&self) -> Option<u64> {
+    fn spare_requests(&self, _: crate::archives::Budget) -> Option<u64> {
         None
     }
 }

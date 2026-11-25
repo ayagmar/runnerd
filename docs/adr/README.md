@@ -15,7 +15,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked | Accepted |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job | Amended by 0050 |
 | [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer | Amended by 0041, 0052, 0054, 0066, 0067, 0077, 0080 |
-| [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token | Accepted |
+| [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token | Amended by 0181 |
 | [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked | In part superseded by 0025 |
 | [0010](0010-mit-license-public-repository.md) | MIT license, public repository | Accepted |
 | [0011](0011-linux-and-github-only-for-v1.md) | Linux hosts and GitHub only, for v1 | Accepted |
@@ -140,7 +140,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0131](0131-a-job-passes-a-barrier-unless-what-passed-would-keep-its-owner-out.md) | A job passes a barrier unless what passed would keep its owner out | Accepted |
 | [0132](0132-one-attention-list-core-words.md) | One attention list that core words, with a cached doctor and five views | Accepted |
 | [0133](0133-a-log-is-read-as-structure-kept-as-it-is-stored.md) | A log is read as structure, kept as it is stored | Amended by 0139, 0171 |
-| [0134](0134-a-job-action-is-previewed-then-sent-to-github-once.md) | A job action is previewed, then sent to GitHub once | Accepted |
+| [0134](0134-a-job-action-is-previewed-then-sent-to-github-once.md) | A job action is previewed, then sent to GitHub once | Amended by 0181 |
 | [0135](0135-the-job-history-is-searched-sorted-and-laid-out-by-core.md) | The job history is searched, sorted and laid out by core | Accepted |
 | [0136](0136-the-dashboard-is-laid-out-by-task.md) | The dashboard is laid out by task | Accepted |
 | [0137](0137-the-tui-follows-core-s-views.md) | The TUI follows core's views, one row per slot, and reads what an older daemon lacks as not supported | Accepted |
@@ -153,7 +153,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0144](0144-the-mirror-keeps-no-blob-descriptor-cache.md) | The mirror keeps no blob descriptor cache, and its storage is repaired before it starts | Accepted |
 | [0145](0145-the-dashboard-leads-with-the-lanes.md) | The dashboard leads with the lanes | Accepted |
 | [0146](0146-the-dashboard-paints-the-doctors-last-run.md) | The dashboard paints the doctor's last run while it is no older than the refresh | Accepted |
-| [0147](0147-runners-read-verified-action-archives-from-runnerds-cache.md) | Runners read verified action archives from runnerd's cache | Accepted |
+| [0147](0147-runners-read-verified-action-archives-from-runnerds-cache.md) | Runners read verified action archives from runnerd's cache | Amended by 0181 |
 | [0148](0148-a-failed-jobs-log-says-whether-an-action-or-checkout-failed-it.md) | A failed job's log says whether an action or its checkout failed it | Accepted |
 | [0149](0149-pinned-mise-and-tools-are-baked-into-a-derived-image.md) | A repository's pinned mise and tools are baked into an image derived from runnerd's | Accepted |
 | [0150](0150-a-script-asks-whether-a-job-waits-for-the-hosts-memory.md) | A script asks whether a job waits for the host's memory in an exit code | Accepted |
@@ -187,3 +187,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0178](0178-a-cited-log-line-is-read-where-it-is.md) | A cited log line is read where it is | Accepted |
 | [0179](0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md) | Trust reads stay conditional, and each endpoint is counted | Accepted |
 | [0180](0180-a-tick-reads-a-job-once-and-not-what-its-listing-showed.md) | A tick reads a job once, and not what its listing showed | Accepted |
+| [0181](0181-credentials-and-public-reads-are-separate-domains.md) | Credentials and public reads are separate domains | Accepted |

@@ -3157,3 +3157,744 @@ async fn a_job_another_page_shows_in_part_or_on_another_runner_is_left_for_the_r
         "jobs 1 and 2 were shown in part, job 3 on two runners; job 4 alike twice"
     );
 }
+
+// The token lifecycle (ADR 0181): an expiring token kept until shortly before it expires, read once for everyone
+// waiting, never served past either clock's end, and a failing source waited out.
+
+use super::token::{self, BACKOFF_FIRST, MINT_DEADLINE, Now, REFRESH_MARGIN, Tokens};
+use super::{Credentials, ExpiringSource, ExpiringToken, PublicReads};
+
+/// `from` less `less`.
+fn before(from: Duration, less: Duration) -> Duration {
+    from.checked_sub(less).unwrap()
+}
+
+/// A clock a test moves: both its sides, or one.
+#[derive(Clone)]
+struct FakeClock(Arc<Mutex<Now>>);
+
+impl FakeClock {
+    fn new() -> FakeClock {
+        FakeClock(Arc::new(Mutex::new(Now {
+            monotonic: std::time::Instant::now(),
+            wall: SystemTime::now(),
+        })))
+    }
+
+    fn now(&self) -> Now {
+        *self.0.lock().unwrap()
+    }
+
+    fn clock(&self) -> token::Clock {
+        let clock = self.clone();
+        Arc::new(move || clock.now())
+    }
+
+    /// Time passes on both clocks, as it does while the host is awake.
+    fn pass(&self, by: Duration) {
+        let mut now = self.0.lock().unwrap();
+        now.monotonic += by;
+        now.wall += by;
+    }
+
+    /// The wall clock alone moves: the host slept, or the clock was set forward.
+    fn jump_wall(&self, by: Duration) {
+        self.0.lock().unwrap().wall += by;
+    }
+
+    /// The monotonic clock alone moves: the wall clock was set back as time passed.
+    fn pass_monotonic(&self, by: Duration) {
+        self.0.lock().unwrap().monotonic += by;
+    }
+}
+
+/// What a fake minting source answers with each read, by its number from 1.
+type Answer = dyn Fn(usize, SystemTime) -> Result<ExpiringToken, Error> + Send + Sync;
+
+/// A minting source: counts its reads in `mints`, waits for a permit of `gate` when one is given, and answers with
+/// `answer`, the read's number and the clock's wall time.
+fn minting(
+    clock: &FakeClock,
+    mints: &Arc<AtomicUsize>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+    answer: impl Fn(usize, SystemTime) -> Result<ExpiringToken, Error> + Send + Sync + 'static,
+) -> ExpiringSource {
+    let (clock, mints) = (clock.clone(), mints.clone());
+    let answer: Arc<Answer> = Arc::new(answer);
+    Arc::new(move || {
+        let (clock, mints, gate, answer) =
+            (clock.clone(), mints.clone(), gate.clone(), answer.clone());
+        Box::pin(async move {
+            let read = mints.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            answer(read, clock.now().wall)
+        })
+    })
+}
+
+/// `t{read}`, expiring an hour after `wall`.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the shape of a minting source's answer"
+)]
+fn hourly(read: usize, wall: SystemTime) -> Result<ExpiringToken, Error> {
+    Ok(ExpiringToken {
+        token: Token(format!("t{read}")),
+        expires_at: wall + Duration::from_hours(1),
+    })
+}
+
+fn expiring_tokens(clock: &FakeClock, source: ExpiringSource) -> Arc<Tokens> {
+    let mut tokens = Tokens::new(token::Source::Expiring(source));
+    tokens.set_clock(clock.clock());
+    Arc::new(tokens)
+}
+
+async fn value(tokens: &Tokens, refused: Option<&str>) -> Result<String, Error> {
+    let refused = refused.map(|refused| Token(refused.to_owned()));
+    tokens.get(refused.as_ref()).await.map(|token| token.0)
+}
+
+#[tokio::test]
+async fn an_expiring_token_is_kept_until_its_margin_and_then_read_again() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let tokens = expiring_tokens(&clock, minting(&clock, &mints, None, hourly));
+    assert_eq!(value(&tokens, None).await.unwrap(), "t1");
+    clock.pass(before(
+        before(Duration::from_hours(1), REFRESH_MARGIN),
+        Duration::from_secs(1),
+    ));
+    assert_eq!(
+        value(&tokens, None).await.unwrap(),
+        "t1",
+        "still outside the margin"
+    );
+    clock.pass(Duration::from_secs(1));
+    assert_eq!(
+        value(&tokens, None).await.unwrap(),
+        "t2",
+        "read again inside the margin, before it expires"
+    );
+    assert_eq!(mints.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_wall_clock_jump_or_a_sleep_past_the_expiry_reads_again_and_so_does_a_clock_set_back() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let tokens = expiring_tokens(&clock, minting(&clock, &mints, None, hourly));
+    assert_eq!(value(&tokens, None).await.unwrap(), "t1");
+    // The host slept two hours: the monotonic clock did not move.
+    clock.jump_wall(Duration::from_hours(2));
+    assert_eq!(value(&tokens, None).await.unwrap(), "t2", "never t1 again");
+    // The wall clock was set back as two hours passed: only the monotonic clock says so.
+    clock.pass_monotonic(Duration::from_hours(2));
+    assert_eq!(value(&tokens, None).await.unwrap(), "t3");
+    // An expiry past the longest a token lasts is held to it.
+    let far = Arc::new(AtomicUsize::new(0));
+    let tokens = expiring_tokens(
+        &clock,
+        minting(&clock, &far, None, |read, wall| {
+            Ok(ExpiringToken {
+                token: Token(format!("f{read}")),
+                expires_at: wall + Duration::from_hours(24),
+            })
+        }),
+    );
+    assert_eq!(value(&tokens, None).await.unwrap(), "f1");
+    clock.pass(before(token::MAX_LIFETIME, REFRESH_MARGIN));
+    assert_eq!(value(&tokens, None).await.unwrap(), "f2");
+}
+
+#[tokio::test]
+async fn a_token_that_is_invalid_or_expires_within_the_margin_is_refused_and_its_source_waited_out()
+{
+    let clock = FakeClock::new();
+    for (value_of, expires_in) in [
+        ("", Duration::from_hours(1)),
+        ("has space", Duration::from_hours(1)),
+        ("ghs_soon_SENTINEL", REFRESH_MARGIN),
+        ("ghs_past_SENTINEL", Duration::ZERO),
+    ] {
+        let mints = Arc::new(AtomicUsize::new(0));
+        let tokens = expiring_tokens(
+            &clock,
+            minting(&clock, &mints, None, move |_, wall| {
+                Ok(ExpiringToken {
+                    token: Token(value_of.to_owned()),
+                    expires_at: wall + expires_in,
+                })
+            }),
+        );
+        let refused = value(&tokens, None).await.unwrap_err();
+        assert!(matches!(refused, Error::Token(_)), "{refused}");
+        let text = format!("{refused} {refused:?}");
+        assert!(
+            value_of.is_empty() || !text.contains(value_of),
+            "the refusal does not show the token: {text}"
+        );
+        // Asked again within the backoff: no read.
+        for _ in 0..5 {
+            assert!(value(&tokens, None).await.is_err());
+        }
+        assert_eq!(mints.load(Ordering::SeqCst), 1, "one read, not one a poll");
+    }
+    // An expiry already past is refused too.
+    let mints = Arc::new(AtomicUsize::new(0));
+    let tokens = expiring_tokens(
+        &clock,
+        minting(&clock, &mints, None, |_, wall| {
+            Ok(ExpiringToken {
+                token: Token("ghs_old".to_owned()),
+                expires_at: wall - Duration::from_secs(60),
+            })
+        }),
+    );
+    assert!(value(&tokens, None).await.is_err());
+}
+
+#[tokio::test]
+async fn a_failing_source_is_tried_again_only_after_a_backoff_that_grows_and_is_reset_by_a_token() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let failing = Arc::new(AtomicBool::new(true));
+    let fails = failing.clone();
+    let tokens = expiring_tokens(
+        &clock,
+        minting(&clock, &mints, None, move |read, wall| {
+            if fails.load(Ordering::SeqCst) {
+                Err(Error::Token("GitHub refused the mint".to_owned()))
+            } else {
+                hourly(read, wall)
+            }
+        }),
+    );
+    let reads = || mints.load(Ordering::SeqCst);
+    assert!(value(&tokens, None).await.is_err());
+    assert_eq!(reads(), 1);
+    clock.pass(before(BACKOFF_FIRST, Duration::from_secs(1)));
+    assert!(value(&tokens, None).await.is_err());
+    assert_eq!(reads(), 1, "within the first backoff");
+    clock.pass(Duration::from_secs(1));
+    assert!(value(&tokens, None).await.is_err());
+    assert_eq!(reads(), 2, "the first backoff passed");
+    clock.pass(BACKOFF_FIRST);
+    assert!(value(&tokens, None).await.is_err());
+    assert_eq!(reads(), 2, "the second backoff is twice the first");
+    clock.pass(BACKOFF_FIRST);
+    failing.store(false, Ordering::SeqCst);
+    assert_eq!(value(&tokens, None).await.unwrap(), "t3");
+    // Expiring now, and the source fails again: the backoff starts over at the first.
+    clock.pass(Duration::from_hours(1));
+    failing.store(true, Ordering::SeqCst);
+    assert!(value(&tokens, None).await.is_err());
+    clock.pass(BACKOFF_FIRST);
+    failing.store(false, Ordering::SeqCst);
+    assert_eq!(value(&tokens, None).await.unwrap(), "t5");
+    // A backoff is bounded.
+    assert_eq!(token::backoff_of(40), token::BACKOFF_MOST);
+}
+
+#[tokio::test]
+async fn cold_expiring_and_refused_requests_at_once_read_the_token_once() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let tokens = expiring_tokens(&clock, minting(&clock, &mints, Some(gate.clone()), hourly));
+    let spawn = |refused: Option<&'static str>| {
+        let tokens = tokens.clone();
+        tokio::spawn(async move { value(&tokens, refused).await })
+    };
+    // Cold.
+    let waiting: Vec<_> = (0..5).map(|_| spawn(None)).collect();
+    reads_reach(&mints, 1).await;
+    gate.add_permits(1);
+    for waiter in waiting {
+        assert_eq!(waiter.await.unwrap().unwrap(), "t1");
+    }
+    assert_eq!(mints.load(Ordering::SeqCst), 1);
+    // Expiring, and refused at once.
+    clock.pass(before(Duration::from_hours(1), REFRESH_MARGIN));
+    let mut waiting: Vec<_> = (0..3).map(|_| spawn(None)).collect();
+    waiting.extend((0..3).map(|_| spawn(Some("t1"))));
+    reads_reach(&mints, 2).await;
+    // Give every waiter its turn to join before the read ends.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    gate.add_permits(1);
+    for waiter in waiting {
+        assert_eq!(waiter.await.unwrap().unwrap(), "t2");
+    }
+    assert_eq!(mints.load(Ordering::SeqCst), 2, "one read for all six");
+}
+
+#[tokio::test]
+async fn a_late_refusal_of_an_old_token_keeps_the_newer_one() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let tokens = expiring_tokens(&clock, minting(&clock, &mints, None, hourly));
+    assert_eq!(value(&tokens, None).await.unwrap(), "t1");
+    assert_eq!(value(&tokens, Some("t1")).await.unwrap(), "t2");
+    assert_eq!(
+        value(&tokens, Some("t1")).await.unwrap(),
+        "t2",
+        "a request that sent t1 before t2 came is refused late"
+    );
+    assert_eq!(mints.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_waiter_that_leaves_strands_neither_the_read_nor_the_others() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let tokens = expiring_tokens(&clock, minting(&clock, &mints, Some(gate.clone()), hourly));
+    let first = {
+        let tokens = tokens.clone();
+        tokio::spawn(async move { value(&tokens, None).await })
+    };
+    reads_reach(&mints, 1).await;
+    let second = {
+        let tokens = tokens.clone();
+        tokio::spawn(async move { value(&tokens, None).await })
+    };
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    gate.add_permits(1);
+    assert_eq!(second.await.unwrap().unwrap(), "t1");
+    assert_eq!(
+        value(&tokens, None).await.unwrap(),
+        "t1",
+        "the read kept it"
+    );
+    assert_eq!(mints.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_that_panics_or_times_out_answers_every_waiter_and_waits_out_a_backoff() {
+    let clock = FakeClock::new();
+    for hangs in [false, true] {
+        let mints = Arc::new(AtomicUsize::new(0));
+        let counted = mints.clone();
+        let source: ExpiringSource = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if hangs {
+                    std::future::pending::<()>().await;
+                }
+                panic!("the source panicked");
+            })
+        });
+        let tokens = expiring_tokens(&clock, source);
+        let waiting: Vec<_> = (0..4)
+            .map(|_| {
+                let tokens = tokens.clone();
+                tokio::spawn(async move { value(&tokens, None).await })
+            })
+            .collect();
+        for waiter in waiting {
+            let answer = tokio::time::timeout(MINT_DEADLINE * 2, waiter)
+                .await
+                .expect("every waiter is answered")
+                .unwrap();
+            assert!(answer.is_err(), "hangs {hangs}: {answer:?}");
+        }
+        assert!(
+            value(&tokens, None).await.is_err(),
+            "within the backoff, no read"
+        );
+        assert_eq!(mints.load(Ordering::SeqCst), 1, "hangs {hangs}");
+        clock.pass(BACKOFF_FIRST);
+    }
+}
+
+/// A read whose runtime stops ends as failed: the next runtime's request is not left waiting on it.
+#[test]
+fn a_read_dropped_with_its_runtime_ends_and_the_next_runtime_reads_again() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let first_hangs = {
+        let counted = mints.clone();
+        let clock = clock.clone();
+        let source: ExpiringSource = Arc::new(move || {
+            let read = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            let wall = clock.now().wall;
+            Box::pin(async move {
+                if read == 1 {
+                    std::future::pending::<()>().await;
+                }
+                hourly(read, wall)
+            })
+        });
+        source
+    };
+    let tokens = expiring_tokens(&clock, first_hangs);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let waited = tokio::time::timeout(Duration::from_millis(50), value(&tokens, None)).await;
+        assert!(waited.is_err(), "still reading");
+    });
+    let (stopped, shut) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(runtime);
+        let _ = stopped.send(());
+    });
+    assert!(
+        shut.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the runtime stops with the read pending"
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let answer = tokio::time::timeout(Duration::from_secs(5), value(&tokens, None))
+            .await
+            .expect("not left waiting on the dropped read");
+        assert!(answer.is_err(), "the dropped read failed");
+        clock.pass(BACKOFF_FIRST);
+        assert_eq!(value(&tokens, None).await.unwrap(), "t2");
+    });
+}
+
+/// The permit is asked again once a refreshed token is in hand: a reload while it is minted withdraws the action.
+#[tokio::test]
+async fn a_job_actions_permit_is_asked_again_after_its_token_is_refreshed() {
+    let (url, seen) = fake_github(|request| {
+        if request
+            .headers
+            .get("authorization")
+            .map(HeaderValue::as_bytes)
+            == Some(b"Bearer t3")
+        {
+            StatusCode::UNAUTHORIZED.into_response()
+        } else {
+            StatusCode::ACCEPTED.into_response()
+        }
+    })
+    .await;
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(1));
+    let github = Arc::new(
+        Github::with_credentials(
+            &url,
+            Credentials::Expiring(minting(&clock, &mints, Some(gate.clone()), hourly)),
+            PublicReads::Authenticated,
+        )
+        .unwrap()
+        .with_token_clock(clock.clock()),
+    );
+    assert_eq!(
+        github
+            .job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &go)
+            .await,
+        Ok(202)
+    );
+    // The token is about to expire; the permit is withdrawn while the new one is minted.
+    clock.pass(before(Duration::from_hours(1), REFRESH_MARGIN));
+    let allowed = Arc::new(AtomicBool::new(true));
+    let asked = Arc::new(AtomicUsize::new(0));
+    let sending = {
+        let (github, allowed, asked) = (github.clone(), allowed.clone(), asked.clone());
+        tokio::spawn(async move {
+            let permit = || -> BoxFuture<'_, bool> {
+                asked.fetch_add(1, Ordering::SeqCst);
+                let go = allowed.load(Ordering::SeqCst);
+                Box::pin(async move { go })
+            };
+            github
+                .job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &permit)
+                .await
+        })
+    };
+    reads_reach(&mints, 2).await;
+    allowed.store(false, Ordering::SeqCst);
+    gate.add_permits(1);
+    assert_eq!(sending.await.unwrap(), Err(ActionFailure::Withdrawn));
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "asked once t2 was in hand");
+    assert_eq!(seen.lock().unwrap().len(), 1, "only the first action went");
+    // A 401 for t3 reads once more and sends once more: t4.
+    gate.add_permits(2);
+    clock.pass(before(Duration::from_hours(1), REFRESH_MARGIN));
+    assert_eq!(
+        github
+            .job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &go)
+            .await,
+        Ok(202)
+    );
+    assert_eq!(mints.load(Ordering::SeqCst), 4);
+    let bearers: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.headers["authorization"].to_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(bearers, ["Bearer t1", "Bearer t3", "Bearer t4"]);
+}
+
+#[tokio::test]
+async fn an_expiring_token_never_shows_in_debug_output_or_errors() {
+    const MINTED: &str = "ghs_mintedSentinelValue0123456789";
+    let (url, _) = fake_github(|_| StatusCode::UNAUTHORIZED.into_response()).await;
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let source = minting(&clock, &mints, None, |_, wall| {
+        Ok(ExpiringToken {
+            token: Token(MINTED.to_owned()),
+            expires_at: wall + Duration::from_hours(1),
+        })
+    });
+    let minted = source().await.unwrap();
+    let credentials = Credentials::Expiring(source);
+    let credentials_text = format!("{credentials:?}");
+    let github = Github::with_credentials(&url, credentials, PublicReads::Anonymous)
+        .unwrap()
+        .with_token_clock(clock.clock());
+    let refused = github.runners("o/r").await.unwrap_err();
+    for text in [
+        format!("{github:?}"),
+        format!("{minted:?}"),
+        credentials_text,
+        format!("{refused:?} {refused}"),
+    ] {
+        assert!(!text.contains(MINTED), "{text}");
+    }
+}
+
+// A pinned action's repository read anonymously (ADR 0181): no credential, no redirect, and nothing of the
+// authenticated reads' rate limit, counts, backoff or kept answers touched.
+
+/// A fake GitHub for the archives' reads: `o/app` is private and answers only the token; `actions/checkout` is public
+/// and answers only without one, conditionally on its tag; `o/moved` redirects to `o/new`; `o/private` is not there to
+/// anyone without the token; `o/limited` answers that the anonymous limit is used up.
+async fn archive_github() -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_github(|request| {
+        let bearer = request
+            .headers
+            .get("authorization")
+            .map(HeaderValue::as_bytes);
+        let token = format!("Bearer {TOKEN}");
+        let mut response = match (request.uri.as_str(), bearer) {
+            ("/repos/o/app", Some(sent)) if sent == token.as_bytes() => json(
+                r#"{"full_name":"o/app","visibility":"private","default_branch":"main"}"#,
+            ),
+            ("/repos/actions/checkout", None) => {
+                if request.headers.get("if-none-match").map(HeaderValue::as_bytes) == Some(b"\"c1\"")
+                {
+                    StatusCode::NOT_MODIFIED.into_response()
+                } else {
+                    let mut response = json(
+                        r#"{"full_name":"actions/checkout","visibility":"public","default_branch":"main"}"#,
+                    );
+                    response
+                        .headers_mut()
+                        .insert("etag", HeaderValue::from_static("\"c1\""));
+                    response
+                }
+            }
+            ("/repos/o/moved", None) => {
+                (StatusCode::MOVED_PERMANENTLY, [("location", "/repos/o/new")]).into_response()
+            }
+            ("/repos/o/new", _) => json(
+                r#"{"full_name":"o/new","visibility":"public","default_branch":"main"}"#,
+            ),
+            ("/repos/o/limited", None) => {
+                let mut response = StatusCode::FORBIDDEN.into_response();
+                let headers = response.headers_mut();
+                headers.insert("x-ratelimit-limit", HeaderValue::from_static("60"));
+                headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+                headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+                headers.insert("x-ratelimit-resource", HeaderValue::from_static("core"));
+                return response;
+            }
+            (_, Some(_)) if request.uri.starts_with("/repos/actions/") => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "a token went to a public read").into_response()
+            }
+            _ => StatusCode::NOT_FOUND.into_response(),
+        };
+        let headers = response.headers_mut();
+        let anonymous = bearer.is_none();
+        headers.insert(
+            "x-ratelimit-limit",
+            HeaderValue::from_static(if anonymous { "60" } else { "5000" }),
+        );
+        headers.insert(
+            "x-ratelimit-remaining",
+            HeaderValue::from_static(if anonymous { "1" } else { "4000" }),
+        );
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+        headers.insert("x-ratelimit-resource", HeaderValue::from_static("core"));
+        response
+    })
+    .await
+}
+
+fn anonymous_client(url: &str) -> Github {
+    Github::with_credentials(
+        url,
+        Credentials::Command(Box::new(|| Ok(Token(TOKEN.to_owned())))),
+        PublicReads::Anonymous,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn anonymously_a_served_repository_is_read_with_the_token_and_a_pinned_action_without_it() {
+    use crate::archives::{Budget, Source as _};
+    let (url, seen) = archive_github().await;
+    let github = anonymous_client(&url);
+    let served = github.served_repository("o/app").await.unwrap();
+    assert!(!served.public, "o/app is private");
+    let authenticated = github.requests().rate_limit();
+    assert_eq!(authenticated.map(|limit| limit.remaining), Some(4000));
+
+    let action = github.action_repository("actions/checkout").await.unwrap();
+    assert!(action.public);
+    assert_eq!(
+        github.action_repository("actions/checkout").await.unwrap(),
+        action,
+        "an unchanged answer is a 304 served from the anonymous reads' own kept answer"
+    );
+    let moved = github.action_repository("o/moved").await.unwrap_err();
+    assert!(
+        !moved.is_gone(),
+        "a redirect is not a disappearance: {moved}"
+    );
+    let private = github.action_repository("o/private").await.unwrap_err();
+    assert!(private.is_gone(), "not there to anyone: {private}");
+
+    let seen = seen.lock().unwrap();
+    for request in seen.iter() {
+        let bearer = request.headers.get("authorization");
+        if request.uri == "/repos/o/app" {
+            assert!(bearer.is_some(), "the served read carries the token");
+        } else {
+            assert!(bearer.is_none(), "{} carries no credential", request.uri);
+        }
+    }
+    assert!(
+        seen.iter().all(|request| request.uri != "/repos/o/new"),
+        "the redirect is not followed"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.headers.contains_key("if-none-match"))
+            .count(),
+        1,
+        "the second read of actions/checkout is conditional"
+    );
+    drop(seen);
+    assert_eq!(
+        tally_of(&github, Class::Repository),
+        [1, 0, 0],
+        "only the served read is counted with the token's"
+    );
+    assert_eq!(github.requests().rate_limit(), authenticated);
+    assert_eq!(github.spare_requests(Budget::Public), None);
+    assert_eq!(github.spare_requests(Budget::Served), Some(4000));
+}
+
+#[tokio::test]
+async fn an_anonymous_rate_limit_holds_the_anonymous_reads_alone_and_is_no_disappearance() {
+    use crate::archives::Source as _;
+    let (url, seen) = archive_github().await;
+    let github = anonymous_client(&url);
+    github.served_repository("o/app").await.unwrap();
+    let spend = github.spend();
+    let report = github.requests();
+
+    let limited = github.action_repository("o/limited").await.unwrap_err();
+    assert!(
+        matches!(limited, Error::RateLimited { .. }),
+        "a used-up limit, not a refusal: {limited}"
+    );
+    assert!(!limited.is_gone());
+    let held = github
+        .action_repository("actions/checkout")
+        .await
+        .unwrap_err();
+    assert!(matches!(held, Error::RateLimited { .. }), "{held}");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.uri != "/repos/actions/checkout"),
+        "nothing is sent until the anonymous limit resets"
+    );
+
+    assert_eq!(
+        github.blocked_until(),
+        None,
+        "the token's reads are not held"
+    );
+    assert_eq!(github.spend(), spend);
+    assert_eq!(github.requests().rate_limit(), report.rate_limit());
+    assert_eq!(tally_of(&github, Class::Repository), [1, 0, 0]);
+    assert!(
+        github.served_repository("o/app").await.is_ok(),
+        "served reads go on"
+    );
+}
+
+#[tokio::test]
+async fn the_anonymous_reads_stop_at_their_hourly_cap_counting_every_send_304s_included() {
+    use crate::archives::Source as _;
+    let (url, seen) = archive_github().await;
+    let github = anonymous_client(&url);
+    for nth in 0..super::public::HOURLY_CAP {
+        assert!(
+            github.action_repository("actions/checkout").await.is_ok(),
+            "read {nth} is within the cap"
+        );
+    }
+    let capped = github
+        .action_repository("actions/checkout")
+        .await
+        .unwrap_err();
+    assert!(matches!(capped, Error::Held(_)), "{capped}");
+    assert!(!capped.is_gone());
+    assert_eq!(seen.lock().unwrap().len(), super::public::HOURLY_CAP);
+    assert!(
+        github.requests().is_empty(),
+        "none counted with the token's"
+    );
+}
+
+#[tokio::test]
+async fn with_authenticated_public_reads_a_pinned_action_is_read_with_the_token_as_before() {
+    use crate::archives::{Budget, Source as _};
+    let (url, seen) = fake_github(|request| {
+        let mut response = json(
+            r#"{"full_name":"actions/checkout","visibility":"public","default_branch":"main"}"#,
+        );
+        let headers = response.headers_mut();
+        headers.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+        assert!(request.headers.contains_key("authorization"));
+        response
+    })
+    .await;
+    let github = client(&url);
+    assert!(
+        github
+            .action_repository("actions/checkout")
+            .await
+            .unwrap()
+            .public
+    );
+    assert!(
+        seen.lock().unwrap()[0]
+            .headers
+            .contains_key("authorization")
+    );
+    assert_eq!(tally_of(&github, Class::Repository), [1, 0, 0]);
+    assert_eq!(github.spare_requests(Budget::Public), Some(4999));
+    assert_eq!(github.spare_requests(Budget::Served), Some(4999));
+}
