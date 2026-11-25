@@ -22,11 +22,20 @@ the queued ones: the running job read seconds later was a second request for the
   repository the engine follows (queued or closing in the ledger, named by a runner here, or an ended upload) and
   returns a `JobListing`: the queued jobs as before, and `observed`, the followed jobs its pages showed in another
   status. It makes no request more: no page, no run, and no workflow read for these jobs. An observed job is decoded
-  as `JobDetails`, as a job read decodes it, and given only when it is the whole answer: of the run's latest attempt
-  (the pages are read with `filter=latest`), a runner and a start once in progress, a conclusion and an end once
-  completed, and its workflow named as a job read names it, from what the client already knows. A job of a run left
-  unread, of an earlier attempt, or of a run whose workflow name would take a read is left out, as is every job of a
-  listing that failed: the listing fails whole, as before.
+  as `JobDetails`, the type a job read gives, and given only when it is the whole answer:
+  - every field a job read has is in the item, `null` where GitHub gives none: the item is read strictly, so a missing
+    attempt, steps or nullable field is not taken for `JobDetails`' defaults, which would record attempt 1 or no steps
+    for good once the job completed;
+  - every time in it parses;
+  - its status says all a read would: waiting with no runner, start or end; in progress with its runner and start and
+    no end; completed with its conclusion and end, a runner and a start or neither, and every step completed;
+  - it is of the run's latest attempt, as the pages are read with `filter=latest`;
+  - its workflow is named as a job read names it, from what the client already knows;
+  - GitHub did not show it twice otherwise: a job that moved between pages while they were read and shows in two
+    states is left out, since nothing in a listing orders the pages. Shown twice alike, it is one answer.
+
+  A job of a run left unread, of an earlier attempt, or of a run whose workflow name would take a read is left out, as
+  is every job of a listing that failed: the listing fails whole, as before. The direct read's decoding is unchanged.
 - **One tick-local owner.** `Observed`, in `scheduler/engine/observed.rs`, holds what the tick's listings showed and
   each successful job read of the tick after them, a read replacing what was known. `list` makes it, `follow_jobs`
   and `follow_running` pass it along, and the tick drops it. Engine holds none of it: nothing of it survives the
@@ -56,5 +65,8 @@ the queued ones: the running job read seconds later was a second request for the
 - The invariants' fake GitHub shows every odd job in its run pages as its read describes it, so the generated
   sequences run with answers from listings and reads alike; the engine's tests in `tests/observed.rs` and
   `tests/build_cache.rs` check each rule above against reads.
+- `github/tests.rs` replays one job's lifecycle (running, unchanged, completed) against the client's request counts,
+  once read and once answered by the listing: the read spends 2 fresh answers and a 304 in job reads, the listing
+  none, and every other class, the jobs pages included, spends alike.
 - `Github`'s listing decodes each job item twice (the listing's fields, then a followed job's details), a cost in CPU
   only.

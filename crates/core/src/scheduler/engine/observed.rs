@@ -142,7 +142,10 @@ mod tests {
                 details(2, "waiting", None),
             ],
         );
-        assert!(observed.for_runner("o/r", 1, "runnerd-a").is_some());
+        assert!(
+            observed.for_runner("o/r", 1, "runnerd-a").is_some(),
+            "job 1's details name runnerd-a, so they stand for its read"
+        );
         assert_eq!(observed.for_runner("o/r", 1, "runnerd-b"), None);
         assert_eq!(observed.for_runner("o/r", 2, "runnerd-a"), None);
         assert_eq!(observed.for_runner("o/s", 1, "runnerd-a"), None);

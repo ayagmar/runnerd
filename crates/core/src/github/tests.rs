@@ -2840,3 +2840,246 @@ async fn a_listing_leaves_out_a_followed_job_its_page_cannot_answer_for_whole() 
         uris(&seen)
     );
 }
+
+/// `listed_job(id, run, fields)` without the keys `drop`, and with `set` written over it.
+fn listed_job_with(
+    id: u64,
+    run: u64,
+    fields: &str,
+    drop: &[&str],
+    set: &[(&str, serde_json::Value)],
+) -> String {
+    let mut job: serde_json::Value = serde_json::from_str(&listed_job(id, run, fields)).unwrap();
+    let object = job.as_object_mut().unwrap();
+    for key in drop {
+        object.remove(*key);
+    }
+    for (key, value) in set {
+        object.insert((*key).to_owned(), value.clone());
+    }
+    job.to_string()
+}
+
+/// A listing of run 30 alone, its workflow known through its queued job 99, whose page shows `jobs` besides.
+async fn one_run_github(jobs: Vec<String>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    let queued = listed_job(
+        99,
+        30,
+        r#""status":"queued","conclusion":null,"completed_at":null,"runner_name":null"#,
+    );
+    let page = format!(r#"{{"jobs":[{queued},{}]}}"#, jobs.join(","));
+    fake_github(move |request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => json(r#"{"workflow_runs":[]}"#),
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+            json(r#"{"workflow_runs":[{"id":30,"workflow_id":7}]}"#)
+        }
+        "/repos/o/r/actions/runs/30/jobs?filter=latest&per_page=100" => json(&page),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await
+}
+
+/// The bugs it catches: a listed job missing a field a job read has (its attempt, its steps, or a nullable field left
+/// out; one without labels fails the listing itself, as before) taken with `JobDetails`' defaults, which would record attempt 1, no steps or no pool for good once it
+/// completed; a time that does not parse; and a completed job shown started with no runner, a partial answer, taken
+/// as whole, while one that never started and had no runner, which GitHub gives for a job cancelled in the queue, is.
+#[tokio::test]
+async fn a_listed_job_missing_what_a_read_gives_is_left_for_the_read() {
+    use serde_json::Value;
+    let cancelled = r#""status":"completed","conclusion":"cancelled","completed_at":"2026-11-14T10:01:00Z","runner_name":null"#;
+    let jobs = vec![
+        listed_job_with(1, 30, PASSED, &["run_attempt"], &[]),
+        listed_job_with(2, 30, PASSED, &["steps"], &[]),
+        listed_job_with(4, 30, PASSED, &["head_branch"], &[]),
+        listed_job_with(5, 30, PASSED, &[], &[("completed_at", Value::from("soon"))]),
+        listed_job_with(6, 30, cancelled, &[], &[]),
+        listed_job_with(7, 30, cancelled, &[], &[("started_at", Value::Null)]),
+        listed_job_with(
+            8,
+            30,
+            PASSED,
+            &[],
+            &[(
+                "steps",
+                serde_json::json!([{"number":1,"name":"Run","status":"in_progress",
+                "conclusion":null,"started_at":"2026-11-14T10:00:10Z","completed_at":null}]),
+            )],
+        ),
+        listed_job_with(9, 30, PASSED, &[], &[]),
+    ];
+    let (url, _) = one_run_github(jobs).await;
+    let listing = client(&url)
+        .queued_jobs("o/r", &(1..=9).collect())
+        .await
+        .unwrap();
+    assert_eq!(
+        listing
+            .observed
+            .iter()
+            .map(|job| job.id)
+            .collect::<Vec<_>>(),
+        [7, 9],
+        "only the whole ones: job 7 cancelled before it started, job 9 complete"
+    );
+    assert_eq!(listing.observed[0].runner_name, None);
+    assert_eq!(listing.queued.len(), 1, "the listing itself answers");
+}
+
+/// The bug it catches: a job GitHub moved between pages while they were read, shown in progress on one and completed
+/// on the next, answered by whichever page sorts first, so a running read could stand on what the listing already saw
+/// is over. Shown twice alike, it is one answer.
+#[tokio::test]
+async fn a_job_two_pages_show_otherwise_is_left_for_the_read() {
+    let (url, _) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => json(r#"{"workflow_runs":[]}"#),
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+            json(r#"{"workflow_runs":[{"id":30,"workflow_id":7}]}"#)
+        }
+        "/repos/o/r/actions/runs/30/jobs?filter=latest&per_page=100" => page(
+            request,
+            &format!(
+                r#"{{"jobs":[{},{},{}]}}"#,
+                listed_job(
+                    99,
+                    30,
+                    r#""status":"queued","conclusion":null,"completed_at":null,"runner_name":null"#
+                ),
+                listed_job(1, 30, RUNNING),
+                listed_job(2, 30, PASSED)
+            ),
+            true,
+        ),
+        "/repos/o/r/actions/runs/30/jobs?filter=latest&per_page=100&page=2" => page(
+            request,
+            &format!(
+                r#"{{"jobs":[{},{}]}}"#,
+                listed_job(1, 30, PASSED),
+                listed_job(2, 30, PASSED)
+            ),
+            false,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let listing = client(&url)
+        .queued_jobs("o/r", &[1, 2].into_iter().collect())
+        .await
+        .unwrap();
+    assert_eq!(
+        listing
+            .observed
+            .iter()
+            .map(|job| job.id)
+            .collect::<Vec<_>>(),
+        [2],
+        "job 1 showed in progress and completed; job 2 alike twice"
+    );
+}
+
+/// Run 30's jobs as GitHub serves them in `phase`: job 2 running in 0, completed in 1, with queued job 99 beside it.
+/// Each answer's `ETag` is its path and phase, so an unchanged phase is a 304.
+async fn lifecycle_github(phase: Arc<AtomicUsize>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_github(move |request| {
+        let now = phase.load(Ordering::SeqCst);
+        let job = if now == 0 { RUNNING } else { PASSED };
+        let body = match request.uri.as_str() {
+            "/repos/o/r/actions/runs?status=queued&per_page=100" => {
+                r#"{"workflow_runs":[]}"#.to_owned()
+            }
+            "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+                r#"{"workflow_runs":[{"id":30,"workflow_id":7}]}"#.to_owned()
+            }
+            "/repos/o/r/actions/runs/30/jobs?filter=latest&per_page=100" => format!(
+                r#"{{"jobs":[{},{}]}}"#,
+                listed_job(
+                    99,
+                    30,
+                    r#""status":"queued","conclusion":null,"completed_at":null,"runner_name":null"#
+                ),
+                listed_job(2, 30, job)
+            ),
+            "/repos/o/r/actions/jobs/2" => listed_job(2, 30, job),
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
+        let etag = format!("\"{}#{now}\"", request.uri);
+        if request
+            .headers
+            .get("if-none-match")
+            .is_some_and(|sent| sent.as_bytes() == etag.as_bytes())
+        {
+            return StatusCode::NOT_MODIFIED.into_response();
+        }
+        ([("etag", etag)], json(&body)).into_response()
+    })
+    .await
+}
+
+/// What a lifecycle of job 2 cost the client, by class in `Class::ALL`'s order: fresh answers and all requests.
+fn spent(github: &Github) -> Vec<(Class, (u64, u64))> {
+    let report = github.requests();
+    Class::ALL
+        .iter()
+        .map(|class| (*class, report.tally(*class)))
+        .filter(|(_, tally)| tally.total() > 0)
+        .map(|(class, tally)| (class, (tally.fresh, tally.total())))
+        .collect()
+}
+
+/// The bugs it catches: a saving that only moves requests to the jobs pages, or one counted in logical calls while
+/// GitHub's 304s already made the reads free. Three ticks of job 2 (running, the same again, completed), each listing
+/// its run and then describing it: once by a job read after a listing that follows nothing, once from the listing.
+#[tokio::test]
+async fn a_lifecycle_answered_by_its_listing_spends_no_job_read_fresh_or_unchanged() {
+    let mut spends = Vec::new();
+    let mut answers = Vec::new();
+    for answered_by_listing in [false, true] {
+        let phase = Arc::new(AtomicUsize::new(0));
+        let (url, _) = lifecycle_github(phase.clone()).await;
+        let github = client(&url);
+        let following: std::collections::BTreeSet<u64> = if answered_by_listing {
+            [2].into_iter().collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        let mut described = Vec::new();
+        for tick in 0..3 {
+            phase.store(usize::from(tick == 2), Ordering::SeqCst);
+            let listing = github.queued_jobs("o/r", &following).await.unwrap();
+            let details = match listing.observed.into_iter().find(|job| job.id == 2) {
+                Some(details) => details,
+                None => github.job("o/r", 2).await.unwrap(),
+            };
+            described.push(details);
+        }
+        spends.push(spent(&github));
+        answers.push(described);
+    }
+    assert_eq!(answers[0], answers[1], "the same answers, tick by tick");
+    assert_eq!(answers[1][2].status, "completed");
+    let (read, listed) = (&spends[0], &spends[1]);
+    let of = |spend: &[(Class, (u64, u64))], class| {
+        spend
+            .iter()
+            .find(|(each, _)| *each == class)
+            .map(|(_, spent)| *spent)
+    };
+    assert_eq!(
+        of(read, Class::JobRead),
+        Some((2, 3)),
+        "read: two fresh answers and one 304: {read:?}"
+    );
+    assert_eq!(of(listed, Class::JobRead), None, "no job read: {listed:?}");
+    assert!(
+        of(listed, Class::Jobs).is_some_and(|(_, total)| total == 3),
+        "the run's jobs page once a tick: {listed:?}"
+    );
+    let others: Vec<_> = read
+        .iter()
+        .filter(|(class, _)| *class != Class::JobRead)
+        .copied()
+        .collect();
+    assert_eq!(
+        &others, listed,
+        "every other class spent alike, the jobs pages too"
+    );
+}

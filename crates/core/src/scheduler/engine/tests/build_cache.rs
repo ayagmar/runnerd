@@ -1306,7 +1306,10 @@ async fn an_ended_jobs_completion_is_read_once_a_tick_while_its_trust_read_fails
         let [(first, first_socket), _] = two_jobs(&github, &docker, &mut engine, pushes).await;
         github_names_no_runner(&github, 1);
         engine.tick(Shutdown::No).await;
-        assert!(save_now(&first_socket, "deps", b"deps").await);
+        assert!(
+            save_now(&first_socket, "deps", b"deps").await,
+            "job 1's save is answered at once"
+        );
         jobs_end(&docker, &mut engine).await;
         assert!(engine.is_closing(1), "job 1's runner went");
         assert!(!engine.no_ended_uploads(), "its save waits");

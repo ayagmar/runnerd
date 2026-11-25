@@ -1005,7 +1005,8 @@ impl Github {
             if job.status == "queued" {
                 queued.push(job);
             } else if following.contains(&job.id)
-                && let Ok(details) = JobDetails::deserialize(&item)
+                && let Ok(listed) = ListedDetails::deserialize(&item)
+                && let details = JobDetails::from(listed)
                 && is_whole(&details)
             {
                 seen.push(details);
@@ -1367,13 +1368,15 @@ impl GithubApi for Github {
         });
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
-        // A job GitHub moved between pages shows twice; the queued listing has the last word on it.
-        observed.sort_by_key(|details: &JobDetails| details.id);
-        observed.dedup_by_key(|details| details.id);
-        observed.retain(|details| {
-            jobs.binary_search_by_key(&details.id, |job| job.id)
-                .is_err()
-        });
+        // A job GitHub moved between pages shows twice. Queued on either page, it is the listing's; shown otherwise
+        // on each, nothing says which is newer, so it is read.
+        let observed = agreed(observed)
+            .into_iter()
+            .filter(|details| {
+                jobs.binary_search_by_key(&details.id, |job| job.id)
+                    .is_err()
+            })
+            .collect();
         Ok(JobListing {
             queued: jobs,
             observed,
@@ -1681,15 +1684,141 @@ enum Named {
     Unread(Option<String>),
 }
 
-/// Whether a listed job's details say all a job read would for its status: a job in progress has its runner and its
-/// start, a completed one its conclusion and its end. A queued job is the listing's, and a status the history does not
-/// know is not given.
+/// Whether a listed job's details say all a job read would for its status, its times readable: a waiting job has none
+/// of a start, an end or a runner; a job in progress has its runner and its start and no end; a completed one its
+/// conclusion and its end, a runner and a start or neither, and every step completed, so no step is left to come. A queued
+/// job is the listing's, and a status the history does not know is not given.
 pub(crate) fn is_whole(details: &JobDetails) -> bool {
+    let readable =
+        |at: &Option<String>| at.as_deref().is_none_or(|at| time::parse_ms(at).is_some());
+    let steps_readable = details
+        .steps
+        .iter()
+        .all(|step| readable(&step.started_at) && readable(&step.completed_at));
+    if !(readable(&details.created_at)
+        && readable(&details.started_at)
+        && readable(&details.completed_at)
+        && steps_readable)
+    {
+        return false;
+    }
+    let shown = (
+        details.runner_name.is_some(),
+        details.started_at.is_some(),
+        details.completed_at.is_some(),
+    );
+    // What each status has: (runner, start, end).
     match details.status.as_str() {
-        "in_progress" => details.runner_name.is_some() && details.started_at.is_some(),
-        "completed" => details.conclusion.is_some() && details.completed_at.is_some(),
-        "waiting" => true,
+        "waiting" => shown == (false, false, false),
+        "in_progress" => shown == (true, true, false),
+        "completed" => {
+            details.conclusion.is_some()
+                && matches!(shown, (_, false, true) | (true, true, true))
+                && details.steps.iter().all(|step| step.status == "completed")
+        }
         _ => false,
+    }
+}
+
+/// The observed jobs by ID, each once: a job shown twice alike is kept once, and one shown twice otherwise, which a
+/// listing cannot order, is left out.
+fn agreed(mut observed: Vec<JobDetails>) -> Vec<JobDetails> {
+    observed.sort_by_key(|details| details.id);
+    let mut agreed: Vec<JobDetails> = Vec::with_capacity(observed.len());
+    let mut conflicting = HashSet::new();
+    for details in observed {
+        match agreed.last() {
+            Some(last) if last.id == details.id => {
+                if *last != details {
+                    conflicting.insert(details.id);
+                }
+            }
+            _ => agreed.push(details),
+        }
+    }
+    agreed.retain(|details| !conflicting.contains(&details.id));
+    agreed
+}
+
+/// A job as a run's jobs page shows it, read strictly: each field a job read has must be there, `null` where GitHub
+/// gives none, where `JobDetails` takes a missing one for its default. An item without one is not taken for a read.
+#[derive(Deserialize)]
+struct ListedDetails {
+    id: u64,
+    run_id: u64,
+    run_attempt: u32,
+    name: String,
+    #[serde(deserialize_with = "present")]
+    workflow_name: Option<String>,
+    #[serde(deserialize_with = "present")]
+    head_branch: Option<String>,
+    #[serde(deserialize_with = "present")]
+    html_url: Option<String>,
+    labels: Vec<String>,
+    #[serde(deserialize_with = "present")]
+    created_at: Option<String>,
+    status: String,
+    #[serde(deserialize_with = "present")]
+    conclusion: Option<String>,
+    #[serde(deserialize_with = "present")]
+    started_at: Option<String>,
+    #[serde(deserialize_with = "present")]
+    completed_at: Option<String>,
+    #[serde(deserialize_with = "present")]
+    runner_name: Option<String>,
+    steps: Vec<ListedStep>,
+}
+
+/// A step of `ListedDetails`, read as strictly.
+#[derive(Deserialize)]
+struct ListedStep {
+    number: u32,
+    name: String,
+    status: String,
+    #[serde(deserialize_with = "present")]
+    conclusion: Option<String>,
+    #[serde(deserialize_with = "present")]
+    started_at: Option<String>,
+    #[serde(deserialize_with = "present")]
+    completed_at: Option<String>,
+}
+
+/// A field that may be `null` but must be there: with `deserialize_with`, serde no longer takes a missing `Option`
+/// for `None`.
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+impl From<ListedDetails> for JobDetails {
+    fn from(listed: ListedDetails) -> JobDetails {
+        JobDetails {
+            id: listed.id,
+            run_id: listed.run_id,
+            run_attempt: listed.run_attempt,
+            name: listed.name,
+            workflow_name: listed.workflow_name,
+            head_branch: listed.head_branch,
+            html_url: listed.html_url,
+            labels: listed.labels,
+            created_at: listed.created_at,
+            status: listed.status,
+            conclusion: listed.conclusion,
+            started_at: listed.started_at,
+            completed_at: listed.completed_at,
+            runner_name: listed.runner_name,
+            steps: listed
+                .steps
+                .into_iter()
+                .map(|step| JobStep {
+                    number: step.number,
+                    name: step.name,
+                    status: step.status,
+                    conclusion: step.conclusion,
+                    started_at: step.started_at,
+                    completed_at: step.completed_at,
+                })
+                .collect(),
+        }
     }
 }
 
