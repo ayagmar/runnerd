@@ -30,7 +30,7 @@ use tar::{EntryType, Header};
 use super::pins::MAX_DEPTH;
 use super::store::ArchiveStore;
 use super::verify::{self, Rejected};
-use super::{ActionRepository, Archives, Settings, Source, Tree, TreeFile};
+use super::{ActionRepository, Archives, Budget, Settings, Source, Tree, TreeFile};
 use crate::api::ArchiveFailureKind;
 use crate::github::Error;
 use crate::testdir::TestDir;
@@ -238,6 +238,10 @@ fn not_found(path: String) -> Error {
 }
 
 impl Source for FakeGithub {
+    async fn served_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
+        self.action_repository(repository).await
+    }
+
     async fn action_repository(&self, repository: &str) -> Result<ActionRepository, Error> {
         let mut fake = self.0.lock().unwrap();
         fake.requests += 1;
@@ -354,7 +358,7 @@ impl Source for FakeGithub {
         Ok(bytes.len() as u64)
     }
 
-    fn spare_requests(&self) -> Option<u64> {
+    fn spare_requests(&self, _: Budget) -> Option<u64> {
         self.0.lock().unwrap().spare
     }
 }
@@ -1514,7 +1518,11 @@ async fn a_pin_not_read_this_refresh_keeps_what_its_repository_last_reached() {
         .unwrap()
         .unanswered
         .insert("actions/checkout".to_owned());
-    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    let ready = archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert!(
+        ready,
+        "read with the token, a lookup left unanswered keeps the archives mounted, as before"
+    );
     assert_eq!(
         on_disk(&dir.0),
         both,
@@ -1915,4 +1923,229 @@ async fn the_store_holds_only_verified_archives_over_generated_refreshes_restart
             }
         }
     }
+}
+
+// The real client on a loopback GitHub, its pinned actions read anonymously (ADR 0181): a served repository is read
+// with the token, a pinned action's repository and archive without it; a used-up anonymous limit is no disappearance,
+// and only GitHub's 404 removes a kept archive.
+
+/// What the loopback GitHub answers for actions/checkout's anonymous lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    Public,
+    Limited,
+    Gone,
+}
+
+/// A request the loopback GitHub received: its path and whether it carried a credential.
+#[derive(Debug, Clone)]
+struct Asked {
+    uri: String,
+    authorized: bool,
+}
+
+const LIVE_TOKEN: &str = "ghs_liveSentinelToken0123456789";
+
+/// Standard base64 with padding, as GitHub sends a blob.
+fn base64_of(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let bits = chunk.iter().enumerate().fold(0_u32, |bits, (nth, byte)| {
+            bits | u32::from(*byte) << (16 - 8 * nth)
+        });
+        for nth in 0..4 {
+            if nth <= chunk.len() {
+                out.push(char::from(ALPHABET[(bits >> (18 - 6 * nth) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Serves `o/app`, private, whose workflow pins actions/checkout and o/secret-action, to the token alone; the pinned
+/// repositories and their archives to anyone, as `lookup` says for actions/checkout. o/secret-action is private, so not
+/// there without the token.
+async fn loopback_github(lookup: Arc<Mutex<Lookup>>) -> (String, Arc<Mutex<Vec<Asked>>>) {
+    use axum::http::{HeaderMap, StatusCode, Uri};
+    use axum::response::IntoResponse as _;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let workflow = format!(
+        "jobs:\n  test:\n    steps:\n      - uses: {}\n      - uses: {}\n",
+        pin("actions/checkout", CHECKOUT),
+        pin("o/secret-action", SECRET)
+    );
+    let plain = "runs:\n  using: node20\n  main: dist/main.js\n";
+    let tarball = archive(CHECKOUT, plain);
+    let app = axum::Router::new().fallback(move |uri: Uri, headers: HeaderMap| {
+        let authorized = headers.get("authorization").is_some_and(|value| {
+            value.as_bytes() == format!("Bearer {LIVE_TOKEN}").as_bytes()
+        });
+        let uri = uri.to_string();
+        log.lock().unwrap().push(Asked {
+            uri: uri.clone(),
+            authorized: headers.contains_key("authorization"),
+        });
+        let json = |body: String| ([("content-type", "application/json")], body).into_response();
+        let response = match (uri.as_str(), authorized) {
+            ("/repos/o/app", true) => json(
+                r#"{"full_name":"o/app","visibility":"private","default_branch":"main"}"#.to_owned(),
+            ),
+            ("/repos/o/app/git/ref/heads/main", true) => {
+                json(r#"{"object":{"sha":"c1"}}"#.to_owned())
+            }
+            ("/repos/o/app/git/trees/c1?recursive=1", true) => json(format!(
+                r#"{{"truncated":false,"tree":[{{"path":".github/workflows/ci.yml","type":"blob","sha":"b1","size":{}}}]}}"#,
+                workflow.len()
+            )),
+            ("/repos/o/app/git/blobs/b1", true) => json(format!(
+                r#"{{"content":"{}","encoding":"base64","size":{}}}"#,
+                base64_of(workflow.as_bytes()),
+                workflow.len()
+            )),
+            ("/repos/actions/checkout", false) => match *lookup.lock().unwrap() {
+                Lookup::Public => json(
+                    r#"{"full_name":"actions/checkout","visibility":"public","default_branch":"main"}"#
+                        .to_owned(),
+                ),
+                Lookup::Limited => (
+                    StatusCode::FORBIDDEN,
+                    [
+                        ("x-ratelimit-limit", "60"),
+                        ("x-ratelimit-remaining", "0"),
+                        ("x-ratelimit-reset", "4000000000"),
+                    ],
+                )
+                    .into_response(),
+                Lookup::Gone => StatusCode::NOT_FOUND.into_response(),
+            },
+            (path, false) if path == format!("/actions/checkout/tar.gz/{CHECKOUT}") => {
+                tarball.clone().into_response()
+            }
+            _ => StatusCode::NOT_FOUND.into_response(),
+        };
+        async move { response }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, asked)
+}
+
+fn anonymous_github(url: &str) -> crate::github::Github {
+    crate::github::Github::with_credentials(
+        url,
+        crate::github::Credentials::Command(Box::new(|| {
+            Ok(crate::github::Token::from_test(LIVE_TOKEN))
+        })),
+        crate::github::PublicReads::Anonymous,
+    )
+    .unwrap()
+    .with_codeload(url)
+}
+
+#[tokio::test]
+async fn anonymously_a_private_served_repository_is_scanned_with_the_token_and_its_public_pins_without_it()
+ {
+    let dir = TestDir::new("archives");
+    let lookup = Arc::new(Mutex::new(Lookup::Public));
+    let (url, asked) = loopback_github(lookup.clone()).await;
+    let github = anonymous_github(&url);
+    let mut archives = open(&dir.0);
+    archives.refresh(&github, &settings(), T0).await;
+
+    assert_eq!(
+        on_disk(&dir.0),
+        BTreeSet::from([file_of("actions/checkout", CHECKOUT)]),
+        "the private action is never fetched"
+    );
+    assert!(
+        failures_of(&archives)
+            .iter()
+            .all(|(subject, _)| subject != SERVED),
+        "o/app's pins are known whole: {:?}",
+        failures_of(&archives)
+    );
+    let asked = asked.lock().unwrap();
+    for request in asked.iter() {
+        assert_eq!(
+            request.authorized,
+            request.uri.starts_with("/repos/o/app"),
+            "only the served repository's reads carry the token: {request:?}"
+        );
+    }
+    assert!(
+        asked
+            .iter()
+            .all(|request| !request.uri.contains("secret-action/tar.gz")),
+        "a private action's archive is never asked for: {asked:?}"
+    );
+    assert!(
+        asked
+            .iter()
+            .any(|request| request.uri == "/repos/o/secret-action"),
+        "o/secret-action was looked up, anonymously, and is not there"
+    );
+}
+
+#[tokio::test]
+async fn a_used_up_anonymous_limit_keeps_every_archive_but_withdraws_the_view_and_only_a_404_removes_one()
+ {
+    let dir = TestDir::new("archives");
+    let lookup = Arc::new(Mutex::new(Lookup::Public));
+    let (url, _) = loopback_github(lookup.clone()).await;
+    let mut archives = open(&dir.0);
+    let cold = archives
+        .refresh(&anonymous_github(&url), &settings(), T0)
+        .await;
+    assert!(cold, "a cold store has nothing to vet");
+    let kept = BTreeSet::from([file_of("actions/checkout", CHECKOUT)]);
+    assert_eq!(on_disk(&dir.0), kept);
+    let warm = archives
+        .refresh(&anonymous_github(&url), &settings(), T0 + 600)
+        .await;
+    assert!(
+        warm,
+        "every kept archive's repository answered: runners get them"
+    );
+
+    // The anonymous limit is used up for good: every lookup of this client fails.
+    *lookup.lock().unwrap() = Lookup::Limited;
+    let github = anonymous_github(&url);
+    let ready = archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert!(
+        !ready,
+        "a kept archive whose repository did not answer withdraws the runners' view"
+    );
+    assert_eq!(
+        on_disk(&dir.0),
+        kept,
+        "a lookup the limit held back is no disappearance, and keeps what o/app reached past 14 days"
+    );
+    assert!(
+        failures_of(&archives).contains(&(SERVED.to_owned(), ArchiveFailureKind::Held)),
+        "the verification left incomplete is reported: {:?}",
+        failures_of(&archives)
+    );
+    assert_eq!(
+        github.blocked_until(),
+        None,
+        "the token's reads are not held back"
+    );
+    let limit = github.requests().rate_limit();
+    assert!(
+        limit.is_none(),
+        "no anonymous reading became the token's: {limit:?}"
+    );
+
+    // GitHub says it is not there to anyone: removed.
+    *lookup.lock().unwrap() = Lookup::Gone;
+    let ready = archives
+        .refresh(&anonymous_github(&url), &settings(), T0 + 21 * DAY)
+        .await;
+    assert_eq!(on_disk(&dir.0), BTreeSet::new());
+    assert!(ready, "answered, and removed: the view is whole again");
 }

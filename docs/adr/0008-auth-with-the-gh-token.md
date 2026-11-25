@@ -1,6 +1,6 @@
 # 0008. Authenticate with the `gh` CLI's token
 
-Status: **Accepted**.
+Status: **Accepted**. Amended by [0181](0181-credentials-and-public-reads-are-separate-domains.md).
 
 ## Context
 

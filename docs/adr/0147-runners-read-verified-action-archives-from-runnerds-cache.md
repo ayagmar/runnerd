@@ -1,7 +1,7 @@
 # 0147. Runners read verified action archives from runnerd's cache
 
 Status: **Accepted** (2026-11-20). Adds `[caches.actions]`, the `archives` host module, `ActionArchives` on `Status`
-and `Caches`, and the attention kind `action-archives`.
+and `Caches`, and the attention kind `action-archives`. Amended by [0181](0181-credentials-and-public-reads-are-separate-domains.md).
 
 ## Context
 

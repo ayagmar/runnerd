@@ -85,7 +85,11 @@ flowchart TB
   runs it follows and the repositories a refusal holds, a leaf only its own methods write
   ([ADR 0153](docs/adr/0153-a-run-its-runner-failed-is-rerun-once-per-attempt.md)). `command` runs an external command in a process group of its own and kills it past its
   deadline or at a stop, for the doctor and for `github`'s `gh auth token`; `github::token` holds the client's token
-  and the one read of it in flight, on a thread of its own. `github::workflows` holds which workflow each run is of, each workflow's name and the
+  and the one read of it in flight: `gh`'s on a thread of its own, kept until GitHub refuses it, or an expiring one
+  minted by a task on the runtime and read again before it expires by either clock, a failed read waited out in a
+  backoff. `github::public` reads a pinned action's repository without any credential when `PublicReads::Anonymous`
+  says so, on a cap, a backoff and kept answers of its own that never touch the token's
+  ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)). `github::workflows` holds which workflow each run is of, each workflow's name and the
   runs still owed one, so a job's workflow is its run's and not the run's name ([ADR 0140](docs/adr/0140-a-jobs-workflow-is-its-runs-workflow-not-the-runs-name.md)). `github::requests` counts each request by a finite endpoint class and by what GitHub answered; the build cache's trust reads stay conditional on the answers `Github` keeps, and only a 304 serves one ([ADR 0179](docs/adr/0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md)). `admission` predicts a job's memory peak and average CPU,
   replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
@@ -389,7 +393,7 @@ always returns, so the daemon closes and flushes the history.
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Job actions | in memory: the confirmations issued and one entry per run while its POST is out in `actions::flights`, each confirmation for 5 minutes; the config's job actions and repositories in `actions::policy`, replaced whole at each reload; a restart forgets them all ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)) |
-| GitHub token | in memory, in `github::token`, read again after GitHub refuses it; never written anywhere |
+| GitHub token | in memory, in `github::token`, read again after GitHub refuses it or, for an expiring one, 5 minutes before it expires; never written anywhere ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)) |
 | GitHub answers kept for conditional requests | in memory, in `Github`'s conditional cache, at most 32 MiB, least recently used first; a restart starts with none, a reload keeps them; only a 304 serves one ([ADR 0179](docs/adr/0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md)) |
 | Doctor's checks and attention | in memory: the doctor's last run in `api/doctor_cache`, the attention snapshot in `api/attention`; a restart starts with the doctor not run and a new `instance` whose revisions count from 1, and forgets why listings failed ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)) |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
@@ -443,7 +447,10 @@ always returns, so the daemon closes and flushes the history.
   at the next check, and a runner gets the mount only after a check settled every file. What to fetch comes only from
   the served repositories' default branches, never from a job's log; archives are downloaded without the token, so
   only a public one can be kept, and an archive is removed only after a refresh knew every pin whole
-  ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)).
+  ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)). A served repository is
+  read with the token; a pinned action's repository with it or anonymously, and only GitHub's 404 or 410 says one is
+  gone: a limit used up is a lookup left unanswered, which read anonymously withdraws the runners' view until every
+  kept archive's repository answered ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
   schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
   commit that branch has, or, where `build_cache_writers = "pull-requests"`, a `pull_request` run of the
