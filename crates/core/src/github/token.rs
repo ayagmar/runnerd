@@ -66,7 +66,22 @@ impl Now {
 pub(super) type Clock = Arc<dyn Fn() -> Now + Send + Sync>;
 
 /// A read's answer: the token and how long it lasts, or why there is none, as text.
-type Read = Option<Result<Token, String>>;
+type Read = Option<Result<Granted, String>>;
+
+/// A token as a request gets it: with how long it lasts, so the request can check it is still usable right before it
+/// sends it.
+#[derive(Clone)]
+pub(super) struct Granted {
+    token: Token,
+    lasts: Lasts,
+}
+
+impl Granted {
+    /// The token.
+    pub(super) fn token(&self) -> &Token {
+        &self.token
+    }
+}
 
 /// The token and the read of it. Only its methods here, and its read's [`Producer`], write it; it survives nothing: a
 /// new client reads anew, and a reload leaves it as it is.
@@ -158,10 +173,17 @@ impl Tokens {
         self.clock = clock;
     }
 
+    /// Whether `granted` may still be sent now, by both clocks: a request checks it again after anything it awaited
+    /// once the token was in hand.
+    pub(super) fn usable(&self, granted: &Granted) -> bool {
+        granted.lasts.fresh((self.clock)())
+    }
+
     /// The token held, unless it is the one GitHub `refused` or it is about to expire; otherwise a read's: the one
     /// running, or a new one. Of several requests refused, cold or expiring at once, the first starts the read and the
-    /// others join it. A refusal of a token no longer held changes nothing: the one held since is served.
-    pub(super) async fn get(&self, refused: Option<&Token>) -> Result<Token, Error> {
+    /// others join it. A refusal of a token no longer held changes nothing: the one held since is served. A read's
+    /// token is checked again as it is handed over: one that expired meanwhile, as the host slept, is an error.
+    pub(super) async fn get(&self, refused: Option<&Token>) -> Result<Granted, Error> {
         let (mut answer, started) = {
             let mut state = lock(&self.state);
             let now = (self.clock)();
@@ -169,7 +191,10 @@ impl Tokens {
                 Hold::Held { token, lasts }
                     if refused.is_none_or(|refused| refused.0 != token.0) && lasts.fresh(now) =>
                 {
-                    return Ok(token.clone());
+                    return Ok(Granted {
+                        token: token.clone(),
+                        lasts: *lasts,
+                    });
                 }
                 Hold::Reading(answer) => (answer.clone(), None),
                 Hold::Failed { retry, message, .. } if now.monotonic < *retry => {
@@ -196,7 +221,10 @@ impl Tokens {
             .map_err(|_| Error::Token("the token read stopped".to_owned()))?
             .clone();
         match read {
-            Some(Ok(token)) => Ok(token),
+            Some(Ok(granted)) if self.usable(&granted) => Ok(granted),
+            Some(Ok(_)) => Err(Error::Token(
+                "the token read expired before it could be used".to_owned(),
+            )),
             Some(Err(message)) => Err(Error::Token(message)),
             None => Err(Error::Token("the token read gave nothing".to_owned())),
         }
@@ -296,12 +324,20 @@ impl Producer {
 
     fn answer(&mut self, read: Result<(Token, Lasts), String>) {
         self.settled = true;
+        // A read that ends past its own token's end, as the host slept while it ran, failed like any other.
+        let read = read.and_then(|(token, lasts)| {
+            if lasts.fresh((self.clock)()) {
+                Ok(Granted { token, lasts })
+            } else {
+                Err("the token read expired before it could be used".to_owned())
+            }
+        });
         // The read started with this lock held until it said a read runs, so the answer lands after that.
         let mut state = lock(&self.shared);
         *state = match &read {
-            Ok((token, lasts)) => Hold::Held {
-                token: token.clone(),
-                lasts: *lasts,
+            Ok(granted) => Hold::Held {
+                token: granted.token.clone(),
+                lasts: granted.lasts,
             },
             Err(message) => match *self.source {
                 Source::Command(_) => Hold::Missing,
@@ -316,7 +352,7 @@ impl Producer {
             },
         };
         drop(state);
-        self.send.send_replace(Some(read.map(|(token, _)| token)));
+        self.send.send_replace(Some(read));
     }
 }
 

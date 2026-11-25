@@ -3254,7 +3254,10 @@ fn expiring_tokens(clock: &FakeClock, source: ExpiringSource) -> Arc<Tokens> {
 
 async fn value(tokens: &Tokens, refused: Option<&str>) -> Result<String, Error> {
     let refused = refused.map(|refused| Token(refused.to_owned()));
-    tokens.get(refused.as_ref()).await.map(|token| token.0)
+    tokens
+        .get(refused.as_ref())
+        .await
+        .map(|granted| granted.token().0.clone())
 }
 
 #[tokio::test]
@@ -3897,4 +3900,154 @@ async fn with_authenticated_public_reads_a_pinned_action_is_read_with_the_token_
     assert_eq!(tally_of(&github, Class::Repository), [1, 0, 0]);
     assert_eq!(github.spare_requests(Budget::Public), Some(4999));
     assert_eq!(github.spare_requests(Budget::Served), Some(4999));
+}
+
+#[tokio::test]
+async fn a_token_that_expires_while_it_is_minted_is_a_failed_read_waited_out() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let sleeper = clock.clone();
+    let tokens = expiring_tokens(
+        &clock,
+        minting(&clock, &mints, None, move |read, wall| {
+            // The host sleeps two hours as GitHub answers: the token is already past its end.
+            if read == 1 {
+                sleeper.jump_wall(Duration::from_hours(2));
+            }
+            hourly(read, wall)
+        }),
+    );
+    let failed = value(&tokens, None).await.unwrap_err();
+    assert!(matches!(failed, Error::Token(_)), "{failed}");
+    assert!(
+        value(&tokens, None).await.is_err(),
+        "within the backoff, no read and no expired token"
+    );
+    assert_eq!(mints.load(Ordering::SeqCst), 1);
+    clock.pass(BACKOFF_FIRST);
+    assert_eq!(value(&tokens, None).await.unwrap(), "t2");
+}
+
+#[tokio::test]
+async fn a_token_that_expires_between_its_read_and_its_waiter_is_not_handed_over() {
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let tokens = expiring_tokens(&clock, minting(&clock, &mints, Some(gate.clone()), hourly));
+    let mut waiting = Box::pin(value(&tokens, None));
+    assert!(
+        futures_util::poll!(waiting.as_mut()).is_pending(),
+        "the read runs"
+    );
+    gate.add_permits(1);
+    // The read ends and keeps t1, still usable; then the host sleeps before the waiter wakes.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    clock.jump_wall(Duration::from_hours(2));
+    let late = waiting.await.unwrap_err();
+    assert!(matches!(late, Error::Token(_)), "{late}");
+    gate.add_permits(1);
+    assert_eq!(
+        value(&tokens, None).await.unwrap(),
+        "t2",
+        "the next request reads again"
+    );
+}
+
+/// A token that expires while the permit is asked is not sent: a fresh one is read and the permit asked again.
+#[tokio::test]
+async fn a_token_that_expires_while_the_permit_is_asked_is_read_again_and_the_permit_asked_again() {
+    let (url, seen) = fake_github(|_| StatusCode::ACCEPTED.into_response()).await;
+    let clock = FakeClock::new();
+    let mints = Arc::new(AtomicUsize::new(0));
+    let github = Github::with_credentials(
+        &url,
+        Credentials::Expiring(minting(&clock, &mints, None, hourly)),
+        PublicReads::Authenticated,
+    )
+    .unwrap()
+    .with_token_clock(clock.clock());
+    let asked = AtomicUsize::new(0);
+    let permit = || -> BoxFuture<'_, bool> {
+        // The first ask takes as long as the token had left.
+        if asked.fetch_add(1, Ordering::SeqCst) == 0 {
+            clock.pass(Duration::from_hours(1));
+        }
+        Box::pin(async { true })
+    };
+    assert_eq!(
+        github
+            .job_action("o/r", JobActionRequest::CancelRun { run: 1 }, &permit)
+            .await,
+        Ok(202)
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 2, "asked again with t2");
+    let bearers: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.headers["authorization"].to_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(bearers, ["Bearer t2"], "t1 never went out");
+}
+
+/// A 429 without a time to wait holds the anonymous reads for the default cooldown, and an ambiguous 403 too; neither
+/// is a disappearance, and neither holds the token's reads.
+#[tokio::test]
+async fn an_anonymous_refusal_without_a_time_to_wait_is_cooled_down_alone() {
+    use crate::archives::Source as _;
+    for (status, limited) in [
+        (StatusCode::TOO_MANY_REQUESTS, true),
+        (StatusCode::FORBIDDEN, false),
+    ] {
+        let (url, seen) = fake_github(move |request| {
+            if request.headers.contains_key("authorization") {
+                let mut response =
+                    json(r#"{"full_name":"o/app","visibility":"private","default_branch":"main"}"#);
+                let headers = response.headers_mut();
+                headers.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
+                headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4000"));
+                headers.insert("x-ratelimit-reset", HeaderValue::from_static("4000000000"));
+                response
+            } else {
+                status.into_response()
+            }
+        })
+        .await;
+        let github = anonymous_client(&url);
+        github.served_repository("o/app").await.unwrap();
+        let spend = github.spend();
+        let before = SystemTime::now();
+        let refused = github.action_repository("o/x").await.unwrap_err();
+        assert!(!refused.is_gone(), "{status}: {refused}");
+        assert_eq!(
+            matches!(refused, Error::RateLimited { .. }),
+            limited,
+            "{status}: {refused}"
+        );
+        let held = github.action_repository("o/y").await.unwrap_err();
+        let Error::RateLimited { until } = held else {
+            panic!("{status}: held for the cooldown, not {held}");
+        };
+        assert!(
+            until >= before + super::public::COOLDOWN
+                && until <= SystemTime::now() + super::public::COOLDOWN,
+            "{status}: held a minute"
+        );
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|request| !request.headers.contains_key("authorization"))
+                .count(),
+            1,
+            "{status}: nothing more sent during the cooldown"
+        );
+        assert_eq!(
+            github.blocked_until(),
+            None,
+            "{status}: the token's reads go on"
+        );
+        assert_eq!(github.spend(), spend);
+        assert!(github.served_repository("o/app").await.is_ok());
+    }
 }

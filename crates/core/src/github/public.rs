@@ -5,7 +5,8 @@
 //!
 //! It must never send the client's token, nor touch what the authenticated reads keep: their rate limit, counts,
 //! backoff and conditional answers, which the scheduler paces by. A limit used up or the cap spent is an error a
-//! caller can tell from a repository that is not there.
+//! caller can tell from a repository that is not there. A 429, or a 403, that says no time to wait holds the reads
+//! for [`COOLDOWN`]; a later hold already set is kept.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -21,6 +22,10 @@ use crate::sync::lock;
 /// The most anonymous requests sent in any hour, whatever GitHub answered: half of GitHub's 60, the rest left for
 /// whatever else shares the address.
 pub(super) const HOURLY_CAP: usize = 30;
+
+/// How long the anonymous reads wait after a 429, or a 403, that names no time to wait: GitHub asks a client to wait
+/// at least a minute after a secondary limit that says nothing more.
+pub(super) const COOLDOWN: Duration = Duration::from_mins(1);
 
 /// The window the cap counts sends in.
 const CAP_WINDOW: Duration = Duration::from_hours(1);
@@ -48,6 +53,13 @@ struct Ledger {
 }
 
 impl Ledger {
+    /// Holds every send until `until`, or until a later time already held; returns the time held to.
+    fn hold(&mut self, until: SystemTime) -> SystemTime {
+        let until = self.blocked_until.map_or(until, |held| held.max(until));
+        self.blocked_until = Some(until);
+        until
+    }
+
     /// Takes one send of the cap `now`, if the limit and the cap allow one.
     fn take(&mut self, now: Instant, wall: SystemTime) -> Result<(), Error> {
         if let Some(until) = self.blocked_until.filter(|until| *until > wall) {
@@ -123,14 +135,29 @@ impl Anonymous {
             source: source.without_url(),
         })?;
         let status = response.status();
-        if let Some(until) = rate_limited_until(status, response.headers(), SystemTime::now()) {
-            lock(&self.ledger).blocked_until = Some(until);
-            if matches!(
-                status,
-                StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-            ) {
+        let now = SystemTime::now();
+        let refused = matches!(
+            status,
+            StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+        );
+        match rate_limited_until(status, response.headers(), now) {
+            Some(until) => {
+                let until = lock(&self.ledger).hold(until);
+                if refused {
+                    return Err(Error::RateLimited { until });
+                }
+            }
+            // A 429 always says a limit: without a time to wait, the default cooldown.
+            None if status == StatusCode::TOO_MANY_REQUESTS => {
+                let until = lock(&self.ledger).hold(now + COOLDOWN);
                 return Err(Error::RateLimited { until });
             }
+            // A 403 that names no limit may be a secondary limit or a refusal: waited out as a limit, reported as
+            // the refusal it may be, and in no case a disappearance.
+            None if status == StatusCode::FORBIDDEN => {
+                lock(&self.ledger).hold(now + COOLDOWN);
+            }
+            None => {}
         }
         if status == StatusCode::NOT_MODIFIED
             && let Some(cached) = cached
@@ -208,6 +235,20 @@ mod tests {
             ledger.take(start + CAP_WINDOW, wall),
             Err(Error::Held(_))
         ));
+    }
+
+    #[test]
+    fn a_hold_never_shortens_a_later_one() {
+        let mut ledger = ledger();
+        let wall = SystemTime::now();
+        let later = wall + Duration::from_hours(1);
+        assert_eq!(ledger.hold(later), later);
+        assert_eq!(
+            ledger.hold(wall + super::COOLDOWN),
+            later,
+            "a cooldown keeps the reset already held"
+        );
+        assert_eq!(ledger.blocked_until, Some(later));
     }
 
     #[test]

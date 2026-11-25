@@ -174,6 +174,11 @@ pub trait Source: Send + Sync {
     /// The requests left of `budget` before it resets, as last read; `None` when no answer said, or when the budget
     /// is one the source holds itself to.
     fn spare_requests(&self, budget: Budget) -> Option<u64>;
+    /// How a pinned action's repository is read (ADR 0181): anonymously, runners get the archives only once every kept
+    /// archive's repository answered.
+    fn public_reads(&self) -> github::PublicReads {
+        github::PublicReads::Authenticated
+    }
 }
 
 /// What the store goes by, from the config: replaced whole at each reload.
@@ -459,7 +464,8 @@ fn unix_now() -> u64 {
 /// Owns the store at `directory`: refreshes at start, every `REFRESH` and whenever the settings change, and withdraws
 /// what jobs resolved as packages as soon as a log names one. Each refresh withdraws the runners' view, opens the
 /// store if it is not open yet, checks it, withdraws what is no longer public or is a package, and publishes the view
-/// again only if the check found it good; then it downloads, and publishes what clients show.
+/// again only if the check found it good and, when pinned actions are read anonymously, every kept archive's repository
+/// answered (ADR 0181); then it downloads, and publishes what clients show.
 async fn run<S: Source + 'static>(
     source: Arc<S>,
     directory: PathBuf,
@@ -489,10 +495,17 @@ async fn run<S: Source + 'static>(
                         first = false;
                     }
                     archives.packages(&packages, unix_now()).await;
-                    archives.vet(&*source, &mut round, unix_now()).await;
+                    let vetted = archives.vet(&*source, &mut round, unix_now()).await;
+                    let mountable = checked.mountable(vetted, source.public_reads());
+                    if checked.good() && !mountable {
+                        warn!(
+                            "not every kept action archive's repository answered; runners get no archives until one \
+                             refresh hears from all of them"
+                        );
+                    }
                     published
                         .ready
-                        .send_replace(checked.good().then(|| view.clone()));
+                        .send_replace(mountable.then(|| view.clone()));
                     published.status.send_replace(Some(archives.status()));
                     archives
                         .update(&*source, &mut round, &now, unix_now())
@@ -557,6 +570,23 @@ impl Checked {
     pub(crate) fn good(self) -> bool {
         self != Checked::Bad
     }
+
+    /// Whether runners may read the archives after this check and a vetting that found `vetted`, their pinned
+    /// actions read as `public` says. Read with the token, a lookup left unanswered keeps the archives mounted, as
+    /// ADR 0147 had it; read anonymously, on a budget that often runs out, it withdraws them until every kept
+    /// archive's repository answered (ADR 0181). Either way the archives stay in the store.
+    pub(crate) fn mountable(self, vetted: Vetted, public: github::PublicReads) -> bool {
+        self.good() && (vetted == Vetted::Whole || public == github::PublicReads::Authenticated)
+    }
+}
+
+/// What a vetting of the kept archives found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Vetted {
+    /// Every kept archive's repository answered, and what is not public was removed.
+    Whole,
+    /// A repository's lookup was left unanswered, or what is not public could not be removed.
+    Partly,
 }
 
 impl Archives {
@@ -594,17 +624,23 @@ impl Archives {
         self.refresher.status(entries, bytes)
     }
 
-    /// One refresh at `now`, as the task runs it, without the runners' view.
+    /// One refresh at `now`, as the task runs it; returns whether the task would publish the runners' view.
     #[cfg(test)]
-    pub(crate) async fn refresh<S: Source>(&mut self, source: &S, settings: &Settings, now: u64) {
+    pub(crate) async fn refresh<S: Source>(
+        &mut self,
+        source: &S,
+        settings: &Settings,
+        now: u64,
+    ) -> bool {
         github::REQUESTS
             .scope(std::cell::Cell::new(0), async {
                 let mut round = self.round();
-                self.check(now).await;
-                self.vet(source, &mut round, now).await;
+                let checked = self.check(now).await;
+                let vetted = self.vet(source, &mut round, now).await;
                 self.update(source, &mut round, settings, now).await;
+                checked.mountable(vetted, source.public_reads())
             })
-            .await;
+            .await
     }
 
     /// One update at `now`, without the check before it.
@@ -851,24 +887,32 @@ impl Archives {
 
     /// Removes every kept archive whose repository GitHub now says is not public, or not there, before runners get
     /// the view: anything a runner reads is what anyone may download, whether or not a repository still pins it. A
-    /// repository GitHub does not answer for is left as it is.
-    pub(crate) async fn vet<S: Source>(&mut self, source: &S, round: &mut Round, now: u64) {
+    /// repository GitHub does not answer for is left as it is, and the vetting is only `Partly` done.
+    pub(crate) async fn vet<S: Source>(
+        &mut self,
+        source: &S,
+        round: &mut Round,
+        now: u64,
+    ) -> Vetted {
         let Some(store) = self.store.clone() else {
-            return;
+            return Vetted::Whole;
         };
         let repositories = lock(&store).repositories();
         let mut hidden = Vec::new();
+        let mut vetted = Vetted::Whole;
         for repository in repositories {
-            if let Ok(None) = round
+            match round
                 .names
                 .public(source, &round.meter, &store, &repository)
                 .await
             {
-                hidden.push(repository);
+                Ok(None) => hidden.push(repository),
+                Ok(Some(_)) => {}
+                Err(_) => vetted = Vetted::Partly,
             }
         }
         if hidden.is_empty() {
-            return;
+            return vetted;
         }
         let withdrawn = {
             let store = store.clone();
@@ -887,9 +931,11 @@ impl Archives {
                 warn!("cannot remove action archives no longer public: {error}");
                 self.refresher
                     .fail(&self.subject(), api::ArchiveFailureKind::Store, now);
+                return Vetted::Partly;
             }
-            Err(_) => {}
+            Err(_) => return Vetted::Partly,
         }
+        vetted
     }
 
     /// The store, opened now if it is not yet.

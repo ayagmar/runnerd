@@ -189,6 +189,13 @@ impl Source for Github {
         write_capped(response, &path, to, limit, received).await
     }
 
+    fn public_reads(&self) -> super::PublicReads {
+        match self.public {
+            Public::Authenticated => super::PublicReads::Authenticated,
+            Public::Anonymous(_) => super::PublicReads::Anonymous,
+        }
+    }
+
     fn spare_requests(&self, budget: Budget) -> Option<u64> {
         // The anonymous reads hold themselves to their own cap and limit; the token's says nothing of them.
         if budget == Budget::Public && matches!(self.public, Public::Anonymous(_)) {

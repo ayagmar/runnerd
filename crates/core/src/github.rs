@@ -1359,11 +1359,25 @@ impl Github {
         }
         // The token GitHub refused, once it did.
         let mut refused: Option<Token> = None;
+        // Whether a token expired while the permit was asked, once it did: a fresh one is read once more.
+        let mut expired = false;
         loop {
-            let token = self.tokens.get(refused.as_ref()).await?;
+            let granted = self.tokens.get(refused.as_ref()).await?;
             if let Err(withdrawn) = permit().await {
                 return Ok(Err(withdrawn));
             }
+            // The permit is awaited with the token in hand: one that expired meanwhile is not sent, and the permit is
+            // asked again with the next.
+            if !self.tokens.usable(&granted) {
+                if expired {
+                    return Err(Error::Token(
+                        "the token expired while the request waited for it".to_owned(),
+                    ));
+                }
+                expired = true;
+                continue;
+            }
+            let token = granted.token().clone();
             let mut request = self
                 .http
                 .request(method.clone(), format!("{}{path}", self.base))

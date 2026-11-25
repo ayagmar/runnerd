@@ -1518,7 +1518,11 @@ async fn a_pin_not_read_this_refresh_keeps_what_its_repository_last_reached() {
         .unwrap()
         .unanswered
         .insert("actions/checkout".to_owned());
-    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    let ready = archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert!(
+        ready,
+        "read with the token, a lookup left unanswered keeps the archives mounted, as before"
+    );
     assert_eq!(
         on_disk(&dir.0),
         both,
@@ -2088,22 +2092,34 @@ async fn anonymously_a_private_served_repository_is_scanned_with_the_token_and_i
 }
 
 #[tokio::test]
-async fn a_used_up_anonymous_limit_keeps_every_archive_and_holds_retention_and_only_a_404_removes_one()
+async fn a_used_up_anonymous_limit_keeps_every_archive_but_withdraws_the_view_and_only_a_404_removes_one()
  {
     let dir = TestDir::new("archives");
     let lookup = Arc::new(Mutex::new(Lookup::Public));
     let (url, _) = loopback_github(lookup.clone()).await;
     let mut archives = open(&dir.0);
-    archives
+    let cold = archives
         .refresh(&anonymous_github(&url), &settings(), T0)
         .await;
+    assert!(cold, "a cold store has nothing to vet");
     let kept = BTreeSet::from([file_of("actions/checkout", CHECKOUT)]);
     assert_eq!(on_disk(&dir.0), kept);
+    let warm = archives
+        .refresh(&anonymous_github(&url), &settings(), T0 + 600)
+        .await;
+    assert!(
+        warm,
+        "every kept archive's repository answered: runners get them"
+    );
 
     // The anonymous limit is used up for good: every lookup of this client fails.
     *lookup.lock().unwrap() = Lookup::Limited;
     let github = anonymous_github(&url);
-    archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    let ready = archives.refresh(&github, &settings(), T0 + 20 * DAY).await;
+    assert!(
+        !ready,
+        "a kept archive whose repository did not answer withdraws the runners' view"
+    );
     assert_eq!(
         on_disk(&dir.0),
         kept,
@@ -2127,8 +2143,9 @@ async fn a_used_up_anonymous_limit_keeps_every_archive_and_holds_retention_and_o
 
     // GitHub says it is not there to anyone: removed.
     *lookup.lock().unwrap() = Lookup::Gone;
-    archives
+    let ready = archives
         .refresh(&anonymous_github(&url), &settings(), T0 + 21 * DAY)
         .await;
     assert_eq!(on_disk(&dir.0), BTreeSet::new());
+    assert!(ready, "answered, and removed: the view is whole again");
 }

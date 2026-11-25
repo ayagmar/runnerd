@@ -448,8 +448,9 @@ always returns, so the daemon closes and flushes the history.
   the served repositories' default branches, never from a job's log; archives are downloaded without the token, so
   only a public one can be kept, and an archive is removed only after a refresh knew every pin whole
   ([ADR 0147](docs/adr/0147-runners-read-verified-action-archives-from-runnerds-cache.md)). A served repository is
-  read with the token; a pinned action's repository with it or anonymously, and only GitHub's 404 says one is gone: a
-  limit used up is a lookup left unanswered ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)).
+  read with the token; a pinned action's repository with it or anonymously, and only GitHub's 404 or 410 says one is
+  gone: a limit used up is a lookup left unanswered, which read anonymously withdraws the runners' view until every
+  kept archive's repository answered ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
   schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
   commit that branch has, or, where `build_cache_writers = "pull-requests"`, a `pull_request` run of the
