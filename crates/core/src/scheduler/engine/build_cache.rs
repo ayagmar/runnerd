@@ -2,7 +2,7 @@
 //! with it, what it was served stored in the history, and whether its job may write, decided once GitHub places the
 //! job on it. It must not start or remove containers, and it never trusts what a runner's log says of its job.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -17,15 +17,16 @@ use crate::config::BuildCacheWriters;
 use crate::docker::DockerApi;
 use crate::github::{self, GithubApi, JobDetails};
 
-/// How long a repository's default branch is taken as known: one renamed while runnerd runs writes within the hour,
-/// and the old name stops writing.
+/// How long a repository's default branch is taken as known, from when GitHub said it, however often it is used
+/// meanwhile: one renamed while runnerd runs writes within the hour, and the old name stops writing.
 const DEFAULT_BRANCH_FOR: Duration = Duration::from_secs(3600);
 
 /// How long a removed runner's uploads wait for GitHub to say which runner ran its job, asked at each poll: GitHub's
 /// jobs API can name none for minutes after a job started (ADR 0085). Past it they are dropped.
 pub(super) const ENDED_WAIT: Duration = Duration::from_secs(600);
 
-/// A repository's default branch, and when GitHub said it.
+/// A repository's default branch, and when GitHub said it: using it again does not make it newer. In memory only:
+/// a restart reads it again, and a reload keeps it.
 #[derive(Debug, Clone)]
 pub(super) struct DefaultBranch {
     branch: String,
@@ -51,11 +52,16 @@ pub(super) struct Undecided {
     job: JobDetails,
 }
 
+/// What GitHub said of a batch of undecided jobs: the default branches it was asked for, and each job's answer.
+struct Answers {
+    read: BTreeMap<String, DefaultBranch>,
+    jobs: Vec<Answer>,
+}
+
 /// What GitHub said of an undecided job: whether it may write, `None` when GitHub could not say, the scopes of a job
 /// that may, and its repository's default branch, once known.
 struct Answer {
     runner: String,
-    repository: String,
     writes: Option<Writes>,
     scopes: Scoped,
     default_branch: Option<String>,
@@ -260,18 +266,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect()
     }
 
-    /// Records what GitHub answered of undecided jobs: their repositories' default branches, and each job's writes.
-    fn take_answers(&mut self, answers: Vec<Answer>) {
-        for answer in answers {
-            if let Some(branch) = &answer.default_branch {
-                self.default_branches.insert(
-                    answer.repository.clone(),
-                    DefaultBranch {
-                        branch: branch.clone(),
-                        read_at: SystemTime::now(),
-                    },
-                );
-            }
+    /// Records what GitHub answered of undecided jobs: the default branches it was asked for, each as old as its
+    /// read, and each job's writes. A branch only used again keeps the age of its read, so it is asked again an hour
+    /// after it was, however many jobs used it meanwhile.
+    fn take_answers(&mut self, answers: Answers) {
+        self.default_branches.extend(answers.read);
+        for answer in answers.jobs {
             if let (Some(writes), Some(cache)) = (answer.writes, &self.build_cache) {
                 let scopes = Scopes {
                     own: answer.scopes.own,
@@ -284,41 +284,69 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 }
 
-/// Asks GitHub for each undecided job's run, its repository's default branch unless `known` has it, and, for a run
-/// that may write, who opened its pull requests and whether the branch has its commit: a tag's run names the tag as
-/// its branch.
+/// Asks GitHub for the default branch of each repository of `undecided` that `known` lacks, once for the batch, then
+/// for each undecided job's run and, for a run that may write, who opened its pull requests and whether the branch
+/// has its commit: a tag's run names the tag as its branch.
 async fn read_answers<G: GithubApi>(
     github: Arc<G>,
     undecided: Vec<Undecided>,
     branches: Vec<String>,
     known: BTreeMap<String, String>,
-) -> Vec<Answer> {
+) -> Answers {
     let (github, branches, known) = (&*github, &branches, &known);
-    futures_util::stream::iter(undecided)
+    let unknown: BTreeSet<String> = undecided
+        .iter()
+        .map(|undecided| undecided.repository.clone())
+        .filter(|repository| !known.contains_key(repository))
+        .collect();
+    let asked: BTreeMap<String, Result<DefaultBranch, github::Error>> =
+        futures_util::stream::iter(unknown)
+            .map(|repository| async move {
+                let read = github
+                    .repository(&repository)
+                    .await
+                    .map(|details| DefaultBranch {
+                        branch: details.default_branch,
+                        read_at: SystemTime::now(),
+                    });
+                (repository, read)
+            })
+            .buffered(CONCURRENT_REQUESTS)
+            .collect()
+            .await;
+    let asked = &asked;
+    let jobs = futures_util::stream::iter(undecided)
         .map(|undecided| async move {
             let default_branch = match known.get(&undecided.repository) {
-                Some(branch) => Ok(branch.clone()),
-                None => github
-                    .repository(&undecided.repository)
-                    .await
-                    .map(|details| details.default_branch),
+                Some(branch) => Ok(branch),
+                None => match asked.get(&undecided.repository) {
+                    Some(Ok(read)) => Ok(&read.branch),
+                    Some(Err(error)) => Err(error),
+                    // Never: every repository `known` lacks was asked. A job left out stays undecided.
+                    None => return None,
+                },
             };
-            let decision = decide(github, &undecided, branches, default_branch.as_ref()).await;
+            let decision = decide(github, &undecided, branches, default_branch).await;
             let (writes, scopes) = match decision {
                 Some(decision) => (Some(decision.writes), decision.scopes),
                 None => (None, Scoped::default()),
             };
-            Answer {
+            Some(Answer {
                 runner: undecided.runner,
-                repository: undecided.repository,
                 writes,
                 scopes,
-                default_branch: default_branch.ok(),
-            }
+                default_branch: default_branch.ok().cloned(),
+            })
         })
         .buffered(CONCURRENT_REQUESTS)
+        .filter_map(std::future::ready)
         .collect()
-        .await
+        .await;
+    let read = asked
+        .iter()
+        .filter_map(|(repository, read)| Some((repository.clone(), read.as_ref().ok()?.clone())))
+        .collect();
+    Answers { read, jobs }
 }
 
 /// Whether an undecided job may write, with its scopes: `Undecided` stays so, and `None` while GitHub does not
