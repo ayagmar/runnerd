@@ -1065,6 +1065,88 @@ async fn a_default_branch_renamed_while_runnerd_runs_writes_within_the_hour() {
     );
 }
 
+/// Jobs that keep coming use the default branch read for them, and it is read again an hour after it was, not an hour
+/// after the last job used it. The bug it catches: each use counting as a read, so under continuous traffic a renamed
+/// default branch never takes over and the old name writes for as long as jobs come.
+#[tokio::test]
+async fn a_default_branch_renamed_under_continuous_jobs_writes_an_hour_after_its_read() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-renamed-busy");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    github.0.lock().unwrap().default_branch = Some("master".to_owned());
+    let pushes = || [trigger("push", "master"), trigger("push", "main")];
+    let age = |engine: &mut Engine<FakeGithub, FakeDocker>, by: Duration| {
+        for known in engine.default_branches.values_mut() {
+            known.read_at -= by;
+        }
+    };
+    let [(master, _), (main, _)] = two_jobs(&github, &docker, &mut engine, pushes()).await;
+    until_decided(&mut engine, &cache, &[&master, &main]).await;
+    docker.0.lock().unwrap().seed_exit = Some(0);
+    jobs_end(&docker, &mut engine).await;
+
+    // 40 minutes on, more jobs use the branch read for the first.
+    age(&mut engine, Duration::from_mins(40));
+    let [(master, _), (main, _)] = two_more_jobs(&github, &docker, &mut engine, 3, pushes()).await;
+    until_decided(&mut engine, &cache, &[&master, &main]).await;
+    jobs_end(&docker, &mut engine).await;
+
+    // The repository renames master to main; 30 minutes on, the read is 70 minutes old.
+    github.0.lock().unwrap().default_branch = Some("main".to_owned());
+    age(&mut engine, Duration::from_mins(30));
+    let [(master, master_socket), (main, main_socket)] =
+        two_more_jobs(&github, &docker, &mut engine, 5, pushes()).await;
+    until_decided(&mut engine, &cache, &[&master, &main]).await;
+    for (socket, key) in [(&master_socket, "aa"), (&main_socket, "bb")] {
+        let path = format!("/gradle/{key}");
+        assert_eq!(
+            buildcache::request(socket, "PUT", &path, b"classes")
+                .await
+                .0,
+            200
+        );
+    }
+    let found = async |key: &str| {
+        buildcache::request(&main_socket, "GET", &format!("/gradle/{key}"), b"")
+            .await
+            .0
+    };
+    assert_eq!(
+        (found("bb").await, found("aa").await),
+        (200, 404),
+        "main writes, master no longer does"
+    );
+}
+
+/// The bug it catches: each undecided job of a repository asking for its default branch, so a batch of a run's jobs
+/// asks GitHub the same thing once per job.
+#[tokio::test]
+async fn jobs_decided_together_read_their_default_branch_once() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-one-default-read");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let pushes = [trigger("push", "main"), trigger("push", "main")];
+    let [(first, _), (second, _)] = two_jobs(&github, &docker, &mut engine, pushes).await;
+    let asked = || {
+        github
+            .calls()
+            .iter()
+            .filter(|call| *call == "repository o/r")
+            .count()
+    };
+    let before = asked();
+    until_decided(&mut engine, &cache, &[&first, &second]).await;
+    let runs = github
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("run "))
+        .count();
+    assert_eq!(runs, 2, "both jobs were decided, each asking for its run");
+    assert_eq!(asked() - before, 1, "{:?}", github.calls());
+}
+
 #[tokio::test]
 async fn an_actions_cache_save_made_while_github_names_no_runner_lands_once_it_does() {
     let github = FakeGithub::default();

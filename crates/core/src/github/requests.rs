@@ -1,4 +1,4 @@
-//! What runnerd asks GitHub, counted by class and by what GitHub answered, and the rate limit the last answer gave,
+//! What runnerd asks GitHub, counted by class (each a finite endpoint, ADR 0179) and by what GitHub answered, and the rate limit the last answer gave,
 //! with the words of the log line that reports them. It decides nothing: the pace of the reads (ADR 0127) is the
 //! scheduler's, from `Spend`, and a count names a class, never a repository, a path or the token. Nothing here survives a restart, and a
 //! config reload does not touch it: a window starts when the client is made, or when the last line was written.
@@ -15,7 +15,8 @@ use crate::api::duration;
 pub(super) const WINDOW: Duration = Duration::from_hours(1);
 
 /// What a request asked for, as the engine's own work: the requests of one class cost about the same and are made for
-/// the same reason.
+/// the same reason. The first six are the engine's polls and runners; the rest are what a line sums as `other` and
+/// lists one by one beside it, each a finite endpoint, never a repository, a number or a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     /// A repository's runs, queued or in progress.
@@ -30,21 +31,63 @@ pub enum Class {
     Registration,
     /// A runner's deletion.
     Delete,
-    /// Anything else: who started a run, a pull request, a branch, a repository's details, a cancel.
+    /// One run read for who started it, as the build cache decides whether a job may write (ADR 0052).
+    Trigger,
+    /// One run read for anything else: its workflow (ADR 0140), or its attempt for a job action (ADR 0134).
+    Run,
+    /// One pull request, read for who opened it and its head and base (ADR 0053).
+    PullRequest,
+    /// One branch's head, read for whether it has a job's commit.
+    Branch,
+    /// Two commits compared, for whether a branch has a job's commit.
+    Compare,
+    /// A repository's details: its default branch and visibility.
+    Repository,
+    /// A repository's workflows, for their names (ADR 0140).
+    Workflows,
+    /// A branch's ref, read by the action archives (ADR 0147).
+    ArchiveRef,
+    /// A commit's tree, read by the action archives.
+    ArchiveTree,
+    /// A file's blob, read by the action archives.
+    ArchiveBlob,
+    /// The jobs of one attempt of a run, read before a re-run (ADR 0134).
+    AttemptJobs,
+    /// A run's cancellation.
+    Cancel,
+    /// A re-run of a job or of a run's failed jobs.
+    Rerun,
+    /// Anything no class above names.
     Other,
 }
 
 impl Class {
     /// Every class, in the order a line lists them.
-    pub const ALL: [Class; 7] = [
+    pub const ALL: [Class; 20] = [
         Class::Runs,
         Class::Jobs,
         Class::Runners,
         Class::JobRead,
         Class::Registration,
         Class::Delete,
+        Class::Trigger,
+        Class::Run,
+        Class::PullRequest,
+        Class::Branch,
+        Class::Compare,
+        Class::Repository,
+        Class::Workflows,
+        Class::ArchiveRef,
+        Class::ArchiveTree,
+        Class::ArchiveBlob,
+        Class::AttemptJobs,
+        Class::Cancel,
+        Class::Rerun,
         Class::Other,
     ];
+
+    /// How many classes a line lists on their own; those after them it sums as `other`.
+    const OWN: usize = 6;
 
     fn label(self) -> &'static str {
         match self {
@@ -54,11 +97,25 @@ impl Class {
             Class::JobRead => "job reads",
             Class::Registration => "registrations",
             Class::Delete => "deletes",
-            Class::Other => "other",
+            Class::Trigger => "run triggers",
+            Class::Run => "run reads",
+            Class::PullRequest => "pull requests",
+            Class::Branch => "branches",
+            Class::Compare => "compares",
+            Class::Repository => "repositories",
+            Class::Workflows => "workflows",
+            Class::ArchiveRef => "archive refs",
+            Class::ArchiveTree => "archive trees",
+            Class::ArchiveBlob => "archive blobs",
+            Class::AttemptJobs => "attempt jobs",
+            Class::Cancel => "cancels",
+            Class::Rerun => "re-runs",
+            Class::Other => "unclassified",
         }
     }
 
-    /// The class of a request, from its method and its path under the API's base.
+    /// The class of a request, from its method and its path under the API's base. A run read for its trigger has
+    /// the path of any other run read: its caller names it `Trigger`.
     pub(super) fn of(method: &Method, path: &str) -> Class {
         let path = path.split_once('?').map_or(path, |(path, _)| path);
         let segments: Vec<&str> = path.split('/').skip(1).collect();
@@ -71,6 +128,25 @@ impl Class {
                 Class::Registration
             }
             ("DELETE", ["repos", _, _, "actions", "runners", _]) => Class::Delete,
+            ("GET", ["repos", _, _, "actions", "runs", _]) => Class::Run,
+            ("GET", ["repos", _, _, "pulls", _]) => Class::PullRequest,
+            // A branch's name may hold `/`.
+            ("GET", ["repos", _, _, "branches", _, ..]) => Class::Branch,
+            ("GET", ["repos", _, _, "compare", ..]) => Class::Compare,
+            ("GET", ["repos", _, _]) => Class::Repository,
+            ("GET", ["repos", _, _, "actions", "workflows"]) => Class::Workflows,
+            ("GET", ["repos", _, _, "git", "ref", ..]) => Class::ArchiveRef,
+            ("GET", ["repos", _, _, "git", "trees", _]) => Class::ArchiveTree,
+            ("GET", ["repos", _, _, "git", "blobs", _]) => Class::ArchiveBlob,
+            ("GET", ["repos", _, _, "actions", "runs", _, "attempts", _, "jobs"]) => {
+                Class::AttemptJobs
+            }
+            ("POST", ["repos", _, _, "actions", "runs", _, "cancel"]) => Class::Cancel,
+            (
+                "POST",
+                ["repos", _, _, "actions", "jobs", _, "rerun"]
+                | ["repos", _, _, "actions", "runs", _, "rerun-failed-jobs"],
+            ) => Class::Rerun,
             _ => Class::Other,
         }
     }
@@ -170,30 +246,49 @@ impl Report {
         self.window
     }
 
-    /// The log line: `GitHub requests in the last 1h 00m: runs 480 (120 fresh, 360 unchanged), … ; rate limit 4200
-    /// of 5000 left, resets in 31m 12s`. A refused count shows only once it is not 0.
+    /// Every request of the classes a line sums as `other`.
+    pub fn other(&self) -> Tally {
+        Class::ALL[Class::OWN..]
+            .iter()
+            .map(|class| self.tally(*class))
+            .fold(Tally::default(), |sum, tally| Tally {
+                fresh: sum.fresh + tally.fresh,
+                unchanged: sum.unchanged + tally.unchanged,
+                refused: sum.refused + tally.refused,
+            })
+    }
+
+    /// The log line: `GitHub requests in the last 1h 00m: runs 480 (120 fresh, 360 unchanged), … , other 40 (30
+    /// fresh, 10 unchanged) [run triggers 25 (5 fresh, 20 unchanged), repositories 15 (…)]; rate limit 4200 of 5000
+    /// left, resets in 31m 12s`. The bracket lists each class `other` sums that was asked at all; a refused count
+    /// shows only once it is not 0.
     pub fn line(&self, now: SystemTime) -> String {
         let mut line = format!(
             "GitHub requests in the last {}: ",
             duration(self.window.as_secs())
         );
-        for (nth, class) in Class::ALL.into_iter().enumerate() {
-            let tally = self.tally(class);
+        for (nth, class) in Class::ALL[..Class::OWN].iter().enumerate() {
             if nth > 0 {
                 line.push_str(", ");
             }
-            let _ = write!(
-                line,
-                "{} {} ({} fresh, {} unchanged",
-                class.label(),
-                tally.total(),
-                tally.fresh,
-                tally.unchanged
-            );
-            if tally.refused > 0 {
-                let _ = write!(line, ", {} refused", tally.refused);
+            push_tally(&mut line, class.label(), self.tally(*class));
+        }
+        line.push_str(", ");
+        push_tally(&mut line, "other", self.other());
+        let asked: Vec<Class> = Class::ALL[Class::OWN..]
+            .iter()
+            .copied()
+            .filter(|class| self.tally(*class).total() > 0)
+            .collect();
+        if !asked.is_empty() {
+            line.push_str(" [");
+            for (nth, class) in asked.into_iter().enumerate() {
+                if nth > 0 {
+                    line.push_str(", ");
+                }
+                push_tally(&mut line, class.label(), self.tally(class));
             }
-            line.push(')');
+            line.push(']');
         }
         match self.rate_limit {
             Some(limit) => {
@@ -213,6 +308,21 @@ impl Report {
         }
         line
     }
+}
+
+/// `label 12 (10 fresh, 2 unchanged)`, with `, 1 refused` before the bracket once any was.
+fn push_tally(line: &mut String, label: &str, tally: Tally) {
+    let _ = write!(
+        line,
+        "{label} {} ({} fresh, {} unchanged",
+        tally.total(),
+        tally.fresh,
+        tally.unchanged
+    );
+    if tally.refused > 0 {
+        let _ = write!(line, ", {} refused", tally.refused);
+    }
+    line.push(')');
 }
 
 /// The counts of the window now running.

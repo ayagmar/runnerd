@@ -1366,15 +1366,14 @@ fn counting_fake() -> impl Fn(&Seen) -> Response + Send + Sync + 'static {
     }
 }
 
-/// How many requests of each class got a fresh answer, a 304 and a refusal, in `Class::ALL`'s order.
-fn tallies(github: &Github) -> Vec<[u64; 3]> {
+/// How many requests of each class asked at all got a fresh answer, a 304 and a refusal, in `Class::ALL`'s order.
+fn tallies(github: &Github) -> Vec<(Class, [u64; 3])> {
     let report = github.requests();
     Class::ALL
         .iter()
-        .map(|class| {
-            let tally = report.tally(*class);
-            [tally.fresh, tally.unchanged, tally.refused]
-        })
+        .map(|class| (*class, report.tally(*class)))
+        .filter(|(_, tally)| tally.total() > 0)
+        .map(|(class, tally)| (class, [tally.fresh, tally.unchanged, tally.refused]))
         .collect()
 }
 
@@ -1403,14 +1402,22 @@ async fn requests_are_counted_by_class_and_by_what_github_answered() {
     assert_eq!(
         tallies(&github),
         [
-            [2, 2, 0], // runs: queued and in progress, twice
-            [1, 1, 0], // jobs of run 10
-            [1, 0, 0], // runners
-            [1, 1, 0], // job reads
-            [1, 0, 0], // registrations
-            [2, 0, 0], // deletes
-            [2, 0, 1], // other: the workflows' names, the repository, the refused cancel
+            (Class::Runs, [2, 2, 0]), // queued and in progress, twice
+            (Class::Jobs, [1, 1, 0]), // of run 10
+            (Class::Runners, [1, 0, 0]),
+            (Class::JobRead, [1, 1, 0]),
+            (Class::Registration, [1, 0, 0]),
+            (Class::Delete, [2, 0, 0]),
+            (Class::Repository, [1, 0, 0]),
+            (Class::Workflows, [1, 0, 0]), // the workflows' names, for job 5's run
+            (Class::Cancel, [0, 0, 1]),
         ]
+    );
+    let other = github.requests().other();
+    assert_eq!(
+        (other.fresh, other.refused),
+        (2, 1),
+        "other sums its classes"
     );
     // What the pace is read by counts the registration and both deletes, whatever GitHub answered.
     assert_eq!(github.spend().mutations, 3);
@@ -1549,7 +1556,9 @@ fn the_line_names_every_class_and_the_limit() {
         (Class::JobRead, StatusCode::OK),
         (Class::Registration, StatusCode::CREATED),
         (Class::Delete, StatusCode::NO_CONTENT),
-        (Class::Other, StatusCode::FORBIDDEN),
+        (Class::Trigger, StatusCode::OK),
+        (Class::Trigger, StatusCode::NOT_MODIFIED),
+        (Class::Cancel, StatusCode::FORBIDDEN),
     ] {
         counter.record(class, status, &headers);
     }
@@ -1558,7 +1567,8 @@ fn the_line_names_every_class_and_the_limit() {
         counter.take(began + Duration::from_secs(3600)).line(now),
         "GitHub requests in the last 1h 00m: runs 3 (1 fresh, 2 unchanged), jobs 1 (0 fresh, 1 unchanged), \
          runners 1 (1 fresh, 0 unchanged), job reads 1 (1 fresh, 0 unchanged), registrations 1 (1 fresh, 0 unchanged), \
-         deletes 1 (1 fresh, 0 unchanged), other 1 (0 fresh, 0 unchanged, 1 refused); \
+         deletes 1 (1 fresh, 0 unchanged), other 3 (1 fresh, 1 unchanged, 1 refused) \
+         [run triggers 2 (1 fresh, 1 unchanged), cancels 1 (0 fresh, 0 unchanged, 1 refused)]; \
          rate limit 4200 of 5000 left, resets in 1m 30s"
     );
 }
@@ -2120,5 +2130,384 @@ async fn an_attempts_jobs_cut_short_or_uncounted_are_a_failed_read() {
             .await
             .map(|jobs| jobs.len()),
         Ok(1)
+    );
+}
+
+/// The build cache's trust reads as a fake GitHub answers them, which a test changes between reads: each path's
+/// status and body, its `ETag` drawn from the body, and a 304 to a request conditional on the current one.
+#[derive(Clone, Default)]
+struct TrustReads(Arc<Mutex<std::collections::HashMap<String, (StatusCode, String)>>>);
+
+/// Who started a run: a person, or a GitHub App.
+const PERSON: &str = r#"{"login":"owner","type":"User"}"#;
+const BOT: &str = r#"{"login":"renovate[bot]","type":"Bot"}"#;
+
+/// Run 1's body: a push to main of `a1`, its actor a person and its triggering actor `triggering`.
+fn trusted_run(triggering: &str) -> String {
+    format!(
+        r#"{{"workflow_id":7,"event":"push","head_branch":"main","head_sha":"a1",
+            "head_repository":{{"full_name":"o/r"}},"actor":{PERSON},"triggering_actor":{triggering},
+            "pull_requests":[]}}"#
+    )
+}
+
+/// Pull request 7's body: a person's, from `head` of `head_repo`, into `base`.
+fn trusted_pull(head_repo: &str, head: &str, base: &str) -> String {
+    format!(
+        r#"{{"number":7,"user":{PERSON},"head":{{"ref":"{head}","sha":"a1","repo":{{"full_name":"{head_repo}"}}}},
+            "base":{{"ref":"{base}"}}}}"#
+    )
+}
+
+const RUN: &str = "/repos/o/r/actions/runs/1";
+const PULL: &str = "/repos/o/r/pulls/7";
+const BRANCH: &str = "/repos/o/r/branches/main";
+
+/// Where the client compares `head`, the branch's head, with the run's commit `a1`.
+fn compare(head: &str) -> String {
+    format!("/repos/o/r/compare/{head}...a1?per_page=1")
+}
+
+/// A body's `ETag`, which changes with it.
+fn etag_of(body: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    format!("\"{:x}\"", hasher.finish())
+}
+
+impl TrustReads {
+    /// Run 1, pushed to main by a person; pull request 7 from `feature` into main; main at `a2`, a1's child.
+    fn new() -> TrustReads {
+        let reads = TrustReads::default();
+        reads.answer(RUN, StatusCode::OK, &trusted_run(PERSON));
+        reads.answer(
+            PULL,
+            StatusCode::OK,
+            &trusted_pull("o/r", "feature", "main"),
+        );
+        reads.answer(BRANCH, StatusCode::OK, r#"{"commit":{"sha":"a2"}}"#);
+        reads.answer(&compare("a2"), StatusCode::OK, r#"{"status":"behind"}"#);
+        reads
+    }
+
+    fn answer(&self, uri: &str, status: StatusCode, body: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(uri.to_owned(), (status, body.to_owned()));
+    }
+
+    /// Answers `request`; a body `no-etag:` starts is sent without its prefix and without an `ETag`.
+    fn respond(&self, request: &Seen) -> Response {
+        let Some((status, body)) = self.0.lock().unwrap().get(&request.uri).cloned() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        if let Some(body) = body.strip_prefix("no-etag:") {
+            return (status, json(body)).into_response();
+        }
+        if status != StatusCode::OK {
+            return (status, json(&body)).into_response();
+        }
+        let etag = etag_of(&body);
+        if request
+            .headers
+            .get("if-none-match")
+            .is_some_and(|sent| sent.as_bytes() == etag.as_bytes())
+        {
+            return (StatusCode::NOT_MODIFIED, [("etag", etag)]).into_response();
+        }
+        ([("etag", etag)], json(&body)).into_response()
+    }
+}
+
+async fn trust_github(reads: &TrustReads) -> (Github, Arc<Mutex<Vec<Seen>>>) {
+    let answering = reads.clone();
+    let (url, seen) = fake_github(move |request| answering.respond(request)).await;
+    (client(&url), seen)
+}
+
+/// How many requests of `class` got a fresh answer, a 304 and a refusal.
+fn tally_of(github: &Github, class: Class) -> [u64; 3] {
+    let tally = github.requests().tally(class);
+    [tally.fresh, tally.unchanged, tally.refused]
+}
+
+/// Every job of a run asks the same four things of GitHub before it may write. The bug it catches: the answers
+/// dropped after each read, so each job pays the rate limit for a run, a pull request, a branch and a compare that
+/// did not change; and a 304 that answers anything but what the first read said.
+#[tokio::test]
+async fn the_build_caches_reads_of_an_unchanged_run_are_304s_that_answer_as_before() {
+    let reads = TrustReads::new();
+    let (github, seen) = trust_github(&reads).await;
+    let first = (
+        github.run_trigger("o/r", 1).await.unwrap(),
+        github.pull_request("o/r", 7).await.unwrap(),
+        github.on_branch("o/r", "main", "a1").await.unwrap(),
+    );
+    for _ in 0..2 {
+        let again = (
+            github.run_trigger("o/r", 1).await.unwrap(),
+            github.pull_request("o/r", 7).await.unwrap(),
+            github.on_branch("o/r", "main", "a1").await.unwrap(),
+        );
+        assert_eq!(again, first, "a 304 answers what the first read said");
+    }
+    assert!(first.0.by_user && first.2, "a person's push, on main");
+    for uri in [RUN, PULL, BRANCH, &compare("a2")] {
+        assert_eq!(
+            conditional(&seen, uri),
+            [false, true, true],
+            "{uri} is asked again, conditionally"
+        );
+    }
+    for class in [
+        Class::Trigger,
+        Class::PullRequest,
+        Class::Branch,
+        Class::Compare,
+    ] {
+        assert_eq!(tally_of(&github, class), [1, 2, 0], "{class:?}");
+    }
+    assert_eq!(
+        github.requests().other().fresh,
+        4,
+        "only the first reads cost"
+    );
+}
+
+/// Every decision asks GitHub again, and a changed answer is the one that counts. The bugs it catches: a run's
+/// trigger, a pull request's head or base, or a branch's head taken from what was kept once GitHub said something
+/// else; a re-run by a bot allowed because the run's ID was allowed before; a deleted branch or a failed compare
+/// answered from the last good read.
+#[tokio::test]
+async fn a_changed_trust_answer_replaces_the_kept_one_and_a_failed_one_is_an_error() {
+    let reads = TrustReads::new();
+    let (github, seen) = trust_github(&reads).await;
+    assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+    github.pull_request("o/r", 7).await.unwrap();
+    assert!(github.on_branch("o/r", "main", "a1").await.unwrap());
+
+    // A GitHub App re-runs the run: same ID, another triggering actor.
+    reads.answer(RUN, StatusCode::OK, &trusted_run(BOT));
+    assert!(
+        !github.run_trigger("o/r", 1).await.unwrap().by_user,
+        "the bot's re-run"
+    );
+    // The pull request's head moves to a fork, and its base to release.
+    reads.answer(
+        PULL,
+        StatusCode::OK,
+        &trusted_pull("f/r", "patch", "release"),
+    );
+    assert_eq!(
+        github.pull_request("o/r", 7).await.unwrap(),
+        super::PullRequest {
+            by_user: true,
+            head_repository: Some("f/r".to_owned()),
+            head_branch: "patch".to_owned(),
+            base_branch: "release".to_owned(),
+        }
+    );
+    // main is force-moved to a commit without a1.
+    reads.answer(BRANCH, StatusCode::OK, r#"{"commit":{"sha":"c9"}}"#);
+    reads.answer(&compare("c9"), StatusCode::OK, r#"{"status":"diverged"}"#);
+    assert!(
+        !github.on_branch("o/r", "main", "a1").await.unwrap(),
+        "a1 is no longer on main"
+    );
+    assert_eq!(
+        conditional(&seen, RUN),
+        [false, true],
+        "the re-run was asked conditionally, and GitHub's new answer taken"
+    );
+    // The compare fails, then main is deleted.
+    reads.answer(
+        &compare("c9"),
+        StatusCode::NOT_FOUND,
+        r#"{"message":"No common ancestor"}"#,
+    );
+    assert!(github.on_branch("o/r", "main", "a1").await.is_err());
+    reads.answer(
+        BRANCH,
+        StatusCode::NOT_FOUND,
+        r#"{"message":"Branch not found"}"#,
+    );
+    assert!(github.on_branch("o/r", "main", "a1").await.is_err());
+    // main comes back as it was: asked whole, nothing left of the read before it was deleted.
+    reads.answer(BRANCH, StatusCode::OK, r#"{"commit":{"sha":"c9"}}"#);
+    reads.answer(&compare("c9"), StatusCode::OK, r#"{"status":"diverged"}"#);
+    assert!(!github.on_branch("o/r", "main", "a1").await.unwrap());
+    assert_eq!(
+        conditional(&seen, BRANCH).last(),
+        Some(&false),
+        "the read after the 404 is not conditional"
+    );
+}
+
+/// The bug it catches: an error, a refusal or a rate limit answered from the last good read of the same path,
+/// which would let a job write on a run GitHub no longer shows, or would not say. A failed read is an error.
+#[tokio::test]
+async fn a_refused_or_failed_trust_read_never_answers_from_the_kept_one() {
+    let reads = TrustReads::new();
+    let (github, seen) = trust_github(&reads).await;
+    for status in [
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::BAD_GATEWAY,
+    ] {
+        reads.answer(RUN, StatusCode::OK, &trusted_run(PERSON));
+        assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+        reads.answer(RUN, status, r#"{"message":"no"}"#);
+        assert!(
+            github.run_trigger("o/r", 1).await.is_err(),
+            "{status} is an error, not the kept run"
+        );
+        // GitHub answers as before: the next read is whole, not a 304 of the read before the failure.
+        reads.answer(RUN, StatusCode::OK, &trusted_run(PERSON));
+        let before = conditional(&seen, RUN).len();
+        assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+        assert_eq!(
+            conditional(&seen, RUN)[before..],
+            [false],
+            "after {status}, nothing is kept"
+        );
+    }
+    assert_eq!(
+        tally_of(&github, Class::Trigger)[2],
+        2,
+        "the 403 and the 429 are refusals"
+    );
+}
+
+/// The bug it catches: an answer without an `ETag` leaving the one kept before it, whose `ETag` a later request
+/// would then send, and whose body a 304 would then serve, though GitHub answered something else since.
+#[tokio::test]
+async fn a_trust_answer_without_an_etag_replaces_the_kept_one() {
+    let reads = TrustReads::new();
+    let (github, seen) = trust_github(&reads).await;
+    assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+    reads.answer(
+        RUN,
+        StatusCode::OK,
+        &format!("no-etag:{}", trusted_run(BOT)),
+    );
+    assert!(!github.run_trigger("o/r", 1).await.unwrap().by_user);
+    reads.answer(RUN, StatusCode::OK, &trusted_run(PERSON));
+    assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+    assert_eq!(conditional(&seen, RUN), [false, true, false]);
+    assert!(
+        lock(&github.etags).entries.contains_key(RUN),
+        "kept again once it has an ETag"
+    );
+}
+
+/// The bugs it catches: trust answers kept past the cache's limit, and an answer kept for one run served for
+/// another once the cache made room.
+#[tokio::test]
+async fn trust_reads_under_cache_pressure_stay_within_the_limit_and_answer_their_own_run() {
+    let reads = TrustReads::new();
+    reads.answer(
+        "/repos/o/r/actions/runs/2",
+        StatusCode::OK,
+        &trusted_run(BOT),
+    );
+    let (mut github, seen) = trust_github(&reads).await;
+    // Room for one run's answer, and every answer may go at once.
+    let limit = RUN.len() + trusted_run(BOT).len() + 8;
+    *github.etags.get_mut().unwrap() = Conditional::new(limit, Duration::ZERO);
+    for _ in 0..3 {
+        assert!(github.run_trigger("o/r", 1).await.unwrap().by_user);
+        assert!(!github.run_trigger("o/r", 2).await.unwrap().by_user);
+        assert!(lock(&github.etags).bytes <= limit, "within {limit} bytes");
+    }
+    assert_eq!(
+        conditional(&seen, RUN),
+        [false, false, false],
+        "run 1's answer made room for run 2's each time"
+    );
+}
+
+/// The bug it catches: an endpoint counted under another, or under `other` with nothing to tell them apart, so a
+/// line cannot say what spends the rate limit; a run read for its trigger counted as any run read.
+#[tokio::test]
+async fn every_endpoint_is_counted_in_a_class_of_its_own() {
+    use super::requests::Class as C;
+    let get = |path: &str| C::of(&Method::GET, path);
+    let post = |path: &str| C::of(&Method::POST, path);
+    let classes = [
+        (
+            get("/repos/o/r/actions/runs?status=queued&per_page=100"),
+            C::Runs,
+        ),
+        (
+            get("/repos/o/r/actions/runs/1/jobs?filter=latest&per_page=100"),
+            C::Jobs,
+        ),
+        (get("/repos/o/r/actions/runners?per_page=100"), C::Runners),
+        (get("/repos/o/r/actions/jobs/5"), C::JobRead),
+        (
+            post("/repos/o/r/actions/runners/generate-jitconfig"),
+            C::Registration,
+        ),
+        (
+            C::of(&Method::DELETE, "/repos/o/r/actions/runners/1"),
+            C::Delete,
+        ),
+        (get("/repos/o/r/actions/runs/1"), C::Run),
+        (get("/repos/o/r/pulls/7"), C::PullRequest),
+        (get("/repos/o/r/branches/release/1%231"), C::Branch),
+        (get("/repos/o/r/compare/a2...a1?per_page=1"), C::Compare),
+        (get("/repos/o/r"), C::Repository),
+        (
+            get("/repos/o/r/actions/workflows?per_page=100"),
+            C::Workflows,
+        ),
+        (get("/repos/o/r/git/ref/heads/main"), C::ArchiveRef),
+        (get("/repos/o/r/git/trees/a1?recursive=1"), C::ArchiveTree),
+        (get("/repos/o/r/git/blobs/b1"), C::ArchiveBlob),
+        (
+            get("/repos/o/r/actions/runs/1/attempts/2/jobs?per_page=100&page=2"),
+            C::AttemptJobs,
+        ),
+        (post("/repos/o/r/actions/runs/1/cancel"), C::Cancel),
+        (post("/repos/o/r/actions/jobs/5/rerun"), C::Rerun),
+        (
+            post("/repos/o/r/actions/runs/1/rerun-failed-jobs"),
+            C::Rerun,
+        ),
+        (get("/user"), C::Other),
+    ];
+    for (got, want) in classes {
+        assert_eq!(got, want);
+    }
+
+    // Through the client: the trust read of run 1 and a job action's read of it are told apart.
+    let reads = TrustReads::new();
+    reads.answer(
+        "/repos/o/r/actions/runs/1/attempts/1/jobs?per_page=100",
+        StatusCode::OK,
+        r#"{"total_count":0,"jobs":[]}"#,
+    );
+    reads.answer(
+        "/repos/o/r/actions/runs/1/cancel",
+        StatusCode::ACCEPTED,
+        "{}",
+    );
+    let (github, _) = trust_github(&reads).await;
+    github.run_trigger("o/r", 1).await.unwrap();
+    github.action_run("o/r", 1).await.unwrap();
+    github.attempt_jobs("o/r", 1, 1).await.unwrap();
+    github.cancel_run("o/r", 1).await.unwrap();
+    assert_eq!(
+        tallies(&github),
+        [
+            (Class::Trigger, [1, 0, 0]),
+            // The job action's read is conditional on what the trust read kept.
+            (Class::Run, [0, 1, 0]),
+            (Class::AttemptJobs, [1, 0, 0]),
+            (Class::Cancel, [1, 0, 0]),
+        ]
     );
 }

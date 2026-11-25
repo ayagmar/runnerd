@@ -927,9 +927,8 @@ impl Github {
                 Next::Waiting => return Err(Unresolved),
                 Next::ReadRun => {
                     let path = format!("/repos/{repository}/actions/runs/{run}");
+                    // Kept for a conditional request: the build cache asks for the same run (ADR 0179).
                     let body: Result<RunWorkflow, Error> = self.get(&path).await;
-                    // Its workflow never changes: nothing asks for the run again.
-                    lock(&self.etags).remove(&path);
                     let mut workflows = lock(&self.workflows);
                     match body {
                         Ok(body) => workflows.run(repository, run, body.workflow_id),
@@ -971,10 +970,23 @@ impl Github {
 
     /// One answer, conditional on the last one kept for `path`, and whether GitHub's `Link` names a next page.
     async fn get_page<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
+        self.get_page_as(Class::of(&Method::GET, path), path).await
+    }
+
+    /// As `get_page`, counted as `class`: for a path whose class depends on why it is read.
+    ///
+    /// A 304 serves the answer kept for `path`, which GitHub just said is current; any other answer replaces it,
+    /// kept again only when it succeeded and carries an `ETag`. So an error, a refusal or an answer without an `ETag`
+    /// is never followed by the answer kept before it, and a request that fails before GitHub answers serves nothing.
+    async fn get_page_as<T: DeserializeOwned>(
+        &self,
+        class: Class,
+        path: &str,
+    ) -> Result<Page<T>, Error> {
         // Taken before the request, so an answer evicted meanwhile still serves a 304.
         let cached = lock(&self.etags).get(path, Instant::now());
         let etag = cached.as_ref().map(|cached| &cached.etag);
-        let response = self.send(Method::GET, path, None, etag).await?;
+        let response = self.send(class, Method::GET, path, None, etag).await?;
         let (bytes, next) = if response.status == StatusCode::NOT_MODIFIED {
             match cached {
                 Some(cached) => (cached.body, cached.next),
@@ -989,10 +1001,18 @@ impl Github {
             }
         } else {
             let etag = response.etag.clone();
-            let response = expect_success(Method::GET, path, response)?;
+            // What GitHub answers now replaces what was kept, whatever it is.
+            let response = match expect_success(Method::GET, path, response) {
+                Ok(response) => response,
+                Err(error) => {
+                    lock(&self.etags).remove(path);
+                    return Err(error);
+                }
+            };
             let body: Arc<[u8]> = response.bytes.into();
-            if let Some(etag) = etag {
-                lock(&self.etags).insert(
+            let mut etags = lock(&self.etags);
+            match etag {
+                Some(etag) => etags.insert(
                     path,
                     Cached {
                         etag,
@@ -1000,8 +1020,10 @@ impl Github {
                         next: response.next,
                     },
                     Instant::now(),
-                );
+                ),
+                None => etags.remove(path),
             }
+            drop(etags);
             (body, response.next)
         };
         Ok(Page {
@@ -1056,13 +1078,14 @@ impl Github {
     /// reads its answer. Records the rate limit.
     async fn send(
         &self,
+        class: Class,
         method: Method,
         path: &str,
         body: Option<&serde_json::Value>,
         etag: Option<&HeaderValue>,
     ) -> Result<Response, Error> {
         let Ok(answered) = self
-            .exchange(&method, path, body, etag, || async {
+            .exchange(class, &method, path, body, etag, || async {
                 Ok::<(), std::convert::Infallible>(())
             })
             .await?;
@@ -1096,6 +1119,7 @@ impl Github {
     /// rate limit, and says when it ends if the answer says it is used up.
     async fn exchange<W, Allowed: Future<Output = Result<(), W>>>(
         &self,
+        class: Class,
         method: &Method,
         path: &str,
         body: Option<&serde_json::Value>,
@@ -1105,7 +1129,6 @@ impl Github {
         if let Some(until) = self.blocked_until() {
             return Err(Error::RateLimited { until });
         }
-        let class = Class::of(method, path);
         // The token GitHub refused, once it did.
         let mut refused: Option<Token> = None;
         loop {
@@ -1265,7 +1288,9 @@ impl GithubApi for Github {
             "work_folder": "_work",
         });
         let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
-        let response = self.send(Method::POST, &path, Some(&body), None).await?;
+        let response = self
+            .send(Class::Registration, Method::POST, &path, Some(&body), None)
+            .await?;
         let response = expect_success(Method::POST, &path, response)?;
         let jit: JitResponse = decode(&path, &response.bytes)?;
         Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
@@ -1273,7 +1298,9 @@ impl GithubApi for Github {
 
     async fn delete_runner(&self, repository: &str, id: u64) -> Result<Deleted, Error> {
         let path = format!("/repos/{repository}/actions/runners/{id}");
-        let response = self.send(Method::DELETE, &path, None, None).await?;
+        let response = self
+            .send(Class::Delete, Method::DELETE, &path, None, None)
+            .await?;
         match response.status {
             StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
             StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
@@ -1301,10 +1328,10 @@ impl GithubApi for Github {
     async fn run_trigger(&self, repository: &str, run: u64) -> Result<RunTrigger, Error> {
         let run_id = run;
         let path = format!("/repos/{repository}/actions/runs/{run}");
-        let run: Result<RunBody, Error> = self.get(&path).await;
-        // Asked once per job: its large answer is not worth keeping for a conditional request.
-        lock(&self.etags).remove(&path);
-        let run = run?;
+        // Kept for a conditional request (ADR 0179): every job of a run asks for it again, and an unchanged run is a
+        // 304, which costs no rate limit. Each decision still asks GitHub: a re-run keeps the run's ID and changes
+        // who triggered it.
+        let run: RunBody = self.get_page_as(Class::Trigger, &path).await?.body;
         if let Some(workflow) = run.workflow_id {
             lock(&self.workflows).run(repository, run_id, Some(workflow));
         }
@@ -1326,9 +1353,8 @@ impl GithubApi for Github {
 
     async fn pull_request(&self, repository: &str, number: u64) -> Result<PullRequest, Error> {
         let path = format!("/repos/{repository}/pulls/{number}");
-        let pull: Result<PullRequestBody, Error> = self.get(&path).await;
-        lock(&self.etags).remove(&path);
-        let pull = pull?;
+        // Kept for a conditional request, asked again for each decision: its head and base can change (ADR 0179).
+        let pull: PullRequestBody = self.get(&path).await?;
         Ok(PullRequest {
             by_user: Account::is_user(pull.user.as_ref()),
             head_repository: pull.head.repo.map(|repo| repo.full_name),
@@ -1365,23 +1391,24 @@ impl GithubApi for Github {
         // Compare would read a bare name as git does, a tag before a branch: a tag `main` would pass for the
         // branch. This endpoint knows only branches.
         let path = format!("/repos/{repository}/branches/{base}");
-        let head: Result<BranchBody, Error> = self.get(&path).await;
-        lock(&self.etags).remove(&path);
-        let head = head?.commit.sha;
+        // Kept for a conditional request, asked again for each decision: a branch moves (ADR 0179).
+        let head = self.get::<BranchBody>(&path).await?.commit.sha;
         if !commit(&head) {
             return Ok(false);
         }
         // The commits it lists are not needed: one is the fewest it sends.
         let path = format!("/repos/{repository}/compare/{head}...{sha}?per_page=1");
+        // Kept for a conditional request: the jobs of one run compare the same two commits.
         let body: Result<CompareBody, Error> = self.get(&path).await;
-        lock(&self.etags).remove(&path);
         // `behind`: the branch has moved on past it.
         Ok(matches!(body?.status.as_str(), "identical" | "behind"))
     }
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), Error> {
         let path = format!("/repos/{repository}/actions/runs/{run}/cancel");
-        let response = self.send(Method::POST, &path, None, None).await?;
+        let response = self
+            .send(Class::Cancel, Method::POST, &path, None, None)
+            .await?;
         // 409: the run completed already.
         if response.status == StatusCode::CONFLICT {
             return Ok(());
@@ -1404,7 +1431,14 @@ impl GithubApi for Github {
             }
         };
         let answered = match self
-            .exchange(&Method::POST, &path, None, None, allowed)
+            .exchange(
+                Class::of(&Method::POST, &path),
+                &Method::POST,
+                &path,
+                None,
+                None,
+                allowed,
+            )
             .await
         {
             Ok(Ok(answered)) => answered,
@@ -1545,6 +1579,7 @@ struct Cached {
 
 /// The answers kept for conditional requests, by path, within `limit` bytes. Room is made only from answers unused
 /// for `fresh`, least recently used first; without enough of those, a new answer is not kept.
+/// Only a 304 serves a kept answer (ADR 0179). Nothing kept survives a restart, and a reload does not touch it.
 struct Conditional {
     entries: HashMap<String, Use>,
     bytes: usize,
