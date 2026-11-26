@@ -15,6 +15,7 @@ default = ["host"]
 # What only the daemon runs: Docker, the GitHub client, the caches and the scheduler. Clients turn it off and get
 # `api` and `config` alone.
 host = [
+  "dep:base64",
   "dep:bollard",
   "dep:bytes",
   "dep:flate2",
@@ -52,6 +53,7 @@ client = [
 ]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 bollard = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
@@ -60,7 +62,8 @@ http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 reqwest = { workspace = true, optional = true }
-ring = { workspace = true, optional = true }
+# alloc: RSA signing, for a GitHub App's JWT (ADR 0182), named here rather than left to rustls's features.
+ring = { workspace = true, optional = true, features = ["alloc"] }
 rusqlite = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true, features = ["fs", "process", "time"] }
 rustls = { workspace = true, optional = true }

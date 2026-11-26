@@ -2576,3 +2576,76 @@ async fn a_reload_that_renames_the_host_warns_it_takes_effect_at_the_next_start(
     );
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_saved_github_app_waits_for_a_restart_on_every_save_and_the_doctor_says_whose_checks_it_reads()
+ {
+    // Catches a second save that hides the pending switch, and a doctor whose App checks read as the daemon's own.
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let put = async |client: &reqwest::Client, text: String| -> ConfigCheck {
+        let response = client
+            .put("http://runnerd/v1/config")
+            .body(text)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&body(response).await).unwrap()
+    };
+    let doctor_auth = async |client: &reqwest::Client| -> Vec<runnerd_core::api::Check> {
+        let response = client.get("http://runnerd/v1/doctor").send().await.unwrap();
+        let doctor: runnerd_core::api::Doctor =
+            serde_json::from_slice(&body(response).await).unwrap();
+        doctor
+            .checks
+            .into_iter()
+            .filter(|check| check.name == doctor_cache::AUTH_CHECK)
+            .collect()
+    };
+    // A key that does not exist: a save never reads it.
+    let app = format!(
+        "{EXAMPLE}{}",
+        crate::testing::app_table(&dir.0.join("never-read.pem"))
+    );
+    let saved = put(&daemon.client, app.clone()).await;
+    let pending = |warnings: &[String]| {
+        warnings.iter().any(|warning| {
+            warning.contains("runs with gh auth token until then")
+                && warning.contains("GitHub App 4242's installation 77 after")
+        })
+    };
+    assert!(pending(&saved.warnings), "{:?}", saved.warnings);
+    daemon.reloads.recv().await.unwrap();
+    let again = put(&daemon.client, app.replacen("slots = 2", "slots = 1", 1)).await;
+    assert!(
+        pending(&again.warnings),
+        "still pending: {:?}",
+        again.warnings
+    );
+    daemon.reloads.recv().await.unwrap();
+    let checks = doctor_auth(&daemon.client).await;
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(checks[0].status, runnerd_core::api::CheckStatus::Warn);
+    assert!(
+        checks[0].detail.contains("not what the daemon runs with"),
+        "{}",
+        checks[0].detail
+    );
+    let back = put(&daemon.client, EXAMPLE.to_owned()).await;
+    assert!(
+        !back
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("GitHub authentication")),
+        "back to what runs: {:?}",
+        back.warnings
+    );
+    daemon.reloads.recv().await.unwrap();
+    assert_eq!(
+        doctor_auth(&daemon.client).await,
+        [],
+        "the saved auth is the running one"
+    );
+    daemon.stop().await;
+}

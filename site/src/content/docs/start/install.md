@@ -8,7 +8,7 @@ description: What runnerd needs, the install command, runnerd init, and how to c
 - Linux with cgroup v2, and Docker with the systemd cgroup driver.
 - [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged. `runnerd doctor` prints the install for your distribution.
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
-- The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
+- The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope. Or, instead, a [GitHub App](../../guides/github-app/) installed on the repositories, with no `gh` needed.
 
 Binaries ship for x86_64 and aarch64; the runner images are linux/amd64 only, so on aarch64 build the `base` stage of `image/Dockerfile` on the host and name it with `image_stage` (`runnerd doctor` prints the command). The `android`, `jvm` and `node` stages carry x86_64 Android platform tools.
 

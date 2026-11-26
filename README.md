@@ -30,7 +30,7 @@ Point a job at the host with `runs-on: [self-hosted, linux, x64]`. Serve private
 
 - Linux with cgroup v2, and Docker with the systemd cgroup driver.
 - [Sysbox](https://github.com/nestybox/sysbox) and a systemd slice whose `MemoryMax` is the runners' budget.
-- The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
+- The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope, or a [GitHub App](https://ayagmar.github.io/runnerd/guides/github-app/) installed on the repositories, set in `[github.app]`.
 
 Binaries ship for x86_64 and aarch64; the runner images are linux/amd64 only, so on aarch64 build the `base` stage of `image/Dockerfile` on the host.
 

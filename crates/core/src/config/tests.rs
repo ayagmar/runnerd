@@ -1408,6 +1408,17 @@ const REFERENCE_BASE: &[(&str, &[(&str, &str)])] = &[
     ("sizing", &[]),
     ("web", &[]),
     ("github", &[]),
+    (
+        "github.app",
+        &[
+            ("app_id", "123456"),
+            ("installation_id", "789012"),
+            (
+                "private_key",
+                r#""/home/dana/.config/runnerd/github-app.pem""#,
+            ),
+        ],
+    ),
     ("notify", &[]),
     (
         "[notify.targets]",
@@ -1429,6 +1440,7 @@ const REFERENCE_SECTIONS: &[(&str, &str)] = &[
     ("[records]", "records"),
     ("[sizing]", "sizing"),
     ("[github]", "github"),
+    ("[github.app]", "github.app"),
     ("[web]", "web"),
     ("[notify]", "notify"),
     ("[[notify.targets]]", "[notify.targets]"),
@@ -1792,4 +1804,89 @@ fn an_overflow_host_keeps_no_warm_runner_and_is_warned_of_auto_sizing() {
         .is_err(),
         "an unknown role is refused"
     );
+}
+
+/// `MINIMAL` with `table` appended.
+fn with_github(table: &str) -> String {
+    format!("{MINIMAL}\n{table}")
+}
+
+#[test]
+fn without_a_github_app_table_runnerd_authenticates_with_gh() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert_eq!(config.github.app, None);
+    assert!(config.github.job_actions, "job actions stay on by default");
+    config.validate(Some(size("16G"))).unwrap();
+}
+
+#[test]
+fn a_whole_github_app_table_parses_beside_job_actions() {
+    let config = Config::parse(&with_github(
+        "[github]\njob_actions = false\n\n[github.app]\napp_id = 123456\ninstallation_id = 789012\n\
+         private_key = \"/home/runnerd/.config/runnerd/github-app.pem\"\n",
+    ))
+    .unwrap();
+    let app = config.github.app.as_ref().unwrap();
+    assert_eq!(
+        (app.app_id, app.installation_id, app.private_key.as_path()),
+        (
+            123_456,
+            789_012,
+            Path::new("/home/runnerd/.config/runnerd/github-app.pem")
+        )
+    );
+    assert!(!config.github.job_actions, "job_actions stays its own key");
+    config.validate(Some(size("16G"))).unwrap();
+}
+
+#[test]
+fn a_partial_github_app_table_or_an_unknown_key_in_it_is_refused() {
+    for table in [
+        "app_id = 1\ninstallation_id = 2\n",
+        "app_id = 1\nprivate_key = \"/k.pem\"\n",
+        "installation_id = 2\nprivate_key = \"/k.pem\"\n",
+        "app_id = 1\ninstallation_id = 2\nprivate_key = \"/k.pem\"\ntoken = \"x\"\n",
+        "app_id = 1\ninstallation_id = 2\nprivate_key = \"/k.pem\"\nclient_secret = \"x\"\n",
+        "app_id = -1\ninstallation_id = 2\nprivate_key = \"/k.pem\"\n",
+    ] {
+        let text = with_github(&format!("[github.app]\n{table}"));
+        assert!(Config::parse(&text).is_err(), "refused: {table}");
+    }
+}
+
+#[test]
+fn a_github_app_with_a_zero_id_or_a_key_in_place_of_its_path_is_refused_without_repeating_it() {
+    let key =
+        "-----BEGIN RSA PRIVATE KEY-----\\nMIIEsentinelKeyBytes\\n-----END RSA PRIVATE KEY-----";
+    for (table, says) in [
+        (
+            "app_id = 0\ninstallation_id = 2\nprivate_key = \"/k.pem\"".to_owned(),
+            "app_id is 0",
+        ),
+        (
+            "app_id = 1\ninstallation_id = 0\nprivate_key = \"/k.pem\"".to_owned(),
+            "installation_id is 0",
+        ),
+        (
+            "app_id = 1\ninstallation_id = 2\nprivate_key = \"keys/app.pem\"".to_owned(),
+            "not an absolute path",
+        ),
+        (
+            "app_id = 1\ninstallation_id = 2\nprivate_key = \"ghs_sentinelInstallationToken\""
+                .to_owned(),
+            "not an absolute path",
+        ),
+        (
+            format!("app_id = 1\ninstallation_id = 2\nprivate_key = \"{key}\""),
+            "holds a key",
+        ),
+    ] {
+        let config = Config::parse(&with_github(&format!("[github.app]\n{table}\n"))).unwrap();
+        let error = config.validate(Some(size("16G"))).unwrap_err().to_string();
+        assert!(error.contains(says), "{table}: {error}");
+        assert!(
+            !error.contains("sentinel") && !error.contains("ghs_"),
+            "the error repeats no value: {error}"
+        );
+    }
 }

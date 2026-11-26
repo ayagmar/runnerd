@@ -62,6 +62,13 @@ name = "halyard/storefront"
 profile = "node"
 labels = ["self-hosted", "linux", "x64", "node"]
 
+# Authenticate as a GitHub App's installation instead of `gh auth token`: the key's .pem file, owned by runnerd's
+# user, chmod 600. Read at start; a change takes effect when runnerd restarts.
+# [github.app]
+# app_id = 123456
+# installation_id = 789012
+# private_key = "/home/dana/.config/runnerd/github-app.pem"
+
 # Failures, lost jobs, runners that cannot start and new insights, to a phone through ntfy. Off without a target.
 # [[notify.targets]]
 # name = "phone"

@@ -188,3 +188,4 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0179](0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md) | Trust reads stay conditional, and each endpoint is counted | Accepted |
 | [0180](0180-a-tick-reads-a-job-once-and-not-what-its-listing-showed.md) | A tick reads a job once, and not what its listing showed | Accepted |
 | [0181](0181-credentials-and-public-reads-are-separate-domains.md) | Credentials and public reads are separate domains | Accepted |
+| [0182](0182-a-github-app-installation-can-authenticate-runnerd.md) | A GitHub App installation can authenticate runnerd | Accepted |

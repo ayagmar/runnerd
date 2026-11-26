@@ -93,6 +93,7 @@ export default defineConfig({
             'guides/remote-dashboard',
             'guides/second-machine',
             'guides/machines',
+            'guides/github-app',
           ],
         },
         {

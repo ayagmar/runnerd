@@ -29,6 +29,7 @@ use crate::docker::JitConfig;
 use crate::sync::lock;
 use crate::time;
 
+pub mod app;
 mod archives;
 mod public;
 mod requests;
@@ -914,6 +915,23 @@ impl Github {
             Credentials::Command(token_source),
             PublicReads::Authenticated,
         )
+    }
+
+    /// A client for `base` that authenticates as the GitHub App installation `app` (ADR 0182), with its expiring
+    /// tokens, and reads pinned actions' repositories anonymously: an installation's token may not say whether a
+    /// repository it does not cover is public.
+    pub fn new_app(base: &str, app: app::App) -> Result<Github, Error> {
+        Github::with_credentials(
+            base,
+            Credentials::Expiring(Arc::new(app).source()),
+            PublicReads::Anonymous,
+        )
+    }
+
+    /// Reads a token now and keeps it, as the first request would: the daemon's start fails here rather than at its
+    /// first poll when no token can be had.
+    pub async fn authenticate(&self) -> Result<(), Error> {
+        self.tokens.get(None).await.map(|_| ())
     }
 
     /// A client for `base` that authenticates with `credentials` and reads pinned actions' repositories as `public`

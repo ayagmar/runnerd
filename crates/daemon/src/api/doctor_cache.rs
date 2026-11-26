@@ -7,7 +7,9 @@
 //! `doctor::READ_DEADLINE`, each Docker request dropped. A run not done `Timing::deadline` after it began is reported
 //! failed, and the next starts only once its blocking work ended. A request waits for a run at most `Timing::answer`,
 //! under every client's timeout, and otherwise answers the last run as it stands. Nothing of it survives a restart; at
-//! a stop the worker ends, and the daemon kills the commands still running (`doctor::stop_commands`).
+//! a stop the worker ends, and the daemon kills the commands still running (`doctor::stop_commands`). The checks read
+//! the saved config, whose GitHub authentication may not be the one the daemon started with (ADR 0182): a run then
+//! carries a check that says so.
 //!
 //! It must not change the host, the config or the engine: it reads.
 
@@ -22,6 +24,7 @@ use tokio::sync::{Notify, watch};
 use tracing::warn;
 
 use super::AppState;
+use crate::auth::Auth;
 
 /// Reads the host and runs the checks for `config` read from `path`, with what the sizing check reads of the job
 /// history: `read_host`, or a test's. Called on a blocking thread.
@@ -60,6 +63,23 @@ async fn recorded(state: &AppState) -> Result<Recorded, String> {
     let history = super::history::sizing_history(state, window).await?;
     Ok(Recorded { history, window })
 }
+
+/// Says the checks read the saved config's GitHub authentication while the daemon runs with another until it
+/// restarts (ADR 0182): `active` is what it started with, `saved` what the checks read.
+fn auth_check(active: &Auth, saved: &Auth) -> Option<Check> {
+    let pending = active.pending(saved)?;
+    Some(Check {
+        name: AUTH_CHECK.to_owned(),
+        status: api::CheckStatus::Warn,
+        detail: format!(
+            "{pending}; the GitHub checks here read the saved config's, not what the daemon runs with"
+        ),
+        fix: Some("restart runnerd: systemctl --user restart runnerd".to_owned()),
+    })
+}
+
+/// The name of the check that says a saved config's GitHub authentication waits for a restart.
+pub(crate) const AUTH_CHECK: &str = "GitHub auth";
 
 /// How the worker paces its runs, and how old a run may be.
 #[derive(Clone, Copy)]
@@ -274,12 +294,16 @@ pub(super) async fn run(state: AppState, worker: Worker) {
             .await
             .unwrap_or_else(|_| Err("the job history did not answer in time".to_owned()));
         let read = setup.read.clone();
+        let saved = Auth::of_text(&text);
         let mut task = tokio::task::spawn_blocking(move || {
             read(Config::parse(&text).ok().as_ref(), &path, recorded)
         });
         let outcome = tokio::select! {
             done = tokio::time::timeout_at(until, &mut task) => match done {
-                Ok(Ok(checks)) => Ok(checks),
+                Ok(Ok(mut checks)) => {
+                    checks.extend(auth_check(&state.auth, &saved));
+                    Ok(checks)
+                }
                 Ok(Err(join_error)) => Err(format!("it stopped: {join_error}")),
                 Err(_) => {
                     overdue = Some(task);

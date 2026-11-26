@@ -36,6 +36,7 @@ BASE = {
     "sizing": {},
     "web": {},
     "github": {},
+    "github.app": {"app_id": "123456", "installation_id": "789012", "private_key": '"/home/dana/.config/runnerd/github-app.pem"'},
     "notify": {},
     "[notify.targets]": {"name": '"phone"', "kind": '"ntfy"', "url": '"https://ntfy.sh/halyard-ci"'},
 }
@@ -49,6 +50,7 @@ SECTIONS = {
     "[records]": "records",
     "[sizing]": "sizing",
     "[github]": "github",
+    "[github.app]": "github.app",
     "[web]": "web",
     "[notify]": "notify",
     "[[notify.targets]]": "[notify.targets]",

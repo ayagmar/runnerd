@@ -301,6 +301,11 @@ pub(super) async fn replace(
             .warnings
             .push("history.database takes effect when runnerd restarts".to_owned());
     }
+    // Chosen at start (ADR 0182), and compared with that, not with the text saved before: each save until a restart
+    // says so.
+    checked
+        .warnings
+        .extend(state.auth.pending(&crate::auth::Auth::of(&config)));
     // Read once at start (ADR 0158): runner names, the status and messages keep the old name until then.
     let name = |config: &Config| config.host.name.clone();
     if current.as_ref().map(name) != Some(name(&config)) {

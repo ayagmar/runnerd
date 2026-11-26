@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use runnerd_core::api::{self, Sizing};
@@ -10,8 +11,9 @@ use runnerd_core::observe::storage;
 use runnerd_core::sizing;
 
 use super::{
-    Check, ConfigFile, DaemonState, DockerFacts, GhAuth, Host, ImageFound, Kernel, READS_AT_ONCE,
-    SYSBOX_DAEMONS, Slice, Status, SysboxDaemon, TokenKind, checks, process_runs, read_each,
+    Auth, Check, ConfigFile, DaemonState, DockerFacts, GhAuth, Host, ImageFound, Kernel,
+    READS_AT_ONCE, SYSBOX_DAEMONS, Slice, Status, SysboxDaemon, TokenKind, checks, process_runs,
+    read_each,
 };
 use crate::testdir::Dir;
 
@@ -78,10 +80,10 @@ fn ready_host(os_release: &str) -> Host {
             memory_max: Some(ByteSize(33 << 30)),
             cpu_quota: "infinity".to_owned(),
         })),
-        gh: Ok(GhAuth {
+        auth: Auth::Gh(Ok(GhAuth {
             scopes: vec!["gist".to_owned(), "repo".to_owned(), "workflow".to_owned()],
             kind: TokenKind::OAuth,
-        }),
+        })),
         visibility: [
             ("halyard/ledger", "private"),
             ("halyard/storefront", "internal"),
@@ -259,10 +261,10 @@ fn the_job_actions_check_says_what_the_token_shows_and_a_fine_grained_token_is_n
     let config = config("sysbox");
     let found = |scopes: &[&str], kind| {
         let mut host = ready_host(ARCH);
-        host.gh = Ok(GhAuth {
+        host.auth = Auth::Gh(Ok(GhAuth {
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             kind,
-        });
+        }));
         let checks = checks(&host, Some(&config));
         let named = |name: &str| {
             let check = checks.iter().find(|check| check.name == name).unwrap();
@@ -288,7 +290,7 @@ fn the_job_actions_check_says_what_the_token_shows_and_a_fine_grained_token_is_n
     let (_, (actions, _)) = found(&[], TokenKind::Other);
     assert_eq!(actions, Status::Info);
     let mut host = ready_host(ARCH);
-    host.gh = Err("gh is not logged in to github.com".to_owned());
+    host.auth = Auth::Gh(Err("gh is not logged in to github.com".to_owned()));
     let skipped = checks(&host, Some(&config));
     let check = skipped
         .iter()
@@ -820,10 +822,10 @@ fn a_slice_without_limits_and_a_token_without_repo_fail() {
         memory_max: None,
         cpu_quota: "infinity".to_owned(),
     }));
-    host.gh = Ok(GhAuth {
+    host.auth = Auth::Gh(Ok(GhAuth {
         scopes: vec!["gist".to_owned()],
         kind: TokenKind::Classic,
-    });
+    }));
     let checks = checks(&host, Some(&config));
     // Measured admission, the default, has no MemoryMax to admit against either: one failure, the slice's.
     assert_eq!(failed(&checks), ["slice", "gh"]);
@@ -1301,4 +1303,196 @@ fn an_overflow_hosts_role_warnings_show_while_the_slice_has_no_memory_max() {
     for warning in &expected {
         assert!(warned.detail.contains(warning.as_str()), "{warned}");
     }
+}
+
+/// A `gh` that only leaves a mark that it ran, and fails: what an App's doctor must never run.
+fn marking_gh(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let gh = dir.join("gh");
+    let mark = dir.join("gh-ran");
+    std::fs::write(
+        &gh,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", mark.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (gh, mark)
+}
+
+/// The example config under `[github.app]` with the test key in `dir`, after `github`, a `[github]` table's keys.
+fn app_config(dir: &Path, github: &str) -> Config {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/runnerd.toml"
+    ))
+    .unwrap();
+    let key = crate::testing::key_file(dir, 0o600);
+    Config::parse(&format!(
+        "{text}\n[github]\n{github}\n{}",
+        crate::testing::app_table(&key)
+    ))
+    .unwrap()
+}
+
+const NAMES: [&str; 2] = ["halyard/ledger", "halyard/storefront"];
+
+/// An installation whose token has Actions: read only and that covers `halyard/ledger`, on its second page, not
+/// `halyard/storefront`, which is public and readable with any token.
+async fn read_only_installation() -> (String, crate::testing::Seen) {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    crate::testing::fake_github(|_, path| match path {
+        "/app/installations/77/access_tokens" => crate::testing::minted(
+            r#"{"administration":"write","actions":"read","contents":"read","pull_requests":"read"}"#,
+        ),
+        "/installation/repositories?per_page=100&page=1" => (
+            [
+                ("content-type", "application/json"),
+                ("link", "<https://api.github.com/installation/repositories?page=2>; rel=\"next\""),
+            ],
+            r#"{"repositories":[{"full_name":"halyard/tools","visibility":"private"}]}"#,
+        )
+            .into_response(),
+        "/installation/repositories?per_page=100&page=2" => crate::testing::json(
+            r#"{"repositories":[{"full_name":"halyard/ledger","visibility":"private"}]}"#,
+        ),
+        "/repos/halyard/storefront" => crate::testing::json(
+            r#"{"default_branch":"main","visibility":"public"}"#,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_doctor_runs_no_gh_and_fails_actions_read_and_an_uncovered_repository_even_with_job_actions_off()
+ {
+    let dir = Dir::new();
+    let (gh, mark) = marking_gh(&dir.0);
+    let (url, seen) = read_only_installation().await;
+    let config = app_config(&dir.0, "job_actions = false");
+    let reads = super::GithubReads { gh, api: url };
+    let (auth, visibility) =
+        tokio::task::spawn_blocking(move || super::read_github(Some(&config), &NAMES, &reads))
+            .await
+            .unwrap();
+    assert!(!mark.exists(), "an App's doctor runs no gh");
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests
+            .iter()
+            .all(|(method, path)| *method == axum::http::Method::GET
+                || path == "/app/installations/77/access_tokens"),
+        "nothing but the mint writes: {requests:?}"
+    );
+    assert!(
+        !requests.iter().any(|(_, path)| path.starts_with("/repos/")),
+        "membership is the installation's listing, never a repository's read: {requests:?}"
+    );
+    let mut host = ready_host(ARCH);
+    host.auth = auth;
+    host.visibility = visibility;
+    let config = app_config(&dir.0, "job_actions = false");
+    let checks = checks(&host, Some(&config));
+    let named = |name: &str| checks.iter().find(|check| check.name == name).unwrap();
+    let app = named(super::APP_CHECK);
+    assert_eq!(app.status, Status::Fail, "{app:?}");
+    assert!(
+        app.detail.contains("actions write (has read)") && app.detail.contains("job_actions off"),
+        "{}",
+        app.detail
+    );
+    let repositories = named("repositories");
+    assert_eq!(repositories.status, Status::Fail, "{repositories:?}");
+    assert!(
+        repositories
+            .detail
+            .contains("does not cover halyard/storefront")
+            && !repositories.detail.contains("ledger"),
+        "{}",
+        repositories.detail
+    );
+    assert_eq!(named(api::JOB_ACTIONS_CHECK).status, Status::Info);
+    assert!(
+        checks.iter().all(|check| check.name != "gh"),
+        "no gh check under an App"
+    );
+    let visibility: Vec<(Status, &str)> = checks
+        .iter()
+        .filter(|check| check.name == "repository")
+        .map(|check| (check.status, check.detail.as_str()))
+        .collect();
+    assert_eq!(
+        visibility,
+        [
+            (Status::Pass, "halyard/ledger: private"),
+            (
+                Status::Skip,
+                "halyard/storefront: cannot read its visibility: the GitHub App's installation does not cover it"
+            ),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_doctors_gh_is_the_one_it_is_given_so_an_app_doctor_not_running_it_means_something() {
+    let dir = Dir::new();
+    let (gh, mark) = marking_gh(&dir.0);
+    let reads = super::GithubReads {
+        gh,
+        api: "http://127.0.0.1:9".to_owned(),
+    };
+    let (auth, _) = tokio::task::spawn_blocking(move || {
+        super::read_github(Some(&config("sysbox")), &NAMES, &reads)
+    })
+    .await
+    .unwrap();
+    assert!(mark.exists(), "the gh given ran");
+    assert!(
+        matches!(auth, Auth::Gh(Err(_))),
+        "a gh that fails is not logged in"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_whose_token_is_refused_fails_its_check_without_repeating_githubs_answer() {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    let dir = Dir::new();
+    let (gh, mark) = marking_gh(&dir.0);
+    let (url, _) = crate::testing::fake_github(|_, _| {
+        (
+            StatusCode::UNAUTHORIZED,
+            format!(r#"{{"message":"sentinel {}"}}"#, crate::testing::TOKEN),
+        )
+            .into_response()
+    })
+    .await;
+    let config = app_config(&dir.0, "");
+    let reads = super::GithubReads { gh, api: url };
+    let (auth, visibility) =
+        tokio::task::spawn_blocking(move || super::read_github(Some(&config), &NAMES, &reads))
+            .await
+            .unwrap();
+    assert!(!mark.exists(), "an App's doctor runs no gh");
+    let mut host = ready_host(ARCH);
+    host.auth = auth;
+    host.visibility = visibility;
+    let checks = checks(&host, Some(&app_config(&dir.0, "")));
+    let app = checks
+        .iter()
+        .find(|check| check.name == super::APP_CHECK)
+        .unwrap();
+    assert_eq!(app.status, Status::Fail);
+    assert!(app.detail.contains("401"), "{}", app.detail);
+    let shown = format!("{checks:?}");
+    assert!(
+        !shown.contains("sentinel") && !shown.contains("ghs_"),
+        "{shown}"
+    );
+    let actions = checks
+        .iter()
+        .find(|check| check.name == api::JOB_ACTIONS_CHECK)
+        .unwrap();
+    assert_eq!(actions.status, Status::Skip);
 }

@@ -968,11 +968,60 @@ pub struct Github {
     /// Whether `POST /v1/jobs/{id}/cancel` and `POST /v1/jobs/{id}/rerun` may cancel a job's run or re-run it on
     /// GitHub. Default on; off, both answer 403. A forced pause cancels runs either way.
     pub job_actions: bool,
+    /// `[github.app]`: authenticate as a GitHub App's installation (ADR 0182). Without it, runnerd uses `gh auth
+    /// token`; with it, the App only, never `gh`.
+    pub app: Option<GithubApp>,
 }
 
 impl Default for Github {
     fn default() -> Github {
-        Github { job_actions: true }
+        Github {
+            job_actions: true,
+            app: None,
+        }
+    }
+}
+
+/// `[github.app]`: the GitHub App installation runnerd authenticates as (ADR 0182). Every key is required. It names
+/// the private key's file, never holds the key: the daemon reads the file at start, and a change takes effect when it
+/// restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubApp {
+    /// The App's ID, from its settings page.
+    pub app_id: u64,
+    /// The installation's ID, from the URL of its settings on the account that installed it.
+    pub installation_id: u64,
+    /// The absolute path of the App's private key, a PEM file only the daemon's user may read.
+    pub private_key: PathBuf,
+}
+
+impl GithubApp {
+    /// Refuses a zero ID, and a `private_key` that is not an absolute path: a key or a token written in its place is
+    /// refused without being repeated.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let refuse = |why: &'static str| Err(ConfigError::GithubApp(why));
+        if self.app_id == 0 {
+            return refuse("app_id is 0; set it to the App's ID");
+        }
+        if self.installation_id == 0 {
+            return refuse("installation_id is 0; set it to the installation's ID");
+        }
+        let text = self.private_key.as_os_str().as_encoded_bytes();
+        let holds_key = text.contains(&b'\n')
+            || text.contains(&b'\r')
+            || text.windows(5).any(|window| window == b"-----");
+        if holds_key {
+            return refuse(
+                "private_key holds a key; set it to the absolute path of the key's .pem file",
+            );
+        }
+        if !self.private_key.is_absolute() {
+            return refuse(
+                "private_key is not an absolute path; set it to the absolute path of the key's .pem file",
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1429,6 +1478,9 @@ pub enum ConfigError {
          set allow_unsafe = true under [host] to use it anyway"
     )]
     UnsafeNotAllowed,
+    /// `[github.app]` is not usable: why, never a value it holds.
+    #[error("[github.app] {0}")]
+    GithubApp(&'static str),
     /// `[host.drive]` names no disk.
     #[error(
         "host.drive.device is empty; set it to the disk under Docker's root, such as \"nvme0n1\""
@@ -1951,6 +2003,9 @@ impl Config {
         self.check_memory_ceiling()?;
         self.web.validate()?;
         self.notify.validate()?;
+        if let Some(app) = &self.github.app {
+            app.validate()?;
+        }
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {
                 return Err(ConfigError::UnknownProfile {

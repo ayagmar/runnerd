@@ -73,6 +73,29 @@ pub(crate) fn parse_ns(text: &str) -> Option<u64> {
     seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
+/// Milliseconds since the Unix epoch of an HTTP `Date` header in its one current form (RFC 9110's IMF-fixdate, such as
+/// `Sun, 06 Nov 1994 08:49:37 GMT`); `None` for anything else.
+#[cfg(feature = "host")]
+pub(crate) fn parse_http_date(text: &str) -> Option<u64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_weekday, rest) = text.trim().split_once(", ")?;
+    let mut parts = rest.split(' ');
+    let (day, month, year, time, zone) = (
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    if zone != "GMT" || parts.next().is_some() || day.len() != 2 || year.len() != 4 {
+        return None;
+    }
+    let month = MONTHS.iter().position(|name| *name == month)? + 1;
+    parse_ms(&format!("{year}-{month:02}-{day}T{time}Z"))
+}
+
 /// `ms` since the epoch as GitHub writes a time, to the second: a test's fixture dated by the clock, so no window
 /// that reads back from now ages it out.
 #[cfg(test)]
@@ -86,6 +109,25 @@ pub(crate) fn rfc3339(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{parse_ms, rfc3339};
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn an_http_date_parses_to_epoch_milliseconds_and_another_form_does_not() {
+        use super::parse_http_date;
+        assert_eq!(
+            parse_http_date("Thu, 22 Oct 2026 19:27:25 GMT"),
+            Some(1_792_697_245_000)
+        );
+        for invalid in [
+            "Thursday, 22-Oct-26 19:27:25 GMT",
+            "Thu Oct 22 19:27:25 2026",
+            "Thu, 22 Oct 2026 19:27:25 UTC",
+            "Thu, 22 Okt 2026 19:27:25 GMT",
+            "",
+        ] {
+            assert_eq!(parse_http_date(invalid), None, "{invalid}");
+        }
+    }
 
     #[test]
     fn github_and_docker_timestamps_parse_to_epoch_milliseconds() {

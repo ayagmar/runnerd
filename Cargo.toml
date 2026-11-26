@@ -18,6 +18,8 @@ runnerd-web = { path = "crates/web", version = "0.1.8" }
 # The clients' parity fixtures: a dev-dependency only, and never published.
 runnerd-fixtures = { path = "crates/fixtures" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+# A GitHub App's private key and the JWT it signs (ADR 0182): PEM's base64 and JWT's base64url, no SIMD.
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
 bytes = "1.12.2"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -29,7 +31,8 @@ hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
 log = "0.4.34"
 # QR codes that sign a phone in to the dashboard: the matrix only; runnerd draws it as SVG or terminal blocks.
-# SHA-256 of the action archives runnerd keeps (ADR 0147): already the TLS provider's crypto.
+# SHA-256 of the action archives runnerd keeps (ADR 0147), and a GitHub App's RS256 signature (ADR 0182): already the
+# TLS provider's crypto.
 ring = { version = "0.17.14", default-features = false }
 qrcode = { version = "0.14.1", default-features = false }
 # The terminal UI: the crossterm backend only; the calendar widget would pull in `time`.
