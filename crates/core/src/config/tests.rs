@@ -1890,3 +1890,55 @@ fn a_github_app_with_a_zero_id_or_a_key_in_place_of_its_path_is_refused_without_
         );
     }
 }
+
+#[test]
+fn a_github_table_that_does_not_parse_is_refused_without_repeating_what_it_holds() {
+    // Synthetic placeholders shaped like what a user might paste: none is a real credential.
+    let token = "ghs_PLACEHOLDER_not_a_real_token_0000";
+    let pem = "-----BEGIN RSA PRIVATE KEY-----\nPLACEHOLDERnotAKey\n-----END RSA PRIVATE KEY-----";
+    for table in [
+        format!(
+            "[github.app]\napp_id = \"{token}\"\ninstallation_id = 2\nprivate_key = \"/k.pem\"\n"
+        ),
+        format!(
+            "[github.app]\napp_id = 1\ninstallation_id = 2\nprivate_key = \"\"\"\n{pem}\n\"\"\"\ntoken = \"{token}\"\n"
+        ),
+        format!("[github.app]\napp_id = 1\ninstallation_id = 2\nprivate_key = \"\"\"\n{pem}\n"),
+        format!("[github.app]\napp_id = 1\ninstallation_id = 2\nprivate_key = {token}\n"),
+        format!("[github.app]\napp_id = 1\ninstallation_id = 2\nprivate_key = [\"{token}\"]\n"),
+        format!("[github.app]\napp_id = 1\ninstallation_id = 2\n{token} = \"/k.pem\"\n"),
+        format!("[github]\njob_actions = \"{token}\"\n"),
+        format!(
+            "[github]\napp = {{ app_id = 1, installation_id = 2, private_key = 7, x = \"{token}\" }}\n"
+        ),
+        format!("github.app.private_key = \"\"\"\n{pem}"),
+    ] {
+        let text = if table.starts_with("github.") {
+            format!("{table}\n{MINIMAL}")
+        } else {
+            with_github(&table)
+        };
+        let error = Config::parse(&text).unwrap_err().to_string();
+        let parse_error = Config::parse_error(&text).unwrap();
+        for shown in [&error, &parse_error.message] {
+            assert!(
+                !shown.contains("PLACEHOLDER")
+                    && !shown.contains("ghs_")
+                    && !shown.contains("BEGIN"),
+                "{table}: {shown}"
+            );
+        }
+        assert!(error.starts_with("[github] at line"), "{table}: {error}");
+    }
+    // An unknown key that reads as a name is named, with the keys the table takes.
+    let error = Config::parse(&with_github("[github.app]\napp_id = 1\ninstallation_id = 2\nprivate_key = \"/k.pem\"\nzz_unknown = \"ghs_PLACEHOLDER\"\n"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unknown field `zz_unknown`, expected") && !error.contains("PLACEHOLDER"),
+        "{error}"
+    );
+    // Elsewhere the parser's words, which say more, are kept.
+    let error = Config::parse(&MINIMAL.replace("cpus = 4", "cpus = \"four\"")).unwrap_err();
+    assert!(error.to_string().contains("four"), "{error}");
+}

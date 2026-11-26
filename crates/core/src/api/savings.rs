@@ -187,6 +187,27 @@ pub enum Visibility {
     Internal,
 }
 
+impl Visibility {
+    /// The visibility GitHub's word names: `public`, `private` or `internal`; `None` for any other.
+    pub fn of(word: &str) -> Option<Visibility> {
+        match word {
+            "public" => Some(Visibility::Public),
+            "private" => Some(Visibility::Private),
+            "internal" => Some(Visibility::Internal),
+            _ => None,
+        }
+    }
+
+    /// GitHub's word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+            Visibility::Internal => "internal",
+        }
+    }
+}
+
 /// The runner each profile's jobs are priced at, from the config running now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pricing {

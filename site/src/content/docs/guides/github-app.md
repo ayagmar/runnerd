@@ -50,6 +50,8 @@ runnerd doctor
 systemctl --user restart runnerd
 ```
 
+At start, runnerd checks that the installation covers every repository it serves and every one it is still draining runners from, and does not start otherwise. A save that adds a repository the installation does not cover is refused.
+
 With `[github.app]` set, `runnerd doctor` runs no `gh` command. It mints a token, checks the four permissions, and lists the installation's repositories to check that it covers each one you serve; it sends nothing that writes. At start the daemon mints its first token and does not start if it cannot.
 
 ## What changes

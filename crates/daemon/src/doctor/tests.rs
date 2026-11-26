@@ -1496,3 +1496,46 @@ async fn an_app_whose_token_is_refused_fails_its_check_without_repeating_githubs
         .unwrap();
     assert_eq!(actions.status, Status::Skip);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_doctor_shows_no_word_github_sent_that_it_does_not_recognize() {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    let dir = Dir::new();
+    let (gh, _) = marking_gh(&dir.0);
+    let (url, _) = crate::testing::fake_github(|_, path| match path {
+        "/app/installations/77/access_tokens" => crate::testing::minted(
+            r#"{"administration":"write","actions":"ghs_sentinelLevel","contents":"read","pull_requests":"read"}"#,
+        ),
+        "/installation/repositories?per_page=100&page=1" => crate::testing::json(
+            r#"{"repositories":[{"full_name":"halyard/ledger","visibility":"ghs_sentinelVisibility"},{"full_name":"halyard/storefront","visibility":"private"}]}"#,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let config = app_config(&dir.0, "");
+    let reads = super::GithubReads { gh, api: url };
+    let (auth, visibility) =
+        tokio::task::spawn_blocking(move || super::read_github(Some(&config), &NAMES, &reads))
+            .await
+            .unwrap();
+    let mut host = ready_host(ARCH);
+    host.auth = auth;
+    host.visibility = visibility;
+    let checks = checks(&host, Some(&app_config(&dir.0, "")));
+    let shown = format!("{checks:?}");
+    assert!(
+        !shown.contains("sentinel") && !shown.contains("ghs_"),
+        "{shown}"
+    );
+    let app = checks
+        .iter()
+        .find(|check| check.name == super::APP_CHECK)
+        .unwrap();
+    assert!(
+        app.detail
+            .contains("actions write (has a level runnerd does not know)"),
+        "{}",
+        app.detail
+    );
+}

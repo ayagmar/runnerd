@@ -326,7 +326,7 @@ pub(crate) fn read_github(
             let visibility = match &installation {
                 Err(_) => Err("needs the GitHub App's token".to_owned()),
                 Ok(installation) => match installation.repositories.get(*name) {
-                    Some(Coverage::Covered(Some(visibility))) => Ok(visibility.clone()),
+                    Some(Coverage::Covered(Some(visibility))) => Ok(visibility.word().to_owned()),
                     Some(Coverage::Covered(None)) => Err(
                         "GitHub did not say, listing the installation's repositories".to_owned(),
                     ),
@@ -1064,7 +1064,7 @@ fn app_checks(
                     "{} {} (has {})",
                     missing.name,
                     missing.needed.word(),
-                    missing.has.as_deref().unwrap_or("none")
+                    missing.has.words()
                 )
             })
             .collect();
@@ -1077,12 +1077,7 @@ fn app_checks(
             "in the App's settings, under Permissions, give Administration: Read and write, Actions: Read and              write, Contents: Read-only and Pull requests: Read-only, then accept the new permissions on the              installation",
         )
     });
-    let uncovered: Vec<&str> = installation
-        .repositories
-        .iter()
-        .filter(|(_, coverage)| **coverage == Coverage::Uncovered)
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let uncovered = installation.uncovered();
     if !installation.repositories.is_empty() {
         checks.push(if uncovered.is_empty() {
             pass(

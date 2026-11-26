@@ -301,7 +301,7 @@ pub(super) async fn run(state: AppState, worker: Worker) {
         let outcome = tokio::select! {
             done = tokio::time::timeout_at(until, &mut task) => match done {
                 Ok(Ok(mut checks)) => {
-                    checks.extend(auth_check(&state.auth, &saved));
+                    checks.extend(auth_check(&state.auth.auth(), &saved));
                     Ok(checks)
                 }
                 Ok(Err(join_error)) => Err(format!("it stopped: {join_error}")),

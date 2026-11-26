@@ -271,6 +271,26 @@ pub(super) async fn replace(
         return Err(Refusal::Invalid(Box::new(checked)));
     };
     let current = Config::parse(&file.text).ok();
+    // Under a GitHub App, a repository the reload adds must be one the running installation covers (ADR 0182): the
+    // daemon could not register runners there, nor remove them once it drains.
+    let served = current
+        .as_ref()
+        .map(Config::repository_names)
+        .unwrap_or_default();
+    let added: Vec<String> = config
+        .repository_names()
+        .into_iter()
+        .filter(|name| {
+            !served
+                .iter()
+                .any(|served| served.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    if let Some(refusal) = state.auth.refuses(&added).await {
+        checked.valid = false;
+        checked.message = refusal;
+        return Err(Refusal::Invalid(Box::new(checked)));
+    }
     // Before the new slice's CPUs are read: a slice not made yet would fail that with the wrong reason.
     if let Some(current) = &current {
         same_slice(current, &config).map_err(Refusal::Control)?;
@@ -305,7 +325,7 @@ pub(super) async fn replace(
     // says so.
     checked
         .warnings
-        .extend(state.auth.pending(&crate::auth::Auth::of(&config)));
+        .extend(state.auth.auth().pending(&crate::auth::Auth::of(&config)));
     // Read once at start (ADR 0158): runner names, the status and messages keep the old name until then.
     let name = |config: &Config| config.host.name.clone();
     if current.as_ref().map(name) != Some(name(&config)) {

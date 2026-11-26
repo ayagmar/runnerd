@@ -439,8 +439,10 @@ always returns, so the daemon closes and flushes the history.
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A GitHub App's
   key and the JWTs it signs stay inside `github::app` alike, and an error from the token exchange or the doctor's
   probe says GitHub's status, never what GitHub sent back. Under `[github.app]`, no `gh` command runs, the doctor's
-  included; the daemon's auth is chosen at start, and a saved change waits for a restart
-  (`crates/daemon/src/auth.rs`). A `[notify]`
+  included; the daemon's auth is chosen at start, and a saved change waits for a restart. The installation covers
+  every repository served or draining: checked at start, and before a reload adds one
+  (`crates/daemon/src/auth.rs`). An error that keeps GitHub's or a parser's words redacts what looks like a
+  credential (`github::scrub`). A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,
   and `GET /v1/config` answers them as `<secret>` (`config::mask_secrets`), which `PUT /v1/config` and the check
   put back (`config::keep_secrets`), so no client holds them.

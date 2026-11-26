@@ -196,7 +196,7 @@ pub enum Error {
         path: String,
         /// What GitHub answered.
         status: StatusCode,
-        /// GitHub's error message, or the body as text.
+        /// GitHub's error message, or the body as text, with anything shaped like a credential redacted (`scrub`).
         message: String,
     },
     /// The request did not get an answer.
@@ -210,12 +210,12 @@ pub enum Error {
         source: reqwest::Error,
     },
     /// The answer is not the JSON expected.
-    #[error("{path}: unexpected response: {source}")]
+    #[error("{path}: unexpected response: {message}")]
     Decode {
         /// The request's path, without the host.
         path: String,
-        /// What did not parse.
-        source: serde_json::Error,
+        /// What did not parse, as the parser says it, with anything shaped like a credential redacted (`scrub`).
+        message: String,
     },
     /// No token could be read.
     #[error("no GitHub token: {0}")]
@@ -920,10 +920,10 @@ impl Github {
     /// A client for `base` that authenticates as the GitHub App installation `app` (ADR 0182), with its expiring
     /// tokens, and reads pinned actions' repositories anonymously: an installation's token may not say whether a
     /// repository it does not cover is public.
-    pub fn new_app(base: &str, app: app::App) -> Result<Github, Error> {
+    pub fn new_app(base: &str, app: Arc<app::App>) -> Result<Github, Error> {
         Github::with_credentials(
             base,
-            Credentials::Expiring(Arc::new(app).source()),
+            Credentials::Expiring(app.source()),
             PublicReads::Anonymous,
         )
     }
@@ -1109,7 +1109,7 @@ impl Github {
         for item in pages.into_iter().flat_map(|page| page.jobs) {
             let job = Job::deserialize(&item).map_err(|source| Error::Decode {
                 path: path.clone(),
-                source,
+                message: scrub(&source.to_string()),
             })?;
             if job.status == "queued" {
                 queued.push(job);
@@ -2089,15 +2089,63 @@ fn expect_success(method: Method, path: &str, response: Response) -> Result<Resp
         method,
         path: path.to_owned(),
         status: response.status,
-        message,
+        message: scrub(&message),
     })
 }
 
 fn decode<T: DeserializeOwned>(path: &str, bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|source| Error::Decode {
         path: path.to_owned(),
-        source,
+        message: scrub(&source.to_string()),
     })
+}
+
+/// The longest text from an answer an error keeps, in characters.
+const SCRUBBED_CHARS: usize = 300;
+
+/// What GitHub sent back, or a parser said of it, as an error may keep it: GitHub's tokens (`ghp_`, `gho_`, `ghu_`,
+/// `ghs_`, `ghr_`, `github_pat_`), JWTs (`eyJ…`) and a bearer's credential each replaced by `<redacted>`, all from a
+/// PEM armour line on dropped, and cut at [`SCRUBBED_CHARS`]. GitHub does not echo a credential, but an error must not
+/// rely on that.
+pub(crate) fn scrub(text: &str) -> String {
+    const PREFIXES: [&str; 8] = [
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "eyJ",
+        "Bearer ",
+    ];
+    let text = text.find("-----BEGIN").map_or(text, |at| &text[..at]);
+    let in_word =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '+' | '=');
+    let mut out = String::new();
+    let mut rest = text;
+    let mut previous: Option<char> = None;
+    while let Some(c) = rest.chars().next() {
+        let starts = previous.is_none_or(|p| !p.is_ascii_alphanumeric() && p != '_');
+        if starts && let Some(prefix) = PREFIXES.iter().find(|prefix| rest.starts_with(**prefix)) {
+            let after = &rest[prefix.len()..];
+            let end = after.find(|c: char| !in_word(c)).unwrap_or(after.len());
+            if prefix.starts_with("Bearer") {
+                out.push_str("Bearer ");
+            }
+            out.push_str("<redacted>");
+            rest = &after[end..];
+            previous = Some('>');
+            continue;
+        }
+        out.push(c);
+        previous = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    if out.chars().count() > SCRUBBED_CHARS {
+        out = out.chars().take(SCRUBBED_CHARS).collect();
+        out.push('…');
+    }
+    out
 }
 
 /// The number a response header carries, if it has the header and it is one.

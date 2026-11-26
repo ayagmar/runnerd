@@ -17,7 +17,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ring::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 
-use super::{App, AppKey, Coverage, KeyError, Level, Missing};
+use super::{App, AppKey, Coverage, Granted, KeyError, Level, Missing};
+use crate::api::Visibility;
 use crate::github::{Class, Github};
 use crate::testdir::TestDir;
 
@@ -102,6 +103,17 @@ fn github_issued_pkcs1_and_pkcs8_keys_sign_a_jwt_that_verifies() {
             "AppKey(<redacted>) Jwt(<redacted>)"
         );
     }
+    // Whitespace around the block is not text outside it.
+    let padded = written(
+        &dir,
+        "padded.pem",
+        format!(
+            "\n  \n{}\n\n",
+            std::fs::read_to_string(fixture("test-pkcs8.pem")).unwrap()
+        )
+        .as_bytes(),
+    );
+    AppKey::load(&padded).unwrap();
     // A read-only key is as good.
     AppKey::load(&key_file(&dir, "test-pkcs8.pem", 0o400)).unwrap();
 }
@@ -155,6 +167,18 @@ fn an_encrypted_a_non_rsa_or_a_malformed_key_is_refused_without_repeating_it() {
             "does not end",
         ),
         (written(&dir, "token", TOKEN.as_bytes()), "not a PEM file"),
+        (
+            written(&dir, "trailing", format!("{pkcs1}sentinel trailing text\n").as_bytes()),
+            "text after the PEM block",
+        ),
+        (
+            written(&dir, "two-blocks", format!("{pkcs1}\n{pkcs1}").as_bytes()),
+            "text after the PEM block",
+        ),
+        (
+            written(&dir, "leading", format!("sentinel leading text\n{pkcs1}").as_bytes()),
+            "text before the PEM block",
+        ),
         (written(&dir, "binary", &[0xff, 0xfe, 0x00, 0x80]), "not a PEM file"),
     ];
     for (path, says) in cases {
@@ -295,8 +319,7 @@ async fn a_token_is_minted_with_a_signed_jwt_and_lasts_as_github_says() {
         lasts > Duration::from_mins(58) && lasts <= Duration::from_hours(1),
         "lasts an hour: {lasts:?}"
     );
-    assert_eq!(minted.permissions["actions"], "write");
-    assert_eq!(minted.selection.as_deref(), Some("selected"));
+    assert_eq!(minted.permissions["actions"], Granted::Level(Level::Write));
     let seen = seen.lock().unwrap().clone();
     let [request] = seen.as_slice() else {
         panic!("one request: {seen:?}");
@@ -494,7 +517,7 @@ async fn the_token_exchange_never_moves_the_installations_rate_limit_counts_or_b
         _ => StatusCode::NOT_FOUND.into_response(),
     })
     .await;
-    let github = Github::new_app(&url, app(&url)).unwrap();
+    let github = Github::new_app(&url, Arc::new(app(&url))).unwrap();
     github.authenticate().await.unwrap();
     assert_eq!(
         github.blocked_until(),
@@ -534,7 +557,7 @@ async fn requests_that_find_no_token_at_once_share_one_mint_and_send_the_token_i
         _ => ([("content-type", "application/json")], "{}").into_response(),
     })
     .await;
-    let github = Arc::new(Github::new_app(&url, app(&url)).unwrap());
+    let github = Arc::new(Github::new_app(&url, Arc::new(app(&url))).unwrap());
     let reads = (0..8).map(|n| {
         let github = github.clone();
         tokio::spawn(async move {
@@ -604,28 +627,28 @@ async fn the_probe_reads_permissions_and_every_page_of_the_installations_reposit
         BTreeMap::from([
             (
                 "halyard/ledger".to_owned(),
-                Coverage::Covered(Some("private".to_owned()))
+                Coverage::Covered(Some(Visibility::Private))
             ),
             ("halyard/public-tools".to_owned(), Coverage::Uncovered),
             (
                 "halyard/site".to_owned(),
-                Coverage::Covered(Some("public".to_owned()))
+                Coverage::Covered(Some(Visibility::Public))
             ),
         ])
     );
-    assert_eq!(installation.selection, "selected");
+    assert_eq!(installation.uncovered(), ["halyard/public-tools"]);
     assert_eq!(
         installation.missing(),
         [
             Missing {
                 name: "actions",
                 needed: Level::Write,
-                has: Some("read".to_owned()),
+                has: Granted::Level(Level::Read),
             },
             Missing {
                 name: "pull_requests",
                 needed: Level::Read,
-                has: None,
+                has: Granted::Nothing,
             },
         ]
     );
@@ -660,4 +683,33 @@ async fn an_installation_with_every_permission_lacks_none_and_admin_counts_as_wr
     .await;
     let installation = app(&url).probe(&[]).await.unwrap();
     assert_eq!(installation.missing(), []);
+}
+
+#[tokio::test]
+async fn words_github_sends_that_runnerd_does_not_know_are_never_kept() {
+    let (url, _) = fake_github(|request| match request.uri.as_str() {
+        MINT_PATH => minted(
+            Duration::from_hours(1),
+            r#"{"administration":"write","actions":"sentinel-ghs_leak","contents":{"sentinel":1},"pull_requests":"read","sentinel_extra":"ghs_leak"}"#,
+        ),
+        _ => (
+            [("content-type", "application/json")],
+            r#"{"repositories":[{"full_name":"o/r","visibility":"sentinel-ghs_leak"}]}"#,
+        )
+            .into_response(),
+    })
+    .await;
+    let installation = app(&url).probe(&["o/r".to_owned()]).await.unwrap();
+    assert_eq!(installation.permissions["actions"], Granted::Unrecognized);
+    assert_eq!(installation.permissions["contents"], Granted::Unrecognized);
+    assert_eq!(
+        installation.repositories["o/r"],
+        Coverage::Covered(None),
+        "a visibility runnerd does not know is none"
+    );
+    let shown = format!("{installation:?} {:?}", installation.missing());
+    assert!(
+        !shown.contains("sentinel") && !shown.contains("ghs_"),
+        "nothing GitHub sent is kept: {shown}"
+    );
 }

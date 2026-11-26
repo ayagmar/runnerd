@@ -28,6 +28,7 @@ use ring::signature::RSA_PKCS1_SHA256;
 use serde::Deserialize;
 
 use super::{Error, ExpiringSource, ExpiringToken, MAX_PAGES, PER_PAGE, REQUEST_TIMEOUT, Token};
+use crate::api::Visibility;
 use crate::config::GithubApp;
 use crate::time;
 
@@ -215,14 +216,17 @@ impl AppKey {
     /// The key a PEM file holds, or why it is not one runnerd takes.
     fn parse(pem: &[u8]) -> Result<AppKey, &'static str> {
         let text = std::str::from_utf8(pem).map_err(|_| "not a PEM file")?;
-        let mut lines = text.lines().map(str::trim);
+        // One PEM block and nothing else, but the whitespace around it.
+        let mut lines = text.trim().lines().map(str::trim);
         let label = lines
-            .by_ref()
-            .find_map(|line| {
-                line.strip_prefix("-----BEGIN ")
-                    .and_then(|rest| rest.strip_suffix("-----"))
-            })
-            .ok_or("not a PEM file")?;
+            .next()
+            .and_then(|line| line.strip_prefix("-----BEGIN "))
+            .and_then(|rest| rest.strip_suffix("-----"))
+            .ok_or(if text.contains("-----BEGIN ") {
+                "text before the PEM block; the file must hold the key alone"
+            } else {
+                "not a PEM file"
+            })?;
         let end = format!("-----END {label}-----");
         let mut body = String::new();
         let mut ended = false;
@@ -239,6 +243,9 @@ impl AppKey {
         }
         if !ended {
             return Err("the PEM block does not end");
+        }
+        if lines.next().is_some() {
+            return Err("text after the PEM block; the file must hold the key alone");
         }
         let encoding = match label {
             "RSA PRIVATE KEY" => Encoding::Pkcs1,
@@ -326,8 +333,8 @@ impl fmt::Debug for App {
 /// An installation token as GitHub minted it, with what the installation may do.
 struct Minted {
     token: ExpiringToken,
-    permissions: BTreeMap<String, String>,
-    selection: Option<String>,
+    /// Each permission GitHub listed, as runnerd recognizes its level.
+    permissions: BTreeMap<String, Granted>,
 }
 
 /// `POST /app/installations/{id}/access_tokens`'s answer. Never `Debug`: it holds the token.
@@ -337,8 +344,6 @@ struct AccessToken {
     expires_at: String,
     #[serde(default)]
     permissions: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    repository_selection: Option<String>,
 }
 
 /// A page of `GET /installation/repositories`.
@@ -354,42 +359,79 @@ struct Listed {
     visibility: Option<String>,
 }
 
-/// What the doctor learns of an installation, with a token minted for it and then dropped: no credential.
+/// What the doctor learns of an installation, with a token minted for it and then dropped: no credential, and no text
+/// GitHub sent, only what runnerd recognized in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installation {
-    /// Each repository permission and its level, as GitHub names them, such as `actions` and `write`.
-    pub permissions: BTreeMap<String, String>,
-    /// `all` or `selected`, as GitHub says; empty when it does not.
-    pub selection: String,
+    /// What the installation has of each of [`REQUIRED_PERMISSIONS`], by its name there.
+    pub permissions: BTreeMap<&'static str, Granted>,
     /// Each repository asked about, by the name it was asked by: whether the installation covers it, and its
     /// visibility when it does.
     pub repositories: BTreeMap<String, Coverage>,
 }
 
+/// What an installation has of a permission, as runnerd recognizes GitHub's word for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Granted {
+    /// Nothing: GitHub does not list it.
+    Nothing,
+    /// This level.
+    Level(Level),
+    /// A word runnerd does not know, never repeated.
+    Unrecognized,
+}
+
+impl Granted {
+    /// What GitHub's `word`, if it gave one, grants.
+    fn of(word: Option<&str>) -> Granted {
+        match word {
+            None => Granted::Nothing,
+            Some(word) => Level::of(word).map_or(Granted::Unrecognized, Granted::Level),
+        }
+    }
+
+    /// It in a word or two, such as `read` or `none`.
+    pub fn words(self) -> &'static str {
+        match self {
+            Granted::Nothing => "none",
+            Granted::Level(level) => level.word(),
+            Granted::Unrecognized => "a level runnerd does not know",
+        }
+    }
+}
+
 /// Whether an installation covers a repository.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Coverage {
-    /// It does; with the repository's visibility as GitHub names it (`public`, `private`, `internal`), when given.
-    Covered(Option<String>),
+    /// It does; with the repository's visibility, when GitHub gave one runnerd recognizes.
+    Covered(Option<Visibility>),
     /// It does not: runnerd cannot register runners for it.
     Uncovered,
 }
 
 impl Installation {
-    /// The required permissions the installation lacks or has below the level needed: each with what it has, `None`
-    /// for none.
+    /// The required permissions the installation lacks or has below the level needed, with what it has.
     pub fn missing(&self) -> Vec<Missing> {
         REQUIRED_PERMISSIONS
             .iter()
             .filter_map(|&(name, needed)| {
-                let has = self.permissions.get(name).map(String::as_str);
-                let enough = has.and_then(Level::of).is_some_and(|level| level >= needed);
-                (!enough).then(|| Missing {
-                    name,
-                    needed,
-                    has: has.map(str::to_owned),
-                })
+                let has = self
+                    .permissions
+                    .get(name)
+                    .copied()
+                    .unwrap_or(Granted::Nothing);
+                let enough = matches!(has, Granted::Level(level) if level >= needed);
+                (!enough).then_some(Missing { name, needed, has })
             })
+            .collect()
+    }
+
+    /// The repositories asked about that the installation does not cover.
+    pub fn uncovered(&self) -> Vec<&str> {
+        self.repositories
+            .iter()
+            .filter(|(_, coverage)| **coverage == Coverage::Uncovered)
+            .map(|(name, _)| name.as_str())
             .collect()
     }
 }
@@ -401,8 +443,8 @@ pub struct Missing {
     pub name: &'static str,
     /// The level runnerd needs.
     pub needed: Level,
-    /// What the installation has, as GitHub says; `None` for nothing.
-    pub has: Option<String>,
+    /// What the installation has.
+    pub has: Granted,
 }
 
 impl App {
@@ -506,7 +548,7 @@ impl App {
         let permissions = answer
             .permissions
             .into_iter()
-            .filter_map(|(name, level)| Some((name, level.as_str()?.to_owned())))
+            .map(|(name, level)| (name, Granted::of(Some(level.as_str().unwrap_or_default()))))
             .collect();
         Ok(Minted {
             token: ExpiringToken {
@@ -514,7 +556,6 @@ impl App {
                 expires_at: SystemTime::now() + Duration::from_millis(lasts),
             },
             permissions,
-            selection: answer.repository_selection,
         })
     }
 
@@ -525,7 +566,7 @@ impl App {
     pub async fn probe(&self, repositories: &[String]) -> Result<Installation, Error> {
         let minted = self.mint().await?;
         let token = minted.token.token;
-        let mut listed: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut listed: BTreeMap<String, Option<Visibility>> = BTreeMap::new();
         let mut whole = false;
         for page in 1..=MAX_PAGES {
             let path = format!("/installation/repositories?per_page={PER_PAGE}&page={page}");
@@ -555,7 +596,7 @@ impl App {
             for repository in page.repositories {
                 listed.insert(
                     repository.full_name.to_ascii_lowercase(),
-                    repository.visibility,
+                    repository.visibility.as_deref().and_then(Visibility::of),
                 );
             }
             if !next {
@@ -571,13 +612,18 @@ impl App {
         }
         let names: BTreeSet<&String> = repositories.iter().collect();
         Ok(Installation {
-            permissions: minted.permissions,
-            selection: minted.selection.unwrap_or_default(),
+            permissions: REQUIRED_PERMISSIONS
+                .iter()
+                .map(|&(name, _)| {
+                    let granted = minted.permissions.get(name).copied();
+                    (name, granted.unwrap_or(Granted::Nothing))
+                })
+                .collect(),
             repositories: names
                 .into_iter()
                 .map(|name| {
                     let coverage = match listed.get(&name.to_ascii_lowercase()) {
-                        Some(visibility) => Coverage::Covered(visibility.clone()),
+                        Some(visibility) => Coverage::Covered(*visibility),
                         None => Coverage::Uncovered,
                     };
                     (name.clone(), coverage)
