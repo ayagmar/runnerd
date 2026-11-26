@@ -89,7 +89,12 @@ flowchart TB
   minted by a task on the runtime and read again before it expires by either clock, a failed read waited out in a
   backoff. `github::public` reads a pinned action's repository without any credential when `PublicReads::Anonymous`
   says so, on a cap, a backoff and kept answers of its own that never touch the token's
-  ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)). `github::workflows` holds which workflow each run is of, each workflow's name and the
+  ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)). `github::app` reads a GitHub App's
+  private key from its file (a regular file of the daemon's user that no one else may read, no link at its end),
+  signs RS256 JWTs and exchanges them for installation tokens on a client of its own, no redirect followed, whose
+  answers never reach `Github`'s counts, rate limit or backoff; `Github::new_app` takes its tokens as expiring
+  credentials and reads pinned actions anonymously, and `App::probe` is the doctor's read of the installation's
+  permissions and repositories ([ADR 0182](docs/adr/0182-a-github-app-installation-can-authenticate-runnerd.md)). `github::workflows` holds which workflow each run is of, each workflow's name and the
   runs still owed one, so a job's workflow is its run's and not the run's name ([ADR 0140](docs/adr/0140-a-jobs-workflow-is-its-runs-workflow-not-the-runs-name.md)). `github::requests` counts each request by a finite endpoint class and by what GitHub answered; the build cache's trust reads stay conditional on the answers `Github` keeps, and only a 304 serves one ([ADR 0179](docs/adr/0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md)). `admission` predicts a job's memory peak and average CPU,
   replays the history for `runnerd simulate` (`admission::replay`, a leaf whose `Replayer` is written only by its own
   methods, [ADR 0115](docs/adr/0115-a-pools-waits-are-one-value.md)), and works out what the host's memory leaves the slice
@@ -394,6 +399,7 @@ always returns, so the daemon closes and flushes the history.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Job actions | in memory: the confirmations issued and one entry per run while its POST is out in `actions::flights`, each confirmation for 5 minutes; the config's job actions and repositories in `actions::policy`, replaced whole at each reload; a restart forgets them all ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)) |
 | GitHub token | in memory, in `github::token`, read again after GitHub refuses it or, for an expiring one, 5 minutes before it expires; never written anywhere ([ADR 0181](docs/adr/0181-credentials-and-public-reads-are-separate-domains.md)) |
+| GitHub App key | its `.pem` file, named by `[github.app] private_key`; read once at start and by the doctor, in memory for the daemon's life, never copied or written ([ADR 0182](docs/adr/0182-a-github-app-installation-can-authenticate-runnerd.md)) |
 | GitHub answers kept for conditional requests | in memory, in `Github`'s conditional cache, at most 32 MiB, least recently used first; a restart starts with none, a reload keeps them; only a 304 serves one ([ADR 0179](docs/adr/0179-trust-reads-stay-conditional-and-each-endpoint-is-counted.md)) |
 | Doctor's checks and attention | in memory: the doctor's last run in `api/doctor_cache`, the attention snapshot in `api/attention`; a restart starts with the doctor not run and a new `instance` whose revisions count from 1, and forgets why listings failed ([ADR 0132](docs/adr/0132-one-attention-list-core-words.md)) |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
@@ -430,7 +436,13 @@ always returns, so the daemon closes and flushes the history.
   token in hand right before the POST. It never changes the job's stored lifecycle; its answer's body is never read,
   and an answer that may or may not have been acted on, any 5xx included, is `unknown`
   ([ADR 0134](docs/adr/0134-a-job-action-is-previewed-then-sent-to-github-once.md)).
-- The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
+- The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A GitHub App's
+  key and the JWTs it signs stay inside `github::app` alike, and an error from the token exchange or the doctor's
+  probe says GitHub's status, never what GitHub sent back. Under `[github.app]`, no `gh` command runs, the doctor's
+  included; the daemon's auth is chosen at start, and a saved change waits for a restart. The installation covers
+  every repository served or draining: checked at start, and before a reload adds one
+  (`crates/daemon/src/auth.rs`). An error that keeps GitHub's or a parser's words redacts what looks like a
+  credential (`github::scrub`). A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,
   and `GET /v1/config` answers them as `<secret>` (`config::mask_secrets`), which `PUT /v1/config` and the check
   put back (`config::keep_secrets`), so no client holds them.

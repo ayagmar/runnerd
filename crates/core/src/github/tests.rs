@@ -3096,7 +3096,7 @@ async fn a_listed_job_without_labels_fails_the_listing() {
         .queued_jobs("o/r", &[1].into_iter().collect())
         .await;
     assert!(
-        matches!(&listing, Err(Error::Decode { source, .. }) if source.to_string().contains("labels")),
+        matches!(&listing, Err(Error::Decode { message, .. }) if message.contains("labels")),
         "the page does not parse: {listing:?}"
     );
 }
@@ -4050,4 +4050,70 @@ async fn an_anonymous_refusal_without_a_time_to_wait_is_cooled_down_alone() {
         assert_eq!(github.spend(), spend);
         assert!(github.served_repository("o/app").await.is_ok());
     }
+}
+
+/// The bug it catches: an error that repeats a credential GitHub, a proxy or a parser put in its answer, which the
+/// doctor, a log line or a client then shows.
+#[tokio::test]
+async fn an_answer_that_carries_something_shaped_like_a_credential_is_redacted_in_the_error() {
+    let leaked = format!(
+        "leaked {TOKEN} ghs_sentinelInstallation Bearer sentinelBearer eyJhbGciOi.sentinelJwt.sig \
+         github_pat_sentinel -----BEGIN RSA PRIVATE KEY----- MIIsentinel"
+    );
+    let message = serde_json::json!({ "message": leaked }).to_string();
+    let wrong_kind = serde_json::json!({ "total_count": 1, "workflow_runs": [{ "id": "ghs_sentinelInDecode" }] })
+        .to_string();
+    let (url, _) = fake_github(move |request| {
+        if request.uri.starts_with("/repos/o/r/pulls") {
+            (StatusCode::FORBIDDEN, message.clone()).into_response()
+        } else if request.uri.starts_with("/repos/o/r/actions/runs") {
+            json(&wrong_kind)
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, leaked.clone()).into_response()
+        }
+    })
+    .await;
+    let github = client(&url);
+    let mut shown = Vec::new();
+    shown.push(
+        github
+            .get::<serde_json::Value>("/repos/o/r/pulls/1")
+            .await
+            .unwrap_err(),
+    );
+    shown.push(
+        github
+            .get::<serde_json::Value>("/repos/o/r/branches/main")
+            .await
+            .unwrap_err(),
+    );
+    shown.push(queued(&github, "o/r").await.unwrap_err());
+    for error in shown {
+        let text = format!("{error} {error:?}");
+        assert!(
+            text.contains("<redacted>") || text.contains("unexpected response"),
+            "{text}"
+        );
+        for secret in ["sentinel", "ghs_", "ghp_", "github_pat_", "eyJ", "MII"] {
+            assert!(!text.contains(secret), "{secret} shows in: {text}");
+        }
+    }
+}
+
+#[test]
+fn scrubbing_keeps_githubs_own_words_and_cuts_long_answers() {
+    assert_eq!(
+        super::scrub("Resource not accessible by integration"),
+        "Resource not accessible by integration"
+    );
+    assert_eq!(
+        super::scrub("token ghs_abc123, then more"),
+        "token <redacted>, then more"
+    );
+    assert_eq!(
+        super::scrub("ahead_ghs_x"),
+        "ahead_ghs_x",
+        "not a token's start"
+    );
+    assert_eq!(super::scrub(&"a".repeat(400)).chars().count(), 301);
 }

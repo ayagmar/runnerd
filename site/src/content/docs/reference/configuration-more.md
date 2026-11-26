@@ -67,6 +67,16 @@ The oldest records go first.
 |---|---|---|
 | `job_actions` | `true` | clients may [cancel a job's run and re-run jobs](../../guides/cancel-rerun/) on GitHub with runnerd's token, each confirmed before it is sent; `false` turns both off |
 
+## `[github.app]`
+
+Unset by default: runnerd uses `gh auth token`. Set, runnerd authenticates as this [GitHub App](../../guides/github-app/)'s installation and never runs `gh`. Every key is required, and a change takes effect when runnerd restarts.
+
+| Key | Default | |
+|---|---|---|
+| `app_id` | unset | the App's ID, from its settings page |
+| `installation_id` | unset | the installation's ID, the number at the end of its settings URL |
+| `private_key` | unset | the absolute path of the App's `.pem` key, a regular file owned by runnerd's user that only it may read (`chmod 600`); never the key itself |
+
 ## `[web]`
 
 | Key | Default | |

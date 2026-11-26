@@ -1539,6 +1539,7 @@ name = "runnerd-core"
 version = "0.1.8"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "bollard",
  "bytes",
  "flate2",

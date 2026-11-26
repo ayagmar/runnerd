@@ -968,11 +968,60 @@ pub struct Github {
     /// Whether `POST /v1/jobs/{id}/cancel` and `POST /v1/jobs/{id}/rerun` may cancel a job's run or re-run it on
     /// GitHub. Default on; off, both answer 403. A forced pause cancels runs either way.
     pub job_actions: bool,
+    /// `[github.app]`: authenticate as a GitHub App's installation (ADR 0182). Without it, runnerd uses `gh auth
+    /// token`; with it, the App only, never `gh`.
+    pub app: Option<GithubApp>,
 }
 
 impl Default for Github {
     fn default() -> Github {
-        Github { job_actions: true }
+        Github {
+            job_actions: true,
+            app: None,
+        }
+    }
+}
+
+/// `[github.app]`: the GitHub App installation runnerd authenticates as (ADR 0182). Every key is required. It names
+/// the private key's file, never holds the key: the daemon reads the file at start, and a change takes effect when it
+/// restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubApp {
+    /// The App's ID, from its settings page.
+    pub app_id: u64,
+    /// The installation's ID, from the URL of its settings on the account that installed it.
+    pub installation_id: u64,
+    /// The absolute path of the App's private key, a PEM file only the daemon's user may read.
+    pub private_key: PathBuf,
+}
+
+impl GithubApp {
+    /// Refuses a zero ID, and a `private_key` that is not an absolute path: a key or a token written in its place is
+    /// refused without being repeated.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let refuse = |why: &'static str| Err(ConfigError::GithubApp(why));
+        if self.app_id == 0 {
+            return refuse("app_id is 0; set it to the App's ID");
+        }
+        if self.installation_id == 0 {
+            return refuse("installation_id is 0; set it to the installation's ID");
+        }
+        let text = self.private_key.as_os_str().as_encoded_bytes();
+        let holds_key = text.contains(&b'\n')
+            || text.contains(&b'\r')
+            || text.windows(5).any(|window| window == b"-----");
+        if holds_key {
+            return refuse(
+                "private_key holds a key; set it to the absolute path of the key's .pem file",
+            );
+        }
+        if !self.private_key.is_absolute() {
+            return refuse(
+                "private_key is not an absolute path; set it to the absolute path of the key's .pem file",
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1429,6 +1478,18 @@ pub enum ConfigError {
          set allow_unsafe = true under [host] to use it anyway"
     )]
     UnsafeNotAllowed,
+    /// `[github]` or `[github.app]` does not parse: where and why in words of runnerd's own, never the parser's
+    /// excerpt of the text, where a key or a token pasted in place of a path would show.
+    #[error("[github] at line {line} does not parse: {why}")]
+    GithubSyntax {
+        /// The line, counted from 1.
+        line: usize,
+        /// Why, never a value: an unknown key is named only when it reads as a name.
+        why: String,
+    },
+    /// `[github.app]` is not usable: why, never a value it holds.
+    #[error("[github.app] {0}")]
+    GithubApp(&'static str),
     /// `[host.drive]` names no disk.
     #[error(
         "host.drive.device is empty; set it to the disk under Docker's root, such as \"nvme0n1\""
@@ -1599,6 +1660,86 @@ impl fmt::Display for Warning {
     }
 }
 
+/// Where and why the config's `[github]` area does not parse, in runnerd's words.
+struct GithubSyntax {
+    line: usize,
+    why: String,
+}
+
+/// `error` in runnerd's words when it is in the `[github]` area of `text`: on a line under a `[github]` or
+/// `[github.…]` header, or on a line that names `github`, as a dotted key does. `None` for an error elsewhere, or one
+/// the parser places nowhere.
+fn github_syntax(text: &str, error: &toml::de::Error) -> Option<GithubSyntax> {
+    let start = error.span()?.start.min(text.len());
+    // An error inside a multi-line string still open, as a pasted key leaves one, is placed where the string opened:
+    // the parser places it at the end of the text, past whatever the string swallowed.
+    let start = open_string(text.get(..start)?).unwrap_or(start);
+    let before = text.get(..start)?;
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    let line_end = text[start..].find('\n').map_or(text.len(), |at| start + at);
+    let header = before[..line_start]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with('['));
+    let under_github = header.is_some_and(|header| {
+        let name: String = header
+            .trim_matches(|c| c == '[' || c == ']')
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
+            .collect();
+        name == "github" || name.starts_with("github.")
+    });
+    let names_github = text[line_start..line_end].contains("github");
+    if !under_github && !names_github {
+        return None;
+    }
+    let message = error.message();
+    let why = if message.starts_with("missing field") {
+        "a key is missing: [github.app] needs app_id, installation_id and private_key".to_owned()
+    } else if let Some(key) = message
+        .strip_prefix("unknown field `")
+        .and_then(|rest| rest.split_once('`'))
+        .map(|(key, _)| key)
+    {
+        // The parser's words name the key and the keys the table takes, which are runnerd's own: kept for a key
+        // that reads as a name, not one that may be a pasted credential.
+        let plain = key.len() <= 32
+            && key.starts_with(|c: char| c.is_ascii_lowercase())
+            && key
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && !["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+                .iter()
+                .any(|prefix| key.starts_with(prefix));
+        if plain {
+            message.trim().to_owned()
+        } else {
+            "a key it does not take: [github] takes job_actions and app, [github.app] app_id, installation_id and \
+             private_key"
+                .to_owned()
+        }
+    } else {
+        "a value of the wrong kind or that does not parse: job_actions is true or false, app_id and installation_id \
+         whole numbers, private_key a quoted absolute path"
+            .to_owned()
+    };
+    Some(GithubSyntax {
+        line: before.matches('\n').count() + 1,
+        why,
+    })
+}
+
+/// Where the last multi-line string of `before` opened, if it is still open at its end: an odd count of one kind of
+/// delimiter. A heuristic that only ever makes an error in the `[github]` area more general.
+fn open_string(before: &str) -> Option<usize> {
+    ["\"\"\"", "\'\'\'"]
+        .into_iter()
+        .filter(|delimiter| before.matches(delimiter).count() % 2 == 1)
+        .filter_map(|delimiter| before.rfind(delimiter))
+        .min()
+}
+
 impl Config {
     /// Reads and parses a config file.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
@@ -1611,7 +1752,13 @@ impl Config {
 
     /// Parses a config from TOML text.
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
-        Ok(toml::from_str(text)?)
+        toml::from_str(text).map_err(|error| match github_syntax(text, &error) {
+            Some(syntax) => ConfigError::GithubSyntax {
+                line: syntax.line,
+                why: syntax.why,
+            },
+            None => ConfigError::Parse(error),
+        })
     }
 
     /// Why a save from a diff is refused when the text changed after the diff was shown: the save would write lines
@@ -1627,6 +1774,12 @@ impl Config {
         let Err(error) = toml::from_str::<Config>(text) else {
             return None;
         };
+        if let Some(syntax) = github_syntax(text, &error) {
+            return Some(ParseError {
+                line: syntax.line,
+                message: syntax.why,
+            });
+        }
         let span = error.span()?;
         let before = text.get(..span.start)?;
         Some(ParseError {
@@ -1951,6 +2104,9 @@ impl Config {
         self.check_memory_ceiling()?;
         self.web.validate()?;
         self.notify.validate()?;
+        if let Some(app) = &self.github.app {
+            app.validate()?;
+        }
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {
                 return Err(ConfigError::UnknownProfile {

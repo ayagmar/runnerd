@@ -78,6 +78,8 @@ pub(crate) struct ConfigSource {
     pub path: PathBuf,
     /// As the daemon read it.
     pub text: String,
+    /// What the daemon authenticates to GitHub with, as it started.
+    pub auth: crate::auth::Active,
     pub memory_max: MemoryMax,
     /// Read when a new config is applied: a config that sets `cpu_overcommit` needs them, others show them.
     pub cpus: SliceCpus,
@@ -121,6 +123,8 @@ struct AppState {
     sessions: Arc<Sessions>,
     /// `[web]` as the config read at start said, which the dashboard runs with until a restart.
     dashboard: Dashboard,
+    /// What the daemon authenticates to GitHub with, chosen at start: a saved config's applies at the next start.
+    auth: Arc<crate::auth::Active>,
     /// The doctor's last run of the host.
     doctors: doctor_cache::Doctors,
     /// What needs attention, as its worker last published it.
@@ -357,6 +361,7 @@ async fn serve_for(
             .and_then(|parsed| parsed.web.open)
             .map(|open| open.to_string()),
     };
+    let auth = Arc::new(config.auth);
     let doctor_cache::Cache { doctors, worker } = doctor_cache::cache(config.doctor);
     let (attention, attention_receiver) = watch::channel(attention::first(&handle.status.borrow()));
     let state = AppState {
@@ -375,6 +380,7 @@ async fn serve_for(
         sync_dir: config.sync_dir,
         sessions,
         dashboard,
+        auth,
         doctors,
         attention: attention_receiver,
     };

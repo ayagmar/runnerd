@@ -363,6 +363,51 @@ async fn start_doctored(
     doctor: doctor_cache::Setup,
     attention: super::attention::Timing,
 ) -> Daemon {
+    start_as(
+        dir,
+        Started {
+            owner,
+            engine,
+            sync_dir,
+            memory_max,
+            text,
+            doctor,
+            attention,
+            auth: crate::auth::Active::Gh,
+        },
+    )
+    .await
+}
+
+/// How a test's daemon starts.
+struct Started<'text> {
+    owner: Option<u32>,
+    engine: bool,
+    sync_dir: SyncDir,
+    memory_max: MemoryMax,
+    text: &'text str,
+    doctor: doctor_cache::Setup,
+    attention: super::attention::Timing,
+    /// What it authenticates to GitHub with.
+    auth: crate::auth::Active,
+}
+
+/// A daemon serving the API in `dir` as `started` says.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fake daemon's wiring, in the order it is built"
+)]
+async fn start_as(dir: &Path, started: Started<'_>) -> Daemon {
+    let Started {
+        owner,
+        engine,
+        sync_dir,
+        memory_max,
+        text,
+        doctor,
+        attention,
+        auth,
+    } = started;
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) =
@@ -406,6 +451,7 @@ async fn start_doctored(
     let source = ConfigSource {
         path: config.clone(),
         text: text.to_owned(),
+        auth,
         memory_max,
         cpus: unreadable_cpus,
         sync_dir,
@@ -2574,5 +2620,152 @@ async fn a_reload_that_renames_the_host_warns_it_takes_effect_at_the_next_start(
         "the name did not change: {:?}",
         again.warnings
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_saved_github_app_waits_for_a_restart_on_every_save_and_the_doctor_says_whose_checks_it_reads()
+ {
+    // Catches a second save that hides the pending switch, and a doctor whose App checks read as the daemon's own.
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let put = async |client: &reqwest::Client, text: String| -> ConfigCheck {
+        let response = client
+            .put("http://runnerd/v1/config")
+            .body(text)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&body(response).await).unwrap()
+    };
+    let doctor_auth = async |client: &reqwest::Client| -> Vec<runnerd_core::api::Check> {
+        let response = client.get("http://runnerd/v1/doctor").send().await.unwrap();
+        let doctor: runnerd_core::api::Doctor =
+            serde_json::from_slice(&body(response).await).unwrap();
+        doctor
+            .checks
+            .into_iter()
+            .filter(|check| check.name == doctor_cache::AUTH_CHECK)
+            .collect()
+    };
+    // A key that does not exist: a save never reads it.
+    let app = format!(
+        "{EXAMPLE}{}",
+        crate::testing::app_table(&dir.0.join("never-read.pem"))
+    );
+    let saved = put(&daemon.client, app.clone()).await;
+    let pending = |warnings: &[String]| {
+        warnings.iter().any(|warning| {
+            warning.contains("runs with gh auth token until then")
+                && warning.contains("GitHub App 4242's installation 77 after")
+        })
+    };
+    assert!(pending(&saved.warnings), "{:?}", saved.warnings);
+    daemon.reloads.recv().await.unwrap();
+    let again = put(&daemon.client, app.replacen("slots = 2", "slots = 1", 1)).await;
+    assert!(
+        pending(&again.warnings),
+        "still pending: {:?}",
+        again.warnings
+    );
+    daemon.reloads.recv().await.unwrap();
+    let checks = doctor_auth(&daemon.client).await;
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(checks[0].status, runnerd_core::api::CheckStatus::Warn);
+    assert!(
+        checks[0].detail.contains("not what the daemon runs with"),
+        "{}",
+        checks[0].detail
+    );
+    let back = put(&daemon.client, EXAMPLE.to_owned()).await;
+    assert!(
+        !back
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("GitHub authentication")),
+        "back to what runs: {:?}",
+        back.warnings
+    );
+    daemon.reloads.recv().await.unwrap();
+    assert_eq!(
+        doctor_auth(&daemon.client).await,
+        [],
+        "the saved auth is the running one"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn under_a_github_app_a_reload_may_add_only_a_repository_the_running_installation_covers() {
+    // Catches a reload that serves a repository the daemon can neither register runners for nor drain.
+    use axum::response::IntoResponse as _;
+    let dir = Dir::new();
+    let (url, _) = crate::testing::fake_github(|_, path| match path {
+        "/app/installations/77/access_tokens" => crate::testing::minted("{}"),
+        "/installation/repositories?per_page=100&page=1" => crate::testing::json(
+            r#"{"repositories":[{"full_name":"halyard/ledger"},{"full_name":"halyard/storefront"},{"full_name":"halyard/docs"}]}"#,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let key = crate::testing::key_file(&dir.0, 0o600);
+    let text = format!("{EXAMPLE}{}", crate::testing::app_table(&key));
+    let config = Config::parse(&text).unwrap().github.app.unwrap();
+    let app = runnerd_core::github::app::App::new(&config, &url).unwrap();
+    let mut daemon = start_as(
+        &dir.0,
+        Started {
+            owner: None,
+            engine: true,
+            sync_dir,
+            memory_max,
+            text: &text,
+            doctor: passing_doctor(),
+            attention: ATTENTION_TIMING,
+            auth: crate::auth::Active::App {
+                config,
+                app: Arc::new(app),
+            },
+        },
+    )
+    .await;
+    let with = |name: &str| {
+        format!(
+            "{text}\n[[repositories]]\nname = \"{name}\"\nprofile = \"node\"\nlabels = [\"self-hosted\", \"docs\"]\n"
+        )
+    };
+    let refused = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(with("halyard/elsewhere"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let checked: ConfigCheck = serde_json::from_slice(&body(refused).await).unwrap();
+    assert!(
+        checked.message.contains("does not cover halyard/elsewhere"),
+        "{}",
+        checked.message
+    );
+    let taken = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(with("halyard/docs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(taken.status(), StatusCode::OK);
+    let checked: ConfigCheck = serde_json::from_slice(&body(taken).await).unwrap();
+    assert!(
+        !checked
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("GitHub authentication")),
+        "the same App runs: {:?}",
+        checked.warnings
+    );
+    daemon.reloads.recv().await.unwrap();
     daemon.stop().await;
 }

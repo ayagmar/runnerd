@@ -12,19 +12,22 @@ use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, Role, parse_age, slice_cpus, slice_memory_max};
 use runnerd_core::docker::Docker;
-use runnerd_core::github::{self, Github};
+use runnerd_core::github;
 use runnerd_core::observe::metrics::Paths;
 use runnerd_core::scheduler::engine::{Control, Durability, Engine, HostIdentity, Setup, Shutdown};
 use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
 mod api;
+mod auth;
 mod doctor;
 mod init;
 mod output;
 mod simulate;
 #[cfg(test)]
 mod testdir;
+#[cfg(test)]
+mod testing;
 
 use output::fail;
 
@@ -918,14 +921,13 @@ async fn serve(
     for warning in config.validate(memory_max).map_err(|error| fail(&error))? {
         warn!("{warning}");
     }
-    // Read once now, so a missing login fails here rather than at the first poll.
-    github::gh_token().map_err(|error| fail(&error))?;
-    let github =
-        Github::new(github::API_URL, Box::new(github::gh_token)).map_err(|error| fail(&error))?;
+    let history = open_history(&config)?;
+    let (github, auth) = auth::connect(&config, github::API_URL, &history.draining)
+        .await
+        .map_err(|error| fail(&error))?;
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
     let identity = HostIdentity::read(config.host.name.as_deref()).map_err(|error| fail(&error))?;
-    let history = open_history(&config)?;
     let sessions = history.sessions;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
@@ -967,6 +969,7 @@ async fn serve(
     let config = api::ConfigSource {
         path,
         text,
+        auth,
         memory_max: slice_memory_max,
         cpus: slice_cpus,
         sync_dir: api::sync_dir,

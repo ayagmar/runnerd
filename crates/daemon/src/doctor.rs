@@ -1,7 +1,8 @@
 //! `runnerd doctor`: what the host is missing to run runners, each with the fix. It reads the host and changes
 //! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones. Every
 //! command it runs and every request to Docker ends within [`READ_DEADLINE`]: one past it is killed or dropped, and its
-//! check says so, so a read of the host is bounded however the host hangs (ADR 0132).
+//! check says so, so a read of the host is bounded however the host hangs (ADR 0132). Under `[github.app]` it runs no
+//! `gh` command: it reads the installation with a token minted for the check and sends nothing that writes (ADR 0182).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -16,6 +17,10 @@ use runnerd_core::cache::{self, Names};
 use runnerd_core::command;
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
+use runnerd_core::github::{
+    self,
+    app::{App, Coverage, Installation},
+};
 use runnerd_core::isolation::modules_check;
 use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::observe::storage;
@@ -39,10 +44,10 @@ pub(crate) struct Host {
     pub os_release: String,
     /// `None` without a config, which names the slice.
     pub slice: Option<Result<Slice, String>>,
-    /// `gh`'s token for github.com: its scopes and kind.
-    pub gh: Result<GhAuth, String>,
+    /// What runnerd authenticates to GitHub with, as the config says, and what that shows.
+    pub auth: Auth,
     /// Each configured repository's visibility as GitHub names it (`public`, `private`, `internal`), by name; empty
-    /// without a config.
+    /// without a config. Read with what `auth` is.
     pub visibility: BTreeMap<String, Result<String, String>>,
     /// How each of `SYSBOX_DAEMONS` runs: Docker keeps the runtime registered without them.
     pub sysbox_daemons: [SysboxDaemon; 2],
@@ -61,6 +66,35 @@ pub(crate) struct Host {
     pub history: storage::History,
     /// Docker's root and the file system it is on; `None` without Docker.
     pub docker_root: Option<storage::DockerRoot>,
+}
+
+/// What the doctor learns of runnerd's GitHub authentication (ADR 0182), never a credential.
+pub(crate) enum Auth {
+    /// `gh`'s token for github.com: its scopes and kind.
+    Gh(Result<GhAuth, String>),
+    /// The GitHub App installation `[github.app]` names: what a token minted for it may do and which configured
+    /// repositories it covers. No `gh` command runs for it.
+    App {
+        app_id: u64,
+        installation_id: u64,
+        installation: Result<Installation, String>,
+    },
+}
+
+/// Where the doctor reads GitHub: the `gh` it runs and the API a GitHub App's checks ask.
+pub(crate) struct GithubReads {
+    pub gh: PathBuf,
+    pub api: String,
+}
+
+impl GithubReads {
+    /// `gh` on the `PATH`, and api.github.com.
+    pub(crate) fn host() -> GithubReads {
+        GithubReads {
+            gh: PathBuf::from("gh"),
+            api: github::API_URL.to_owned(),
+        }
+    }
 }
 
 /// What `gh auth status` says of the active account's token for github.com, never the token itself.
@@ -174,8 +208,7 @@ impl Host {
             .map(|repository| repository.name.as_str())
             .collect();
         std::thread::scope(|scope| {
-            let gh = scope.spawn(read_gh);
-            let visibility = scope.spawn(|| read_each(&names, |name: &&str| read_visibility(name)));
+            let github = scope.spawn(|| read_github(config, &names, &GithubReads::host()));
             let docker = scope.spawn(|| DockerReads::read(config));
             let config_file = path.and_then(|path| {
                 let metadata = std::fs::metadata(path).ok()?;
@@ -207,19 +240,7 @@ impl Host {
                     ..memory
                 })
             };
-            let gh = joined(gh);
-            let visibility = names
-                .iter()
-                .zip(joined(visibility))
-                .map(|(name, read)| {
-                    // Without gh logged in, what it said of a repository is only that.
-                    let visibility = match &gh {
-                        Ok(_) => read,
-                        Err(_) => Err("needs gh logged in to github.com".to_owned()),
-                    };
-                    ((*name).to_owned(), visibility)
-                })
-                .collect();
+            let (auth, visibility) = joined(github);
             let history = storage::History::read(&history_path(config));
             let DockerReads {
                 docker,
@@ -236,7 +257,7 @@ impl Host {
                 sizing: None,
                 os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
                 slice,
-                gh,
+                auth,
                 visibility,
                 sysbox_daemons,
                 sysbox_unit,
@@ -250,6 +271,79 @@ impl Host {
             }
         })
     }
+}
+
+/// How runnerd authenticates to GitHub under `config` and each of `names`' visibility, read through `reads`: with
+/// `gh`, as before, or, under `[github.app]`, with a token minted for the App's installation, and no `gh` command at
+/// all. The App's reads end within [`READ_DEADLINE`] and send nothing that writes.
+pub(crate) fn read_github(
+    config: Option<&Config>,
+    names: &[&str],
+    reads: &GithubReads,
+) -> (Auth, BTreeMap<String, Result<String, String>>) {
+    let Some(app) = config.and_then(|config| config.github.app.as_ref()) else {
+        let (gh, visibility) = std::thread::scope(|scope| {
+            let gh = scope.spawn(|| read_gh(&reads.gh));
+            let visibility =
+                scope.spawn(|| read_each(names, |name: &&str| read_visibility(&reads.gh, name)));
+            (joined(gh), joined(visibility))
+        });
+        let visibility = names
+            .iter()
+            .zip(visibility)
+            .map(|(name, read)| {
+                // Without gh logged in, what it said of a repository is only that.
+                let visibility = match &gh {
+                    Ok(_) => read,
+                    Err(_) => Err("needs gh logged in to github.com".to_owned()),
+                };
+                ((*name).to_owned(), visibility)
+            })
+            .collect();
+        return (Auth::Gh(gh), visibility);
+    };
+    let repositories: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+    let probe = || -> Result<Installation, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(async {
+            let app = App::new(app, &reads.api).map_err(|error| error.to_string())?;
+            match tokio::time::timeout(READ_DEADLINE, app.probe(&repositories)).await {
+                Ok(probed) => probed.map_err(|error| error.to_string()),
+                Err(_) => Err(format!(
+                    "GitHub did not answer within {}",
+                    api::duration(READ_DEADLINE.as_secs())
+                )),
+            }
+        })
+    };
+    let installation = probe();
+    let visibility = names
+        .iter()
+        .map(|name| {
+            let visibility = match &installation {
+                Err(_) => Err("needs the GitHub App's token".to_owned()),
+                Ok(installation) => match installation.repositories.get(*name) {
+                    Some(Coverage::Covered(Some(visibility))) => Ok(visibility.word().to_owned()),
+                    Some(Coverage::Covered(None)) => Err(
+                        "GitHub did not say, listing the installation's repositories".to_owned(),
+                    ),
+                    Some(Coverage::Uncovered) | None => {
+                        Err("the GitHub App's installation does not cover it".to_owned())
+                    }
+                },
+            };
+            ((*name).to_owned(), visibility)
+        })
+        .collect();
+    let auth = Auth::App {
+        app_id: app.app_id,
+        installation_id: app.installation_id,
+        installation,
+    };
+    (auth, visibility)
 }
 
 /// What `Host::read` reads from Docker, which it reads on a thread of its own.
@@ -570,8 +664,8 @@ fn read_slice(slice: &str) -> Result<Slice, String> {
     })
 }
 
-fn read_gh() -> Result<GhAuth, String> {
-    let output = output(Command::new("gh").args([
+fn read_gh(gh: &Path) -> Result<GhAuth, String> {
+    let output = output(Command::new(gh).args([
         "auth",
         "status",
         "--hostname",
@@ -632,8 +726,8 @@ fn first_line(stderr: &[u8]) -> String {
 }
 
 /// What GitHub says of `repository`'s visibility, through `gh`.
-fn read_visibility(repository: &str) -> Result<String, String> {
-    let output = output(Command::new("gh").args([
+fn read_visibility(gh: &Path, repository: &str) -> Result<String, String> {
+    let output = output(Command::new(gh).args([
         "api",
         "--hostname",
         "github.com",
@@ -799,8 +893,17 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         (None, None) => storage::DockerRoot::skipped(storage::RootSkipped::NoDocker),
         (None, Some(_)) => storage::DockerRoot::skipped(storage::RootSkipped::Unnamed),
     });
-    checks.push(gh_check(&host.gh));
-    checks.push(job_actions_check(&host.gh, config));
+    match &host.auth {
+        Auth::Gh(gh) => {
+            checks.push(gh_check(gh));
+            checks.push(job_actions_check(gh, config));
+        }
+        Auth::App {
+            app_id,
+            installation_id,
+            installation,
+        } => checks.extend(app_checks(*app_id, *installation_id, installation, config)),
+    }
     checks.extend(
         host.visibility
             .iter()
@@ -915,6 +1018,106 @@ fn job_actions_check(gh: &Result<GhAuth, String>, config: Option<&Config>) -> Ch
          GitHub does not show for {}; the first action's answer says",
         token_words(auth.kind)
     ))
+}
+
+/// The check of a GitHub App's installation (ADR 0182).
+pub(crate) const APP_CHECK: &str = "GitHub App";
+
+/// What a GitHub App's installation lets runnerd do: whether a token was minted, whether it has every permission
+/// runnerd needs, whether it covers every configured repository, and, as evidence only, whether it can cancel and
+/// re-run jobs. Actions: write is required whatever `job_actions` says: a forced pause cancels runs.
+fn app_checks(
+    app_id: u64,
+    installation_id: u64,
+    installation: &Result<Installation, String>,
+    config: Option<&Config>,
+) -> Vec<Check> {
+    let named = format!("App {app_id}'s installation {installation_id}");
+    let installation = match installation {
+        Ok(installation) => installation,
+        Err(error) => {
+            return vec![
+                fail(
+                    APP_CHECK,
+                    format!("{named}: {error}"),
+                    "check [github.app]: app_id and installation_id as the App's settings show them, and                      private_key the absolute path of its .pem file, owned by runnerd's user:
+                     chmod 600 /path/to/github-app.pem",
+                ),
+                skip(api::JOB_ACTIONS_CHECK, "needs the GitHub App's token"),
+            ];
+        }
+    };
+    let mut checks = Vec::new();
+    let missing = installation.missing();
+    checks.push(if missing.is_empty() {
+        pass(
+            APP_CHECK,
+            format!(
+                "{named} has Administration: write, Actions: write, Contents: read and Pull requests: read"
+            ),
+        )
+    } else {
+        let lacks: Vec<String> = missing
+            .iter()
+            .map(|missing| {
+                format!(
+                    "{} {} (has {})",
+                    missing.name,
+                    missing.needed.word(),
+                    missing.has.words()
+                )
+            })
+            .collect();
+        fail(
+            APP_CHECK,
+            format!(
+                "{named} lacks {}; runnerd needs Actions: write even with job_actions off, as a forced pause                  cancels runs",
+                lacks.join(", ")
+            ),
+            "in the App's settings, under Permissions, give Administration: Read and write, Actions: Read and              write, Contents: Read-only and Pull requests: Read-only, then accept the new permissions on the              installation",
+        )
+    });
+    let uncovered = installation.uncovered();
+    if !installation.repositories.is_empty() {
+        checks.push(if uncovered.is_empty() {
+            pass(
+                "repositories",
+                format!("{named} covers every configured repository"),
+            )
+        } else {
+            fail(
+                "repositories",
+                format!(
+                    "{named} does not cover {}: runnerd cannot register runners there",
+                    uncovered.join(", ")
+                ),
+                "add them to the installation's repository access (the account's Settings > GitHub Apps >                  Configure)",
+            )
+        });
+    }
+    let name = api::JOB_ACTIONS_CHECK;
+    checks.push(if config.is_some_and(|config| !config.github.job_actions) {
+        Check {
+            name: name.to_owned(),
+            status: Status::Info,
+            detail: "off: [github] job_actions = false".to_owned(),
+            fix: None,
+        }
+    } else if missing.iter().any(|missing| missing.name == "actions") {
+        Check {
+            name: name.to_owned(),
+            status: Status::Warn,
+            detail: "the installation lacks Actions: write, which cancelling and re-running jobs need".to_owned(),
+            fix: None,
+        }
+    } else {
+        pass(
+            name,
+            "the installation's Actions: write lets runnerd cancel and re-run jobs; GitHub's answer to each still              decides"
+                .to_owned(),
+        )
+    });
+    checks
 }
 
 fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
